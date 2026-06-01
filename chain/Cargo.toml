@@ -1,0 +1,33 @@
+[package]
+name = "smallto-chain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A minimal (and wicked fast) blockchain built with the Commonware Library."
+
+[dependencies]
+smallto-types = { workspace = true }
+commonware-actor = { workspace = true }
+commonware-broadcast = { workspace = true }
+commonware-codec = { workspace = true }
+commonware-consensus = { workspace = true, features = ["mocks"] }
+commonware-cryptography = { workspace = true, features = ["mocks"] }
+commonware-macros = { workspace = true }
+commonware-p2p = { workspace = true }
+commonware-resolver = { workspace = true }
+commonware-runtime = { workspace = true }
+commonware-storage = { workspace = true }
+commonware-stream = { workspace = true }
+commonware-utils = { workspace = true }
+commonware-parallel = { workspace = true }
+bytes = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+governor = { workspace = true }
+serde = { version = "1.0.218", features = ["derive"] }
+prometheus-client = { workspace = true }
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3.19", features = ["fmt", "json"] }

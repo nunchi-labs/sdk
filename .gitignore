@@ -1,0 +1,7 @@
+*.swp
+*.DS_Store
+target
+*.vscode
+/assets
+/test
+/types/pkg
