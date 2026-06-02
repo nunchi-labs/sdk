@@ -12,7 +12,7 @@ pub enum LedgerError {
     BadSignature,
     #[error("nonce mismatch for {account:?}: expected {expected}, got {actual}")]
     NonceMismatch {
-        account: AccountId,
+        account: Box<AccountId>,
         expected: u64,
         actual: u64,
     },
@@ -30,8 +30,8 @@ pub enum LedgerError {
     Unauthorized,
     #[error("insufficient balance for {account:?} in {coin:?}: available {available}, required {required}")]
     InsufficientBalance {
-        account: AccountId,
-        coin: CoinId,
+        account: Box<AccountId>,
+        coin: Box<CoinId>,
         available: u128,
         required: u128,
     },
@@ -88,7 +88,7 @@ impl Ledger {
         let expected = self.nonce(&tx.signer);
         if tx.payload.nonce != expected {
             return Err(LedgerError::NonceMismatch {
-                account: tx.signer.clone(),
+                account: Box::new(tx.signer.clone()),
                 expected,
                 actual: tx.payload.nonce,
             });
@@ -264,8 +264,8 @@ impl Ledger {
         let available = self.balances.get(&key).copied().unwrap_or(0);
         if available < amount {
             return Err(LedgerError::InsufficientBalance {
-                account: account.clone(),
-                coin,
+                account: Box::new(account.clone()),
+                coin: Box::new(coin),
                 available,
                 required: amount,
             });
