@@ -1935,6 +1935,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "nunchi-coins"
+version = "2026.5.0"
+dependencies = [
+ "bytes",
+ "commonware-codec",
+ "commonware-cryptography",
+ "nunchi-common",
+ "thiserror",
+]
+
+[[package]]
+name = "nunchi-common"
+version = "2026.5.0"
+dependencies = [
+ "bytes",
+ "commonware-codec",
+ "commonware-cryptography",
+]
+
+[[package]]
 name = "objc2-core-foundation"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2589,17 +2609,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde-wasm-bindgen"
-version = "0.6.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8302e169f0eddcc139c70f139d19d6467353af16f9fce27e8c30158036a1e16b"
-dependencies = [
- "js-sys",
- "serde",
- "wasm-bindgen",
-]
-
-[[package]]
 name = "serde_core"
 version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2759,9 +2768,7 @@ dependencies = [
  "commonware-utils",
  "rand 0.8.6",
  "serde",
- "serde-wasm-bindgen",
  "thiserror",
- "wasm-bindgen",
 ]
 
 [[package]]
