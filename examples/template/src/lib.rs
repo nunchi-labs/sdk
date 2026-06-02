@@ -1,12 +1,68 @@
+use commonware_consensus::types::Epoch;
+use commonware_formatting::hex;
+use commonware_utils::NZU64;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    num::{NonZeroU32, NonZeroUsize},
+    num::{NonZero, NonZeroU32, NonZeroUsize},
 };
+
+mod block;
+mod consensus;
 
 pub mod application;
 pub mod engine;
+
+pub use block::{Block, Finalized, Notarized};
+pub use consensus::{
+    Activity, Context, Finalization, Identity, Notarization, PublicKey, Scheme, Seed, Seedable,
+    Signature,
+};
+
+/// The unique namespace prefix used in all signing operations to prevent signature replay attacks.
+pub const NAMESPACE: &[u8] = b"_ALTO";
+
+/// The epoch number used in [commonware_consensus::simplex].
+///
+/// Because the template does not implement reconfiguration (validator set changes and resharing), we hardcode the epoch to 0.
+///
+/// For an example of how to implement reconfiguration and resharing, see [commonware-reshare](https://github.com/commonwarexyz/monorepo/tree/main/examples/reshare).
+pub const EPOCH: Epoch = Epoch::zero();
+
+/// The epoch length used in [commonware_consensus::simplex].
+///
+/// Because the template does not implement reconfiguration (validator set changes and resharing), we hardcode the epoch length to u64::MAX (to
+/// stay in the first epoch forever).
+///
+/// For an example of how to implement reconfiguration and resharing, see [commonware-reshare](https://github.com/commonwarexyz/monorepo/tree/main/examples/reshare).
+pub const EPOCH_LENGTH: NonZero<u64> = NZU64!(u64::MAX);
+
+#[repr(u8)]
+pub enum Kind {
+    Seed = 0,
+    Notarization = 1,
+    Finalization = 2,
+}
+
+impl Kind {
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Seed),
+            1 => Some(Self::Notarization),
+            2 => Some(Self::Finalization),
+            _ => None,
+        }
+    }
+
+    pub fn to_hex(&self) -> String {
+        match self {
+            Self::Seed => hex(&[0]),
+            Self::Notarization => hex(&[1]),
+            Self::Finalization => hex(&[2]),
+        }
+    }
+}
 
 pub const DEFAULT_BLOCKING_THREADS: usize = 512;
 pub const DEFAULT_STORAGE_BUFFER_POOL_MAX_PER_CLASS: NonZeroU32 = commonware_utils::NZU32!(16_384);
@@ -90,7 +146,6 @@ mod tests {
     use engine::{Config, Engine};
     use governor::Quota;
     use rand::{rngs::StdRng, Rng, SeedableRng};
-    use smallto_types::NAMESPACE;
     use std::{collections::HashMap, num::NonZeroU32, time::Duration};
     use tracing::info;
 
@@ -630,5 +685,92 @@ mod tests {
         }
         assert!(runs > 1);
         info!(runs, "unclean shutdown recovery worked");
+    }
+}
+
+#[cfg(test)]
+mod type_tests {
+    use super::*;
+    use commonware_codec::{DecodeExt, Encode};
+    use commonware_consensus::{
+        simplex::{
+            scheme::bls12381_threshold::vrf as bls12381_threshold,
+            types::{Finalization, Finalize, Notarization, Notarize, Proposal},
+        },
+        types::{Height, Round, View},
+    };
+    use commonware_cryptography::{
+        bls12381::primitives::variant::MinSig, certificate::mocks::Fixture, ed25519, sha256,
+        Digest, Digestible, Hasher, Sha256, Signer,
+    };
+    use commonware_parallel::Sequential;
+    use rand::{rngs::StdRng, SeedableRng};
+
+    #[test]
+    fn test_notarized() {
+        let mut rng = StdRng::seed_from_u64(0);
+        let n = 4;
+        let Fixture { schemes, .. } =
+            bls12381_threshold::fixture::<MinSig, _>(&mut rng, NAMESPACE, n);
+
+        let context = Context {
+            round: Round::new(EPOCH, View::new(9)),
+            leader: ed25519::PrivateKey::from_seed(0).public_key(),
+            parent: (View::new(8), sha256::Digest::EMPTY),
+        };
+        let digest = Sha256::hash(b"hello world");
+        let block = Block::new(context, digest, Height::new(10), 100);
+        let proposal = Proposal::new(
+            Round::new(EPOCH, View::new(9)),
+            View::new(8),
+            block.digest(),
+        );
+
+        let notarizes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
+            .collect();
+        let notarization =
+            Notarization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap();
+        let notarized = Notarized::new(notarization, block.clone());
+
+        let encoded = notarized.encode();
+        let decoded = Notarized::decode(encoded).expect("failed to decode notarized");
+        assert_eq!(notarized, decoded);
+        assert!(notarized.verify(&schemes[0], &Sequential));
+    }
+
+    #[test]
+    fn test_finalized() {
+        let mut rng = StdRng::seed_from_u64(0);
+        let n = 4;
+        let Fixture { schemes, .. } =
+            bls12381_threshold::fixture::<MinSig, _>(&mut rng, NAMESPACE, n);
+
+        let context = Context {
+            round: Round::new(EPOCH, View::new(9)),
+            leader: ed25519::PrivateKey::from_seed(0).public_key(),
+            parent: (View::new(8), sha256::Digest::EMPTY),
+        };
+        let digest = Sha256::hash(b"hello world");
+        let block = Block::new(context, digest, Height::new(10), 100);
+        let proposal = Proposal::new(
+            Round::new(EPOCH, View::new(9)),
+            View::new(8),
+            block.digest(),
+        );
+
+        let finalizes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
+            .collect();
+        let finalization =
+            Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential).unwrap();
+        let finalized = Finalized::new(finalization, block.clone());
+
+        let encoded = finalized.encode();
+        let decoded = Finalized::decode(encoded).expect("failed to decode finalized");
+        assert_eq!(finalized, decoded);
+        assert!(finalized.verify(&schemes[0], &Sequential));
     }
 }

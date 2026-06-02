@@ -1,3 +1,4 @@
+use crate::{Block, Context, Scheme, EPOCH};
 use commonware_actor::Feedback;
 use commonware_consensus::{
     marshal::{ancestry::Ancestry, Update},
@@ -9,7 +10,6 @@ use commonware_runtime::{Clock, Metrics, Spawner, Storage};
 use commonware_utils::{Acknowledgement, SystemTimeExt};
 use futures::StreamExt;
 use rand::Rng;
-use smallto_types::{Block, Context, Scheme, EPOCH};
 use std::time::{Duration, SystemTime};
 use tracing::info;
 

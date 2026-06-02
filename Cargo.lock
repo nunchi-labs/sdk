@@ -1955,6 +1955,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "nunchi-template"
+version = "2026.5.0"
+dependencies = [
+ "bytes",
+ "commonware-actor",
+ "commonware-broadcast",
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-formatting",
+ "commonware-macros",
+ "commonware-math",
+ "commonware-p2p",
+ "commonware-parallel",
+ "commonware-resolver",
+ "commonware-runtime",
+ "commonware-storage",
+ "commonware-stream",
+ "commonware-utils",
+ "futures",
+ "governor",
+ "prometheus-client",
+ "rand 0.8.6",
+ "serde",
+ "thiserror",
+ "tracing",
+ "tracing-subscriber 0.3.23",
+]
+
+[[package]]
 name = "objc2-core-foundation"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2724,52 +2754,6 @@ name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
-
-[[package]]
-name = "smallto-chain"
-version = "2026.5.0"
-dependencies = [
- "bytes",
- "commonware-actor",
- "commonware-broadcast",
- "commonware-codec",
- "commonware-consensus",
- "commonware-cryptography",
- "commonware-macros",
- "commonware-p2p",
- "commonware-parallel",
- "commonware-resolver",
- "commonware-runtime",
- "commonware-storage",
- "commonware-stream",
- "commonware-utils",
- "futures",
- "governor",
- "prometheus-client",
- "rand 0.8.6",
- "serde",
- "smallto-types",
- "thiserror",
- "tracing",
- "tracing-subscriber 0.3.23",
-]
-
-[[package]]
-name = "smallto-types"
-version = "2026.5.0"
-dependencies = [
- "bytes",
- "commonware-codec",
- "commonware-consensus",
- "commonware-cryptography",
- "commonware-formatting",
- "commonware-math",
- "commonware-parallel",
- "commonware-utils",
- "rand 0.8.6",
- "serde",
- "thiserror",
-]
 
 [[package]]
 name = "smallvec"
