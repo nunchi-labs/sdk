@@ -3,6 +3,7 @@ members = [
     "common",
     "coins",
     "examples/template",
+    "examples/coins-chain",
 ]
 resolver = "2"
 
@@ -15,6 +16,7 @@ license = "MIT OR Apache-2.0"
 nunchi-coins = { version = "2026.5.0", path = "coins" }
 nunchi-common = { version = "2026.5.0", path = "common" }
 nunchi-template = { version = "2026.5.0", path = "examples/template" }
+nunchi-coins-chain = { version = "2026.5.0", path = "examples/coins-chain" }
 commonware-actor = "2026.5.0"
 commonware-broadcast = "2026.5.0"
 commonware-codec = "2026.5.0"
