@@ -3,12 +3,14 @@
 mod account;
 mod asset;
 mod codec;
+mod db;
 mod factory;
 mod ledger;
 mod transaction;
 
 pub use account::{Account, AccountId, PrivateKey, Signature};
 pub use asset::{CoinId, CoinSpec, TokenDefinition, MAX_NAME_BYTES, MAX_SYMBOL_BYTES};
+pub use db::CoinDB;
 pub use factory::TokenFactory;
 pub use ledger::{Ledger, LedgerError};
 pub use transaction::{CoinOperation, Transaction, TransactionPayload};

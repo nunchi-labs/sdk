@@ -1941,6 +1941,7 @@ dependencies = [
  "bytes",
  "commonware-codec",
  "commonware-cryptography",
+ "commonware-runtime",
  "nunchi-common",
  "thiserror",
 ]
@@ -1952,6 +1953,11 @@ dependencies = [
  "bytes",
  "commonware-codec",
  "commonware-cryptography",
+ "commonware-parallel",
+ "commonware-runtime",
+ "commonware-storage",
+ "commonware-utils",
+ "thiserror",
 ]
 
 [[package]]

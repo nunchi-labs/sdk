@@ -1,9 +1,8 @@
 use super::{
     Account, AccountId, CoinId, CoinOperation, TokenDefinition, TokenFactory, Transaction,
 };
-use commonware_codec::Encode;
-use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
-use std::collections::BTreeMap;
+use crate::db::CoinDB;
+use commonware_cryptography::sha256::Digest;
 use thiserror::Error;
 
 #[derive(Debug, Error, Clone, Eq, PartialEq)]
@@ -41,51 +40,57 @@ pub enum LedgerError {
     SupplyOverflow,
     #[error("max supply exceeded: max {max}, attempted {attempted}")]
     MaxSupplyExceeded { max: u128, attempted: u128 },
+    #[error("state storage error: {0}")]
+    Storage(String),
 }
 
-/// Deterministic in-memory state for accounts and tokens.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct Ledger {
-    factory: TokenFactory,
-    accounts: BTreeMap<AccountId, u64>,
-    tokens: BTreeMap<CoinId, TokenDefinition>,
-    balances: BTreeMap<(AccountId, CoinId), u128>,
+/// Deterministic state machine for accounts and tokens over a [`CoinDB`] backend.
+///
+/// State lives in the shared, authenticated database; [`Ledger::root`] commits to it succinctly.
+/// Operations stage writes that become durable on [`Ledger::commit`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Ledger<D> {
+    db: D,
 }
 
-impl Ledger {
-    pub fn factory(&self) -> &TokenFactory {
-        &self.factory
+impl<D: CoinDB> Ledger<D> {
+    /// Wrap a database backend as a coin ledger.
+    pub fn new(db: D) -> Self {
+        Self { db }
     }
 
-    pub fn account(&self, id: &AccountId) -> Account {
-        Account::new(id.clone(), self.nonce(id))
+    /// Borrow the underlying database.
+    pub fn db(&self) -> &D {
+        &self.db
     }
 
-    pub fn nonce(&self, id: &AccountId) -> u64 {
-        self.accounts.get(id).copied().unwrap_or(0)
+    /// Consume the ledger, returning the underlying database.
+    pub fn into_inner(self) -> D {
+        self.db
     }
 
-    pub fn token(&self, coin: &CoinId) -> Option<&TokenDefinition> {
-        self.tokens.get(coin)
+    pub async fn account(&self, id: &AccountId) -> Result<Account, LedgerError> {
+        Ok(Account::new(id.clone(), self.db.nonce(id).await?))
     }
 
-    pub fn tokens(&self) -> impl Iterator<Item = (&CoinId, &TokenDefinition)> {
-        self.tokens.iter()
+    pub async fn nonce(&self, id: &AccountId) -> Result<u64, LedgerError> {
+        self.db.nonce(id).await
     }
 
-    pub fn balance(&self, account: &AccountId, coin: &CoinId) -> u128 {
-        self.balances
-            .get(&(account.clone(), *coin))
-            .copied()
-            .unwrap_or(0)
+    pub async fn token(&self, coin: &CoinId) -> Result<Option<TokenDefinition>, LedgerError> {
+        self.db.token(coin).await
     }
 
-    pub fn apply_transaction(&mut self, tx: &Transaction) -> Result<(), LedgerError> {
+    pub async fn balance(&self, account: &AccountId, coin: &CoinId) -> Result<u128, LedgerError> {
+        self.db.balance(account, coin).await
+    }
+
+    pub async fn apply_transaction(&mut self, tx: &Transaction) -> Result<(), LedgerError> {
         if !tx.verify() {
             return Err(LedgerError::BadSignature);
         }
 
-        let expected = self.nonce(&tx.signer);
+        let expected = self.db.nonce(&tx.signer).await?;
         if tx.payload.nonce != expected {
             return Err(LedgerError::NonceMismatch {
                 account: Box::new(tx.signer.clone()),
@@ -94,77 +99,65 @@ impl Ledger {
             });
         }
 
-        self.apply_operation(&tx.signer, &tx.payload.operation)?;
+        self.apply_operation(&tx.signer, &tx.payload.operation)
+            .await?;
         let next_nonce = expected.checked_add(1).ok_or(LedgerError::NonceOverflow)?;
-        self.accounts.insert(tx.signer.clone(), next_nonce);
+        self.db.set_nonce(&tx.signer, next_nonce);
         Ok(())
     }
 
-    pub fn create_token(
+    pub async fn create_token(
         &mut self,
         issuer: AccountId,
         spec: super::CoinSpec,
     ) -> Result<CoinId, LedgerError> {
-        let token = self.factory.create(issuer.clone(), spec)?;
+        let mut factory = TokenFactory::with_nonce(self.db.factory_nonce().await?);
+        let token = factory.create(issuer.clone(), spec)?;
+        self.db.set_factory_nonce(factory.next_nonce());
+
         let id = token.id;
-        if self.tokens.insert(id, token.clone()).is_some() {
+        if self.db.token(&id).await?.is_some() {
             return Err(LedgerError::DuplicateToken(id));
         }
+        self.db.set_token(&token);
         if token.total_supply > 0 {
-            self.credit(&issuer, id, token.total_supply)?;
+            self.credit(&issuer, id, token.total_supply).await?;
         }
         Ok(id)
     }
 
-    pub fn state_root(&self) -> Digest {
-        let mut hasher = Sha256::new();
-        hasher.update(b"NUNCHI_LEDGER_V1");
-        hasher.update(&self.factory.encode());
-
-        for (account, nonce) in &self.accounts {
-            hasher.update(b"account");
-            hasher.update(&account.encode());
-            hasher.update(&nonce.encode());
-        }
-
-        for (coin, token) in &self.tokens {
-            hasher.update(b"token");
-            hasher.update(&coin.encode());
-            hasher.update(&token.encode());
-        }
-
-        for ((account, coin), balance) in &self.balances {
-            hasher.update(b"balance");
-            hasher.update(&account.encode());
-            hasher.update(&coin.encode());
-            hasher.update(&balance.encode());
-        }
-
-        hasher.finalize()
+    /// Flush staged writes, returning the new authenticated state root.
+    pub async fn commit(&mut self) -> Result<Digest, LedgerError> {
+        self.db.commit().await
     }
 
-    fn apply_operation(
+    /// The most recently committed authenticated state root.
+    pub fn root(&self) -> Digest {
+        self.db.root()
+    }
+
+    async fn apply_operation(
         &mut self,
         signer: &AccountId,
         operation: &CoinOperation,
     ) -> Result<(), LedgerError> {
         match operation {
             CoinOperation::CreateToken { spec } => {
-                self.create_token(signer.clone(), spec.clone())?;
+                self.create_token(signer.clone(), spec.clone()).await?;
             }
             CoinOperation::Mint { coin, to, amount } => {
-                self.ensure_positive(*amount)?;
-                self.ensure_issuer(signer, coin)?;
-                self.increase_supply(*coin, *amount)?;
-                self.credit(to, *coin, *amount)?;
+                ensure_positive(*amount)?;
+                self.ensure_issuer(signer, coin).await?;
+                self.increase_supply(*coin, *amount).await?;
+                self.credit(to, *coin, *amount).await?;
             }
             CoinOperation::Burn { coin, from, amount } => {
-                self.ensure_positive(*amount)?;
+                ensure_positive(*amount)?;
                 if signer != from {
                     return Err(LedgerError::Unauthorized);
                 }
-                self.debit(from, *coin, *amount)?;
-                self.decrease_supply(*coin, *amount)?;
+                self.debit(from, *coin, *amount).await?;
+                self.decrease_supply(*coin, *amount).await?;
             }
             CoinOperation::Transfer {
                 coin,
@@ -172,29 +165,22 @@ impl Ledger {
                 to,
                 amount,
             } => {
-                self.ensure_positive(*amount)?;
+                ensure_positive(*amount)?;
                 if signer != from {
                     return Err(LedgerError::Unauthorized);
                 }
-                self.debit(from, *coin, *amount)?;
-                self.credit(to, *coin, *amount)?;
+                self.debit(from, *coin, *amount).await?;
+                self.credit(to, *coin, *amount).await?;
             }
         }
         Ok(())
     }
 
-    fn ensure_positive(&self, amount: u128) -> Result<(), LedgerError> {
-        if amount == 0 {
-            Err(LedgerError::InvalidAmount)
-        } else {
-            Ok(())
-        }
-    }
-
-    fn ensure_issuer(&self, signer: &AccountId, coin: &CoinId) -> Result<(), LedgerError> {
+    async fn ensure_issuer(&self, signer: &AccountId, coin: &CoinId) -> Result<(), LedgerError> {
         let token = self
-            .tokens
-            .get(coin)
+            .db
+            .token(coin)
+            .await?
             .ok_or(LedgerError::UnknownToken(*coin))?;
         if &token.issuer == signer {
             Ok(())
@@ -203,10 +189,11 @@ impl Ledger {
         }
     }
 
-    fn increase_supply(&mut self, coin: CoinId, amount: u128) -> Result<(), LedgerError> {
-        let token = self
-            .tokens
-            .get_mut(&coin)
+    async fn increase_supply(&mut self, coin: CoinId, amount: u128) -> Result<(), LedgerError> {
+        let mut token = self
+            .db
+            .token(&coin)
+            .await?
             .ok_or(LedgerError::UnknownToken(coin))?;
         let attempted = token
             .total_supply
@@ -218,50 +205,51 @@ impl Ledger {
             }
         }
         token.total_supply = attempted;
+        self.db.set_token(&token);
         Ok(())
     }
 
-    fn decrease_supply(&mut self, coin: CoinId, amount: u128) -> Result<(), LedgerError> {
-        let token = self
-            .tokens
-            .get_mut(&coin)
+    async fn decrease_supply(&mut self, coin: CoinId, amount: u128) -> Result<(), LedgerError> {
+        let mut token = self
+            .db
+            .token(&coin)
+            .await?
             .ok_or(LedgerError::UnknownToken(coin))?;
         token.total_supply = token
             .total_supply
             .checked_sub(amount)
             .ok_or(LedgerError::SupplyOverflow)?;
+        self.db.set_token(&token);
         Ok(())
     }
 
-    fn credit(
+    async fn credit(
         &mut self,
         account: &AccountId,
         coin: CoinId,
         amount: u128,
     ) -> Result<(), LedgerError> {
-        if !self.tokens.contains_key(&coin) {
+        if self.db.token(&coin).await?.is_none() {
             return Err(LedgerError::UnknownToken(coin));
         }
-        let key = (account.clone(), coin);
-        let current = self.balances.get(&key).copied().unwrap_or(0);
+        let current = self.db.balance(account, &coin).await?;
         let updated = current
             .checked_add(amount)
             .ok_or(LedgerError::BalanceOverflow)?;
-        self.balances.insert(key, updated);
+        self.db.set_balance(account, &coin, updated);
         Ok(())
     }
 
-    fn debit(
+    async fn debit(
         &mut self,
         account: &AccountId,
         coin: CoinId,
         amount: u128,
     ) -> Result<(), LedgerError> {
-        if !self.tokens.contains_key(&coin) {
+        if self.db.token(&coin).await?.is_none() {
             return Err(LedgerError::UnknownToken(coin));
         }
-        let key = (account.clone(), coin);
-        let available = self.balances.get(&key).copied().unwrap_or(0);
+        let available = self.db.balance(account, &coin).await?;
         if available < amount {
             return Err(LedgerError::InsufficientBalance {
                 account: Box::new(account.clone()),
@@ -270,12 +258,150 @@ impl Ledger {
                 required: amount,
             });
         }
-        let updated = available - amount;
-        if updated == 0 {
-            self.balances.remove(&key);
-        } else {
-            self.balances.insert(key, updated);
-        }
+        self.db.set_balance(account, &coin, available - amount);
         Ok(())
+    }
+}
+
+fn ensure_positive(amount: u128) -> Result<(), LedgerError> {
+    if amount == 0 {
+        Err(LedgerError::InvalidAmount)
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{CoinSpec, PrivateKey};
+    use commonware_cryptography::Signer;
+    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
+    use nunchi_common::QmdbState;
+
+    async fn ledger(context: deterministic::Context) -> Ledger<QmdbState<deterministic::Context>> {
+        let db = QmdbState::init(context, "coins-test")
+            .await
+            .expect("init state db");
+        Ledger::new(db)
+    }
+
+    fn spec(supply: u128, max: Option<u128>) -> CoinSpec {
+        CoinSpec::new("NCH", "Nunchi", 9, supply, max)
+    }
+
+    #[test]
+    fn create_token_credits_issuer_and_commits_root() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut ledger = ledger(context).await;
+            let alice = PrivateKey::from_seed(1).public_key();
+
+            let empty_root = ledger.root();
+            let coin = ledger
+                .create_token(alice.clone(), spec(1_000, None))
+                .await
+                .expect("create token");
+
+            assert_eq!(ledger.balance(&alice, &coin).await.unwrap(), 1_000);
+            assert_eq!(
+                ledger.token(&coin).await.unwrap().unwrap().total_supply,
+                1_000
+            );
+
+            let root = ledger.commit().await.expect("commit");
+            assert_ne!(root, empty_root, "committing state must change the root");
+        });
+    }
+
+    #[test]
+    fn transfer_via_signed_transaction_moves_balance_and_bumps_nonce() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut ledger = ledger(context).await;
+            let alice_key = PrivateKey::from_seed(1);
+            let alice = alice_key.public_key();
+            let bob = PrivateKey::from_seed(2).public_key();
+
+            let coin = ledger
+                .create_token(alice.clone(), spec(1_000, None))
+                .await
+                .expect("create token");
+
+            let tx = Transaction::sign(
+                &alice_key,
+                0,
+                CoinOperation::Transfer {
+                    coin,
+                    from: alice.clone(),
+                    to: bob.clone(),
+                    amount: 250,
+                },
+            );
+            ledger.apply_transaction(&tx).await.expect("apply transfer");
+
+            assert_eq!(ledger.balance(&alice, &coin).await.unwrap(), 750);
+            assert_eq!(ledger.balance(&bob, &coin).await.unwrap(), 250);
+            assert_eq!(ledger.nonce(&alice).await.unwrap(), 1);
+        });
+    }
+
+    #[test]
+    fn rejects_transaction_with_wrong_nonce() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut ledger = ledger(context).await;
+            let alice_key = PrivateKey::from_seed(1);
+            let alice = alice_key.public_key();
+            let bob = PrivateKey::from_seed(2).public_key();
+
+            let coin = ledger
+                .create_token(alice.clone(), spec(1_000, None))
+                .await
+                .expect("create token");
+
+            // Signer's account nonce is still 0; signing with nonce 5 must be rejected.
+            let tx = Transaction::sign(
+                &alice_key,
+                5,
+                CoinOperation::Transfer {
+                    coin,
+                    from: alice.clone(),
+                    to: bob,
+                    amount: 1,
+                },
+            );
+            let err = ledger.apply_transaction(&tx).await.unwrap_err();
+            assert!(matches!(
+                err,
+                LedgerError::NonceMismatch {
+                    expected: 0,
+                    actual: 5,
+                    ..
+                }
+            ));
+        });
+    }
+
+    #[test]
+    fn committed_state_survives_reopen() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let alice = PrivateKey::from_seed(1).public_key();
+
+            let coin = {
+                let mut ledger = ledger(context.child("open")).await;
+                let coin = ledger
+                    .create_token(alice.clone(), spec(1_000, None))
+                    .await
+                    .expect("create token");
+                ledger.commit().await.expect("commit");
+                coin
+            };
+
+            // Reopen the same partitions: committed balances must be recovered.
+            let reopened = ledger(context.child("reopen")).await;
+            assert_eq!(reopened.balance(&alice, &coin).await.unwrap(), 1_000);
+        });
     }
 }
