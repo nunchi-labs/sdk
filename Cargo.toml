@@ -39,13 +39,21 @@ prometheus-client = "0.24.0"
 [profile.bench]
 overflow-checks = true
 
-[profile.dev]
-overflow-checks = true
-
 [profile.release]
 overflow-checks = true
 codegen-units = 1
 lto = true
 
-[profile.test]
+# Speed up compilation time for dev builds by reducing emitted debug info.
+# NOTE: Debuggers may provide less useful information with this setting.
+# Uncomment this section if you're using a debugger.
+[profile.dev]
+# https://davidlattimore.github.io/posts/2024/02/04/speeding-up-the-rust-edit-build-run-cycle.html
+debug = "line-tables-only"
 overflow-checks = true
+split-debuginfo = "unpacked"
+
+[profile.test]
+debug = "line-tables-only"
+overflow-checks = true
+split-debuginfo = "unpacked"

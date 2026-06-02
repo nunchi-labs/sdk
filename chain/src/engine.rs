@@ -1,5 +1,4 @@
 use crate::application::Application;
-use smallto_types::{Block, Finalization, Scheme, EPOCH, EPOCH_LENGTH, NAMESPACE};
 use commonware_broadcast::buffered;
 use commonware_consensus::{
     marshal::{
@@ -32,6 +31,7 @@ use futures::future::try_join_all;
 use governor::clock::Clock as GClock;
 use governor::Quota;
 use rand::{CryptoRng, Rng};
+use smallto_types::{Block, Finalization, Scheme, EPOCH, EPOCH_LENGTH, NAMESPACE};
 use std::{
     num::NonZero,
     time::{Duration, Instant},
@@ -112,7 +112,17 @@ where
     >,
     marshaled: Marshaled<E>,
 
-    consensus: Consensus<E, Scheme, Random, B, Digest, Marshaled<E>, Marshaled<E>, MarshalMailbox<Scheme, Standard<Block>>, S>,
+    consensus: Consensus<
+        E,
+        Scheme,
+        Random,
+        B,
+        Digest,
+        Marshaled<E>,
+        Marshaled<E>,
+        MarshalMailbox<Scheme, Standard<Block>>,
+        S,
+    >,
 }
 
 impl<E, B, P, S> Engine<E, B, P, S>

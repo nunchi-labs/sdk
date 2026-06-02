@@ -9,10 +9,8 @@ pub mod application;
 pub mod engine;
 
 pub const DEFAULT_BLOCKING_THREADS: usize = 512;
-pub const DEFAULT_STORAGE_BUFFER_POOL_MAX_PER_CLASS: NonZeroU32 =
-    commonware_utils::NZU32!(16_384);
-pub const DEFAULT_NETWORK_BUFFER_POOL_MAX_PER_CLASS: NonZeroU32 =
-    commonware_utils::NZU32!(4_096);
+pub const DEFAULT_STORAGE_BUFFER_POOL_MAX_PER_CLASS: NonZeroU32 = commonware_utils::NZU32!(16_384);
+pub const DEFAULT_NETWORK_BUFFER_POOL_MAX_PER_CLASS: NonZeroU32 = commonware_utils::NZU32!(4_096);
 
 fn default_blocking_threads() -> usize {
     DEFAULT_BLOCKING_THREADS
@@ -71,7 +69,6 @@ pub struct Peers {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smallto_types::NAMESPACE;
     use commonware_consensus::{
         marshal, simplex::scheme::bls12381_threshold::vrf as bls12381_threshold, types::ViewDelta,
     };
@@ -93,6 +90,7 @@ mod tests {
     use engine::{Config, Engine};
     use governor::Quota;
     use rand::{rngs::StdRng, Rng, SeedableRng};
+    use smallto_types::NAMESPACE;
     use std::{collections::HashMap, num::NonZeroU32, time::Duration};
     use tracing::info;
 
