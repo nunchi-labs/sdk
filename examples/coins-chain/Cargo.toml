@@ -1,0 +1,32 @@
+[package]
+name = "nunchi-coins-chain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A demo blockchain that executes the Nunchi coins module, used for coin-operation integration tests."
+
+[dependencies]
+nunchi-coins = { workspace = true }
+nunchi-common = { workspace = true }
+commonware-actor = { workspace = true }
+commonware-broadcast = { workspace = true }
+commonware-codec = { workspace = true }
+commonware-consensus = { workspace = true, features = ["mocks"] }
+commonware-cryptography = { workspace = true, features = ["mocks"] }
+commonware-macros = { workspace = true }
+commonware-p2p = { workspace = true }
+commonware-resolver = { workspace = true }
+commonware-runtime = { workspace = true }
+commonware-storage = { workspace = true }
+commonware-utils = { workspace = true }
+commonware-parallel = { workspace = true }
+bytes = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+governor = { workspace = true }
+
+[dev-dependencies]
+commonware-math = { workspace = true }
+tracing-subscriber = { version = "0.3.19", features = ["fmt", "json"] }
