@@ -156,45 +156,61 @@ mod tests {
     /// (Effectively) unlimited quota for tests.
     const TEST_QUOTA: Quota = Quota::per_second(NZU32!(u32::MAX));
 
+    const PENDING_CHANNEL: u64 = 0;
+    const RECOVERED_CHANNEL: u64 = 1;
+    const RESOLVER_CHANNEL: u64 = 2;
+    const BROADCAST_CHANNEL: u64 = 3;
+    const BACKFILL_CHANNEL: u64 = 4;
+
     /// Registers all validators using the oracle.
     async fn register_validators(
         oracle: &mut Oracle<PublicKey, deterministic::Context>,
         validators: &[PublicKey],
-    ) -> HashMap<PublicKey, Registration> {
+    ) -> HashMap<PublicKey, ValidatorChannels> {
         oracle
             .manager()
             .track(0, Set::from_iter_dedup(validators.iter().cloned()));
         let mut registrations = HashMap::new();
         for validator in validators.iter() {
             let oracle = oracle.control(validator.clone());
-            let (pending_sender, pending_receiver) = oracle.register(0, TEST_QUOTA).await.unwrap();
-            let (recovered_sender, recovered_receiver) =
-                oracle.register(1, TEST_QUOTA).await.unwrap();
-            let (resolver_sender, resolver_receiver) =
-                oracle.register(2, TEST_QUOTA).await.unwrap();
-            let (broadcast_sender, broadcast_receiver) =
-                oracle.register(3, TEST_QUOTA).await.unwrap();
-            let (backfill_sender, backfill_receiver) =
-                oracle.register(4, TEST_QUOTA).await.unwrap();
+            let pending = oracle.register(PENDING_CHANNEL, TEST_QUOTA).await.unwrap();
+            let recovered = oracle
+                .register(RECOVERED_CHANNEL, TEST_QUOTA)
+                .await
+                .unwrap();
+            let resolver = oracle.register(RESOLVER_CHANNEL, TEST_QUOTA).await.unwrap();
+            let broadcast = oracle
+                .register(BROADCAST_CHANNEL, TEST_QUOTA)
+                .await
+                .unwrap();
+            let backfill = oracle.register(BACKFILL_CHANNEL, TEST_QUOTA).await.unwrap();
             registrations.insert(
                 validator.clone(),
-                (
-                    (pending_sender, pending_receiver),
-                    (recovered_sender, recovered_receiver),
-                    (resolver_sender, resolver_receiver),
-                    (broadcast_sender, broadcast_receiver),
-                    (backfill_sender, backfill_receiver),
-                ),
+                ValidatorChannels {
+                    pending,
+                    recovered,
+                    resolver,
+                    broadcast,
+                    backfill,
+                },
             );
         }
         registrations
     }
 
-    /// Links (or unlinks) validators using the oracle.
-    ///
-    /// The `action` parameter determines the action (e.g. link, unlink) to take.
-    /// The `restrict_to` function can be used to restrict the linking to certain connections,
-    /// otherwise all validators will be linked to all other validators.
+    type Channel = (
+        Sender<PublicKey, deterministic::Context>,
+        Receiver<PublicKey>,
+    );
+
+    struct ValidatorChannels {
+        pending: Channel,
+        recovered: Channel,
+        resolver: Channel,
+        broadcast: Channel,
+        backfill: Channel,
+    }
+
     async fn link_validators(
         oracle: &mut Oracle<PublicKey, deterministic::Context>,
         validators: &[PublicKey],
@@ -203,19 +219,16 @@ mod tests {
     ) {
         for (i1, v1) in validators.iter().enumerate() {
             for (i2, v2) in validators.iter().enumerate() {
-                // Ignore self
                 if v2 == v1 {
                     continue;
                 }
 
-                // Restrict to certain connections
                 if let Some(f) = restrict_to {
                     if !f(validators.len(), i1, i2) {
                         continue;
                     }
                 }
 
-                // Add link
                 oracle
                     .add_link(v1.clone(), v2.clone(), link.clone())
                     .await
@@ -243,29 +256,6 @@ mod tests {
         Some((name, labels, value))
     }
 
-    type Registration = (
-        (
-            Sender<PublicKey, deterministic::Context>,
-            Receiver<PublicKey>,
-        ),
-        (
-            Sender<PublicKey, deterministic::Context>,
-            Receiver<PublicKey>,
-        ),
-        (
-            Sender<PublicKey, deterministic::Context>,
-            Receiver<PublicKey>,
-        ),
-        (
-            Sender<PublicKey, deterministic::Context>,
-            Receiver<PublicKey>,
-        ),
-        (
-            Sender<PublicKey, deterministic::Context>,
-            Receiver<PublicKey>,
-        ),
-    );
-
     #[derive(Clone)]
     struct ValidatorConfig {
         leader_timeout: Duration,
@@ -287,7 +277,7 @@ mod tests {
         signer: &commonware_cryptography::ed25519::PrivateKey,
         scheme: &bls12381_threshold::Scheme<PublicKey, MinSig>,
         participants: Set<PublicKey>,
-        registration: Registration,
+        channels: ValidatorChannels,
     ) {
         start_validator_with(
             context,
@@ -295,7 +285,7 @@ mod tests {
             signer,
             scheme,
             participants,
-            registration,
+            channels,
             ValidatorConfig::default(),
         )
         .await;
@@ -307,7 +297,7 @@ mod tests {
         signer: &commonware_cryptography::ed25519::PrivateKey,
         scheme: &bls12381_threshold::Scheme<PublicKey, MinSig>,
         participants: Set<PublicKey>,
-        registration: Registration,
+        channels: ValidatorChannels,
         cfg: ValidatorConfig,
     ) {
         let public_key = signer.public_key();
@@ -337,7 +327,6 @@ mod tests {
             strategy: Sequential,
         };
         let validator_context = context.child("validator").with_attribute("id", &uid);
-        let (pending, recovered, resolver, broadcast, backfill) = registration;
         let marshal_resolver_cfg = marshal::resolver::p2p::Config {
             public_key: public_key.clone(),
             peer_provider: oracle.manager(),
@@ -352,10 +341,16 @@ mod tests {
         let marshal_resolver = marshal::resolver::p2p::init(
             validator_context.child("backfill"),
             marshal_resolver_cfg,
-            backfill,
+            channels.backfill,
         );
         let engine = Engine::new(validator_context.child("engine"), config).await;
-        engine.start(pending, recovered, resolver, broadcast, marshal_resolver);
+        engine.start(
+            channels.pending,
+            channels.recovered,
+            channels.resolver,
+            channels.broadcast,
+            marshal_resolver,
+        );
     }
 
     async fn poll_until_height(context: &deterministic::Context, required: u64) {
