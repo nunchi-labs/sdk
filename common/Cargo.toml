@@ -1,0 +1,15 @@
+[package]
+name = "nunchi-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bytes = { workspace = true }
+thiserror = { workspace = true }
+commonware-codec = { workspace = true }
+commonware-cryptography = { workspace = true }
+commonware-runtime = { workspace = true }
+commonware-storage = { workspace = true }
+commonware-parallel = { workspace = true }
+commonware-utils = { workspace = true }

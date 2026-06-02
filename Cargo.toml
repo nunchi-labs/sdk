@@ -1,7 +1,8 @@
 [workspace]
 members = [
-    "chain",
-    "types",
+    "common",
+    "coins",
+    "examples/template",
 ]
 resolver = "2"
 
@@ -11,8 +12,9 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-smallto-chain = { version = "2026.5.0", path = "chain" }
-smallto-types = { version = "2026.5.0", path = "types" }
+nunchi-coins = { version = "2026.5.0", path = "coins" }
+nunchi-common = { version = "2026.5.0", path = "common" }
+nunchi-template = { version = "2026.5.0", path = "examples/template" }
 commonware-actor = "2026.5.0"
 commonware-broadcast = "2026.5.0"
 commonware-codec = "2026.5.0"
