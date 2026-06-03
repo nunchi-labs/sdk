@@ -9,7 +9,10 @@ use commonware_p2p::{
     Manager,
 };
 use commonware_parallel::Sequential;
-use commonware_runtime::{deterministic, Clock, Supervisor};
+use commonware_runtime::{
+    deterministic::{self, Runner},
+    Clock, Metrics, Runner as _, Supervisor,
+};
 use commonware_utils::{ordered::Set, NZUsize, NZU32};
 use governor::Quota;
 use nunchi_coins_chain::{
@@ -18,7 +21,11 @@ use nunchi_coins_chain::{
     txpool::Submitter,
     PublicKey, NAMESPACE,
 };
-use std::{collections::HashMap, num::NonZeroU32, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    num::NonZeroU32,
+    time::Duration,
+};
 
 const FREEZER_TABLE_INITIAL_SIZE: u32 = 2u32.pow(14); // 1MB
 const TEST_QUOTA: Quota = Quota::per_second(NZU32!(u32::MAX));
@@ -36,6 +43,7 @@ type Channel = (
 );
 
 type ThresholdScheme = bls12381_threshold::Scheme<PublicKey, MinSig>;
+type ThresholdFixture = Fixture<ThresholdScheme>;
 
 pub(crate) fn reliable_link() -> Link {
     Link {
@@ -56,8 +64,8 @@ pub(crate) fn lossy_link() -> Link {
 
 #[derive(Clone)]
 pub(crate) struct ValidatorConfig {
-    leader_timeout: Duration,
-    certification_timeout: Duration,
+    pub(crate) leader_timeout: Duration,
+    pub(crate) certification_timeout: Duration,
 }
 
 impl Default for ValidatorConfig {
@@ -79,6 +87,7 @@ struct ValidatorChannels {
 
 pub(crate) struct TestNetworkBuilder {
     validators: u32,
+    fixture: Option<ThresholdFixture>,
     initial_link: Option<Link>,
     validator_config: ValidatorConfig,
 }
@@ -87,18 +96,32 @@ impl TestNetworkBuilder {
     pub(crate) fn new(validators: u32) -> Self {
         Self {
             validators,
+            fixture: None,
             initial_link: Some(reliable_link()),
             validator_config: ValidatorConfig::default(),
         }
     }
 
-    #[allow(dead_code)]
+    pub(crate) fn with_fixture(mut self, fixture: ThresholdFixture) -> Self {
+        self.validators = fixture
+            .participants
+            .len()
+            .try_into()
+            .expect("validator count exceeds u32");
+        self.fixture = Some(fixture);
+        self
+    }
+
     pub(crate) fn with_initial_link(mut self, link: Link) -> Self {
         self.initial_link = Some(link);
         self
     }
 
-    #[allow(dead_code)]
+    pub(crate) fn with_validator_config(mut self, validator_config: ValidatorConfig) -> Self {
+        self.validator_config = validator_config;
+        self
+    }
+
     pub(crate) fn without_initial_links(mut self) -> Self {
         self.initial_link = None;
         self
@@ -118,12 +141,15 @@ impl TestNetworkBuilder {
         );
         network.start();
 
+        let fixture = self.fixture.unwrap_or_else(|| {
+            bls12381_threshold::fixture::<MinSig, _>(context, NAMESPACE, self.validators)
+        });
         let Fixture {
             schemes,
             private_keys,
             participants,
             ..
-        } = bls12381_threshold::fixture::<MinSig, _>(context, NAMESPACE, self.validators);
+        } = fixture;
         let registrations = register_validators(&mut oracle, &participants).await;
         let participants_set = Set::from_iter_dedup(participants.clone());
 
@@ -161,6 +187,10 @@ pub(crate) struct TestNetwork<'a> {
 }
 
 impl TestNetwork<'_> {
+    pub(crate) fn context(&self) -> &deterministic::Context {
+        self.context
+    }
+
     pub(crate) async fn start_all(&mut self) {
         for index in 0..self.private_keys.len() {
             self.start_validator(index).await;
@@ -206,6 +236,58 @@ impl TestNetwork<'_> {
                     .unwrap();
             }
         }
+    }
+
+    pub(crate) async fn run_until_height(&self, required: u64) {
+        self.run_until_height_with_interval(required, Duration::from_secs(1))
+            .await;
+    }
+
+    pub(crate) async fn run_until_height_with_interval(&self, required: u64, interval: Duration) {
+        let expected = self.started_validator_ids();
+        assert!(
+            !expected.is_empty(),
+            "run_until_height requires at least one started validator"
+        );
+
+        loop {
+            let metrics = self.context.encode();
+            let mut reached = HashSet::new();
+            for line in metrics.lines() {
+                let Some((metric, labels, value)) = validator_metric_sample(line) else {
+                    continue;
+                };
+
+                if metric.ends_with("_peers_blocked") {
+                    assert_eq!(value.parse::<u64>().unwrap(), 0);
+                }
+
+                if metric.ends_with("_marshal_processed_height")
+                    && value.parse::<u64>().unwrap() >= required
+                {
+                    if let Some(id) = metric_label(labels, "id") {
+                        if expected.contains(id) {
+                            reached.insert(id);
+                        }
+                    }
+                }
+            }
+            if reached.len() == expected.len() {
+                break;
+            }
+            self.context.sleep(interval).await;
+        }
+    }
+
+    fn started_validator_ids(&self) -> HashSet<String> {
+        self.private_keys
+            .iter()
+            .filter_map(|signer| {
+                let public_key = signer.public_key();
+                (!self.registrations.contains_key(&public_key))
+                    .then(|| format!("validator_{public_key}"))
+            })
+            .collect()
     }
 
     /// The transaction submitter for validator `index` — a client's ingress to that node.
@@ -258,6 +340,25 @@ impl TestNetwork<'_> {
         }
         true
     }
+}
+
+pub(crate) fn deterministic_state(
+    validators: u32,
+    seed: u64,
+    link: Link,
+    required_height: u64,
+) -> String {
+    let cfg = deterministic::Config::default().with_seed(seed);
+    let executor = Runner::from(cfg);
+    executor.start(|mut context| async move {
+        let mut network = TestNetworkBuilder::new(validators)
+            .with_initial_link(link)
+            .build(&mut context)
+            .await;
+        network.start_all().await;
+        network.run_until_height(required_height).await;
+        context.auditor().state()
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -325,6 +426,30 @@ async fn start_validator(
         marshal_resolver,
     );
     handle
+}
+
+fn validator_metric_sample(line: &str) -> Option<(&str, Option<&str>, &str)> {
+    let line = line.trim();
+    if line.starts_with('#') {
+        return None;
+    }
+    let mut parts = line.split_whitespace();
+    let metric = parts.next()?;
+    let value = parts.next()?;
+    let (name, labels) = metric
+        .split_once('{')
+        .map_or((metric, None), |(name, labels)| {
+            (name, Some(labels.trim_end_matches('}')))
+        });
+    name.starts_with("validator_")
+        .then_some((name, labels, value))
+}
+
+fn metric_label<'a>(labels: Option<&'a str>, name: &str) -> Option<&'a str> {
+    labels?.split(',').find_map(|label| {
+        let (label_name, value) = label.split_once('=')?;
+        (label_name == name).then(|| value.trim_matches('"'))
+    })
 }
 
 async fn register_validators(
