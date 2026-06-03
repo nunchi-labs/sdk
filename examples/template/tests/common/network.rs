@@ -19,7 +19,11 @@ use nunchi_template::{
     engine::{Config, Engine},
     PublicKey, NAMESPACE,
 };
-use std::{collections::HashMap, num::NonZeroU32, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    num::NonZeroU32,
+    time::Duration,
+};
 
 const FREEZER_TABLE_INITIAL_SIZE: u32 = 2u32.pow(14); // 1MB
 const TEST_QUOTA: Quota = Quota::per_second(NZU32!(u32::MAX));
@@ -202,11 +206,17 @@ impl TestNetwork<'_> {
     }
 
     pub(crate) async fn run_until_height(&self, required: u64) {
+        let expected = self.started_validator_ids();
+        assert!(
+            !expected.is_empty(),
+            "run_until_height requires at least one started validator"
+        );
+
         loop {
             let metrics = self.context.encode();
-            let mut success = false;
+            let mut reached = HashSet::new();
             for line in metrics.lines() {
-                let Some((metric, value)) = validator_metric_sample(line) else {
+                let Some((metric, labels, value)) = validator_metric_sample(line) else {
                     continue;
                 };
 
@@ -217,15 +227,29 @@ impl TestNetwork<'_> {
                 if metric.ends_with("_marshal_processed_height")
                     && value.parse::<u64>().unwrap() >= required
                 {
-                    success = true;
-                    break;
+                    if let Some(id) = metric_label(labels, "id") {
+                        if expected.contains(id) {
+                            reached.insert(id);
+                        }
+                    }
                 }
             }
-            if success {
+            if reached.len() == expected.len() {
                 break;
             }
             self.context.sleep(Duration::from_secs(1)).await;
         }
+    }
+
+    fn started_validator_ids(&self) -> HashSet<String> {
+        self.private_keys
+            .iter()
+            .filter_map(|signer| {
+                let public_key = signer.public_key();
+                (!self.registrations.contains_key(&public_key))
+                    .then(|| format!("validator_{public_key}"))
+            })
+            .collect()
     }
 }
 
@@ -347,7 +371,7 @@ async fn start_validator(
     );
 }
 
-fn validator_metric_sample(line: &str) -> Option<(&str, &str)> {
+fn validator_metric_sample(line: &str) -> Option<(&str, Option<&str>, &str)> {
     let line = line.trim();
     if line.starts_with('#') {
         return None;
@@ -355,6 +379,18 @@ fn validator_metric_sample(line: &str) -> Option<(&str, &str)> {
     let mut parts = line.split_whitespace();
     let metric = parts.next()?;
     let value = parts.next()?;
-    let name = metric.split_once('{').map_or(metric, |(name, _)| name);
-    name.starts_with("validator_").then_some((name, value))
+    let (name, labels) = metric
+        .split_once('{')
+        .map_or((metric, None), |(name, labels)| {
+            (name, Some(labels.trim_end_matches('}')))
+        });
+    name.starts_with("validator_")
+        .then_some((name, labels, value))
+}
+
+fn metric_label<'a>(labels: Option<&'a str>, name: &str) -> Option<&'a str> {
+    labels?.split(',').find_map(|label| {
+        let (label_name, value) = label.split_once('=')?;
+        (label_name == name).then(|| value.trim_matches('"'))
+    })
 }
