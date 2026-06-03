@@ -2024,6 +2024,7 @@ dependencies = [
  "governor",
  "prometheus-client",
  "rand 0.8.6",
+ "rand_core 0.6.4",
  "serde",
  "thiserror",
  "tracing",
