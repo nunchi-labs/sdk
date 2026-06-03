@@ -85,7 +85,7 @@ impl EncodeSize for PublicKey {
 ///
 /// Private keys encode raw key material for controlled SDK persistence/export flows. Callers that
 /// store encoded private keys should wrap the bytes with their own keystore encryption.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum PrivateKey {
     Ed25519(ed25519::PrivateKey),
     Secp256r1(secp256r1::standard::PrivateKey),
@@ -124,6 +124,15 @@ impl PrivateKey {
             Self::Ed25519(key) => Signature::Ed25519(key.sign(namespace, msg)),
             Self::Secp256r1(key) => Signature::Secp256r1(key.sign(namespace, msg)),
         }
+    }
+}
+
+impl core::fmt::Debug for PrivateKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PrivateKey")
+            .field("curve", &self.curve())
+            .field("key", &"[REDACTED]")
+            .finish()
     }
 }
 
@@ -313,5 +322,15 @@ mod tests {
         assert!(private
             .public_key()
             .verify(NAMESPACE, MESSAGE, &decoded_signature));
+    }
+
+    #[test]
+    fn private_key_debug_redacts_key_material() {
+        let private = PrivateKey::ed25519_from_seed(7);
+        let debug = format!("{private:?}");
+
+        assert!(debug.contains("Ed25519"));
+        assert!(debug.contains("REDACTED"));
+        assert!(!debug.contains("Secret"));
     }
 }

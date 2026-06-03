@@ -89,10 +89,21 @@ impl<Operation: Read<Cfg = ()>> Read for Transaction<Operation> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+        let signer = PublicKey::read(buf)?;
+        let payload = TransactionPayload::read(buf)?;
+        let signature = Signature::read(buf)?;
+
+        if signer.curve() != signature.curve() {
+            return Err(Error::Invalid(
+                "transaction",
+                "signature curve does not match signer curve",
+            ));
+        }
+
         Ok(Self {
-            signer: PublicKey::read(buf)?,
-            payload: TransactionPayload::read(buf)?,
-            signature: Signature::read(buf)?,
+            signer,
+            payload,
+            signature,
         })
     }
 }
@@ -163,5 +174,21 @@ mod tests {
         tx.payload.operation = TestOperation(43);
 
         assert!(!tx.verify());
+    }
+
+    #[test]
+    fn transaction_decode_rejects_mismatched_signature_curve() {
+        let signer = PrivateKey::ed25519_from_seed(7);
+        let secp_signer = PrivateKey::secp256r1_from_seed(7);
+        let mut tx = Transaction::sign(&signer, 11, TestOperation(42));
+        tx.signature = secp_signer.sign(TestOperation::NAMESPACE, &tx.payload.encode());
+
+        assert!(matches!(
+            Transaction::<TestOperation>::decode(tx.encode().as_ref()),
+            Err(Error::Invalid(
+                "transaction",
+                "signature curve does not match signer curve"
+            ))
+        ));
     }
 }
