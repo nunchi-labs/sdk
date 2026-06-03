@@ -1,4 +1,6 @@
 use crate::application::Application;
+use crate::execution::{ChainState, Executor, Mailbox as ExecutorReporter, NodeHandle};
+use crate::txpool::TxPool;
 use crate::{Block, Finalization, Scheme, EPOCH, EPOCH_LENGTH, NAMESPACE};
 use commonware_broadcast::buffered;
 use commonware_consensus::{
@@ -7,9 +9,11 @@ use commonware_consensus::{
         core::{Actor as MarshalActor, Mailbox as MarshalMailbox},
         resolver::handler,
         standard::{Deferred, Standard},
+        Update,
     },
     simplex::{self, elector::Random, Engine as Consensus},
-    types::{Epoch, FixedEpocher, ViewDelta},
+    types::{Epoch, FixedEpocher, Height, ViewDelta},
+    Reporters,
 };
 use commonware_cryptography::{
     bls12381::primitives::{group, sharing::Sharing, variant::MinSig},
@@ -29,9 +33,13 @@ use commonware_storage::archive::immutable;
 use commonware_utils::{ordered::Set, NZU16};
 use commonware_utils::{NZUsize, NZU64};
 use futures::future::try_join_all;
+use futures::lock::Mutex as AsyncMutex;
 use governor::clock::Clock as GClock;
 use governor::Quota;
+use nunchi_coins::Ledger;
+use nunchi_common::QmdbState;
 use rand::{CryptoRng, Rng};
+use std::sync::Arc;
 use std::{
     num::NonZero,
     time::{Duration, Instant},
@@ -53,6 +61,8 @@ const PAGE_CACHE_PAGE_SIZE: NonZero<u16> = NZU16!(4_096); // 4KB
 const PAGE_CACHE_CAPACITY: NonZero<usize> = NZUsize!(8_192); // 32MB
 const MAX_REPAIR: NonZero<usize> = NZUsize!(20);
 const MAX_PENDING_ACKS: NonZero<usize> = NZUsize!(16);
+/// Capacity of the executor's finalized-block mailbox before messages spill to overflow.
+const EXECUTOR_MAILBOX_CAPACITY: NonZero<usize> = NZUsize!(1_024);
 
 /// Configuration for the [Engine].
 pub struct Config<
@@ -84,6 +94,9 @@ pub struct Config<
     pub fetch_rate_per_peer: Quota,
 
     pub strategy: S,
+
+    /// Maximum number of transactions a proposed block may carry.
+    pub max_block_transactions: usize,
 }
 
 type Marshaled<E> = Deferred<E, Scheme, Application, Block, FixedEpocher>;
@@ -141,7 +154,7 @@ where
     strategy: S,
 }
 
-/// The engine that drives the [Application].
+/// The engine that drives the coins-chain [Application].
 #[allow(clippy::type_complexity)]
 pub struct Engine<E, B, P, S>
 where
@@ -158,17 +171,31 @@ where
     marshaled: Marshaled<E>,
 
     consensus: ConsensusEngine<E, B, S>,
+    executor: Handle<()>,
+    txpool: Handle<()>,
+    /// The executor's report sink, wired alongside the application as a marshal reporter at start.
+    reporter: ExecutorReporter,
 }
 
 impl<E, B, P, S> Engine<E, B, P, S>
 where
-    E: BufferPooler + Clock + GClock + Rng + CryptoRng + Spawner + ThreadPooler + Storage + Metrics,
+    E: BufferPooler
+        + Clock
+        + GClock
+        + Rng
+        + CryptoRng
+        + Spawner
+        + ThreadPooler
+        + Storage
+        + Metrics
+        + Send
+        + 'static,
     B: Blocker<PublicKey = PublicKey>,
     P: Provider<PublicKey = PublicKey>,
     S: Strategy,
 {
     /// Create a new [Engine].
-    pub async fn new(context: E, cfg: Config<B, P, S>) -> Self {
+    pub async fn new(context: E, cfg: Config<B, P, S>) -> (Self, NodeHandle<E>) {
         let Config {
             blocker,
             provider,
@@ -192,7 +219,36 @@ where
             fetch_concurrent,
             fetch_rate_per_peer: _,
             strategy,
+            max_block_transactions,
         } = cfg;
+
+        let (txpool, submitter) = TxPool::new();
+        let coin_state = QmdbState::init(
+            context.child("coins_state"),
+            &format!("{partition_prefix}-coins"),
+        )
+        .await
+        .expect("failed to initialize coin state");
+        let shared_ledger = Arc::new(AsyncMutex::new(ChainState {
+            ledger: Ledger::new(coin_state),
+            applied_height: Height::zero(),
+        }));
+        let executor_context = context.child("coins_executor");
+        let (coins_executor, reporter) = Executor::new(
+            &executor_context,
+            EXECUTOR_MAILBOX_CAPACITY,
+            shared_ledger.clone(),
+            submitter.clone(),
+        );
+        // The handle this node exposes to its operator: its transaction ingress and ledger view.
+        let node_handle = NodeHandle {
+            submitter: submitter.clone(),
+            ledger: shared_ledger,
+        };
+        let txpool = txpool.start(context.child("txpool"));
+        let executor = coins_executor.start(executor_context);
+
+        let app = Application::new(submitter, max_block_transactions);
 
         let page_cache = Self::create_page_cache(&context);
         let (buffer, buffer_mailbox) =
@@ -222,7 +278,7 @@ where
         )
         .await;
         let marshaled =
-            Self::create_marshaled(&context, marshal_mailbox.clone(), materials.epocher);
+            Self::create_marshaled(&context, app, marshal_mailbox.clone(), materials.epocher);
         let consensus = Self::create_consensus(
             &context,
             partition_prefix,
@@ -243,14 +299,18 @@ where
             strategy,
         );
 
-        Self {
+        let engine = Self {
             context: ContextCell::new(context),
             buffer,
             buffer_mailbox,
             marshal,
             marshaled,
             consensus,
-        }
+            executor,
+            txpool,
+            reporter,
+        };
+        (engine, node_handle)
     }
 
     fn create_page_cache(context: &E) -> CacheRef {
@@ -428,10 +488,10 @@ where
 
     fn create_marshaled(
         context: &E,
+        app: Application,
         marshal_mailbox: MarshalMailbox<Scheme, Standard<Block>>,
         epocher: FixedEpocher,
     ) -> Marshaled<E> {
-        let app = Application::new();
         Marshaled::new(context.child("marshaled"), app, marshal_mailbox, epocher)
     }
 
@@ -550,10 +610,8 @@ where
         // Start the buffer
         let buffer_handle = self.buffer.start(broadcast);
 
-        // Start marshal
-        let marshal_handle = self
-            .marshal
-            .start(self.marshaled, self.buffer_mailbox, marshal);
+        let reporters = Reporters::<Update<Block>, _, _>::from((self.marshaled, self.reporter));
+        let marshal_handle = self.marshal.start(reporters, self.buffer_mailbox, marshal);
 
         // Start consensus
         //
@@ -561,8 +619,15 @@ where
         // restart could block).
         let consensus_handle = self.consensus.start(pending, recovered, resolver);
 
-        // Wait for any actor to finish
-        let handles: Vec<Handle<()>> = vec![buffer_handle, marshal_handle, consensus_handle];
+        // Wait for any actor to finish. The transaction pool and coin executor run for the engine's
+        // lifetime; including them here means a panic in either surfaces as an engine failure.
+        let handles: Vec<Handle<()>> = vec![
+            buffer_handle,
+            marshal_handle,
+            consensus_handle,
+            self.executor,
+            self.txpool,
+        ];
         if let Err(e) = try_join_all(handles).await {
             error!(?e, "engine failed");
         } else {

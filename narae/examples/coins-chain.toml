@@ -1,0 +1,13 @@
+title = "coins-chain harness"
+
+[[nodes]]
+name = "coins-chain convergence"
+command = "cargo"
+args = [
+  "test",
+  "-p",
+  "nunchi-coins-chain",
+  "coin_state_converges_across_validators",
+  "--",
+  "--nocapture",
+]
