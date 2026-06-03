@@ -1,6 +1,6 @@
 use commonware_codec::{Encode, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
-use nunchi_crypto::{PrivateKey, PublicKey, Signature};
+use nunchi_crypto::{PrivateKey, PublicKey, Signature, SignatureError};
 
 /// Operation types that can be carried by signed Nunchi transactions.
 pub trait Operation: EncodeSize + Read<Cfg = ()> + Write {
@@ -64,7 +64,7 @@ impl<Operation: self::Operation> Transaction<Operation> {
         }
     }
 
-    pub fn verify(&self) -> bool {
+    pub fn verify(&self) -> Result<(), SignatureError> {
         self.signer.verify(
             Operation::NAMESPACE,
             &self.payload.encode(),
@@ -151,7 +151,7 @@ mod tests {
         let signer = PrivateKey::ed25519_from_seed(7);
         let tx = Transaction::sign(&signer, 11, TestOperation(42));
 
-        assert!(tx.verify());
+        assert_eq!(tx.verify(), Ok(()));
         assert_eq!(tx.signer, signer.public_key());
         assert_eq!(Transaction::decode(tx.encode().as_ref()).unwrap(), tx);
     }
@@ -161,7 +161,7 @@ mod tests {
         let signer = PrivateKey::secp256r1_from_seed(7);
         let tx = Transaction::sign(&signer, 11, TestOperation(42));
 
-        assert!(tx.verify());
+        assert_eq!(tx.verify(), Ok(()));
         assert_eq!(tx.signer, signer.public_key());
         assert_eq!(Transaction::decode(tx.encode().as_ref()).unwrap(), tx);
     }
@@ -173,7 +173,17 @@ mod tests {
 
         tx.payload.operation = TestOperation(43);
 
-        assert!(!tx.verify());
+        assert_eq!(tx.verify(), Err(SignatureError::InvalidSignature));
+    }
+
+    #[test]
+    fn transaction_verification_rejects_mismatched_signature_curve() {
+        let signer = PrivateKey::ed25519_from_seed(7);
+        let secp_signer = PrivateKey::secp256r1_from_seed(7);
+        let mut tx = Transaction::sign(&signer, 11, TestOperation(42));
+        tx.signature = secp_signer.sign(TestOperation::NAMESPACE, &tx.payload.encode());
+
+        assert_eq!(tx.verify(), Err(SignatureError::IncompatibleKey));
     }
 
     #[test]

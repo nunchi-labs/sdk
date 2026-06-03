@@ -1,6 +1,15 @@
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use commonware_cryptography::{ed25519, secp256r1, Signer as _, Verifier as _};
 
+/// A signature verification failure.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum SignatureError {
+    #[error("invalid signature")]
+    InvalidSignature,
+    #[error("incompatible signature/key curves")]
+    IncompatibleKey,
+}
+
 /// Signature curve supported by Nunchi account keys.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -38,15 +47,22 @@ impl PublicKey {
         }
     }
 
-    pub fn verify(&self, namespace: &[u8], msg: &[u8], sig: &Signature) -> bool {
+    pub fn verify(
+        &self,
+        namespace: &[u8],
+        msg: &[u8],
+        sig: &Signature,
+    ) -> Result<(), SignatureError> {
         match (self, sig) {
-            (Self::Ed25519(public), Signature::Ed25519(signature)) => {
-                public.verify(namespace, msg, signature)
-            }
-            (Self::Secp256r1(public), Signature::Secp256r1(signature)) => {
-                public.verify(namespace, msg, signature)
-            }
-            _ => false,
+            (Self::Ed25519(public), Signature::Ed25519(signature)) => public
+                .verify(namespace, msg, signature)
+                .then_some(())
+                .ok_or(SignatureError::InvalidSignature),
+            (Self::Secp256r1(public), Signature::Secp256r1(signature)) => public
+                .verify(namespace, msg, signature)
+                .then_some(())
+                .ok_or(SignatureError::InvalidSignature),
+            _ => Err(SignatureError::IncompatibleKey),
         }
     }
 }
@@ -227,7 +243,7 @@ mod tests {
         let signature = private.sign(NAMESPACE, MESSAGE);
 
         assert_eq!(public.curve(), Curve::Ed25519);
-        assert!(public.verify(NAMESPACE, MESSAGE, &signature));
+        assert_eq!(public.verify(NAMESPACE, MESSAGE, &signature), Ok(()));
         assert_eq!(PublicKey::decode(public.encode().as_ref()).unwrap(), public);
         assert_eq!(
             Signature::decode(signature.encode().as_ref()).unwrap(),
@@ -242,7 +258,7 @@ mod tests {
         let signature = private.sign(NAMESPACE, MESSAGE);
 
         assert_eq!(public.curve(), Curve::Secp256r1);
-        assert!(public.verify(NAMESPACE, MESSAGE, &signature));
+        assert_eq!(public.verify(NAMESPACE, MESSAGE, &signature), Ok(()));
         assert_eq!(PublicKey::decode(public.encode().as_ref()).unwrap(), public);
         assert_eq!(
             Signature::decode(signature.encode().as_ref()).unwrap(),
@@ -256,7 +272,22 @@ mod tests {
         let secp_public = PrivateKey::secp256r1_from_seed(7).public_key();
         let signature = ed_private.sign(NAMESPACE, MESSAGE);
 
-        assert!(!secp_public.verify(NAMESPACE, MESSAGE, &signature));
+        assert_eq!(
+            secp_public.verify(NAMESPACE, MESSAGE, &signature),
+            Err(SignatureError::IncompatibleKey)
+        );
+    }
+
+    #[test]
+    fn invalid_signature_fails_verification() {
+        let private = PrivateKey::ed25519_from_seed(7);
+        let public = private.public_key();
+        let signature = private.sign(NAMESPACE, MESSAGE);
+
+        assert_eq!(
+            public.verify(NAMESPACE, b"tampered", &signature),
+            Err(SignatureError::InvalidSignature)
+        );
     }
 
     #[test]
@@ -301,9 +332,12 @@ mod tests {
             decoded_signature, signature,
             "decoded Ed25519 key must produce byte-identical signatures"
         );
-        assert!(private
-            .public_key()
-            .verify(NAMESPACE, MESSAGE, &decoded_signature));
+        assert_eq!(
+            private
+                .public_key()
+                .verify(NAMESPACE, MESSAGE, &decoded_signature),
+            Ok(())
+        );
     }
 
     #[test]
@@ -319,9 +353,12 @@ mod tests {
             decoded_signature, signature,
             "decoded Secp256r1 key must produce byte-identical signatures"
         );
-        assert!(private
-            .public_key()
-            .verify(NAMESPACE, MESSAGE, &decoded_signature));
+        assert_eq!(
+            private
+                .public_key()
+                .verify(NAMESPACE, MESSAGE, &decoded_signature),
+            Ok(())
+        );
     }
 
     #[test]

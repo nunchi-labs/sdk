@@ -6,5 +6,6 @@ license.workspace = true
 
 [dependencies]
 bytes = { workspace = true }
+thiserror = { workspace = true }
 commonware-codec = { workspace = true }
 commonware-cryptography = { workspace = true }
