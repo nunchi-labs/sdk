@@ -231,6 +231,11 @@ impl TestNetwork<'_> {
     }
 
     pub(crate) async fn run_until_height(&self, required: u64) {
+        self.run_until_height_with_interval(required, Duration::from_secs(1))
+            .await;
+    }
+
+    pub(crate) async fn run_until_height_with_interval(&self, required: u64, interval: Duration) {
         let expected = self.started_validator_ids();
         assert!(
             !expected.is_empty(),
@@ -262,7 +267,7 @@ impl TestNetwork<'_> {
             if reached.len() == expected.len() {
                 break;
             }
-            self.context.sleep(Duration::from_secs(1)).await;
+            self.context.sleep(interval).await;
         }
     }
 

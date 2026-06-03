@@ -100,7 +100,10 @@ fn recovers_unclean_shutdown() {
             network.start_all().await;
 
             select! {
-                _ = network.run_until_height(required_container) => {
+                _ = network.run_until_height_with_interval(
+                    required_container,
+                    Duration::from_millis(10),
+                ) => {
                     true
                 },
                 _ = network.context().sleep(wait) => {
