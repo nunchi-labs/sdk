@@ -3,12 +3,13 @@ use super::{
 };
 use crate::db::CoinDB;
 use commonware_cryptography::sha256::Digest;
+use nunchi_crypto::SignatureError;
 use thiserror::Error;
 
 #[derive(Debug, Error, Clone, Eq, PartialEq)]
 pub enum LedgerError {
-    #[error("bad transaction signature")]
-    BadSignature,
+    #[error("bad transaction signature: {0}")]
+    BadSignature(#[from] SignatureError),
     #[error("nonce mismatch for {account:?}: expected {expected}, got {actual}")]
     NonceMismatch {
         account: Box<AccountId>,
@@ -86,9 +87,7 @@ impl<D: CoinDB> Ledger<D> {
     }
 
     pub async fn apply_transaction(&mut self, tx: &Transaction) -> Result<(), LedgerError> {
-        if !tx.verify() {
-            return Err(LedgerError::BadSignature);
-        }
+        tx.verify()?;
 
         let expected = self.db.nonce(&tx.signer).await?;
         if tx.payload.nonce != expected {
@@ -275,7 +274,6 @@ fn ensure_positive(amount: u128) -> Result<(), LedgerError> {
 mod tests {
     use super::*;
     use crate::{CoinSpec, PrivateKey};
-    use commonware_cryptography::Signer;
     use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
     use nunchi_common::QmdbState;
 
@@ -295,7 +293,7 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let mut ledger = ledger(context).await;
-            let alice = PrivateKey::from_seed(1).public_key();
+            let alice = PrivateKey::ed25519_from_seed(1).public_key();
 
             let empty_root = ledger.root();
             let coin = ledger
@@ -319,9 +317,9 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let mut ledger = ledger(context).await;
-            let alice_key = PrivateKey::from_seed(1);
+            let alice_key = PrivateKey::ed25519_from_seed(1);
             let alice = alice_key.public_key();
-            let bob = PrivateKey::from_seed(2).public_key();
+            let bob = PrivateKey::ed25519_from_seed(2).public_key();
 
             let coin = ledger
                 .create_token(alice.clone(), spec(1_000, None))
@@ -351,9 +349,9 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let mut ledger = ledger(context).await;
-            let alice_key = PrivateKey::from_seed(1);
+            let alice_key = PrivateKey::ed25519_from_seed(1);
             let alice = alice_key.public_key();
-            let bob = PrivateKey::from_seed(2).public_key();
+            let bob = PrivateKey::ed25519_from_seed(2).public_key();
 
             let coin = ledger
                 .create_token(alice.clone(), spec(1_000, None))
@@ -384,10 +382,49 @@ mod tests {
     }
 
     #[test]
+    fn rejects_transaction_with_bad_signature() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut ledger = ledger(context).await;
+            let alice_key = PrivateKey::ed25519_from_seed(1);
+            let alice = alice_key.public_key();
+            let bob = PrivateKey::ed25519_from_seed(2).public_key();
+
+            let coin = ledger
+                .create_token(alice.clone(), spec(1_000, None))
+                .await
+                .expect("create token");
+
+            let mut tx = Transaction::sign(
+                &alice_key,
+                0,
+                CoinOperation::Transfer {
+                    coin,
+                    from: alice.clone(),
+                    to: bob,
+                    amount: 1,
+                },
+            );
+            tx.payload.operation = CoinOperation::Transfer {
+                coin,
+                from: alice,
+                to: PrivateKey::ed25519_from_seed(3).public_key(),
+                amount: 1,
+            };
+
+            let err = ledger.apply_transaction(&tx).await.unwrap_err();
+            assert_eq!(
+                err,
+                LedgerError::BadSignature(SignatureError::InvalidSignature)
+            );
+        });
+    }
+
+    #[test]
     fn committed_state_survives_reopen() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let alice = PrivateKey::from_seed(1).public_key();
+            let alice = PrivateKey::ed25519_from_seed(1).public_key();
 
             let coin = {
                 let mut ledger = ledger(context.child("open")).await;

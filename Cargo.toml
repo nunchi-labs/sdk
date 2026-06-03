@@ -2,6 +2,7 @@
 members = [
     "common",
     "coins",
+    "crypto",
     "examples/template",
 ]
 resolver = "2"
@@ -14,6 +15,7 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 nunchi-coins = { version = "2026.5.0", path = "coins" }
 nunchi-common = { version = "2026.5.0", path = "common" }
+nunchi-crypto = { version = "2026.5.0", path = "crypto" }
 nunchi-template = { version = "2026.5.0", path = "examples/template" }
 commonware-actor = "2026.5.0"
 commonware-broadcast = "2026.5.0"

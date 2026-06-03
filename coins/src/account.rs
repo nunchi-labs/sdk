@@ -1,10 +1,8 @@
 use commonware_codec::{EncodeSize, Read, ReadExt, Write};
-use commonware_cryptography::ed25519;
 
-// TODO(distractedm1nd): There should be an abstraction over the curves.
-pub type AccountId = ed25519::PublicKey;
-pub type PrivateKey = ed25519::PrivateKey;
-pub type Signature = ed25519::Signature;
+pub type AccountId = nunchi_crypto::PublicKey;
+pub type PrivateKey = nunchi_crypto::PrivateKey;
+pub type Signature = nunchi_crypto::Signature;
 
 /// An account known to the coin ledger.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -40,5 +38,27 @@ impl Read for Account {
 impl EncodeSize for Account {
     fn encode_size(&self) -> usize {
         self.id.encode_size() + self.nonce.encode_size()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_codec::{DecodeExt, Encode};
+
+    #[test]
+    fn account_roundtrips_with_ed25519_id() {
+        let id = PrivateKey::ed25519_from_seed(1).public_key();
+        let account = Account::new(id, 42);
+
+        assert_eq!(Account::decode(account.encode().as_ref()).unwrap(), account);
+    }
+
+    #[test]
+    fn account_roundtrips_with_secp256r1_id() {
+        let id = PrivateKey::secp256r1_from_seed(1).public_key();
+        let account = Account::new(id, 42);
+
+        assert_eq!(Account::decode(account.encode().as_ref()).unwrap(), account);
     }
 }
