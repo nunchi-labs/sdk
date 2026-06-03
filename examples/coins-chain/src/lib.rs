@@ -21,6 +21,7 @@ mod consensus;
 pub mod application;
 pub mod engine;
 pub mod execution;
+pub mod testnet;
 pub mod txpool;
 
 pub use block::{Block, Finalized, Notarized, MAX_TRANSACTIONS};
