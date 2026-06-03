@@ -59,7 +59,7 @@ jobs:
         if: github.actor != 'dependabot[bot]'
         uses: codecov/codecov-action@v5
         with:
-          fail_ci_if_error: true
+          fail_ci_if_error: false
           files: codecov.info
           token: ${{ secrets.CODECOV_TOKEN }}
           flags: rust
@@ -78,12 +78,13 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: false
+          toolchain: nightly
 
       - name: Install udeps
         uses: taiki-e/install-action@cargo-udeps
 
       - name: Check Unused Dependencies
-        run: cargo udeps --locked --all-features --all-targets
+        run: cargo +nightly udeps --locked --all-features --all-targets
 
   clippy:
     runs-on: ubuntu-latest
