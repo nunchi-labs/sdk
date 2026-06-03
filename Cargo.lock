@@ -1943,6 +1943,7 @@ dependencies = [
  "commonware-cryptography",
  "commonware-runtime",
  "nunchi-common",
+ "nunchi-crypto",
  "thiserror",
 ]
 
@@ -1957,7 +1958,17 @@ dependencies = [
  "commonware-runtime",
  "commonware-storage",
  "commonware-utils",
+ "nunchi-crypto",
  "thiserror",
+]
+
+[[package]]
+name = "nunchi-crypto"
+version = "2026.5.0"
+dependencies = [
+ "bytes",
+ "commonware-codec",
+ "commonware-cryptography",
 ]
 
 [[package]]

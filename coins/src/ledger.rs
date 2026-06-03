@@ -275,7 +275,6 @@ fn ensure_positive(amount: u128) -> Result<(), LedgerError> {
 mod tests {
     use super::*;
     use crate::{CoinSpec, PrivateKey};
-    use commonware_cryptography::Signer;
     use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
     use nunchi_common::QmdbState;
 
@@ -295,7 +294,7 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let mut ledger = ledger(context).await;
-            let alice = PrivateKey::from_seed(1).public_key();
+            let alice = PrivateKey::ed25519_from_seed(1).public_key();
 
             let empty_root = ledger.root();
             let coin = ledger
@@ -319,9 +318,9 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let mut ledger = ledger(context).await;
-            let alice_key = PrivateKey::from_seed(1);
+            let alice_key = PrivateKey::ed25519_from_seed(1);
             let alice = alice_key.public_key();
-            let bob = PrivateKey::from_seed(2).public_key();
+            let bob = PrivateKey::ed25519_from_seed(2).public_key();
 
             let coin = ledger
                 .create_token(alice.clone(), spec(1_000, None))
@@ -351,9 +350,9 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let mut ledger = ledger(context).await;
-            let alice_key = PrivateKey::from_seed(1);
+            let alice_key = PrivateKey::ed25519_from_seed(1);
             let alice = alice_key.public_key();
-            let bob = PrivateKey::from_seed(2).public_key();
+            let bob = PrivateKey::ed25519_from_seed(2).public_key();
 
             let coin = ledger
                 .create_token(alice.clone(), spec(1_000, None))
@@ -387,7 +386,7 @@ mod tests {
     fn committed_state_survives_reopen() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let alice = PrivateKey::from_seed(1).public_key();
+            let alice = PrivateKey::ed25519_from_seed(1).public_key();
 
             let coin = {
                 let mut ledger = ledger(context.child("open")).await;

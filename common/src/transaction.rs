@@ -1,9 +1,6 @@
 use commonware_codec::{Encode, EncodeSize, Error, Read, ReadExt, Write};
-use commonware_cryptography::{
-    ed25519::{PrivateKey, PublicKey, Signature},
-    sha256::Digest,
-    Hasher, Sha256, Signer, Verifier,
-};
+use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+use nunchi_crypto::{PrivateKey, PublicKey, Signature};
 
 /// Operation types that can be carried by signed Nunchi transactions.
 pub trait Operation: EncodeSize + Read<Cfg = ()> + Write {
@@ -103,5 +100,68 @@ impl<Operation: Read<Cfg = ()>> Read for Transaction<Operation> {
 impl<Operation: EncodeSize> EncodeSize for Transaction<Operation> {
     fn encode_size(&self) -> usize {
         self.signer.encode_size() + self.payload.encode_size() + self.signature.encode_size()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_codec::{DecodeExt, Encode};
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct TestOperation(u8);
+
+    impl Write for TestOperation {
+        fn write(&self, buf: &mut impl bytes::BufMut) {
+            self.0.write(buf);
+        }
+    }
+
+    impl Read for TestOperation {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+            Ok(Self(u8::read(buf)?))
+        }
+    }
+
+    impl EncodeSize for TestOperation {
+        fn encode_size(&self) -> usize {
+            self.0.encode_size()
+        }
+    }
+
+    impl Operation for TestOperation {
+        const NAMESPACE: &'static [u8] = b"nunchi-common/test-operation";
+    }
+
+    #[test]
+    fn ed25519_transaction_signs_verifies_and_roundtrips() {
+        let signer = PrivateKey::ed25519_from_seed(7);
+        let tx = Transaction::sign(&signer, 11, TestOperation(42));
+
+        assert!(tx.verify());
+        assert_eq!(tx.signer, signer.public_key());
+        assert_eq!(Transaction::decode(tx.encode().as_ref()).unwrap(), tx);
+    }
+
+    #[test]
+    fn secp256r1_transaction_signs_verifies_and_roundtrips() {
+        let signer = PrivateKey::secp256r1_from_seed(7);
+        let tx = Transaction::sign(&signer, 11, TestOperation(42));
+
+        assert!(tx.verify());
+        assert_eq!(tx.signer, signer.public_key());
+        assert_eq!(Transaction::decode(tx.encode().as_ref()).unwrap(), tx);
+    }
+
+    #[test]
+    fn transaction_verification_rejects_tampered_payload() {
+        let signer = PrivateKey::ed25519_from_seed(7);
+        let mut tx = Transaction::sign(&signer, 11, TestOperation(42));
+
+        tx.payload.operation = TestOperation(43);
+
+        assert!(!tx.verify());
     }
 }

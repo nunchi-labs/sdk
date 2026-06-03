@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 bytes = { workspace = true }
 thiserror = { workspace = true }
+nunchi-crypto = { workspace = true }
 commonware-codec = { workspace = true }
 commonware-cryptography = { workspace = true }
 commonware-runtime = { workspace = true }
