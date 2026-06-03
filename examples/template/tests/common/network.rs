@@ -40,6 +40,7 @@ type Channel = (
 );
 
 type ThresholdScheme = bls12381_threshold::Scheme<PublicKey, MinSig>;
+type ThresholdFixture = Fixture<ThresholdScheme>;
 
 pub(crate) fn reliable_link() -> Link {
     Link {
@@ -59,8 +60,8 @@ pub(crate) fn lossy_link() -> Link {
 
 #[derive(Clone)]
 pub(crate) struct ValidatorConfig {
-    leader_timeout: Duration,
-    certification_timeout: Duration,
+    pub(crate) leader_timeout: Duration,
+    pub(crate) certification_timeout: Duration,
 }
 
 impl Default for ValidatorConfig {
@@ -82,6 +83,7 @@ struct ValidatorChannels {
 
 pub(crate) struct TestNetworkBuilder {
     validators: u32,
+    fixture: Option<ThresholdFixture>,
     initial_link: Option<Link>,
     validator_config: ValidatorConfig,
 }
@@ -90,13 +92,29 @@ impl TestNetworkBuilder {
     pub(crate) fn new(validators: u32) -> Self {
         Self {
             validators,
+            fixture: None,
             initial_link: Some(reliable_link()),
             validator_config: ValidatorConfig::default(),
         }
     }
 
+    pub(crate) fn with_fixture(mut self, fixture: ThresholdFixture) -> Self {
+        self.validators = fixture
+            .participants
+            .len()
+            .try_into()
+            .expect("validator count exceeds u32");
+        self.fixture = Some(fixture);
+        self
+    }
+
     pub(crate) fn with_initial_link(mut self, link: Link) -> Self {
         self.initial_link = Some(link);
+        self
+    }
+
+    pub(crate) fn with_validator_config(mut self, validator_config: ValidatorConfig) -> Self {
+        self.validator_config = validator_config;
         self
     }
 
@@ -119,12 +137,15 @@ impl TestNetworkBuilder {
         );
         network.start();
 
+        let fixture = self.fixture.unwrap_or_else(|| {
+            bls12381_threshold::fixture::<MinSig, _>(context, NAMESPACE, self.validators)
+        });
         let Fixture {
             schemes,
             private_keys,
             participants,
             ..
-        } = bls12381_threshold::fixture::<MinSig, _>(context, NAMESPACE, self.validators);
+        } = fixture;
         let registrations = register_validators(&mut oracle, &participants).await;
         let participants_set = Set::from_iter_dedup(participants.clone());
 
@@ -159,6 +180,10 @@ pub(crate) struct TestNetwork<'a> {
 }
 
 impl TestNetwork<'_> {
+    pub(crate) fn context(&self) -> &deterministic::Context {
+        self.context
+    }
+
     pub(crate) async fn start_all(&mut self) {
         for index in 0..self.private_keys.len() {
             self.start_validator(index).await;
