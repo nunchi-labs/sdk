@@ -107,13 +107,13 @@ where
             return false;
         }
 
+        if block.transactions.len() > self.max_block_transactions {
+            return false;
+        }
+
         // Every carried transaction must bear a valid signature from its declared signer.
         // Application-level validity (nonce, balances, token existence) is enforced at execution.
-        if !block
-            .transactions
-            .iter()
-            .all(nunchi_coins::Transaction::verify)
-        {
+        if block.transactions.iter().any(|tx| tx.verify().is_err()) {
             return false;
         }
 

@@ -4,7 +4,7 @@ use common::network::{
     deterministic_state, lossy_link, reliable_link, TestNetworkBuilder, ValidatorConfig,
 };
 use commonware_consensus::simplex::scheme::bls12381_threshold::vrf as bls12381_threshold;
-use commonware_cryptography::{bls12381::primitives::variant::MinSig, Signer};
+use commonware_cryptography::bls12381::primitives::variant::MinSig;
 use commonware_macros::{select, test_traced};
 use commonware_p2p::simulated::Link;
 use commonware_runtime::{deterministic, Clock, Runner as _};

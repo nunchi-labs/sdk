@@ -12,7 +12,7 @@ use commonware_runtime::{Handle, Spawner};
 use commonware_storage::Context;
 use commonware_utils::{acknowledgement::Exact, Acknowledgement};
 use futures::lock::Mutex as AsyncMutex;
-use nunchi_coins::Ledger;
+use nunchi_coins::{Ledger, LedgerError};
 use nunchi_common::QmdbState;
 use std::collections::VecDeque;
 use std::num::NonZeroUsize;
@@ -105,14 +105,23 @@ impl<E: Context + Spawner + Send + 'static> Executor<E> {
 
     async fn run(mut self) {
         while let Some(FinalizedBlock { block, ack }) = self.receiver.recv().await {
-            let applied = self.apply_block(&block).await;
-            self.submitter.prune(applied);
-            ack.acknowledge();
+            match self.apply_block(&block).await {
+                Ok(applied) => {
+                    self.submitter.prune(applied);
+                    ack.acknowledge();
+                }
+                Err(e) => {
+                    // TODO: in this case, we should not panic but bubble the
+                    // error up to gracefully shut down the application. Alas,
+                    // we have no graceful shutdown yet.
+                    panic!("failed to apply block: {e}")
+                }
+            }
         }
     }
 
     /// Apply a finalized block, returning the digests of transactions that took effect.
-    async fn apply_block(&self, block: &Block) -> Vec<Digest> {
+    async fn apply_block(&self, block: &Block) -> Result<Vec<Digest>, LedgerError> {
         let mut state = self.ledger.lock().await;
         let mut applied = Vec::new();
         for transaction in &block.transactions {
@@ -122,6 +131,9 @@ impl<E: Context + Spawner + Send + 'static> Executor<E> {
             // on a transaction that isn't applicable in this position.
             match state.ledger.apply_transaction(transaction).await {
                 Ok(()) => applied.push(transaction.digest()),
+                Err(err @ LedgerError::Storage(_)) => {
+                    return Err(err);
+                }
                 Err(error) => debug!(
                     height = %block.height(),
                     ?error,
@@ -129,15 +141,14 @@ impl<E: Context + Spawner + Send + 'static> Executor<E> {
                 ),
             }
         }
+
         // Only commit when the block actually mutated state.
         if !applied.is_empty() {
-            state
-                .ledger
-                .commit()
-                .await
-                .expect("coin state commit failed");
+            if let Err(err @ LedgerError::Storage(_)) = state.ledger.commit().await {
+                return Err(err);
+            }
         }
         state.applied_height = block.height();
-        applied
+        Ok(applied)
     }
 }

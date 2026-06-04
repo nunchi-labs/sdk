@@ -6,6 +6,7 @@ use futures::channel::{mpsc, oneshot};
 use futures::StreamExt;
 use nunchi_coins::Transaction;
 use std::collections::BTreeMap;
+use tracing::debug;
 
 enum Message {
     /// A client submitted a transaction to this node.
@@ -84,9 +85,18 @@ impl TxPool {
     async fn run(mut self) {
         while let Some(message) = self.receiver.next().await {
             match message {
-                Message::Submit(transaction) => {
-                    self.pending.insert(transaction.digest(), *transaction);
-                }
+                Message::Submit(transaction) => match transaction.verify() {
+                    Ok(_) => {
+                        self.pending.insert(transaction.digest(), *transaction);
+                    }
+                    Err(e) => {
+                        debug!(
+                            txhash = ?transaction.digest(),
+                            err = ?e,
+                            "transaction being dropped"
+                        );
+                    }
+                },
                 Message::Prune(digests) => {
                     for digest in digests {
                         self.pending.remove(&digest);

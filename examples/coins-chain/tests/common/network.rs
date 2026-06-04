@@ -15,6 +15,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{ordered::Set, NZUsize, NZU32};
 use governor::Quota;
+use nunchi_coins::AccountId;
 use nunchi_coins_chain::{
     engine::{Config, Engine},
     execution::{NodeHandle, SharedLedger},
@@ -311,7 +312,7 @@ impl TestNetwork<'_> {
     ///
     /// An account's nonce advances once per applied transaction, so this is a precise "all the
     /// client's transactions have been finalized and applied, on every node" gate.
-    pub(crate) async fn run_until_nonces(&self, expected: &[(PublicKey, u64)]) {
+    pub(crate) async fn run_until_nonces(&self, expected: &[(AccountId, u64)]) {
         loop {
             if self.all_nonces_reached(expected).await {
                 break;
@@ -320,7 +321,7 @@ impl TestNetwork<'_> {
         }
     }
 
-    async fn all_nonces_reached(&self, expected: &[(PublicKey, u64)]) -> bool {
+    async fn all_nonces_reached(&self, expected: &[(AccountId, u64)]) -> bool {
         let handles = self.ledger_handles();
         if handles.len() != self.participants.len() {
             return false;
