@@ -164,13 +164,6 @@ impl MultisigPolicy {
             return Err(AccountPolicyError::DuplicateSigner);
         }
 
-        if threshold as usize > signers.len() {
-            return Err(AccountPolicyError::ThresholdExceedsSigners {
-                threshold,
-                signers: signers.len(),
-            });
-        }
-
         Ok(Self { threshold, signers })
     }
 

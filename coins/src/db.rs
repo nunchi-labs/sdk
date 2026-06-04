@@ -120,6 +120,11 @@ impl<S: StateDb> CoinDB for S {
     }
 
     fn set_account_policy(&mut self, policy: &AccountPolicy) {
+        // Single-key policies are synthesized from the AccountId in account_policy() and never
+        // read back from storage, so writing them here would leave dead data in the table.
+        if let AccountPolicy::Single(_) = policy {
+            return;
+        }
         let key = NS.key(Table::AccountPolicy, &encoded(&policy.id()));
         StateDb::set(self, key, encoded(policy));
     }
