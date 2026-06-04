@@ -5,7 +5,7 @@
 //! blanket impl below means any [`StateDb`] is automatically a [`CoinDB`], so the coin module
 //! composes onto the same store as every other module without bespoke wiring.
 
-use super::{AccountId, CoinId, TokenDefinition, COINS_NAMESPACE};
+use super::{AccountId, AccountPolicy, CoinId, TokenDefinition, COINS_NAMESPACE};
 use crate::LedgerError;
 use commonware_codec::{Encode, Read, ReadExt};
 use commonware_cryptography::sha256::Digest;
@@ -23,6 +23,7 @@ enum Table {
     Factory = 1,
     Token = 2,
     Balance = 3,
+    AccountPolicy = 4,
 }
 
 impl From<Table> for u8 {
@@ -53,6 +54,12 @@ pub trait CoinDB {
 
     /// Stage the next nonce for `id`.
     fn set_nonce(&mut self, id: &AccountId, nonce: u64);
+
+    /// Look up a registered account policy.
+    async fn account_policy(&self, id: &AccountId) -> Result<Option<AccountPolicy>, LedgerError>;
+
+    /// Stage an account policy.
+    fn set_account_policy(&mut self, policy: &AccountPolicy);
 
     /// Next token-derivation nonce for the [`crate::TokenFactory`] (0 if no token exists yet).
     async fn factory_nonce(&self) -> Result<u64, LedgerError>;
@@ -94,6 +101,27 @@ impl<S: StateDb> CoinDB for S {
     fn set_nonce(&mut self, id: &AccountId, nonce: u64) {
         let key = NS.key(Table::Account, &encoded(id));
         StateDb::set(self, key, encoded(&nonce));
+    }
+
+    async fn account_policy(&self, id: &AccountId) -> Result<Option<AccountPolicy>, LedgerError> {
+        match id {
+            AccountId::Single(public_key) => Ok(Some(AccountPolicy::single(public_key.clone()))),
+            AccountId::Multisig(_) => {
+                let key = NS.key(Table::AccountPolicy, &encoded(id));
+                match StateDb::get(self, &key)
+                    .await
+                    .map_err(|err| LedgerError::Storage(err.to_string()))?
+                {
+                    Some(bytes) => Ok(Some(decoded::<AccountPolicy>(&bytes)?)),
+                    None => Ok(None),
+                }
+            }
+        }
+    }
+
+    fn set_account_policy(&mut self, policy: &AccountPolicy) {
+        let key = NS.key(Table::AccountPolicy, &encoded(&policy.id()));
+        StateDb::set(self, key, encoded(policy));
     }
 
     async fn factory_nonce(&self) -> Result<u64, LedgerError> {

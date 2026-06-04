@@ -7,8 +7,8 @@
 //! Transactions enter the chain exactly as they would on a real network: a client signs a
 //! transaction and submits it to a *specific* node's [`txpool`] (there is no gossip — each node only
 //! proposes the transactions it received). When that node leads, it includes them in its block;
-//! once finalized, every node executes them into its ledger. The [`execution::NodeRegistry`]
-//! exposes each node's transaction submitter and committed ledger so clients (and the integration
+//! once finalized, every node executes them into its ledger. Each [`execution::NodeHandle`]
+//! exposes a node's transaction submitter and committed ledger so clients (and the integration
 //! tests in `tests/`) can drive and observe the chain.
 
 use commonware_consensus::types::Epoch;

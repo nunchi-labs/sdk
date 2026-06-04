@@ -34,7 +34,7 @@ fn gold_spec() -> CoinSpec {
 /// The id Alice's token will be assigned: it is the first token created on the chain, so the token
 /// factory derives it with nonce 0.
 fn gold_coin() -> CoinId {
-    TokenFactory::derive_coin_id(&key(ALICE).public_key(), 0, &gold_spec())
+    TokenFactory::derive_coin_id(&AccountId::from(key(ALICE).public_key()), 0, &gold_spec())
 }
 
 #[test_traced]
@@ -163,9 +163,9 @@ async fn submit_scenario(
 ) -> (AccountId, AccountId, AccountId) {
     let alice = key(ALICE);
     let bob = key(BOB);
-    let alice_id = alice.public_key();
-    let bob_id = bob.public_key();
-    let carol_id = key(CAROL).public_key();
+    let alice_id = AccountId::from(alice.public_key());
+    let bob_id = AccountId::from(bob.public_key());
+    let carol_id = AccountId::from(key(CAROL).public_key());
     let coin = gold_coin();
 
     let node0 = network.submitter(0);
