@@ -1,219 +1,166 @@
-use crate::consensus::{Finalization, Notarization, Scheme};
+use crate::consensus::{Context, Finalization, Notarization, Scheme};
 use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, EncodeSize, Error, Read, ReadExt, Write};
-use commonware_consensus::{
-    simplex::types::Context as SimplexContext,
-    types::{Epoch, Height, Round, View},
-    CertifiableBlock, Heightable,
-};
+use commonware_codec::{varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_consensus::{types::Height, CertifiableBlock, Heightable};
 use commonware_cryptography::{
-    bls12381::{
-        dkg::feldman_desmedt::SignedDealerLog,
-        primitives::variant::{MinSig, Variant},
-    },
+    bls12381::{dkg::feldman_desmedt::SignedDealerLog, primitives::variant::MinSig},
     ed25519,
-    sha256::Sha256,
+    sha256::{Digest, Sha256},
     Committable, Digest as EmptyDigest, Digestible, Hasher, Signer,
 };
 use commonware_parallel::Strategy;
 use rand::rngs::OsRng;
 use std::num::NonZeroU32;
 
+/// DKG dealer log payload that may be included in a template block.
+pub type DealerLog = SignedDealerLog<MinSig, ed25519::PrivateKey>;
+
+/// Genesis message to use during initialization.
+const GENESIS: &[u8] = b"commonware is neat";
+
 #[derive(Clone, Debug)]
-pub struct Block<H = Sha256, C = ed25519::PrivateKey, V = MinSig>
-where
-    H: Hasher,
-    C: Signer,
-    V: Variant,
-{
+pub struct Block {
     /// The consensus context when this block was proposed.
-    pub context: SimplexContext<H::Digest, C::PublicKey>,
+    pub context: Context,
 
     /// The parent block's digest.
-    pub parent: H::Digest,
+    pub parent: Digest,
 
     /// The height of the block in the blockchain.
     pub height: Height,
 
+    /// The timestamp of the block (in milliseconds since the Unix epoch).
+    pub timestamp: u64,
+
     /// An optional outcome of a dealing operation.
-    pub log: Option<SignedDealerLog<V, C>>,
+    pub log: Option<DealerLog>,
+
+    /// Pre-computed digest of the block.
+    digest: Digest,
 }
 
-impl<H, C, V> PartialEq for Block<H, C, V>
-where
-    H: Hasher,
-    C: Signer,
-    V: Variant,
-{
+impl PartialEq for Block {
     fn eq(&self, other: &Self) -> bool {
-        self.digest() == other.digest()
+        self.context == other.context
+            && self.parent == other.parent
+            && self.height == other.height
+            && self.timestamp == other.timestamp
+            && self.digest == other.digest
+            && self.log.encode() == other.log.encode()
     }
 }
 
-impl<H, C, V> Eq for Block<H, C, V>
-where
-    H: Hasher,
-    C: Signer,
-    V: Variant,
-{
-}
+impl Eq for Block {}
 
-impl<H, C, V> Block<H, C, V>
-where
-    H: Hasher,
-    C: Signer,
-    V: Variant,
-{
-    pub const fn new(
-        context: SimplexContext<H::Digest, C::PublicKey>,
-        parent: H::Digest,
+impl Block {
+    fn compute_digest(
+        context: &Context,
+        parent: &Digest,
         height: Height,
-        log: Option<SignedDealerLog<V, C>>,
+        timestamp: u64,
+        log: &Option<DealerLog>,
+    ) -> Digest {
+        let mut hasher = Sha256::new();
+        hasher.update(&context.encode());
+        hasher.update(parent);
+        hasher.update(&height.get().to_be_bytes());
+        hasher.update(&timestamp.to_be_bytes());
+        hasher.update(&log.encode());
+        hasher.finalize()
+    }
+
+    pub fn new(
+        context: Context,
+        parent: Digest,
+        height: Height,
+        timestamp: u64,
+        log: Option<DealerLog>,
     ) -> Self {
+        let digest = Self::compute_digest(&context, &parent, height, timestamp, &log);
         Self {
             context,
             parent,
             height,
+            timestamp,
             log,
+            digest,
         }
     }
 }
 
-impl<H, C, V> Write for Block<H, C, V>
-where
-    H: Hasher,
-    C: Signer,
-    V: Variant,
-{
+impl Write for Block {
     fn write(&self, writer: &mut impl BufMut) {
         self.context.write(writer);
         self.parent.write(writer);
         self.height.write(writer);
+        UInt(self.timestamp).write(writer);
         self.log.write(writer);
     }
 }
 
-impl<H, C, V> Read for Block<H, C, V>
-where
-    H: Hasher,
-    C: Signer,
-    V: Variant,
-{
+impl Read for Block {
     type Cfg = NonZeroU32;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
+        let context = Context::read(reader)?;
+        let parent = Digest::read(reader)?;
+        let height = Height::read(reader)?;
+        let timestamp = UInt::read(reader)?.0;
+        let log = Read::read_cfg(reader, cfg)?;
+
+        let digest = Self::compute_digest(&context, &parent, height, timestamp, &log);
         Ok(Self {
-            context: SimplexContext::read(reader)?,
-            parent: H::Digest::read(reader)?,
-            height: Height::read(reader)?,
-            log: Read::read_cfg(reader, cfg)?,
+            context,
+            parent,
+            height,
+            timestamp,
+            log,
+            digest,
         })
     }
 }
 
-impl<H, C, V> EncodeSize for Block<H, C, V>
-where
-    H: Hasher,
-    C: Signer,
-    V: Variant,
-{
+impl EncodeSize for Block {
     fn encode_size(&self) -> usize {
         self.context.encode_size()
             + self.parent.encode_size()
             + self.height.encode_size()
+            + UInt(self.timestamp).encode_size()
             + self.log.encode_size()
     }
 }
 
-impl<H, C, V> Digestible for Block<H, C, V>
-where
-    H: Hasher,
-    C: Signer,
-    V: Variant,
-{
-    type Digest = H::Digest;
+impl Digestible for Block {
+    type Digest = Digest;
 
-    fn digest(&self) -> H::Digest {
-        H::hash(&self.encode())
+    fn digest(&self) -> Digest {
+        self.digest
     }
 }
 
-impl<H, C, V> Committable for Block<H, C, V>
-where
-    H: Hasher,
-    C: Signer,
-    V: Variant,
-{
-    type Commitment = H::Digest;
+impl Committable for Block {
+    type Commitment = Digest;
 
-    fn commitment(&self) -> H::Digest {
+    fn commitment(&self) -> Digest {
         self.digest()
     }
 }
 
-impl<H, C, V> commonware_consensus::Block for Block<H, C, V>
-where
-    H: Hasher,
-    C: Signer,
-    V: Variant,
-{
-    fn parent(&self) -> Self::Digest {
-        self.parent
-    }
-}
+pub fn genesis() -> Block {
+    use commonware_consensus::types::{Epoch, Round, View};
 
-impl<H, C, V> Heightable for Block<H, C, V>
-where
-    H: Hasher,
-    C: Signer,
-    V: Variant,
-{
-    fn height(&self) -> Height {
-        self.height
-    }
-}
-
-impl<H, C, V> CertifiableBlock for Block<H, C, V>
-where
-    H: Hasher,
-    C: Signer,
-    V: Variant,
-{
-    type Context = SimplexContext<H::Digest, C::PublicKey>;
-
-    fn context(&self) -> Self::Context {
-        self.context.clone()
-    }
-}
-
-pub const fn genesis_block<H, C, V>(
-    context: SimplexContext<H::Digest, C::PublicKey>,
-) -> Block<H, C, V>
-where
-    H: Hasher,
-    C: Signer,
-    V: Variant,
-{
+    let genesis_context = Context {
+        round: Round::new(Epoch::zero(), View::zero()),
+        leader: ed25519::PrivateKey::from_seed(0).public_key(),
+        parent: (View::zero(), <Digest as EmptyDigest>::EMPTY),
+    };
     Block::new(
-        context,
-        <<H as Hasher>::Digest as EmptyDigest>::EMPTY,
+        genesis_context,
+        Sha256::hash(GENESIS),
         Height::zero(),
+        0,
         None,
     )
-}
-
-pub fn genesis<H, C, V>() -> Block<H, C, V>
-where
-    H: Hasher,
-    C: Signer,
-    V: Variant,
-{
-    let context = SimplexContext {
-        round: Round::new(Epoch::zero(), View::zero()),
-        leader: C::from_seed(0).public_key(),
-        parent: (View::zero(), <H::Digest as EmptyDigest>::EMPTY),
-    };
-    genesis_block(context)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -305,5 +252,25 @@ impl Read for Finalized {
 impl EncodeSize for Finalized {
     fn encode_size(&self) -> usize {
         self.proof.encode_size() + self.block.encode_size()
+    }
+}
+
+impl commonware_consensus::Block for Block {
+    fn parent(&self) -> Digest {
+        self.parent
+    }
+}
+
+impl Heightable for Block {
+    fn height(&self) -> Height {
+        self.height
+    }
+}
+
+impl CertifiableBlock for Block {
+    type Context = Context;
+
+    fn context(&self) -> Self::Context {
+        self.context.clone()
     }
 }

@@ -19,12 +19,12 @@ use commonware_cryptography::{
         primitives::{
             group::Share,
             sharing::{Mode, ModeVersion},
-            variant::Variant,
+            variant::{MinSig, Variant},
         },
     },
-    ed25519::Batch,
+    ed25519::{self, Batch},
     transcript::Summary,
-    BatchVerifier, Hasher, PublicKey, Signer,
+    BatchVerifier, PublicKey, Signer,
 };
 use commonware_macros::select_loop;
 use commonware_math::algebra::Random;
@@ -100,28 +100,25 @@ impl<V: Variant, P: PublicKey> Read for Message<V, P> {
     }
 }
 
-pub struct Config<C: Signer, P> {
+pub struct Config<P> {
     pub manager: P,
-    pub signer: C,
+    pub signer: ed25519::PrivateKey,
     pub mailbox_size: NonZeroUsize,
     pub partition_prefix: String,
-    pub peer_config: PeerConfig<C::PublicKey>,
+    pub peer_config: PeerConfig<ed25519::PublicKey>,
     pub max_supported_mode: ModeVersion,
 }
 
-pub struct Actor<E, P, H, C, V>
+pub struct Actor<E, P>
 where
     E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + RuntimeStorage,
-    P: Manager<PublicKey = C::PublicKey>,
-    H: Hasher,
-    C: Signer,
-    V: Variant,
+    P: Manager<PublicKey = ed25519::PublicKey>,
 {
     context: ContextCell<E>,
     manager: P,
-    mailbox: ActorReceiver<MailboxMessage<H, C, V>>,
-    signer: C,
-    peer_config: PeerConfig<C::PublicKey>,
+    mailbox: ActorReceiver<MailboxMessage>,
+    signer: ed25519::PrivateKey,
+    peer_config: PeerConfig<ed25519::PublicKey>,
     partition_prefix: String,
     max_supported_mode: ModeVersion,
 
@@ -129,21 +126,18 @@ where
     failed_epochs: Counter,
     our_reveals: Counter,
     all_reveals: Counter,
-    latest_share: GaugeFamily<Peer<C::PublicKey>>,
-    latest_ack: GaugeFamily<Peer<C::PublicKey>>,
+    latest_share: GaugeFamily<Peer<ed25519::PublicKey>>,
+    latest_ack: GaugeFamily<Peer<ed25519::PublicKey>>,
 }
 
-impl<E, P, H, C, V> Actor<E, P, H, C, V>
+impl<E, P> Actor<E, P>
 where
     E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + RuntimeStorage,
-    P: Manager<PublicKey = C::PublicKey>,
-    H: Hasher,
-    C: Signer,
-    Batch: BatchVerifier<PublicKey = C::PublicKey>,
-    V: Variant,
+    P: Manager<PublicKey = ed25519::PublicKey>,
+    Batch: BatchVerifier<PublicKey = ed25519::PublicKey>,
 {
     /// Create a new DKG [Actor] and its associated [Mailbox].
-    pub fn new(context: E, config: Config<C, P>) -> (Self, Mailbox<H, C, V>) {
+    pub fn new(context: E, config: Config<P>) -> (Self, Mailbox) {
         // Create mailbox
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
 
@@ -185,14 +179,14 @@ where
     /// Start the DKG actor.
     pub fn start(
         mut self,
-        output: Option<Output<V, C::PublicKey>>,
+        output: Option<Output<MinSig, ed25519::PublicKey>>,
         share: Option<Share>,
-        orchestrator: orchestrator::Mailbox<V, C::PublicKey>,
+        orchestrator: orchestrator::Mailbox<MinSig, ed25519::PublicKey>,
         dkg: (
-            impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = ed25519::PublicKey>,
+            impl Receiver<PublicKey = ed25519::PublicKey>,
         ),
-        callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
+        callback: Box<dyn UpdateCallBack<MinSig, ed25519::PublicKey>>,
     ) -> Handle<()> {
         // NOTE: In a production setting with a large validator set, the implementor may want
         // to choose a dedicated thread for the DKG actor. This actor can perform CPU-intensive
@@ -205,14 +199,14 @@ where
 
     async fn run(
         mut self,
-        output: Option<Output<V, C::PublicKey>>,
+        output: Option<Output<MinSig, ed25519::PublicKey>>,
         share: Option<Share>,
-        mut orchestrator: orchestrator::Mailbox<V, C::PublicKey>,
+        mut orchestrator: orchestrator::Mailbox<MinSig, ed25519::PublicKey>,
         (sender, receiver): (
-            impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = ed25519::PublicKey>,
+            impl Receiver<PublicKey = ed25519::PublicKey>,
         ),
-        mut callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
+        mut callback: Box<dyn UpdateCallBack<MinSig, ed25519::PublicKey>>,
     ) {
         let max_read_size = NZU32!(self.peer_config.max_participants_per_round());
         let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
@@ -254,7 +248,7 @@ where
                 (
                     self.peer_config.participants.clone(),
                     self.peer_config.dealers(0),
-                    Set::<C::PublicKey>::default(),
+                    Set::<ed25519::PublicKey>::default(),
                 )
             } else {
                 // In reshare mode, the initial dealer set must exactly match the players that
@@ -300,7 +294,7 @@ where
             let am_player = players.position(&self_pk).is_some();
 
             // Inform the orchestrator of the epoch transition
-            let transition: EpochTransition<V, C::PublicKey> = EpochTransition {
+            let transition: EpochTransition<MinSig, ed25519::PublicKey> = EpochTransition {
                 epoch,
                 poly: epoch_state.output.as_ref().map(|o| o.public().clone()),
                 share: epoch_state.share.clone(),
@@ -326,9 +320,9 @@ where
             .expect("round info configuration should be correct");
 
             // Initialize dealer state if we are a dealer (factory handles log submission check)
-            let mut dealer_state: Option<Dealer<V, C>> = am_dealer
+            let mut dealer_state: Option<Dealer<MinSig, ed25519::PrivateKey>> = am_dealer
                 .then(|| {
-                    storage.create_dealer::<C, N3f1>(
+                    storage.create_dealer::<ed25519::PrivateKey, N3f1>(
                         epoch,
                         self.signer.clone(),
                         round.clone(),
@@ -339,9 +333,13 @@ where
                 .flatten();
 
             // Initialize player state if we are a player
-            let mut player_state: Option<Player<V, C>> = am_player
+            let mut player_state: Option<Player<MinSig, ed25519::PrivateKey>> = am_player
                 .then(|| {
-                    storage.create_player::<C, N3f1>(epoch, self.signer.clone(), round.clone())
+                    storage.create_player::<ed25519::PrivateKey, N3f1>(
+                        epoch,
+                        self.signer.clone(),
+                        round.clone(),
+                    )
                 })
                 .flatten();
 
@@ -354,7 +352,7 @@ where
                 network_msg = round_receiver.recv() => {
                     match network_msg {
                         Ok((sender_pk, msg_bytes)) => {
-                            let msg = match Message::<V, C::PublicKey>::read_cfg(
+                            let msg = match Message::<MinSig, ed25519::PublicKey>::read_cfg(
                                 &mut msg_bytes.clone(),
                                 &max_read_size,
                             ) {
@@ -383,7 +381,7 @@ where
                                                 .try_set_max(epoch.get());
 
                                             let payload =
-                                                Message::<V, C::PublicKey>::Ack(ack).encode();
+                                                Message::<MinSig, ed25519::PublicKey>::Ack(ack).encode();
                                             let sent = round_sender.send(
                                                 Recipients::One(sender_pk.clone()),
                                                 payload,
@@ -598,12 +596,12 @@ where
         info!("exiting DKG actor");
     }
 
-    async fn distribute_shares<S: Sender<PublicKey = C::PublicKey>>(
-        self_pk: &C::PublicKey,
-        storage: &mut Storage<E, V, C::PublicKey>,
+    async fn distribute_shares<S: Sender<PublicKey = ed25519::PublicKey>>(
+        self_pk: &ed25519::PublicKey,
+        storage: &mut Storage<E, MinSig, ed25519::PublicKey>,
         epoch: Epoch,
-        dealer_state: &mut Dealer<V, C>,
-        mut player_state: Option<&mut Player<V, C>>,
+        dealer_state: &mut Dealer<MinSig, ed25519::PrivateKey>,
+        mut player_state: Option<&mut Player<MinSig, ed25519::PrivateKey>>,
         sender: &mut S,
     ) {
         for (player, pub_msg, priv_msg) in dealer_state.shares_to_distribute().collect::<Vec<_>>() {
@@ -628,7 +626,7 @@ where
             }
 
             // Send to remote player
-            let payload = Message::<V, C::PublicKey>::Dealer(pub_msg, priv_msg).encode();
+            let payload = Message::<MinSig, ed25519::PublicKey>::Dealer(pub_msg, priv_msg).encode();
             let success = sender.send(Recipients::One(player.clone()), payload, true);
             if success.is_empty() {
                 debug!(?epoch, ?player, "failed to send share");
@@ -648,7 +646,7 @@ mod tests {
         bls12381::{dkg::feldman_desmedt::deal, primitives::variant::MinSig},
         ed25519::{PrivateKey, PublicKey as Ed25519PublicKey},
         transcript::Summary,
-        Sha256, Signer,
+        Signer,
     };
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
@@ -763,7 +761,7 @@ mod tests {
 
             // Restart the actor with stale bootstrap inputs (output=None, share=None). The
             // recovered epoch must override these.
-            let (actor, _mailbox) = Actor::<_, _, Sha256, _, MinSig>::new(
+            let (actor, _mailbox) = Actor::<_, _>::new(
                 context.child("actor"),
                 Config {
                     manager: NoopManager::<Ed25519PublicKey>::default(),

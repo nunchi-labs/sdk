@@ -23,7 +23,7 @@ use commonware_cryptography::{
     },
     certificate::Scheme as _,
     ed25519::{self, Batch},
-    sha256::{Digest, Sha256},
+    sha256::Digest,
     BatchVerifier, Signer,
 };
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
@@ -77,8 +77,8 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
     pub strategy: S,
 }
 
-type DkgActor<E, P> = dkg::Actor<E, P, Sha256, ed25519::PrivateKey, MinSig>;
-type DkgMailbox = dkg::Mailbox<Sha256, ed25519::PrivateKey, MinSig>;
+type DkgActor<E, P> = dkg::Actor<E, P>;
+type DkgMailbox = dkg::Mailbox;
 type Marshaled<E> = Deferred<E, Scheme, Application, Block, FixedEpocher>;
 type SchemeProvider = Provider<Scheme, ed25519::PrivateKey>;
 type FinalizationsArchive<E> = immutable::Archive<E, Digest, Finalization>;
@@ -92,8 +92,7 @@ type Marshal<E, S> = MarshalActor<
     FixedEpocher,
     S,
 >;
-type Orchestrator<E, B, S> =
-    orchestrator::Actor<E, B, MinSig, ed25519::PrivateKey, Sha256, Marshaled<E>, Scheme, Random, S>;
+type Orchestrator<E, B, S> = orchestrator::Actor<E, B, Marshaled<E>, Scheme, Random, S>;
 
 /// The engine that drives the [Application].
 #[allow(clippy::type_complexity)]
@@ -275,7 +274,7 @@ where
 
         let application = Deferred::new(
             context.child("application"),
-            Application::new(dkg_mailbox.clone()),
+            Application::with_dkg(dkg_mailbox.clone()),
             marshal_mailbox.clone(),
             FixedEpocher::new(BLOCKS_PER_EPOCH),
         );

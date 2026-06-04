@@ -13,7 +13,7 @@ use commonware_consensus::{
     CertifiableAutomaton, Relay,
 };
 use commonware_cryptography::{
-    bls12381::primitives::variant::Variant, certificate::Scheme, Digestible, Hasher, Signer,
+    bls12381::primitives::variant::MinSig, certificate::Scheme, ed25519, sha256::Digest, Digestible,
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{
@@ -33,22 +33,19 @@ use std::{collections::BTreeMap, marker::PhantomData, num::NonZeroUsize, time::D
 use tracing::{debug, info, warn};
 
 /// Configuration for the orchestrator.
-pub struct Config<B, V, C, H, A, S, L, T>
+pub struct Config<B, A, S, L, T>
 where
-    B: Blocker<PublicKey = C::PublicKey>,
-    V: Variant,
-    C: Signer,
-    H: Hasher,
-    A: CertifiableAutomaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
-        + Relay<Digest = H::Digest, PublicKey = C::PublicKey, Plan = Plan<C::PublicKey>>,
+    B: Blocker<PublicKey = ed25519::PublicKey>,
+    A: CertifiableAutomaton<Context = Context<Digest, ed25519::PublicKey>, Digest = Digest>
+        + Relay<Digest = Digest, PublicKey = ed25519::PublicKey, Plan = Plan<ed25519::PublicKey>>,
     S: Scheme,
     L: Elector<S>,
     T: Strategy,
 {
     pub oracle: B,
     pub application: A,
-    pub provider: Provider<S, C>,
-    pub marshal: MarshalMailbox<S, Standard<Block<H, C, V>>>,
+    pub provider: Provider<S, ed25519::PrivateKey>,
+    pub marshal: MarshalMailbox<S, Standard<Block>>,
     pub strategy: T,
     pub leader_timeout: Duration,
     pub certification_timeout: Duration,
@@ -62,27 +59,25 @@ where
     pub _phantom: PhantomData<L>,
 }
 
-pub struct Actor<E, B, V, C, H, A, S, L, T>
+pub struct Actor<E, B, A, S, L, T>
 where
     E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
-    B: Blocker<PublicKey = C::PublicKey>,
-    V: Variant,
-    C: Signer,
-    H: Hasher,
-    A: CertifiableAutomaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
-        + Relay<Digest = H::Digest, PublicKey = C::PublicKey, Plan = Plan<C::PublicKey>>,
+    B: Blocker<PublicKey = ed25519::PublicKey>,
+    A: CertifiableAutomaton<Context = Context<Digest, ed25519::PublicKey>, Digest = Digest>
+        + Relay<Digest = Digest, PublicKey = ed25519::PublicKey, Plan = Plan<ed25519::PublicKey>>,
     S: Scheme,
     L: Elector<S>,
     T: Strategy,
-    Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
+    Provider<S, ed25519::PrivateKey>:
+        EpochProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
-    mailbox: mailbox::Receiver<Message<V, C::PublicKey>>,
+    mailbox: mailbox::Receiver<Message<MinSig, ed25519::PublicKey>>,
     application: A,
 
     oracle: B,
-    marshal: MarshalMailbox<S, Standard<Block<H, C, V>>>,
-    provider: Provider<S, C>,
+    marshal: MarshalMailbox<S, Standard<Block>>,
+    provider: Provider<S, ed25519::PrivateKey>,
     strategy: T,
     leader_timeout: Duration,
     certification_timeout: Duration,
@@ -96,24 +91,22 @@ where
     _phantom: PhantomData<L>,
 }
 
-impl<E, B, V, C, H, A, S, L, T> Actor<E, B, V, C, H, A, S, L, T>
+impl<E, B, A, S, L, T> Actor<E, B, A, S, L, T>
 where
     E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
-    B: Blocker<PublicKey = C::PublicKey>,
-    V: Variant,
-    C: Signer,
-    H: Hasher,
-    A: CertifiableAutomaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
-        + Relay<Digest = H::Digest, PublicKey = C::PublicKey, Plan = Plan<C::PublicKey>>,
-    S: scheme::Scheme<H::Digest, PublicKey = C::PublicKey>,
+    B: Blocker<PublicKey = ed25519::PublicKey>,
+    A: CertifiableAutomaton<Context = Context<Digest, ed25519::PublicKey>, Digest = Digest>
+        + Relay<Digest = Digest, PublicKey = ed25519::PublicKey, Plan = Plan<ed25519::PublicKey>>,
+    S: scheme::Scheme<Digest, PublicKey = ed25519::PublicKey>,
     L: Elector<S>,
     T: Strategy,
-    Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
+    Provider<S, ed25519::PrivateKey>:
+        EpochProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
 {
     pub fn new(
         context: E,
-        config: Config<B, V, C, H, A, S, L, T>,
-    ) -> (Self, Mailbox<V, C::PublicKey>) {
+        config: Config<B, A, S, L, T>,
+    ) -> (Self, Mailbox<MinSig, ed25519::PublicKey>) {
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
         let page_cache_ref = CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000));
 
@@ -144,16 +137,16 @@ where
     pub fn start(
         mut self,
         votes: (
-            impl Sender<PublicKey = C::PublicKey>,
-            impl commonware_p2p::Receiver<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = ed25519::PublicKey>,
+            impl commonware_p2p::Receiver<PublicKey = ed25519::PublicKey>,
         ),
         certificates: (
-            impl Sender<PublicKey = C::PublicKey>,
-            impl commonware_p2p::Receiver<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = ed25519::PublicKey>,
+            impl commonware_p2p::Receiver<PublicKey = ed25519::PublicKey>,
         ),
         resolver: (
-            impl Sender<PublicKey = C::PublicKey>,
-            impl commonware_p2p::Receiver<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = ed25519::PublicKey>,
+            impl commonware_p2p::Receiver<PublicKey = ed25519::PublicKey>,
         ),
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(votes, certificates, resolver,))
@@ -162,16 +155,16 @@ where
     async fn run(
         mut self,
         (vote_sender, vote_receiver): (
-            impl Sender<PublicKey = C::PublicKey>,
-            impl commonware_p2p::Receiver<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = ed25519::PublicKey>,
+            impl commonware_p2p::Receiver<PublicKey = ed25519::PublicKey>,
         ),
         (certificate_sender, certificate_receiver): (
-            impl Sender<PublicKey = C::PublicKey>,
-            impl commonware_p2p::Receiver<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = ed25519::PublicKey>,
+            impl commonware_p2p::Receiver<PublicKey = ed25519::PublicKey>,
         ),
         (resolver_sender, resolver_receiver): (
-            impl Sender<PublicKey = C::PublicKey>,
-            impl commonware_p2p::Receiver<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = ed25519::PublicKey>,
+            impl commonware_p2p::Receiver<PublicKey = ed25519::PublicKey>,
         ),
     ) {
         // Start muxers for each physical channel used by consensus
@@ -266,7 +259,7 @@ where
                                 )
                             })
                             .digest(),
-                        None => genesis::<H, C, V>().digest(),
+                        None => genesis().digest(),
                     };
 
                     // Register the new signing scheme with the scheme provider.
@@ -320,19 +313,19 @@ where
     async fn enter_epoch(
         &mut self,
         epoch: Epoch,
-        floor: H::Digest,
+        floor: Digest,
         scheme: S,
         vote_mux: &mut MuxHandle<
-            impl Sender<PublicKey = C::PublicKey>,
-            impl commonware_p2p::Receiver<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = ed25519::PublicKey>,
+            impl commonware_p2p::Receiver<PublicKey = ed25519::PublicKey>,
         >,
         certificate_mux: &mut MuxHandle<
-            impl Sender<PublicKey = C::PublicKey>,
-            impl commonware_p2p::Receiver<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = ed25519::PublicKey>,
+            impl commonware_p2p::Receiver<PublicKey = ed25519::PublicKey>,
         >,
         resolver_mux: &mut MuxHandle<
-            impl Sender<PublicKey = C::PublicKey>,
-            impl commonware_p2p::Receiver<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = ed25519::PublicKey>,
+            impl commonware_p2p::Receiver<PublicKey = ed25519::PublicKey>,
         >,
     ) -> Handle<()> {
         // Start the new engine

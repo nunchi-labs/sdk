@@ -2,16 +2,12 @@
 //!
 //! [Actor]: super::Actor
 
-use crate::Block;
+use crate::{block::DealerLog, Block};
 use commonware_actor::{
     mailbox::{Policy, Sender},
     Feedback,
 };
 use commonware_consensus::{marshal::Update, Reporter};
-use commonware_cryptography::{
-    bls12381::{dkg::feldman_desmedt::SignedDealerLog, primitives::variant::Variant},
-    Hasher, Signer,
-};
 use commonware_utils::{acknowledgement::Exact, channel::oneshot, Acknowledgement};
 use std::collections::VecDeque;
 use tracing::error;
@@ -20,29 +16,21 @@ use tracing::error;
 ///
 /// [Actor]: super::Actor
 #[allow(clippy::large_enum_variant)]
-pub enum Message<H, C, V, A = Exact>
+pub enum Message<A = Exact>
 where
-    H: Hasher,
-    C: Signer,
-    V: Variant,
     A: Acknowledgement,
 {
-    /// A request for the [Actor]'s next [SignedDealerLog] for inclusion within a block.
-    ///
-    /// [Actor]: super::Actor
+    /// A request for the [Actor]'s next [DealerLog] for inclusion within a block.
     Act {
-        response: oneshot::Sender<Option<SignedDealerLog<V, C>>>,
+        response: oneshot::Sender<Option<DealerLog>>,
     },
 
     /// A new block has been finalized.
-    Finalized { block: Block<H, C, V>, response: A },
+    Finalized { block: Block, response: A },
 }
 
-impl<H, C, V, A> Policy for Message<H, C, V, A>
+impl<A> Policy for Message<A>
 where
-    H: Hasher,
-    C: Signer,
-    V: Variant,
     A: Acknowledgement,
 {
     type Overflow = VecDeque<Self>;
@@ -56,32 +44,26 @@ where
 ///
 /// [Actor]: super::Actor
 #[derive(Clone)]
-pub struct Mailbox<H, C, V, A = Exact>
+pub struct Mailbox<A = Exact>
 where
-    H: Hasher,
-    C: Signer,
-    V: Variant,
     A: Acknowledgement,
 {
-    sender: Sender<Message<H, C, V, A>>,
+    sender: Sender<Message<A>>,
 }
 
-impl<H, C, V, A> Mailbox<H, C, V, A>
+impl<A> Mailbox<A>
 where
-    H: Hasher,
-    C: Signer,
-    V: Variant,
     A: Acknowledgement,
 {
     /// Create a new mailbox.
-    pub const fn new(sender: Sender<Message<H, C, V, A>>) -> Self {
+    pub const fn new(sender: Sender<Message<A>>) -> Self {
         Self { sender }
     }
 
     /// Request the [Actor]'s next payload for inclusion within a block.
     ///
     /// [Actor]: super::Actor
-    pub async fn act(&mut self) -> Option<SignedDealerLog<V, C>> {
+    pub async fn act(&mut self) -> Option<DealerLog> {
         let (response_tx, response_rx) = oneshot::channel();
         if !self
             .sender
@@ -104,14 +86,11 @@ where
     }
 }
 
-impl<H, C, V, A> Reporter for Mailbox<H, C, V, A>
+impl<A> Reporter for Mailbox<A>
 where
-    H: Hasher,
-    C: Signer,
-    V: Variant,
     A: Acknowledgement,
 {
-    type Activity = Update<Block<H, C, V>, A>;
+    type Activity = Update<Block, A>;
 
     fn report(&mut self, update: Self::Activity) -> Feedback {
         // Report the finalized block to the DKG actor on a best-effort basis.
