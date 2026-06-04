@@ -1948,6 +1948,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "nunchi-coins-chain"
+version = "2026.5.0"
+dependencies = [
+ "bytes",
+ "commonware-actor",
+ "commonware-broadcast",
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-math",
+ "commonware-p2p",
+ "commonware-parallel",
+ "commonware-resolver",
+ "commonware-runtime",
+ "commonware-storage",
+ "commonware-utils",
+ "futures",
+ "governor",
+ "nunchi-coins",
+ "nunchi-common",
+ "rand 0.8.6",
+ "thiserror",
+ "tracing",
+ "tracing-subscriber 0.3.23",
+]
+
+[[package]]
 name = "nunchi-common"
 version = "2026.5.0"
 dependencies = [

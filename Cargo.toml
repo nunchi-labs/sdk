@@ -4,6 +4,7 @@ members = [
     "coins",
     "crypto",
     "examples/template",
+    "examples/coins-chain",
 ]
 resolver = "2"
 
@@ -17,6 +18,7 @@ nunchi-coins = { version = "2026.5.0", path = "coins" }
 nunchi-common = { version = "2026.5.0", path = "common" }
 nunchi-crypto = { version = "2026.5.0", path = "crypto" }
 nunchi-template = { version = "2026.5.0", path = "examples/template" }
+nunchi-coins-chain = { version = "2026.5.0", path = "examples/coins-chain" }
 commonware-actor = "2026.5.0"
 commonware-broadcast = "2026.5.0"
 commonware-codec = "2026.5.0"
