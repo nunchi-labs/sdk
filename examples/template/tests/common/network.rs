@@ -246,10 +246,12 @@ impl TestNetwork<'_> {
         start_validator(
             self.context,
             &self.oracle,
-            signer,
-            self.output.clone(),
-            share,
-            self.peer_config.clone(),
+            ValidatorIdentity {
+                signer,
+                output: self.output.clone(),
+                share,
+                peer_config: self.peer_config.clone(),
+            },
             channels,
             self.validator_config.clone(),
         )
@@ -384,16 +386,26 @@ async fn register_validators(
     registrations
 }
 
-async fn start_validator(
-    context: &deterministic::Context,
-    oracle: &Oracle<PublicKey, deterministic::Context>,
-    signer: &ed25519::PrivateKey,
+struct ValidatorIdentity<'a> {
+    signer: &'a ed25519::PrivateKey,
     output: Output<MinSig, PublicKey>,
     share: group::Share,
     peer_config: PeerConfig<PublicKey>,
+}
+
+async fn start_validator(
+    context: &deterministic::Context,
+    oracle: &Oracle<PublicKey, deterministic::Context>,
+    identity: ValidatorIdentity<'_>,
     channels: ValidatorChannels,
     cfg: ValidatorConfig,
 ) {
+    let ValidatorIdentity {
+        signer,
+        output,
+        share,
+        peer_config,
+    } = identity;
     let public_key = signer.public_key();
     let uid = format!("validator_{public_key}");
     let config: Config<_, _, _> = Config {
