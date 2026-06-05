@@ -2,7 +2,7 @@
 //!
 //! [Actor]: super::Actor
 
-use crate::{block::DealerLog, Block};
+use crate::{DealerLog, ReshareBlock};
 use commonware_actor::{
     mailbox::{Policy, Sender},
     Feedback,
@@ -16,8 +16,9 @@ use tracing::error;
 ///
 /// [Actor]: super::Actor
 #[allow(clippy::large_enum_variant)]
-pub enum Message<A = Exact>
+pub enum Message<B, A = Exact>
 where
+    B: ReshareBlock,
     A: Acknowledgement,
 {
     /// A request for the [Actor]'s next [DealerLog] for inclusion within a block.
@@ -26,11 +27,12 @@ where
     },
 
     /// A new block has been finalized.
-    Finalized { block: Block, response: A },
+    Finalized { block: B, response: A },
 }
 
-impl<A> Policy for Message<A>
+impl<B, A> Policy for Message<B, A>
 where
+    B: ReshareBlock,
     A: Acknowledgement,
 {
     type Overflow = VecDeque<Self>;
@@ -44,19 +46,21 @@ where
 ///
 /// [Actor]: super::Actor
 #[derive(Clone)]
-pub struct Mailbox<A = Exact>
+pub struct Mailbox<B, A = Exact>
 where
+    B: ReshareBlock,
     A: Acknowledgement,
 {
-    sender: Sender<Message<A>>,
+    sender: Sender<Message<B, A>>,
 }
 
-impl<A> Mailbox<A>
+impl<B, A> Mailbox<B, A>
 where
+    B: ReshareBlock,
     A: Acknowledgement,
 {
     /// Create a new mailbox.
-    pub const fn new(sender: Sender<Message<A>>) -> Self {
+    pub const fn new(sender: Sender<Message<B, A>>) -> Self {
         Self { sender }
     }
 
@@ -86,11 +90,12 @@ where
     }
 }
 
-impl<A> Reporter for Mailbox<A>
+impl<B, A> Reporter for Mailbox<B, A>
 where
+    B: ReshareBlock,
     A: Acknowledgement,
 {
-    type Activity = Update<Block, A>;
+    type Activity = Update<B, A>;
 
     fn report(&mut self, update: Self::Activity) -> Feedback {
         // Report the finalized block to the DKG actor on a best-effort basis.

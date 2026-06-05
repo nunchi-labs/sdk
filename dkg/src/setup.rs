@@ -1,7 +1,7 @@
 //! Peer selection configuration for template-chain resharing.
 
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::ed25519::PublicKey;
+use commonware_cryptography::{ed25519::PublicKey as Ed25519PublicKey, PublicKey};
 use commonware_formatting::{from_hex, hex};
 use commonware_utils::{ordered::Set, TryCollect};
 use rand::{rngs::StdRng, seq::IteratorRandom, SeedableRng};
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 /// A list of all peers' public keys.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PeerConfig<P: commonware_cryptography::PublicKey = PublicKey> {
+pub struct PeerConfig<P: PublicKey = Ed25519PublicKey> {
     /// The number of participants per round.
     ///
     /// This is a vec which cycles through different numbers in each round.
@@ -24,7 +24,7 @@ pub struct PeerConfig<P: commonware_cryptography::PublicKey = PublicKey> {
     pub participants: Set<P>,
 }
 
-impl<P: commonware_cryptography::PublicKey> PeerConfig<P> {
+impl<P: PublicKey> PeerConfig<P> {
     /// Returns the maximum number of participants per round.
     pub fn max_participants_per_round(&self) -> u32 {
         self.num_participants_per_round

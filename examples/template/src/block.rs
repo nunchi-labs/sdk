@@ -3,17 +3,14 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_consensus::{types::Height, CertifiableBlock, Heightable};
 use commonware_cryptography::{
-    bls12381::{dkg::feldman_desmedt::SignedDealerLog, primitives::variant::MinSig},
     ed25519,
     sha256::{Digest, Sha256},
     Committable, Digest as EmptyDigest, Digestible, Hasher, Signer,
 };
 use commonware_parallel::Strategy;
+use nunchi_dkg::{DealerLog, ReshareBlock};
 use rand::rngs::OsRng;
 use std::num::NonZeroU32;
-
-/// DKG dealer log payload that may be included in a template block.
-pub type DealerLog = SignedDealerLog<MinSig, ed25519::PrivateKey>;
 
 /// Genesis message to use during initialization.
 const GENESIS: &[u8] = b"commonware is neat";
@@ -272,5 +269,11 @@ impl CertifiableBlock for Block {
 
     fn context(&self) -> Self::Context {
         self.context.clone()
+    }
+}
+
+impl ReshareBlock for Block {
+    fn reshare_log(&self) -> Option<&DealerLog> {
+        self.log.as_ref()
     }
 }

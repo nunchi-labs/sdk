@@ -1,4 +1,4 @@
-use crate::{dkg, genesis, Block, Context, Scheme};
+use crate::{genesis, Block, Context, Scheme};
 use commonware_actor::Feedback;
 use commonware_consensus::{
     marshal::{ancestry::Ancestry, Update},
@@ -8,6 +8,7 @@ use commonware_cryptography::Digestible;
 use commonware_runtime::{Clock, Metrics, Spawner, Storage};
 use commonware_utils::{Acknowledgement, SystemTimeExt};
 use futures::StreamExt;
+use nunchi_dkg as dkg;
 use rand::Rng;
 use std::time::{Duration, SystemTime};
 use tracing::info;
@@ -20,7 +21,7 @@ const MAX_BLOCK_TIMESTAMP_MS: u64 = 7_258_118_400_000;
 
 #[derive(Clone, Default)]
 pub struct Application {
-    dkg: Option<dkg::Mailbox>,
+    dkg: Option<dkg::Mailbox<Block>>,
 }
 
 impl Application {
@@ -32,7 +33,7 @@ impl Application {
         Self::default()
     }
 
-    pub fn with_dkg(dkg: dkg::Mailbox) -> Self {
+    pub fn with_dkg(dkg: dkg::Mailbox<Block>) -> Self {
         Self { dkg: Some(dkg) }
     }
 }

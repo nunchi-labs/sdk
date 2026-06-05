@@ -11,7 +11,6 @@
 //! - This key material should be stored securely (e.g., encrypted at rest)
 //! - Old shares should be securely deleted after successful resharing
 
-use crate::dkg::ModeVersion;
 use commonware_codec::{EncodeSize, Read, ReadExt, Write};
 use commonware_consensus::types::Epoch as EpochNum;
 use commonware_cryptography::{
@@ -20,7 +19,7 @@ use commonware_cryptography::{
             Dealer as CryptoDealer, DealerLog, DealerPrivMsg, DealerPubMsg, Info, Logs, Output,
             Player as CryptoPlayer, PlayerAck, SignedDealerLog,
         },
-        primitives::{group::Share, variant::Variant},
+        primitives::{group::Share, sharing::ModeVersion, variant::Variant},
     },
     transcript::{Summary, Transcript},
     BatchVerifier, PublicKey, Signer,
@@ -717,7 +716,7 @@ mod tests {
                 context.child("storage"),
                 "test",
                 NonZeroU32::new(10).unwrap(),
-                crate::dkg::MAX_SUPPORTED_MODE,
+                crate::MAX_SUPPORTED_MODE,
             )
             .await;
 
@@ -759,7 +758,7 @@ mod tests {
                 context.child("storage"),
                 "test",
                 NonZeroU32::new(10).unwrap(),
-                crate::dkg::MAX_SUPPORTED_MODE,
+                crate::MAX_SUPPORTED_MODE,
             )
             .await;
 
@@ -801,7 +800,7 @@ mod tests {
                 context.child("storage"),
                 "test",
                 NonZeroU32::new(10).unwrap(),
-                crate::dkg::MAX_SUPPORTED_MODE,
+                crate::MAX_SUPPORTED_MODE,
             )
             .await;
 
@@ -851,7 +850,7 @@ mod tests {
                 context.child("storage"),
                 "test",
                 NonZeroU32::new(10).unwrap(),
-                crate::dkg::MAX_SUPPORTED_MODE,
+                crate::MAX_SUPPORTED_MODE,
             )
             .await;
 

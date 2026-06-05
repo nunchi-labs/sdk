@@ -1969,7 +1969,9 @@ dependencies = [
  "governor",
  "nunchi-coins",
  "nunchi-common",
+ "nunchi-dkg",
  "rand 0.8.6",
+ "rand_core 0.6.4",
  "thiserror",
  "tracing",
  "tracing-subscriber 0.3.23",
@@ -2001,6 +2003,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "nunchi-dkg"
+version = "2026.5.0"
+dependencies = [
+ "bytes",
+ "commonware-actor",
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-formatting",
+ "commonware-macros",
+ "commonware-math",
+ "commonware-p2p",
+ "commonware-parallel",
+ "commonware-runtime",
+ "commonware-storage",
+ "commonware-utils",
+ "futures",
+ "rand 0.8.6",
+ "rand_core 0.6.4",
+ "serde",
+ "tracing",
+ "tracing-subscriber 0.3.23",
+]
+
+[[package]]
 name = "nunchi-template"
 version = "2026.5.0"
 dependencies = [
@@ -2022,6 +2049,7 @@ dependencies = [
  "commonware-utils",
  "futures",
  "governor",
+ "nunchi-dkg",
  "prometheus-client",
  "rand 0.8.6",
  "rand_core 0.6.4",

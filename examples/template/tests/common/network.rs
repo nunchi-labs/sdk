@@ -20,10 +20,9 @@ use commonware_utils::{
     N3f1, NZUsize, NZU32,
 };
 use governor::Quota;
+use nunchi_dkg::{ContinueOnUpdate, PeerConfig};
 use nunchi_template::{
-    dkg::ContinueOnUpdate,
     engine::{Config, Engine},
-    setup::PeerConfig,
     PublicKey,
 };
 use std::{

@@ -1,9 +1,6 @@
 use crate::{
-    application::Application,
-    dkg::{self, UpdateCallBack, MAX_SUPPORTED_MODE},
-    orchestrator,
-    setup::PeerConfig,
-    Block, EpochProvider, Finalization, Provider, PublicKey, Scheme, BLOCKS_PER_EPOCH, NAMESPACE,
+    application::Application, Block, EpochProvider, Finalization, Provider, PublicKey, Scheme,
+    BLOCKS_PER_EPOCH, NAMESPACE,
 };
 use commonware_broadcast::buffered;
 use commonware_consensus::{
@@ -24,7 +21,7 @@ use commonware_cryptography::{
     certificate::Scheme as _,
     ed25519::{self, Batch},
     sha256::Digest,
-    BatchVerifier, Signer,
+    BatchVerifier, Digestible, Signer,
 };
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
 use commonware_parallel::Strategy;
@@ -35,6 +32,7 @@ use commonware_runtime::{
 use commonware_storage::archive::immutable;
 use commonware_utils::{union, NZUsize, NZU16, NZU64};
 use futures::future::try_join_all;
+use nunchi_dkg::{self as dkg, orchestrator, PeerConfig, UpdateCallBack, MAX_SUPPORTED_MODE};
 use rand_core::CryptoRngCore;
 use std::{
     marker::PhantomData,
@@ -77,8 +75,8 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
     pub strategy: S,
 }
 
-type DkgActor<E, P> = dkg::Actor<E, P>;
-type DkgMailbox = dkg::Mailbox;
+type DkgActor<E, P> = dkg::Actor<E, P, Block>;
+type DkgMailbox = dkg::Mailbox<Block>;
 type Marshaled<E> = Deferred<E, Scheme, Application, Block, FixedEpocher>;
 type SchemeProvider = Provider<Scheme, ed25519::PrivateKey>;
 type FinalizationsArchive<E> = immutable::Archive<E, Digest, Finalization>;
@@ -92,7 +90,7 @@ type Marshal<E, S> = MarshalActor<
     FixedEpocher,
     S,
 >;
-type Orchestrator<E, B, S> = orchestrator::Actor<E, B, Marshaled<E>, Scheme, Random, S>;
+type Orchestrator<E, B, S> = orchestrator::Actor<E, B, Marshaled<E>, Scheme, Random, S, Block>;
 
 /// The engine that drives the [Application].
 #[allow(clippy::type_complexity)]
@@ -138,6 +136,8 @@ where
                 partition_prefix: config.partition_prefix.clone(),
                 peer_config: config.peer_config.clone(),
                 max_supported_mode: MAX_SUPPORTED_MODE,
+                namespace: NAMESPACE.to_vec(),
+                epoch_length: BLOCKS_PER_EPOCH,
             },
         );
 
@@ -244,6 +244,7 @@ where
             certificate_verifier,
         );
         let genesis = Application::genesis();
+        let genesis_digest = genesis.digest();
         let (marshal, marshal_mailbox, _processed_height) = MarshalActor::init(
             context.child("marshal"),
             finalizations_by_height,
@@ -292,6 +293,8 @@ where
                 muxer_size: MAILBOX_SIZE.get(),
                 mailbox_size: MAILBOX_SIZE,
                 partition_prefix: format!("{}_consensus", config.partition_prefix),
+                epoch_length: BLOCKS_PER_EPOCH,
+                genesis_digest,
                 _phantom: PhantomData,
             },
         );

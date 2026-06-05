@@ -1,9 +1,8 @@
 //! Consensus engine orchestrator for epoch transitions.
 
 use crate::{
-    genesis,
     orchestrator::{ingress::Message, Mailbox},
-    Block, EpochProvider, Provider, BLOCKS_PER_EPOCH,
+    EpochProvider, Provider,
 };
 use commonware_actor::mailbox;
 use commonware_consensus::{
@@ -29,11 +28,16 @@ use commonware_runtime::{
 };
 use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16};
 use rand_core::CryptoRngCore;
-use std::{collections::BTreeMap, marker::PhantomData, num::NonZeroUsize, time::Duration};
+use std::{
+    collections::BTreeMap,
+    marker::PhantomData,
+    num::{NonZeroU64, NonZeroUsize},
+    time::Duration,
+};
 use tracing::{debug, info, warn};
 
 /// Configuration for the orchestrator.
-pub struct Config<B, A, S, L, T>
+pub struct Config<B, A, S, L, T, Blk>
 where
     B: Blocker<PublicKey = ed25519::PublicKey>,
     A: CertifiableAutomaton<Context = Context<Digest, ed25519::PublicKey>, Digest = Digest>
@@ -41,11 +45,16 @@ where
     S: Scheme,
     L: Elector<S>,
     T: Strategy,
+    Blk: commonware_consensus::Block
+        + commonware_consensus::Heightable
+        + commonware_consensus::CertifiableBlock<Context = Context<Digest, ed25519::PublicKey>>
+        + Digestible<Digest = Digest>
+        + Clone,
 {
     pub oracle: B,
     pub application: A,
     pub provider: Provider<S, ed25519::PrivateKey>,
-    pub marshal: MarshalMailbox<S, Standard<Block>>,
+    pub marshal: MarshalMailbox<S, Standard<Blk>>,
     pub strategy: T,
     pub leader_timeout: Duration,
     pub certification_timeout: Duration,
@@ -55,11 +64,13 @@ where
 
     // Partition prefix used for orchestrator metadata persistence
     pub partition_prefix: String,
+    pub epoch_length: NonZeroU64,
+    pub genesis_digest: Digest,
 
     pub _phantom: PhantomData<L>,
 }
 
-pub struct Actor<E, B, A, S, L, T>
+pub struct Actor<E, B, A, S, L, T, Blk>
 where
     E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
     B: Blocker<PublicKey = ed25519::PublicKey>,
@@ -68,6 +79,14 @@ where
     S: Scheme,
     L: Elector<S>,
     T: Strategy,
+    Blk: commonware_consensus::Block
+        + commonware_consensus::Heightable
+        + commonware_consensus::CertifiableBlock<Context = Context<Digest, ed25519::PublicKey>>
+        + Digestible<Digest = Digest>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
     Provider<S, ed25519::PrivateKey>:
         EpochProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
 {
@@ -76,7 +95,7 @@ where
     application: A,
 
     oracle: B,
-    marshal: MarshalMailbox<S, Standard<Block>>,
+    marshal: MarshalMailbox<S, Standard<Blk>>,
     provider: Provider<S, ed25519::PrivateKey>,
     strategy: T,
     leader_timeout: Duration,
@@ -84,6 +103,8 @@ where
 
     muxer_size: usize,
     partition_prefix: String,
+    epoch_length: NonZeroU64,
+    genesis_digest: Digest,
     page_cache_ref: CacheRef,
 
     latest_epoch: Gauge,
@@ -91,7 +112,7 @@ where
     _phantom: PhantomData<L>,
 }
 
-impl<E, B, A, S, L, T> Actor<E, B, A, S, L, T>
+impl<E, B, A, S, L, T, Blk> Actor<E, B, A, S, L, T, Blk>
 where
     E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
     B: Blocker<PublicKey = ed25519::PublicKey>,
@@ -100,12 +121,20 @@ where
     S: scheme::Scheme<Digest, PublicKey = ed25519::PublicKey>,
     L: Elector<S>,
     T: Strategy,
+    Blk: commonware_consensus::Block
+        + commonware_consensus::Heightable
+        + commonware_consensus::CertifiableBlock<Context = Context<Digest, ed25519::PublicKey>>
+        + Digestible<Digest = Digest>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
     Provider<S, ed25519::PrivateKey>:
         EpochProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
 {
     pub fn new(
         context: E,
-        config: Config<B, A, S, L, T>,
+        config: Config<B, A, S, L, T, Blk>,
     ) -> (Self, Mailbox<MinSig, ed25519::PublicKey>) {
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
         let page_cache_ref = CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000));
@@ -126,6 +155,8 @@ where
                 certification_timeout: config.certification_timeout,
                 muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
+                epoch_length: config.epoch_length,
+                genesis_digest: config.genesis_digest,
                 page_cache_ref,
                 latest_epoch,
                 _phantom: PhantomData,
@@ -194,7 +225,7 @@ where
         mux.start();
 
         // Wait for instructions to transition epochs.
-        let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
+        let epocher = FixedEpocher::new(self.epoch_length);
         let mut engines: BTreeMap<Epoch, Handle<()>> = BTreeMap::new();
 
         select_loop! {
@@ -259,7 +290,7 @@ where
                                 )
                             })
                             .digest(),
-                        None => genesis().digest(),
+                        None => self.genesis_digest,
                     };
 
                     // Register the new signing scheme with the scheme provider.

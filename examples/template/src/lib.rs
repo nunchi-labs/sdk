@@ -11,10 +11,6 @@ mod block;
 mod consensus;
 mod namespace;
 
-pub mod dkg;
-pub mod orchestrator;
-pub mod setup;
-
 pub mod application;
 pub mod engine;
 
@@ -24,7 +20,7 @@ pub use consensus::{
     PublicKey, Scheme, Seed, Seedable, Signature, ThresholdScheme,
 };
 pub use namespace::APPLICATION as NAMESPACE;
-pub use setup::PeerConfig;
+pub use nunchi_dkg::PeerConfig;
 
 /// The number of blocks in an epoch.
 ///

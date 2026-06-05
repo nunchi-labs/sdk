@@ -3,10 +3,9 @@ use super::{
     Mailbox, Message as MailboxMessage, PostUpdate, Update, UpdateCallBack,
 };
 use crate::{
-    namespace,
     orchestrator::{self, EpochTransition},
     setup::PeerConfig,
-    BLOCKS_PER_EPOCH,
+    ReshareBlock,
 };
 use commonware_actor::mailbox::{self, Receiver as ActorReceiver};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
@@ -38,7 +37,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{ordered::Set, Acknowledgement as _, N3f1, NZU32};
 use rand_core::CryptoRngCore;
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use tracing::{debug, info, warn};
 
 /// Per-peer label.
@@ -107,20 +106,25 @@ pub struct Config<P> {
     pub partition_prefix: String,
     pub peer_config: PeerConfig<ed25519::PublicKey>,
     pub max_supported_mode: ModeVersion,
+    pub namespace: Vec<u8>,
+    pub epoch_length: NonZeroU64,
 }
 
-pub struct Actor<E, P>
+pub struct Actor<E, P, B>
 where
     E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + RuntimeStorage,
     P: Manager<PublicKey = ed25519::PublicKey>,
+    B: ReshareBlock,
 {
     context: ContextCell<E>,
     manager: P,
-    mailbox: ActorReceiver<MailboxMessage>,
+    mailbox: ActorReceiver<MailboxMessage<B>>,
     signer: ed25519::PrivateKey,
     peer_config: PeerConfig<ed25519::PublicKey>,
     partition_prefix: String,
     max_supported_mode: ModeVersion,
+    namespace: Vec<u8>,
+    epoch_length: NonZeroU64,
 
     successful_epochs: Counter,
     failed_epochs: Counter,
@@ -130,14 +134,15 @@ where
     latest_ack: GaugeFamily<Peer<ed25519::PublicKey>>,
 }
 
-impl<E, P> Actor<E, P>
+impl<E, P, B> Actor<E, P, B>
 where
     E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + RuntimeStorage,
     P: Manager<PublicKey = ed25519::PublicKey>,
+    B: ReshareBlock,
     Batch: BatchVerifier<PublicKey = ed25519::PublicKey>,
 {
     /// Create a new DKG [Actor] and its associated [Mailbox].
-    pub fn new(context: E, config: Config<P>) -> (Self, Mailbox) {
+    pub fn new(context: E, config: Config<P>) -> (Self, Mailbox<B>) {
         // Create mailbox
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
 
@@ -164,6 +169,8 @@ where
                 peer_config: config.peer_config,
                 partition_prefix: config.partition_prefix,
                 max_supported_mode: config.max_supported_mode,
+                namespace: config.namespace,
+                epoch_length: config.epoch_length,
 
                 successful_epochs,
                 failed_epochs,
@@ -209,7 +216,7 @@ where
         mut callback: Box<dyn UpdateCallBack<MinSig, ed25519::PublicKey>>,
     ) {
         let max_read_size = NZU32!(self.peer_config.max_participants_per_round());
-        let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
+        let epocher = FixedEpocher::new(self.epoch_length);
 
         // Initialize persistent state
         let mut storage = Storage::init(
@@ -310,7 +317,7 @@ where
 
             // Prepare round info
             let round = Info::new::<N3f1>(
-                namespace::APPLICATION,
+                &self.namespace,
                 epoch.get(),
                 epoch_state.output.clone(),
                 Mode::NonZeroCounter,
@@ -434,7 +441,7 @@ where
                     }
                     MailboxMessage::Finalized { block, response } => {
                         let bounds = epocher
-                            .containing(block.height)
+                            .containing(block.height())
                             .expect("block height covered by epoch strategy");
                         let block_epoch = bounds.epoch();
                         let phase = bounds.phase();
@@ -449,8 +456,8 @@ where
                         }
 
                         // Process dealer log from block if present
-                        if let Some(log) = block.log {
-                            if let Some((dealer, dealer_log)) = log.check(&round) {
+                        if let Some(log) = block.reshare_log() {
+                            if let Some((dealer, dealer_log)) = log.clone().check(&round) {
                                 // If we see our dealing outcome in a finalized block,
                                 // make sure to take it, so that we don't post
                                 // it in subsequent blocks
@@ -486,7 +493,7 @@ where
                         }
 
                         // Continue if not the last block in the epoch
-                        if block.height != bounds.last() {
+                        if block.height() != bounds.last() {
                             // Acknowledge block processing
                             response.acknowledge();
                             continue;
@@ -640,21 +647,81 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{dkg::ContinueOnUpdate, orchestrator::Message, setup::PeerConfig};
+    use crate::{orchestrator::Message, ContinueOnUpdate, PeerConfig};
+    use bytes::{Buf, BufMut};
     use commonware_actor::Feedback;
+    use commonware_codec::{EncodeSize, Error as CodecError, Read, Write};
+    use commonware_consensus::{types::Height, Heightable};
     use commonware_cryptography::{
         bls12381::{dkg::feldman_desmedt::deal, primitives::variant::MinSig},
         ed25519::{PrivateKey, PublicKey as Ed25519PublicKey},
+        sha256,
         transcript::Summary,
-        Signer,
+        Digest as _, Digestible, Signer,
     };
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
     use commonware_p2p::{utils::mocks::inert_channel, PeerSetSubscription, Provider};
     use commonware_runtime::{deterministic, Runner, Supervisor as _};
-    use commonware_utils::{channel::mpsc, N3f1, NZUsize, TryCollect, NZU32};
+    use commonware_utils::{channel::mpsc, N3f1, NZUsize, TryCollect, NZU32, NZU64};
     use core::marker::PhantomData;
     use std::collections::BTreeMap;
+
+    #[derive(Clone)]
+    struct TestBlock {
+        height: Height,
+        parent: sha256::Digest,
+    }
+
+    impl Write for TestBlock {
+        fn write(&self, writer: &mut impl BufMut) {
+            self.height.write(writer);
+            self.parent.write(writer);
+        }
+    }
+
+    impl Read for TestBlock {
+        type Cfg = ();
+
+        fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+            Ok(Self {
+                height: Height::read(reader)?,
+                parent: sha256::Digest::read(reader)?,
+            })
+        }
+    }
+
+    impl EncodeSize for TestBlock {
+        fn encode_size(&self) -> usize {
+            self.height.encode_size() + self.parent.encode_size()
+        }
+    }
+
+    impl Digestible for TestBlock {
+        type Digest = sha256::Digest;
+
+        fn digest(&self) -> Self::Digest {
+            sha256::Digest::EMPTY
+        }
+    }
+
+    impl Heightable for TestBlock {
+        fn height(&self) -> Height {
+            self.height
+        }
+    }
+
+    impl commonware_consensus::Block for TestBlock {
+        fn parent(&self) -> Self::Digest {
+            self.parent
+        }
+    }
+
+    impl crate::ReshareBlock for TestBlock {
+        fn reshare_log(&self) -> Option<&crate::DealerLog> {
+            None
+        }
+    }
 
     #[derive(Clone, Debug)]
     struct NoopManager<P: PublicKey>(PhantomData<P>);
@@ -743,7 +810,7 @@ mod tests {
                 context.child("seed_storage"),
                 &partition_prefix,
                 NZU32!(peer_config.max_participants_per_round()),
-                crate::dkg::MAX_SUPPORTED_MODE,
+                crate::MAX_SUPPORTED_MODE,
             )
             .await;
             storage
@@ -761,7 +828,7 @@ mod tests {
 
             // Restart the actor with stale bootstrap inputs (output=None, share=None). The
             // recovered epoch must override these.
-            let (actor, _mailbox) = Actor::<_, _>::new(
+            let (actor, _mailbox) = Actor::<_, _, TestBlock>::new(
                 context.child("actor"),
                 Config {
                     manager: NoopManager::<Ed25519PublicKey>::default(),
@@ -769,7 +836,9 @@ mod tests {
                     mailbox_size: NZUsize!(8),
                     partition_prefix,
                     peer_config: peer_config.clone(),
-                    max_supported_mode: crate::dkg::MAX_SUPPORTED_MODE,
+                    max_supported_mode: crate::MAX_SUPPORTED_MODE,
+                    namespace: b"test_dkg".to_vec(),
+                    epoch_length: NZU64!(200),
                 },
             );
             let (sender, receiver) = inert_channel(&peer_config.participants);
