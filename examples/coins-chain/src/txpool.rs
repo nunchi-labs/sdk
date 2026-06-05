@@ -108,8 +108,8 @@ impl TxPool {
                     // Order by (account, nonce) so an account's operations stay in nonce order within a
                     // block and therefore apply without tripping the ledger's nonce gate.
                     transactions.sort_by(|a, b| {
-                        a.account
-                            .cmp(&b.account)
+                        a.account_id
+                            .cmp(&b.account_id)
                             .then(a.payload.nonce.cmp(&b.payload.nonce))
                     });
                     transactions.truncate(limit);

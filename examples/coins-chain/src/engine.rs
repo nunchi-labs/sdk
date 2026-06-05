@@ -99,7 +99,7 @@ pub struct Config<
     pub max_block_transactions: usize,
 }
 
-type Marshaled<E> = Deferred<E, Scheme, Application, Block, FixedEpocher>;
+type Marshaled<E> = Deferred<E, Scheme, Application<E>, Block, FixedEpocher>;
 type FinalizationsArchive<E> = immutable::Archive<E, Digest, Finalization>;
 type BlocksArchive<E> = immutable::Archive<E, Digest, Block>;
 type Marshal<E, S> = MarshalActor<
@@ -243,12 +243,12 @@ where
         // The handle this node exposes to its operator: its transaction ingress and ledger view.
         let node_handle = NodeHandle {
             submitter: submitter.clone(),
-            ledger: shared_ledger,
+            ledger: shared_ledger.clone(),
         };
         let txpool = txpool.start(context.child("txpool"));
         let executor = coins_executor.start(executor_context);
 
-        let app = Application::new(submitter, max_block_transactions);
+        let app = Application::new(submitter, shared_ledger, max_block_transactions);
 
         let page_cache = Self::create_page_cache(&context);
         let (buffer, buffer_mailbox) =
@@ -438,7 +438,7 @@ where
             .expect("failed to create scheme");
         let certificate_provider = ConstantProvider::new(scheme.clone());
         let epocher = FixedEpocher::new(EPOCH_LENGTH);
-        let genesis = Application::genesis();
+        let genesis = Application::<E>::genesis();
         let genesis_digest = genesis.digest();
 
         ConsensusMaterials {
@@ -488,7 +488,7 @@ where
 
     fn create_marshaled(
         context: &E,
-        app: Application,
+        app: Application<E>,
         marshal_mailbox: MarshalMailbox<Scheme, Standard<Block>>,
         epocher: FixedEpocher,
     ) -> Marshaled<E> {

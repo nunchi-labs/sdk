@@ -55,11 +55,11 @@ pub trait CoinDB {
     /// Stage the next nonce for `id`.
     fn set_nonce(&mut self, id: &AccountId, nonce: u64);
 
-    /// Look up a registered account policy.
+    /// Look up a registered multisig account policy.
     async fn account_policy(&self, id: &AccountId) -> Result<Option<AccountPolicy>, LedgerError>;
 
-    /// Stage an account policy.
-    fn set_account_policy(&mut self, policy: &AccountPolicy);
+    /// Stage an account policy at `id`.
+    fn set_account_policy(&mut self, id: &AccountId, policy: &AccountPolicy);
 
     /// Next token-derivation nonce for the [`crate::TokenFactory`] (0 if no token exists yet).
     async fn factory_nonce(&self) -> Result<u64, LedgerError>;
@@ -104,28 +104,18 @@ impl<S: StateDb> CoinDB for S {
     }
 
     async fn account_policy(&self, id: &AccountId) -> Result<Option<AccountPolicy>, LedgerError> {
-        match id {
-            AccountId::Single(public_key) => Ok(Some(AccountPolicy::single(public_key.clone()))),
-            AccountId::Multisig(_) => {
-                let key = NS.key(Table::AccountPolicy, &encoded(id));
-                match StateDb::get(self, &key)
-                    .await
-                    .map_err(|err| LedgerError::Storage(err.to_string()))?
-                {
-                    Some(bytes) => Ok(Some(decoded::<AccountPolicy>(&bytes)?)),
-                    None => Ok(None),
-                }
-            }
+        let key = NS.key(Table::AccountPolicy, &encoded(id));
+        match StateDb::get(self, &key)
+            .await
+            .map_err(|err| LedgerError::Storage(err.to_string()))?
+        {
+            Some(bytes) => Ok(Some(decoded::<AccountPolicy>(&bytes)?)),
+            None => Ok(None),
         }
     }
 
-    fn set_account_policy(&mut self, policy: &AccountPolicy) {
-        // Single-key policies are synthesized from the AccountId in account_policy() and never
-        // read back from storage, so writing them here would leave dead data in the table.
-        if let AccountPolicy::Single(_) = policy {
-            return;
-        }
-        let key = NS.key(Table::AccountPolicy, &encoded(&policy.id()));
+    fn set_account_policy(&mut self, id: &AccountId, policy: &AccountPolicy) {
+        let key = NS.key(Table::AccountPolicy, &encoded(id));
         StateDb::set(self, key, encoded(policy));
     }
 
