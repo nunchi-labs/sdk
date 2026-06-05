@@ -142,7 +142,7 @@ where
         // Every carried transaction must bear a valid signature from its declared signer.
         // Application-level validity (nonce, balances, token existence) is enforced at execution.
         for tx in &block.transactions {
-            if tx.verify().is_err() || !self.authorization_valid(tx).await {
+            if tx.verify().is_err() {
                 return false;
             }
         }

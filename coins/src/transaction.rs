@@ -1,4 +1,4 @@
-use super::{AccountId, AccountPolicy, CoinId, CoinSpec};
+use super::{AccountId, CoinId, CoinSpec, MultisigPolicy};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use nunchi_common::Operation;
 
@@ -13,7 +13,7 @@ const OP_REGISTER_ACCOUNT_POLICY: u8 = 4;
 pub enum CoinOperation {
     RegisterAccountPolicy {
         account_id: AccountId,
-        policy: AccountPolicy,
+        policy: MultisigPolicy,
     },
     CreateToken {
         spec: CoinSpec,
@@ -83,7 +83,7 @@ impl Read for CoinOperation {
         match u8::read(buf)? {
             OP_REGISTER_ACCOUNT_POLICY => Ok(Self::RegisterAccountPolicy {
                 account_id: AccountId::read(buf)?,
-                policy: AccountPolicy::read(buf)?,
+                policy: MultisigPolicy::read(buf)?,
             }),
             OP_CREATE_TOKEN => Ok(Self::CreateToken {
                 spec: CoinSpec::read(buf)?,

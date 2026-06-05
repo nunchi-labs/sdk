@@ -166,15 +166,45 @@ impl<D: CoinDB> Ledger<D> {
     async fn ensure_authorized(&self, tx: &Transaction) -> Result<(), LedgerError> {
         tx.verify()?;
 
-        match (&tx.account_type, &tx.authorization) {
-            (AccountType::External, Authorization::Single(_)) => {
+        match (&tx.account_type, &tx.authorization, &tx.payload.operation) {
+            (
+                AccountType::Multisig,
+                Authorization::Multisig { policy, .. },
+                CoinOperation::RegisterAccountPolicy {
+                    account_id,
+                    policy: registered,
+                },
+            ) => {
+                if &tx.account_id != account_id || policy != registered {
+                    return Err(LedgerError::AccountPolicyMismatch(Box::new(
+                        tx.account_id.clone(),
+                    )));
+                }
+                match self.db.account_policy(&tx.account_id).await? {
+                    Some(AccountPolicy::Multisig(existing)) if &existing == policy => {}
+                    Some(_) => {
+                        return Err(LedgerError::AccountPolicyMismatch(Box::new(
+                            tx.account_id.clone(),
+                        )));
+                    }
+                    None => {}
+                }
+            }
+            (
+                AccountType::External,
+                Authorization::Single(_),
+                CoinOperation::RegisterAccountPolicy { .. },
+            ) => {
+                return Err(LedgerError::Unauthorized);
+            }
+            (AccountType::External, Authorization::Single(_), _) => {
                 if self.db.account_policy(&tx.account_id).await?.is_some() {
                     return Err(LedgerError::AccountPolicyMismatch(Box::new(
                         tx.account_id.clone(),
                     )));
                 }
             }
-            (AccountType::Multisig, Authorization::Multisig { policy, .. }) => {
+            (AccountType::Multisig, Authorization::Multisig { policy, .. }, _) => {
                 match self.db.account_policy(&tx.account_id).await? {
                     Some(AccountPolicy::Multisig(registered)) if &registered == policy => {}
                     Some(_) => {
@@ -202,11 +232,14 @@ impl<D: CoinDB> Ledger<D> {
     ) -> Result<(), LedgerError> {
         match operation {
             CoinOperation::RegisterAccountPolicy { account_id, policy } => {
-                if signer == account_id {
+                if signer != account_id {
                     return Err(LedgerError::Unauthorized);
                 }
-                self.register_account_policy(account_id.clone(), policy.clone())
-                    .await?;
+                self.register_account_policy(
+                    account_id.clone(),
+                    AccountPolicy::Multisig(policy.clone()),
+                )
+                .await?;
             }
             CoinOperation::CreateToken { spec } => {
                 self.create_token(signer.clone(), spec.clone()).await?;
@@ -667,16 +700,16 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let mut ledger = ledger(context).await;
-            let sponsor = PrivateKey::ed25519_from_seed(1);
             let alice_a = PrivateKey::ed25519_from_seed(2);
             let alice_b = PrivateKey::secp256r1_from_seed(3);
             let alice = multisig_account(99);
             let policy =
-                AccountPolicy::multisig(2, vec![alice_a.public_key(), alice_b.public_key()])
-                    .unwrap();
+                MultisigPolicy::new(2, vec![alice_a.public_key(), alice_b.public_key()]).unwrap();
 
-            let tx = Transaction::sign(
-                &sponsor,
+            let tx = Transaction::sign_multisig(
+                alice.clone(),
+                policy.clone(),
+                &[&alice_a, &alice_b],
                 0,
                 CoinOperation::RegisterAccountPolicy {
                     account_id: alice.clone(),
@@ -688,7 +721,7 @@ mod tests {
                 .await
                 .expect("register policy");
 
-            assert_eq!(ledger.nonce(&account(&sponsor)).await.unwrap(), 1);
+            assert_eq!(ledger.nonce(&alice).await.unwrap(), 1);
             assert_eq!(
                 ledger.account(&alice).await.unwrap().kind,
                 AccountType::Multisig
@@ -700,15 +733,13 @@ mod tests {
                 .expect("create token");
             let tx = Transaction::sign_multisig(
                 alice.clone(),
-                match policy {
-                    AccountPolicy::Multisig(policy) => policy,
-                },
+                policy,
                 &[&alice_a, &alice_b],
-                0,
+                1,
                 CoinOperation::Transfer {
                     coin,
                     from: alice.clone(),
-                    to: account(&sponsor),
+                    to: account(&alice_a),
                     amount: 1,
                 },
             );
@@ -721,22 +752,22 @@ mod tests {
     }
 
     #[test]
-    fn register_account_policy_operation_rejects_self_registration() {
+    fn register_account_policy_operation_rejects_external_registration() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let mut ledger = ledger(context).await;
-            let sponsor = PrivateKey::ed25519_from_seed(1);
+            let attacker = PrivateKey::ed25519_from_seed(1);
             let alice_a = PrivateKey::ed25519_from_seed(2);
             let alice_b = PrivateKey::secp256r1_from_seed(3);
             let policy =
-                AccountPolicy::multisig(2, vec![alice_a.public_key(), alice_b.public_key()])
-                    .unwrap();
+                MultisigPolicy::new(2, vec![alice_a.public_key(), alice_b.public_key()]).unwrap();
+            let alice = multisig_account(99);
 
             let tx = Transaction::sign(
-                &sponsor,
+                &attacker,
                 0,
                 CoinOperation::RegisterAccountPolicy {
-                    account_id: sponsor.public_key(),
+                    account_id: alice,
                     policy,
                 },
             );
@@ -744,6 +775,36 @@ mod tests {
             assert_eq!(
                 ledger.apply_transaction(&tx).await,
                 Err(LedgerError::Unauthorized)
+            );
+        });
+    }
+
+    #[test]
+    fn register_account_policy_operation_rejects_policy_witness_mismatch() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut ledger = ledger(context).await;
+            let alice_a = PrivateKey::ed25519_from_seed(1);
+            let alice_b = PrivateKey::secp256r1_from_seed(2);
+            let alice = multisig_account(99);
+            let authorized =
+                MultisigPolicy::new(2, vec![alice_a.public_key(), alice_b.public_key()]).unwrap();
+            let registered = MultisigPolicy::new(1, vec![alice_a.public_key()]).unwrap();
+
+            let tx = Transaction::sign_multisig(
+                alice.clone(),
+                authorized,
+                &[&alice_a, &alice_b],
+                0,
+                CoinOperation::RegisterAccountPolicy {
+                    account_id: alice.clone(),
+                    policy: registered,
+                },
+            );
+
+            assert_eq!(
+                ledger.apply_transaction(&tx).await,
+                Err(LedgerError::AccountPolicyMismatch(Box::new(alice)))
             );
         });
     }
