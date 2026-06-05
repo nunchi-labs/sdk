@@ -9,9 +9,11 @@ use commonware_consensus::{
         core::Actor as MarshalActor,
         resolver,
         standard::{Deferred, Standard},
+        Update,
     },
     simplex::elector::Random,
     types::{FixedEpocher, ViewDelta},
+    Reporters,
 };
 use commonware_cryptography::{
     bls12381::{
@@ -108,6 +110,7 @@ where
     buffer: buffered::Engine<E, PublicKey, Block, P>,
     buffered_mailbox: buffered::Mailbox<PublicKey, Block>,
     marshal: Marshal<E, S>,
+    marshaled: Marshaled<E>,
     orchestrator: Orchestrator<E, B, S>,
     orchestrator_mailbox: orchestrator::Mailbox<MinSig, PublicKey>,
 }
@@ -284,7 +287,7 @@ where
             context.child("orchestrator"),
             orchestrator::Config {
                 oracle: config.blocker.clone(),
-                application,
+                application: application.clone(),
                 provider,
                 marshal: marshal_mailbox,
                 strategy: config.strategy.clone(),
@@ -307,6 +310,7 @@ where
             buffer,
             buffered_mailbox,
             marshal,
+            marshaled: application,
             orchestrator,
             orchestrator_mailbox,
         }
@@ -392,9 +396,10 @@ where
             callback,
         );
         let buffer_handle = self.buffer.start(broadcast);
+        let reporters = Reporters::<Update<Block>, _, _>::from((self.marshaled, self.dkg_mailbox));
         let marshal_handle = self
             .marshal
-            .start(self.dkg_mailbox, self.buffered_mailbox, marshal);
+            .start(reporters, self.buffered_mailbox, marshal);
         let orchestrator_handle = self.orchestrator.start(votes, certificates, resolver);
 
         if let Err(e) = try_join_all(vec![

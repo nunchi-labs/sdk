@@ -117,6 +117,7 @@ where
     buffer: buffered::Engine<E, PublicKey, Block, P>,
     buffered_mailbox: buffered::Mailbox<PublicKey, Block>,
     marshal: Marshal<E, S>,
+    marshaled: Marshaled<E>,
     orchestrator: Orchestrator<E, B, S>,
     orchestrator_mailbox: orchestrator::Mailbox<MinSig, PublicKey>,
     executor: Handle<()>,
@@ -333,7 +334,7 @@ where
             context.child("orchestrator"),
             orchestrator::Config {
                 oracle: config.blocker.clone(),
-                application,
+                application: application.clone(),
                 provider,
                 marshal: marshal_mailbox,
                 strategy: config.strategy.clone(),
@@ -356,6 +357,7 @@ where
             buffer,
             buffered_mailbox,
             marshal,
+            marshaled: application,
             orchestrator,
             orchestrator_mailbox,
             executor,
@@ -445,7 +447,9 @@ where
             callback,
         );
         let buffer_handle = self.buffer.start(broadcast);
-        let reporters = Reporters::<Update<Block>, _, _>::from((self.dkg_mailbox, self.reporter));
+        let app_and_dkg =
+            Reporters::<Update<Block>, _, _>::from((self.marshaled, self.dkg_mailbox));
+        let reporters = Reporters::<Update<Block>, _, _>::from((app_and_dkg, self.reporter));
         let marshal_handle = self
             .marshal
             .start(reporters, self.buffered_mailbox, marshal);
