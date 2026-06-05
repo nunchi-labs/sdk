@@ -9,6 +9,7 @@ description = "A demo blockchain that executes the Nunchi coins module, used for
 nunchi-coins = { workspace = true }
 nunchi-common = { workspace = true }
 nunchi-dkg = { workspace = true }
+nunchi-rpc = { workspace = true }
 commonware-actor = { workspace = true }
 commonware-broadcast = { workspace = true }
 commonware-codec = { workspace = true }
@@ -28,6 +29,8 @@ thiserror = { workspace = true }
 futures = { workspace = true }
 tracing = { workspace = true }
 governor = { workspace = true }
+jsonrpsee = { workspace = true }
+serde = { workspace = true }
 
 [dev-dependencies]
 commonware-math = { workspace = true }

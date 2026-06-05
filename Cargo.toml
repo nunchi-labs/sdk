@@ -4,6 +4,7 @@ members = [
     "coins",
     "crypto",
     "dkg",
+    "rpc",
     "examples/template",
     "examples/coins-chain",
 ]
@@ -19,6 +20,7 @@ nunchi-coins = { version = "2026.5.0", path = "coins" }
 nunchi-common = { version = "2026.5.0", path = "common" }
 nunchi-crypto = { version = "2026.5.0", path = "crypto" }
 nunchi-dkg = { version = "2026.5.0", path = "dkg" }
+nunchi-rpc = { version = "2026.5.0", path = "rpc" }
 nunchi-template = { version = "2026.5.0", path = "examples/template" }
 nunchi-coins-chain = { version = "2026.5.0", path = "examples/coins-chain" }
 commonware-actor = "2026.5.0"
@@ -44,6 +46,8 @@ futures = "0.3.31"
 tracing = "0.1.41"
 governor = "0.10.2"
 prometheus-client = "0.24.0"
+jsonrpsee = { version = "0.26.0", features = ["server", "macros"] }
+serde = { version = "1.0.219", features = ["derive"] }
 
 [profile.bench]
 overflow-checks = true

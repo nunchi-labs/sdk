@@ -1,5 +1,5 @@
 use crate::application::Application;
-use crate::execution::{ChainState, Executor, Mailbox as ExecutorReporter, NodeHandle};
+use crate::execution::{Executor, Mailbox as ExecutorReporter, NodeHandle};
 use crate::txpool::TxPool;
 use crate::{
     Block, EpochProvider, Finalization, Provider, PublicKey, Scheme, BLOCKS_PER_EPOCH, NAMESPACE,
@@ -36,7 +36,7 @@ use commonware_runtime::{
 use commonware_storage::archive::immutable;
 use commonware_utils::{union, NZUsize, NZU16, NZU64};
 use futures::{future::try_join_all, lock::Mutex as AsyncMutex};
-use nunchi_coins::Ledger;
+use nunchi_coins::{rpc::SharedLedger, Ledger};
 use nunchi_common::QmdbState;
 use nunchi_dkg::{self as dkg, orchestrator, PeerConfig, UpdateCallBack, MAX_SUPPORTED_MODE};
 use rand_core::CryptoRngCore;
@@ -150,20 +150,20 @@ where
         )
         .await
         .expect("failed to initialize coin state");
-        let shared_ledger = Arc::new(AsyncMutex::new(ChainState {
-            ledger: Ledger::new(coin_state),
-            applied_height: Height::zero(),
-        }));
+        let shared_ledger = SharedLedger::new(Ledger::new(coin_state));
+        let applied_height = Arc::new(AsyncMutex::new(Height::zero()));
         let executor_context = context.child("coins_executor");
         let (coins_executor, reporter) = Executor::new(
             &executor_context,
             EXECUTOR_MAILBOX_CAPACITY,
             shared_ledger.clone(),
+            applied_height.clone(),
             submitter.clone(),
         );
         let node_handle = NodeHandle {
             submitter: submitter.clone(),
             ledger: shared_ledger.clone(),
+            applied_height,
         };
         let txpool = txpool.start(context.child("txpool"));
         let executor = coins_executor.start(executor_context);

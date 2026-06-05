@@ -9,8 +9,12 @@ bytes = { workspace = true }
 thiserror = { workspace = true }
 nunchi-common = { workspace = true }
 nunchi-crypto = { workspace = true }
+nunchi-rpc = { workspace = true }
 commonware-codec = { workspace = true }
 commonware-cryptography = { workspace = true }
+jsonrpsee = { workspace = true }
+serde = { workspace = true }
+futures = { workspace = true }
 
 [dev-dependencies]
 commonware-runtime = { workspace = true }

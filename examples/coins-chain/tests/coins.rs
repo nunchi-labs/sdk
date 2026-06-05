@@ -238,8 +238,8 @@ fn coin_state_converges_across_validators() {
 
         let mut roots = Vec::new();
         for shared in &handles {
-            let state = shared.lock().await;
-            roots.push(state.ledger.root());
+            let ledger = shared.lock().await;
+            roots.push(ledger.root());
         }
 
         let reference = roots[0];
@@ -275,8 +275,7 @@ fn coin_balances_match_submitted_transactions() {
             .into_iter()
             .next()
             .expect("at least one validator ledger");
-        let state = shared.lock().await;
-        let ledger = &state.ledger;
+        let ledger = shared.lock().await;
         let coin = gold_coin();
 
         // Alice: 1_000_000 - 300_000 (to Bob) + 50_000 (mint) - 100_000 (burn) = 650_000.

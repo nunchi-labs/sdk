@@ -6,6 +6,7 @@ mod codec;
 mod db;
 mod factory;
 mod ledger;
+pub mod rpc;
 mod transaction;
 
 pub use account::{
