@@ -1,4 +1,6 @@
-use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
+use crate::COINS_NAMESPACE;
+use commonware_codec::{Encode, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_cryptography::{Hasher, Sha256};
 pub use nunchi_common::{AccountPolicyError, AccountType, MultisigPolicy};
 
 pub type AccountId = nunchi_crypto::PublicKey;
@@ -7,6 +9,23 @@ pub type PrivateKey = nunchi_crypto::PrivateKey;
 pub type Signature = nunchi_crypto::Signature;
 
 const ACCOUNT_POLICY_MULTISIG: u8 = 1;
+
+/// Derive a stable multisig account identifier from its initial policy.
+///
+/// The domain-separated derivation binds the identifier used during
+/// bootstrap to the canonical initial policy. Future policy rotation must
+/// use a separate operation authorized by the currently registered policy;
+/// it must not reuse the bootstrap registration rules.
+///
+/// `COINS_NAMESPACE` is also used as the coin-operation signing namespace.
+/// The `"account/multisig/v1"` tag keeps this derivation domain-separated.
+pub fn multisig_account_id(policy: &MultisigPolicy) -> AccountId {
+    let mut hasher = Sha256::new();
+    hasher.update(COINS_NAMESPACE);
+    hasher.update(b"account/multisig/v1");
+    hasher.update(&policy.encode());
+    AccountId::synthetic(hasher.finalize())
+}
 
 /// A coin account authorization policy persisted by the coin ledger.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -127,6 +146,11 @@ mod tests {
         let second = MultisigPolicy::new(2, vec![secp, ed]).unwrap();
 
         assert_eq!(first, second);
+        assert_eq!(multisig_account_id(&first), multisig_account_id(&second));
+        assert_eq!(
+            multisig_account_id(&first).curve(),
+            nunchi_crypto::Curve::Synthetic
+        );
     }
 
     #[test]
@@ -153,6 +177,17 @@ mod tests {
         assert_eq!(
             MultisigPolicy::new(1, vec![signer.clone(), signer]),
             Err(AccountPolicyError::DuplicateSigner)
+        );
+    }
+
+    #[test]
+    fn multisig_policy_rejects_synthetic_signers() {
+        let signer = PrivateKey::ed25519_from_seed(1).public_key();
+        let policy = MultisigPolicy::new(1, vec![signer]).unwrap();
+
+        assert_eq!(
+            MultisigPolicy::new(1, vec![multisig_account_id(&policy)]),
+            Err(AccountPolicyError::SyntheticSigner)
         );
     }
 

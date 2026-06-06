@@ -1,5 +1,5 @@
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
-use commonware_cryptography::{ed25519, secp256r1, Signer as _, Verifier as _};
+use commonware_cryptography::{ed25519, secp256r1, sha256::Digest, Signer as _, Verifier as _};
 
 /// A signature verification failure.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -16,6 +16,7 @@ pub enum SignatureError {
 pub enum Curve {
     Ed25519 = 1,
     Secp256r1 = 2,
+    Synthetic = 3,
 }
 
 impl Curve {
@@ -27,6 +28,7 @@ impl Curve {
         match u8::read(buf)? {
             1 => Ok(Self::Ed25519),
             2 => Ok(Self::Secp256r1),
+            3 => Ok(Self::Synthetic),
             tag => Err(Error::InvalidEnum(tag)),
         }
     }
@@ -37,13 +39,20 @@ impl Curve {
 pub enum PublicKey {
     Ed25519(ed25519::PublicKey),
     Secp256r1(secp256r1::standard::PublicKey),
+    Synthetic(Digest),
 }
 
 impl PublicKey {
+    /// Construct a stable account identifier that has no corresponding private key.
+    pub fn synthetic(digest: Digest) -> Self {
+        Self::Synthetic(digest)
+    }
+
     pub fn curve(&self) -> Curve {
         match self {
             Self::Ed25519(_) => Curve::Ed25519,
             Self::Secp256r1(_) => Curve::Secp256r1,
+            Self::Synthetic(_) => Curve::Synthetic,
         }
     }
 
@@ -62,6 +71,7 @@ impl PublicKey {
                 .verify(namespace, msg, signature)
                 .then_some(())
                 .ok_or(SignatureError::InvalidSignature),
+            (Self::Synthetic(_), _) => Err(SignatureError::IncompatibleKey),
             _ => Err(SignatureError::IncompatibleKey),
         }
     }
@@ -73,6 +83,7 @@ impl Write for PublicKey {
         match self {
             Self::Ed25519(key) => key.write(buf),
             Self::Secp256r1(key) => key.write(buf),
+            Self::Synthetic(digest) => digest.write(buf),
         }
     }
 }
@@ -84,6 +95,7 @@ impl Read for PublicKey {
         match Curve::read(buf)? {
             Curve::Ed25519 => Ok(Self::Ed25519(ed25519::PublicKey::read(buf)?)),
             Curve::Secp256r1 => Ok(Self::Secp256r1(secp256r1::standard::PublicKey::read(buf)?)),
+            Curve::Synthetic => Ok(Self::Synthetic(Digest::read(buf)?)),
         }
     }
 }
@@ -93,6 +105,7 @@ impl EncodeSize for PublicKey {
         1 + match self {
             Self::Ed25519(key) => key.encode_size(),
             Self::Secp256r1(key) => key.encode_size(),
+            Self::Synthetic(digest) => digest.encode_size(),
         }
     }
 }
@@ -169,6 +182,10 @@ impl Read for PrivateKey {
         match Curve::read(buf)? {
             Curve::Ed25519 => Ok(Self::Ed25519(ed25519::PrivateKey::read(buf)?)),
             Curve::Secp256r1 => Ok(Self::Secp256r1(secp256r1::standard::PrivateKey::read(buf)?)),
+            Curve::Synthetic => Err(Error::Invalid(
+                "private key",
+                "synthetic key has no private key",
+            )),
         }
     }
 }
@@ -215,6 +232,7 @@ impl Read for Signature {
         match Curve::read(buf)? {
             Curve::Ed25519 => Ok(Self::Ed25519(ed25519::Signature::read(buf)?)),
             Curve::Secp256r1 => Ok(Self::Secp256r1(secp256r1::standard::Signature::read(buf)?)),
+            Curve::Synthetic => Err(Error::Invalid("signature", "synthetic key cannot sign")),
         }
     }
 }
@@ -232,6 +250,7 @@ impl EncodeSize for Signature {
 mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode};
+    use commonware_cryptography::{Hasher as _, Sha256};
 
     const NAMESPACE: &[u8] = b"nunchi-crypto/test";
     const MESSAGE: &[u8] = b"hello nunchi";
@@ -263,6 +282,21 @@ mod tests {
         assert_eq!(
             Signature::decode(signature.encode().as_ref()).unwrap(),
             signature
+        );
+    }
+
+    #[test]
+    fn synthetic_public_keys_roundtrip_but_cannot_verify_signatures() {
+        let digest = Sha256::hash(b"synthetic-account");
+        let public = PublicKey::synthetic(digest);
+        let signer = PrivateKey::ed25519_from_seed(7);
+        let signature = signer.sign(NAMESPACE, MESSAGE);
+
+        assert_eq!(public.curve(), Curve::Synthetic);
+        assert_eq!(PublicKey::decode(public.encode().as_ref()).unwrap(), public);
+        assert_eq!(
+            public.verify(NAMESPACE, MESSAGE, &signature),
+            Err(SignatureError::IncompatibleKey)
         );
     }
 

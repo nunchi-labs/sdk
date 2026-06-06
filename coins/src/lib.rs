@@ -9,8 +9,8 @@ mod ledger;
 mod transaction;
 
 pub use account::{
-    Account, AccountId, AccountPolicy, AccountPolicyError, AccountType, MultisigPolicy, PrivateKey,
-    Signature,
+    multisig_account_id, Account, AccountId, AccountPolicy, AccountPolicyError, AccountType,
+    MultisigPolicy, PrivateKey, Signature,
 };
 pub use asset::{CoinId, CoinSpec, TokenDefinition, MAX_NAME_BYTES, MAX_SYMBOL_BYTES};
 pub use db::CoinDB;

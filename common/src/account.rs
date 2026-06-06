@@ -1,5 +1,5 @@
 use commonware_codec::{Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
-use nunchi_crypto::PublicKey;
+use nunchi_crypto::{Curve, PublicKey};
 use thiserror::Error;
 
 const ACCOUNT_TYPE_EXTERNAL: u8 = 0;
@@ -66,6 +66,12 @@ impl MultisigPolicy {
                 signers: signers.len(),
             });
         }
+        if signers
+            .iter()
+            .any(|signer| signer.curve() == Curve::Synthetic)
+        {
+            return Err(AccountPolicyError::SyntheticSigner);
+        }
 
         let original_signers = signers.len();
         signers.sort_by_cached_key(|signer| signer.encode().as_ref().to_vec());
@@ -123,6 +129,8 @@ pub enum AccountPolicyError {
     ThresholdExceedsSigners { threshold: u16, signers: usize },
     #[error("multisig signers must be unique")]
     DuplicateSigner,
+    #[error("synthetic account identifiers cannot be multisig signers")]
+    SyntheticSigner,
     #[error("multisig has {actual} signers, but the maximum is {max}")]
     TooManySigners { max: usize, actual: usize },
 }

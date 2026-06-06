@@ -338,6 +338,7 @@ fn signing_bytes<Operation: EncodeSize + Write>(
 mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode};
+    use commonware_cryptography::Sha256;
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct TestOperation(u8);
@@ -364,6 +365,10 @@ mod tests {
 
     impl Operation for TestOperation {
         const NAMESPACE: &'static [u8] = b"nunchi-common/test-operation";
+    }
+
+    fn synthetic_account(label: &[u8]) -> PublicKey {
+        PublicKey::synthetic(Sha256::hash(label))
     }
 
     #[test]
@@ -423,7 +428,7 @@ mod tests {
     fn multisig_transaction_signs_verifies_and_roundtrips() {
         let alice = PrivateKey::ed25519_from_seed(1);
         let bob = PrivateKey::secp256r1_from_seed(2);
-        let account_id = PrivateKey::ed25519_from_seed(99).public_key();
+        let account_id = synthetic_account(b"multisig-roundtrip");
         let policy = MultisigPolicy::new(2, vec![alice.public_key(), bob.public_key()]).unwrap();
         let tx =
             Transaction::sign_multisig(account_id, policy, &[&alice, &bob], 0, TestOperation(42));
@@ -437,7 +442,7 @@ mod tests {
     fn multisig_authorization_rejects_non_canonical_signature_order() {
         let alice = PrivateKey::ed25519_from_seed(1);
         let bob = PrivateKey::secp256r1_from_seed(2);
-        let account_id = PrivateKey::ed25519_from_seed(99).public_key();
+        let account_id = synthetic_account(b"multisig-ordering");
         let policy = MultisigPolicy::new(2, vec![alice.public_key(), bob.public_key()]).unwrap();
         let mut tx =
             Transaction::sign_multisig(account_id, policy, &[&alice, &bob], 0, TestOperation(42));
@@ -454,7 +459,7 @@ mod tests {
     fn authorization_rejects_account_type_mismatches() {
         let alice = PrivateKey::ed25519_from_seed(1);
         let bob = PrivateKey::secp256r1_from_seed(2);
-        let account_id = PrivateKey::ed25519_from_seed(99).public_key();
+        let account_id = synthetic_account(b"multisig-mismatch");
         let policy = MultisigPolicy::new(2, vec![alice.public_key(), bob.public_key()]).unwrap();
 
         let single = Transaction::sign(&alice, 0, TestOperation(42));

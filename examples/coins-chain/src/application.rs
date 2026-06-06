@@ -67,9 +67,26 @@ impl<E: StorageContext> Application<E> {
         }
     }
 
-    async fn authorization_valid(&self, tx: &nunchi_coins::Transaction) -> bool {
+    async fn filter_authorized(
+        &self,
+        pending: Vec<nunchi_coins::Transaction>,
+    ) -> Vec<nunchi_coins::Transaction> {
         let state = self.ledger.lock().await;
-        state.ledger.validate_authorization(tx).await.is_ok()
+        let mut transactions = Vec::with_capacity(self.max_block_transactions.min(pending.len()));
+        for transaction in pending {
+            if transactions.len() == self.max_block_transactions {
+                break;
+            }
+            if state
+                .ledger
+                .validate_authorization(&transaction)
+                .await
+                .is_ok()
+            {
+                transactions.push(transaction);
+            }
+        }
+        transactions
     }
 }
 
@@ -101,13 +118,11 @@ where
             "proposed timestamp exceeded maximum",
         );
 
-        let pending = self.submitter.pending(self.max_block_transactions).await;
-        let mut transactions = Vec::with_capacity(pending.len());
-        for transaction in pending {
-            if self.authorization_valid(&transaction).await {
-                transactions.push(transaction);
-            }
-        }
+        // TODO: Bound txpool memory and proposal-time revalidation through admission
+        // control and eviction. Bounding this fetch while the pool remains unbounded
+        // can starve valid transactions behind lower-sorting unauthorized entries.
+        let pending = self.submitter.pending(usize::MAX).await;
+        let transactions = self.filter_authorized(pending).await;
 
         Some(Block::new(
             context,
@@ -184,7 +199,8 @@ mod tests {
     use commonware_runtime::{deterministic, Runner as _};
     use futures::lock::Mutex as AsyncMutex;
     use nunchi_coins::{
-        AccountPolicy, CoinOperation, CoinSpec, Ledger, MultisigPolicy, PrivateKey, Transaction,
+        multisig_account_id, AccountPolicy, CoinOperation, CoinSpec, Ledger, MultisigPolicy,
+        PrivateKey, Transaction,
     };
     use nunchi_common::QmdbState;
     use std::sync::Arc;
@@ -210,9 +226,9 @@ mod tests {
 
             let alice_a = PrivateKey::ed25519_from_seed(1);
             let alice_b = PrivateKey::secp256r1_from_seed(2);
-            let account_id = PrivateKey::ed25519_from_seed(99).public_key();
             let policy =
                 MultisigPolicy::new(2, vec![alice_a.public_key(), alice_b.public_key()]).unwrap();
+            let account_id = multisig_account_id(&policy);
             let tx = Transaction::sign_multisig(
                 account_id.clone(),
                 policy.clone(),
@@ -221,7 +237,7 @@ mod tests {
                 CoinOperation::CreateToken { spec: spec() },
             );
 
-            assert!(!app.authorization_valid(&tx).await);
+            assert!(app.filter_authorized(vec![tx.clone()]).await.is_empty());
 
             shared
                 .lock()
@@ -231,7 +247,7 @@ mod tests {
                 .await
                 .expect("register policy");
 
-            assert!(app.authorization_valid(&tx).await);
+            assert_eq!(app.filter_authorized(vec![tx.clone()]).await, vec![tx]);
         });
     }
 }
