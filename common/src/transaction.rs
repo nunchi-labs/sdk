@@ -1,4 +1,4 @@
-use crate::{AccountType, MultisigPolicy, MAX_MULTISIG_SIGNERS};
+use crate::{AccountType, Address, MultisigPolicy, MAX_MULTISIG_SIGNERS};
 use commonware_codec::{Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use nunchi_crypto::{PrivateKey, PublicKey, Signature, SignatureError};
@@ -60,7 +60,7 @@ pub struct AccountSignature {
 impl AccountSignature {
     pub fn sign<Operation: self::Operation>(
         signer: &PrivateKey,
-        account_id: &PublicKey,
+        account_id: &Address,
         account_type: AccountType,
         payload: &TransactionPayload<Operation>,
     ) -> Self {
@@ -75,7 +75,7 @@ impl AccountSignature {
 
     pub fn verify<Operation: self::Operation>(
         &self,
-        account_id: &PublicKey,
+        account_id: &Address,
         account_type: AccountType,
         payload: &TransactionPayload<Operation>,
     ) -> Result<(), SignatureError> {
@@ -121,7 +121,10 @@ impl EncodeSize for AccountSignature {
 /// Authorization attached to a Nunchi transaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Authorization {
-    Single(Signature),
+    Single {
+        signer: PublicKey,
+        signature: Signature,
+    },
     Multisig {
         policy: MultisigPolicy,
         signatures: Vec<AccountSignature>,
@@ -131,16 +134,21 @@ pub enum Authorization {
 impl Authorization {
     pub fn verify<Operation: self::Operation>(
         &self,
-        account_id: &PublicKey,
+        account_id: &Address,
         account_type: AccountType,
         payload: &TransactionPayload<Operation>,
     ) -> Result<(), SignatureError> {
         match (account_type, self) {
-            (AccountType::External, Self::Single(signature)) => account_id.verify(
-                Operation::NAMESPACE,
-                &signing_bytes(account_id, account_type, payload),
-                signature,
-            ),
+            (AccountType::External, Self::Single { signer, signature }) => {
+                if Address::external(signer) != *account_id {
+                    return Err(SignatureError::IncompatibleKey);
+                }
+                signer.verify(
+                    Operation::NAMESPACE,
+                    &signing_bytes(account_id, account_type, payload),
+                    signature,
+                )
+            }
             (AccountType::Multisig, Self::Multisig { policy, signatures }) => {
                 let mut seen = BTreeSet::new();
                 let mut previous_signer_key: Option<Vec<u8>> = None;
@@ -176,8 +184,9 @@ impl Authorization {
 impl Write for Authorization {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         match self {
-            Self::Single(signature) => {
+            Self::Single { signer, signature } => {
                 AUTH_SINGLE.write(buf);
+                signer.write(buf);
                 signature.write(buf);
             }
             Self::Multisig { policy, signatures } => {
@@ -194,7 +203,17 @@ impl Read for Authorization {
 
     fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         match u8::read(buf)? {
-            AUTH_SINGLE => Ok(Self::Single(Signature::read(buf)?)),
+            AUTH_SINGLE => {
+                let signer = PublicKey::read(buf)?;
+                let signature = Signature::read(buf)?;
+                if signer.curve() != signature.curve() {
+                    return Err(Error::Invalid(
+                        "authorization",
+                        "signature curve does not match signer curve",
+                    ));
+                }
+                Ok(Self::Single { signer, signature })
+            }
             AUTH_MULTISIG => Ok(Self::Multisig {
                 policy: MultisigPolicy::read(buf)?,
                 signatures: Vec::<AccountSignature>::read_cfg(
@@ -210,7 +229,7 @@ impl Read for Authorization {
 impl EncodeSize for Authorization {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Self::Single(signature) => signature.encode_size(),
+            Self::Single { signer, signature } => signer.encode_size() + signature.encode_size(),
             Self::Multisig { policy, signatures } => {
                 policy.encode_size() + signatures.encode_size()
             }
@@ -221,7 +240,7 @@ impl EncodeSize for Authorization {
 /// A signed Nunchi transaction over a caller-defined operation enum.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Transaction<Operation> {
-    pub account_id: PublicKey,
+    pub account_id: Address,
     pub account_type: AccountType,
     pub payload: TransactionPayload<Operation>,
     pub authorization: Authorization,
@@ -229,13 +248,17 @@ pub struct Transaction<Operation> {
 
 impl<Operation: self::Operation> Transaction<Operation> {
     pub fn sign(signer: &PrivateKey, nonce: u64, operation: Operation) -> Self {
-        let account_id = signer.public_key();
+        let signer_public = signer.public_key();
+        let account_id = Address::external(&signer_public);
         let account_type = AccountType::External;
         let payload = TransactionPayload::new(nonce, operation);
-        let authorization = Authorization::Single(signer.sign(
-            Operation::NAMESPACE,
-            &signing_bytes(&account_id, account_type, &payload),
-        ));
+        let authorization = Authorization::Single {
+            signer: signer_public,
+            signature: signer.sign(
+                Operation::NAMESPACE,
+                &signing_bytes(&account_id, account_type, &payload),
+            ),
+        };
         Self {
             account_id,
             account_type,
@@ -245,7 +268,7 @@ impl<Operation: self::Operation> Transaction<Operation> {
     }
 
     pub fn sign_multisig(
-        account_id: PublicKey,
+        account_id: Address,
         policy: MultisigPolicy,
         signers: &[&PrivateKey],
         nonce: u64,
@@ -289,18 +312,18 @@ impl<Operation: Read<Cfg = ()>> Read for Transaction<Operation> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
-        let account_id = PublicKey::read(buf)?;
+        let account_id = Address::read(buf)?;
         let account_type = AccountType::read(buf)?;
         let payload = TransactionPayload::read(buf)?;
         let authorization = Authorization::read(buf)?;
 
-        if let (AccountType::External, Authorization::Single(signature)) =
+        if let (AccountType::External, Authorization::Single { signer, signature }) =
             (account_type, &authorization)
         {
-            if account_id.curve() != signature.curve() {
+            if signer.curve() != signature.curve() {
                 return Err(Error::Invalid(
                     "transaction",
-                    "signature curve does not match account curve",
+                    "signature curve does not match signer curve",
                 ));
             }
         }
@@ -324,7 +347,7 @@ impl<Operation: EncodeSize> EncodeSize for Transaction<Operation> {
 }
 
 fn signing_bytes<Operation: EncodeSize + Write>(
-    account_id: &PublicKey,
+    account_id: &Address,
     account_type: AccountType,
     payload: &TransactionPayload<Operation>,
 ) -> Vec<u8> {
@@ -338,7 +361,6 @@ fn signing_bytes<Operation: EncodeSize + Write>(
 mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode};
-    use commonware_cryptography::Sha256;
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct TestOperation(u8);
@@ -367,16 +389,12 @@ mod tests {
         const NAMESPACE: &'static [u8] = b"nunchi-common/test-operation";
     }
 
-    fn synthetic_account(label: &[u8]) -> PublicKey {
-        PublicKey::synthetic(Sha256::hash(label))
-    }
-
     #[test]
     fn ed25519_transaction_signs_verifies_and_roundtrips() {
         let signer = PrivateKey::ed25519_from_seed(7);
         let tx = Transaction::sign(&signer, 3, TestOperation(42));
 
-        assert_eq!(tx.account_id, signer.public_key());
+        assert_eq!(tx.account_id, Address::external(&signer.public_key()));
         assert_eq!(tx.account_type, AccountType::External);
         assert_eq!(tx.verify(), Ok(()));
         assert_eq!(Transaction::decode(tx.encode().as_ref()).unwrap(), tx);
@@ -387,7 +405,7 @@ mod tests {
         let signer = PrivateKey::secp256r1_from_seed(7);
         let tx = Transaction::sign(&signer, 3, TestOperation(42));
 
-        assert_eq!(tx.account_id, signer.public_key());
+        assert_eq!(tx.account_id, Address::external(&signer.public_key()));
         assert_eq!(tx.account_type, AccountType::External);
         assert_eq!(tx.verify(), Ok(()));
         assert_eq!(Transaction::decode(tx.encode().as_ref()).unwrap(), tx);
@@ -407,8 +425,10 @@ mod tests {
         let signer = PrivateKey::ed25519_from_seed(7);
         let other = PrivateKey::secp256r1_from_seed(9);
         let mut tx = Transaction::sign(&signer, 3, TestOperation(42));
-        tx.authorization =
-            Authorization::Single(other.sign(TestOperation::NAMESPACE, &tx.payload.encode()));
+        tx.authorization = Authorization::Single {
+            signer: signer.public_key(),
+            signature: other.sign(TestOperation::NAMESPACE, &tx.payload.encode()),
+        };
 
         assert_eq!(tx.verify(), Err(SignatureError::IncompatibleKey));
     }
@@ -418,8 +438,10 @@ mod tests {
         let signer = PrivateKey::ed25519_from_seed(7);
         let other = PrivateKey::secp256r1_from_seed(9);
         let mut tx = Transaction::sign(&signer, 3, TestOperation(42));
-        tx.authorization =
-            Authorization::Single(other.sign(TestOperation::NAMESPACE, &tx.payload.encode()));
+        tx.authorization = Authorization::Single {
+            signer: signer.public_key(),
+            signature: other.sign(TestOperation::NAMESPACE, &tx.payload.encode()),
+        };
 
         assert!(Transaction::<TestOperation>::decode(tx.encode().as_ref()).is_err());
     }
@@ -428,8 +450,8 @@ mod tests {
     fn multisig_transaction_signs_verifies_and_roundtrips() {
         let alice = PrivateKey::ed25519_from_seed(1);
         let bob = PrivateKey::secp256r1_from_seed(2);
-        let account_id = synthetic_account(b"multisig-roundtrip");
         let policy = MultisigPolicy::new(2, vec![alice.public_key(), bob.public_key()]).unwrap();
+        let account_id = Address::multisig(&policy);
         let tx =
             Transaction::sign_multisig(account_id, policy, &[&alice, &bob], 0, TestOperation(42));
 
@@ -442,8 +464,8 @@ mod tests {
     fn multisig_authorization_rejects_non_canonical_signature_order() {
         let alice = PrivateKey::ed25519_from_seed(1);
         let bob = PrivateKey::secp256r1_from_seed(2);
-        let account_id = synthetic_account(b"multisig-ordering");
         let policy = MultisigPolicy::new(2, vec![alice.public_key(), bob.public_key()]).unwrap();
+        let account_id = Address::multisig(&policy);
         let mut tx =
             Transaction::sign_multisig(account_id, policy, &[&alice, &bob], 0, TestOperation(42));
 
@@ -459,8 +481,8 @@ mod tests {
     fn authorization_rejects_account_type_mismatches() {
         let alice = PrivateKey::ed25519_from_seed(1);
         let bob = PrivateKey::secp256r1_from_seed(2);
-        let account_id = synthetic_account(b"multisig-mismatch");
         let policy = MultisigPolicy::new(2, vec![alice.public_key(), bob.public_key()]).unwrap();
+        let account_id = Address::multisig(&policy);
 
         let single = Transaction::sign(&alice, 0, TestOperation(42));
         assert_eq!(

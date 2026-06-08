@@ -1,4 +1,4 @@
-use super::{AccountId, CoinId, CoinSpec, LedgerError, TokenDefinition, COINS_NAMESPACE};
+use super::{Address, CoinId, CoinSpec, LedgerError, TokenDefinition, COINS_NAMESPACE};
 use commonware_codec::{Encode, EncodeSize, Read, ReadExt, Write};
 use commonware_cryptography::{Hasher, Sha256};
 
@@ -19,7 +19,7 @@ impl TokenFactory {
         self.next_nonce
     }
 
-    pub fn derive_coin_id(issuer: &AccountId, nonce: u64, spec: &CoinSpec) -> CoinId {
+    pub fn derive_coin_id(issuer: &Address, nonce: u64, spec: &CoinSpec) -> CoinId {
         let mut hasher = Sha256::new();
         hasher.update(COINS_NAMESPACE);
         hasher.update(&issuer.encode());
@@ -30,7 +30,7 @@ impl TokenFactory {
 
     pub fn create(
         &mut self,
-        issuer: AccountId,
+        issuer: Address,
         spec: CoinSpec,
     ) -> Result<TokenDefinition, LedgerError> {
         validate_spec(&spec)?;

@@ -1,9 +1,64 @@
-use commonware_codec::{Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
-use nunchi_crypto::{Curve, PublicKey};
+use commonware_codec::{Encode, EncodeSize, Error, FixedSize, RangeCfg, Read, ReadExt, Write};
+use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+use nunchi_crypto::PublicKey;
 use thiserror::Error;
 
+const ADDRESS_DOMAIN: &[u8] = b"nunchi/account/v1";
+const ADDRESS_EXTERNAL: u8 = 0;
+const ADDRESS_MULTISIG: u8 = 1;
 const ACCOUNT_TYPE_EXTERNAL: u8 = 0;
 const ACCOUNT_TYPE_MULTISIG: u8 = 1;
+
+/// A unified Nunchi account address.
+///
+/// Addresses are derived identifiers, not public keys. Different account kinds
+/// hash typed material into the same fixed-width address space.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct Address(Digest);
+
+impl Address {
+    pub fn external(public_key: &PublicKey) -> Self {
+        Self::derive(ADDRESS_EXTERNAL, &public_key.encode())
+    }
+
+    pub fn multisig(policy: &MultisigPolicy) -> Self {
+        Self::derive(ADDRESS_MULTISIG, &policy.encode())
+    }
+
+    fn derive(kind: u8, material: &[u8]) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(ADDRESS_DOMAIN);
+        hasher.update(&[kind]);
+        hasher.update(material);
+        Self(hasher.finalize())
+    }
+}
+
+impl From<PublicKey> for Address {
+    fn from(value: PublicKey) -> Self {
+        Self::external(&value)
+    }
+}
+
+impl Write for Address {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.0.write(buf);
+    }
+}
+
+impl Read for Address {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+        Ok(Self(Digest::read(buf)?))
+    }
+}
+
+impl EncodeSize for Address {
+    fn encode_size(&self) -> usize {
+        Digest::SIZE
+    }
+}
 
 /// Authorization scheme expected for an account.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,13 +121,6 @@ impl MultisigPolicy {
                 signers: signers.len(),
             });
         }
-        if signers
-            .iter()
-            .any(|signer| signer.curve() == Curve::Synthetic)
-        {
-            return Err(AccountPolicyError::SyntheticSigner);
-        }
-
         let original_signers = signers.len();
         signers.sort_by_cached_key(|signer| signer.encode().as_ref().to_vec());
         signers.dedup();
@@ -129,8 +177,6 @@ pub enum AccountPolicyError {
     ThresholdExceedsSigners { threshold: u16, signers: usize },
     #[error("multisig signers must be unique")]
     DuplicateSigner,
-    #[error("synthetic account identifiers cannot be multisig signers")]
-    SyntheticSigner,
     #[error("multisig has {actual} signers, but the maximum is {max}")]
     TooManySigners { max: usize, actual: usize },
 }
