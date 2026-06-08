@@ -1,321 +1,193 @@
-use crate::application::Application;
-use crate::{Block, Finalization, Scheme, EPOCH, EPOCH_LENGTH, NAMESPACE};
+use crate::{
+    application::Application, Block, EpochProvider, Finalization, Provider, PublicKey, Scheme,
+    BLOCKS_PER_EPOCH, NAMESPACE,
+};
 use commonware_broadcast::buffered;
 use commonware_consensus::{
     marshal::{
         self,
-        core::{Actor as MarshalActor, Mailbox as MarshalMailbox},
-        resolver::handler,
+        core::Actor as MarshalActor,
+        resolver,
         standard::{Deferred, Standard},
+        Update,
     },
-    simplex::{self, elector::Random, Engine as Consensus},
-    types::{Epoch, FixedEpocher, ViewDelta},
+    simplex::elector::Random,
+    types::{FixedEpocher, ViewDelta},
+    Reporters,
 };
 use commonware_cryptography::{
-    bls12381::primitives::{group, sharing::Sharing, variant::MinSig},
-    certificate::{ConstantProvider, Scheme as _},
-    ed25519::PublicKey,
+    bls12381::{
+        dkg::feldman_desmedt::Output,
+        primitives::{group, variant::MinSig},
+    },
+    certificate::Scheme as _,
+    ed25519::{self, Batch},
     sha256::Digest,
-    Digestible,
+    BatchVerifier, Digestible, Signer,
 };
-use commonware_p2p::{Blocker, Provider, Receiver, Sender};
+use commonware_p2p::{Blocker, Manager, Receiver, Sender};
 use commonware_parallel::Strategy;
-use commonware_resolver::TargetedResolver;
 use commonware_runtime::{
     buffer::paged::CacheRef, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics,
-    Spawner, Storage, ThreadPooler,
+    Network, Spawner, Storage,
 };
 use commonware_storage::archive::immutable;
-use commonware_utils::{ordered::Set, NZU16};
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::{union, NZUsize, NZU16, NZU64};
 use futures::future::try_join_all;
-use governor::clock::Clock as GClock;
-use governor::Quota;
-use rand::{CryptoRng, Rng};
+use nunchi_dkg::{self as dkg, orchestrator, PeerConfig, UpdateCallBack, MAX_SUPPORTED_MODE};
+use rand_core::CryptoRngCore;
 use std::{
-    num::NonZero,
+    marker::PhantomData,
+    num::{NonZero, NonZeroU16, NonZeroUsize},
     time::{Duration, Instant},
 };
 use tracing::{error, info, warn};
 
-/// To better support peers near tip during network instability, we multiply
-/// the consensus activity timeout by this factor.
+const MAILBOX_SIZE: NonZeroUsize = NZUsize!(1024);
+const DEQUE_SIZE: usize = 10;
+const ACTIVITY_TIMEOUT: ViewDelta = ViewDelta::new(256);
 const SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER: u64 = 10;
 const PRUNABLE_ITEMS_PER_SECTION: NonZero<u64> = NZU64!(4_096);
 const IMMUTABLE_ITEMS_PER_SECTION: NonZero<u64> = NZU64!(262_144);
 const FREEZER_TABLE_RESIZE_FREQUENCY: u8 = 4;
 const FREEZER_TABLE_RESIZE_CHUNK_SIZE: u32 = 2u32.pow(16); // 3MB
-const FREEZER_JOURNAL_TARGET_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
-const FREEZER_JOURNAL_COMPRESSION: Option<u8> = Some(3);
+const FREEZER_VALUE_TARGET_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
+const FREEZER_VALUE_COMPRESSION: Option<u8> = Some(3);
 const REPLAY_BUFFER: NonZero<usize> = NZUsize!(8 * 1024 * 1024); // 8MB
 const WRITE_BUFFER: NonZero<usize> = NZUsize!(1024 * 1024); // 1MB
-const PAGE_CACHE_PAGE_SIZE: NonZero<u16> = NZU16!(4_096); // 4KB
+const PAGE_CACHE_PAGE_SIZE: NonZeroU16 = NZU16!(4_096); // 4KB
 const PAGE_CACHE_CAPACITY: NonZero<usize> = NZUsize!(8_192); // 32MB
-const MAX_REPAIR: NonZero<usize> = NZUsize!(20);
+const MAX_REPAIR: NonZero<usize> = NZUsize!(50);
 const MAX_PENDING_ACKS: NonZero<usize> = NZUsize!(16);
 
 /// Configuration for the [Engine].
-pub struct Config<
-    B: Blocker<PublicKey = PublicKey>,
-    P: Provider<PublicKey = PublicKey>,
-    S: Strategy,
-> {
+pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = PublicKey>, S: Strategy>
+{
     pub blocker: B,
-    pub provider: P,
+    pub manager: P,
     pub partition_prefix: String,
     pub blocks_freezer_table_initial_size: u32,
     pub finalized_freezer_table_initial_size: u32,
-    pub me: PublicKey,
-    pub polynomial: Sharing<MinSig>,
-    pub share: group::Share,
-    pub participants: Set<PublicKey>,
-    pub mailbox_size: usize,
-    pub deque_size: usize,
-
+    pub signer: ed25519::PrivateKey,
+    pub output: Output<MinSig, PublicKey>,
+    pub share: Option<group::Share>,
+    pub peer_config: PeerConfig<PublicKey>,
     pub leader_timeout: Duration,
     pub certification_timeout: Duration,
-    pub nullify_retry: Duration,
-    pub fetch_timeout: Duration,
-    pub activity_timeout: ViewDelta,
-    pub skip_timeout: ViewDelta,
-    pub max_fetch_count: usize,
-    pub max_fetch_size: usize,
-    pub fetch_concurrent: usize,
-    pub fetch_rate_per_peer: Quota,
-
     pub strategy: S,
 }
 
+type DkgActor<E, P> = dkg::Actor<E, P, Block>;
+type DkgMailbox = dkg::Mailbox<Block>;
 type Marshaled<E> = Deferred<E, Scheme, Application, Block, FixedEpocher>;
+type SchemeProvider = Provider<Scheme, ed25519::PrivateKey>;
 type FinalizationsArchive<E> = immutable::Archive<E, Digest, Finalization>;
 type BlocksArchive<E> = immutable::Archive<E, Digest, Block>;
 type Marshal<E, S> = MarshalActor<
     E,
     Standard<Block>,
-    ConstantProvider<Scheme, Epoch>,
+    SchemeProvider,
     FinalizationsArchive<E>,
     BlocksArchive<E>,
     FixedEpocher,
     S,
 >;
-type ConsensusEngine<E, B, S> = Consensus<
-    E,
-    Scheme,
-    Random,
-    B,
-    Digest,
-    Marshaled<E>,
-    Marshaled<E>,
-    MarshalMailbox<Scheme, Standard<Block>>,
-    S,
->;
-
-struct Archives<E>
-where
-    E: BufferPooler + Clock + Metrics + Storage,
-{
-    finalizations_by_height: FinalizationsArchive<E>,
-    finalized_blocks: BlocksArchive<E>,
-}
-
-struct ConsensusMaterials {
-    scheme: Scheme,
-    certificate_provider: ConstantProvider<Scheme, Epoch>,
-    epocher: FixedEpocher,
-    genesis: Block,
-    genesis_digest: Digest,
-}
-
-struct MarshalInputs<E, S>
-where
-    E: BufferPooler + Clock + Metrics + Storage,
-{
-    partition_prefix: String,
-    mailbox_size: usize,
-    activity_timeout: ViewDelta,
-    archives: Archives<E>,
-    page_cache: CacheRef,
-    provider: ConstantProvider<Scheme, Epoch>,
-    epocher: FixedEpocher,
-    genesis: Block,
-    strategy: S,
-}
+type Orchestrator<E, B, S> = orchestrator::Actor<E, B, Marshaled<E>, Scheme, Random, S, Block>;
 
 /// The engine that drives the [Application].
 #[allow(clippy::type_complexity)]
 pub struct Engine<E, B, P, S>
 where
-    E: BufferPooler + Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
+    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
     B: Blocker<PublicKey = PublicKey>,
-    P: Provider<PublicKey = PublicKey>,
+    P: Manager<PublicKey = PublicKey>,
     S: Strategy,
 {
     context: ContextCell<E>,
-
+    config: Config<B, P, S>,
+    dkg: DkgActor<E, P>,
+    dkg_mailbox: DkgMailbox,
     buffer: buffered::Engine<E, PublicKey, Block, P>,
-    buffer_mailbox: buffered::Mailbox<PublicKey, Block>,
+    buffered_mailbox: buffered::Mailbox<PublicKey, Block>,
     marshal: Marshal<E, S>,
     marshaled: Marshaled<E>,
-
-    consensus: ConsensusEngine<E, B, S>,
+    orchestrator: Orchestrator<E, B, S>,
+    orchestrator_mailbox: orchestrator::Mailbox<MinSig, PublicKey>,
 }
 
 impl<E, B, P, S> Engine<E, B, P, S>
 where
-    E: BufferPooler + Clock + GClock + Rng + CryptoRng + Spawner + ThreadPooler + Storage + Metrics,
+    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
     B: Blocker<PublicKey = PublicKey>,
-    P: Provider<PublicKey = PublicKey>,
+    P: Manager<PublicKey = PublicKey>,
     S: Strategy,
+    Batch: BatchVerifier<PublicKey = PublicKey>,
 {
     /// Create a new [Engine].
-    pub async fn new(context: E, cfg: Config<B, P, S>) -> Self {
-        let Config {
-            blocker,
-            provider,
-            partition_prefix,
-            blocks_freezer_table_initial_size,
-            finalized_freezer_table_initial_size,
-            me,
-            polynomial,
-            share,
-            participants,
-            mailbox_size,
-            deque_size,
-            leader_timeout,
-            certification_timeout,
-            nullify_retry,
-            fetch_timeout,
-            activity_timeout,
-            skip_timeout,
-            max_fetch_count: _,
-            max_fetch_size: _,
-            fetch_concurrent,
-            fetch_rate_per_peer: _,
-            strategy,
-        } = cfg;
+    pub async fn new(context: E, config: Config<B, P, S>) -> Self {
+        let page_cache = CacheRef::from_pooler(&context, PAGE_CACHE_PAGE_SIZE, PAGE_CACHE_CAPACITY);
+        let consensus_namespace = union(NAMESPACE, b"_CONSENSUS");
+        let num_participants =
+            commonware_utils::NZU32!(config.peer_config.max_participants_per_round());
 
-        let page_cache = Self::create_page_cache(&context);
-        let (buffer, buffer_mailbox) =
-            Self::create_buffer(&context, me, mailbox_size, deque_size, provider);
-        let archives = Self::init_archives(
-            &context,
-            &partition_prefix,
-            blocks_freezer_table_initial_size,
-            finalized_freezer_table_initial_size,
-            &page_cache,
-        )
-        .await;
-        let materials = Self::create_consensus_materials(participants, polynomial, share);
-        let (marshal, marshal_mailbox) = Self::init_marshal(
-            &context,
-            MarshalInputs {
-                partition_prefix: partition_prefix.clone(),
-                mailbox_size,
-                activity_timeout,
-                archives,
-                page_cache: page_cache.clone(),
-                provider: materials.certificate_provider,
-                epocher: materials.epocher.clone(),
-                genesis: materials.genesis,
-                strategy: strategy.clone(),
+        let (dkg, dkg_mailbox) = dkg::Actor::new(
+            context.child("dkg"),
+            dkg::Config {
+                manager: config.manager.clone(),
+                signer: config.signer.clone(),
+                mailbox_size: MAILBOX_SIZE,
+                partition_prefix: config.partition_prefix.clone(),
+                peer_config: config.peer_config.clone(),
+                max_supported_mode: MAX_SUPPORTED_MODE,
+                namespace: NAMESPACE.to_vec(),
+                epoch_length: BLOCKS_PER_EPOCH,
             },
-        )
-        .await;
-        let marshaled =
-            Self::create_marshaled(&context, marshal_mailbox.clone(), materials.epocher);
-        let consensus = Self::create_consensus(
-            &context,
-            partition_prefix,
-            mailbox_size,
-            leader_timeout,
-            certification_timeout,
-            nullify_retry,
-            fetch_timeout,
-            activity_timeout,
-            skip_timeout,
-            fetch_concurrent,
-            blocker,
-            page_cache,
-            materials.scheme,
-            materials.genesis_digest,
-            marshaled.clone(),
-            marshal_mailbox,
-            strategy,
         );
 
-        Self {
-            context: ContextCell::new(context),
-            buffer,
-            buffer_mailbox,
-            marshal,
-            marshaled,
-            consensus,
-        }
-    }
-
-    fn create_page_cache(context: &E) -> CacheRef {
-        CacheRef::from_pooler(context, PAGE_CACHE_PAGE_SIZE, PAGE_CACHE_CAPACITY)
-    }
-
-    fn create_buffer(
-        context: &E,
-        public_key: PublicKey,
-        mailbox_size: usize,
-        deque_size: usize,
-        provider: P,
-    ) -> (
-        buffered::Engine<E, PublicKey, Block, P>,
-        buffered::Mailbox<PublicKey, Block>,
-    ) {
-        buffered::Engine::new(
+        let (buffer, buffered_mailbox) = buffered::Engine::new(
             context.child("buffer"),
             buffered::Config {
-                public_key,
-                mailbox_size: NZUsize!(mailbox_size),
-                deque_size,
+                public_key: config.signer.public_key(),
+                mailbox_size: MAILBOX_SIZE,
+                deque_size: DEQUE_SIZE,
                 priority: true,
-                codec_config: (),
-                peer_provider: provider,
+                codec_config: num_participants,
+                peer_provider: config.manager.clone(),
             },
-        )
-    }
+        );
 
-    async fn init_archives(
-        context: &E,
-        partition_prefix: &str,
-        blocks_freezer_table_initial_size: u32,
-        finalized_freezer_table_initial_size: u32,
-        page_cache: &CacheRef,
-    ) -> Archives<E> {
         let start = Instant::now();
         let finalizations_by_height = immutable::Archive::init(
             context.child("finalizations_by_height"),
             immutable::Config {
                 metadata_partition: format!(
                     "{}-finalizations-by-height-metadata",
-                    partition_prefix
+                    config.partition_prefix
                 ),
                 freezer_table_partition: format!(
                     "{}-finalizations-by-height-freezer-table",
-                    partition_prefix
+                    config.partition_prefix
                 ),
-                freezer_table_initial_size: finalized_freezer_table_initial_size,
+                freezer_table_initial_size: config.finalized_freezer_table_initial_size,
                 freezer_table_resize_frequency: FREEZER_TABLE_RESIZE_FREQUENCY,
                 freezer_table_resize_chunk_size: FREEZER_TABLE_RESIZE_CHUNK_SIZE,
                 freezer_key_partition: format!(
-                    "{}-finalizations-by-height-freezer-key-journal",
-                    partition_prefix
+                    "{}-finalizations-by-height-freezer-key",
+                    config.partition_prefix
                 ),
                 freezer_key_page_cache: page_cache.clone(),
                 freezer_key_write_buffer: WRITE_BUFFER,
                 freezer_value_partition: format!(
-                    "{}-finalizations-by-height-freezer-value-journal",
-                    partition_prefix
+                    "{}-finalizations-by-height-freezer-value",
+                    config.partition_prefix
                 ),
                 freezer_value_write_buffer: WRITE_BUFFER,
-                freezer_value_target_size: FREEZER_JOURNAL_TARGET_SIZE,
-                freezer_value_compression: FREEZER_JOURNAL_COMPRESSION,
-                ordinal_partition: format!("{}-finalizations-by-height-ordinal", partition_prefix),
+                freezer_value_target_size: FREEZER_VALUE_TARGET_SIZE,
+                freezer_value_compression: FREEZER_VALUE_COMPRESSION,
+                ordinal_partition: format!(
+                    "{}-finalizations-by-height-ordinal",
+                    config.partition_prefix
+                ),
                 ordinal_write_buffer: WRITE_BUFFER,
                 items_per_section: IMMUTABLE_ITEMS_PER_SECTION,
                 codec_config: Scheme::certificate_codec_config_unbounded(),
@@ -326,36 +198,38 @@ where
         .expect("failed to initialize finalizations by height archive");
         info!(elapsed = ?start.elapsed(), "restored finalizations by height archive");
 
-        // Initialize finalized blocks
         let start = Instant::now();
         let finalized_blocks = immutable::Archive::init(
             context.child("finalized_blocks"),
             immutable::Config {
-                metadata_partition: format!("{}-finalized_blocks-metadata", partition_prefix),
+                metadata_partition: format!(
+                    "{}-finalized_blocks-metadata",
+                    config.partition_prefix
+                ),
                 freezer_table_partition: format!(
                     "{}-finalized_blocks-freezer-table",
-                    partition_prefix
+                    config.partition_prefix
                 ),
-                freezer_table_initial_size: blocks_freezer_table_initial_size,
+                freezer_table_initial_size: config.blocks_freezer_table_initial_size,
                 freezer_table_resize_frequency: FREEZER_TABLE_RESIZE_FREQUENCY,
                 freezer_table_resize_chunk_size: FREEZER_TABLE_RESIZE_CHUNK_SIZE,
                 freezer_key_partition: format!(
-                    "{}-finalized-blocks-freezer-key-journal",
-                    partition_prefix
+                    "{}-finalized_blocks-freezer-key",
+                    config.partition_prefix
                 ),
                 freezer_key_page_cache: page_cache.clone(),
                 freezer_key_write_buffer: WRITE_BUFFER,
                 freezer_value_partition: format!(
-                    "{}-finalized-blocks-freezer-value-journal",
-                    partition_prefix
+                    "{}-finalized_blocks-freezer-value",
+                    config.partition_prefix
                 ),
                 freezer_value_write_buffer: WRITE_BUFFER,
-                freezer_value_target_size: FREEZER_JOURNAL_TARGET_SIZE,
-                freezer_value_compression: FREEZER_JOURNAL_COMPRESSION,
-                ordinal_partition: format!("{}-finalized-blocks-ordinal", partition_prefix),
+                freezer_value_target_size: FREEZER_VALUE_TARGET_SIZE,
+                freezer_value_compression: FREEZER_VALUE_COMPRESSION,
+                ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
                 ordinal_write_buffer: WRITE_BUFFER,
                 items_per_section: IMMUTABLE_ITEMS_PER_SECTION,
-                codec_config: (),
+                codec_config: num_participants,
                 replay_buffer: REPLAY_BUFFER,
             },
         )
@@ -363,136 +237,93 @@ where
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
-        Archives {
-            finalizations_by_height,
-            finalized_blocks,
-        }
-    }
-
-    fn create_consensus_materials(
-        participants: Set<PublicKey>,
-        polynomial: Sharing<MinSig>,
-        share: group::Share,
-    ) -> ConsensusMaterials {
-        let scheme = Scheme::signer(NAMESPACE, participants, polynomial, share)
-            .expect("failed to create scheme");
-        let certificate_provider = ConstantProvider::new(scheme.clone());
-        let epocher = FixedEpocher::new(EPOCH_LENGTH);
+        let certificate_verifier = <SchemeProvider as EpochProvider>::certificate_verifier(
+            &consensus_namespace,
+            &config.output,
+        );
+        let provider = Provider::new(
+            consensus_namespace.clone(),
+            config.signer.clone(),
+            certificate_verifier,
+        );
         let genesis = Application::genesis();
         let genesis_digest = genesis.digest();
-
-        ConsensusMaterials {
-            scheme,
-            certificate_provider,
-            epocher,
-            genesis,
-            genesis_digest,
-        }
-    }
-
-    async fn init_marshal(
-        context: &E,
-        inputs: MarshalInputs<E, S>,
-    ) -> (Marshal<E, S>, MarshalMailbox<Scheme, Standard<Block>>) {
-        let (marshal, marshal_mailbox, _) = MarshalActor::init(
+        let (marshal, marshal_mailbox, _processed_height) = MarshalActor::init(
             context.child("marshal"),
-            inputs.archives.finalizations_by_height,
-            inputs.archives.finalized_blocks,
+            finalizations_by_height,
+            finalized_blocks,
             marshal::Config {
-                provider: inputs.provider,
-                epocher: inputs.epocher,
-                partition_prefix: inputs.partition_prefix,
-                mailbox_size: NZUsize!(inputs.mailbox_size),
+                provider: provider.clone(),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                start: marshal::Start::Genesis(genesis),
+                partition_prefix: format!("{}_marshal", config.partition_prefix),
+                mailbox_size: MAILBOX_SIZE,
                 view_retention_timeout: ViewDelta::new(
-                    inputs
-                        .activity_timeout
+                    ACTIVITY_TIMEOUT
                         .get()
                         .saturating_mul(SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER),
                 ),
-                start: marshal::Start::Genesis(inputs.genesis),
                 prunable_items_per_section: PRUNABLE_ITEMS_PER_SECTION,
+                page_cache: page_cache.clone(),
                 replay_buffer: REPLAY_BUFFER,
                 key_write_buffer: WRITE_BUFFER,
                 value_write_buffer: WRITE_BUFFER,
-                block_codec_config: (),
+                block_codec_config: num_participants,
                 max_repair: MAX_REPAIR,
                 max_pending_acks: MAX_PENDING_ACKS,
-                page_cache: inputs.page_cache,
-                strategy: inputs.strategy,
+                strategy: config.strategy.clone(),
             },
         )
         .await;
 
-        (marshal, marshal_mailbox)
-    }
+        let application = Deferred::new(
+            context.child("application"),
+            Application::with_dkg(dkg_mailbox.clone()),
+            marshal_mailbox.clone(),
+            FixedEpocher::new(BLOCKS_PER_EPOCH),
+        );
 
-    fn create_marshaled(
-        context: &E,
-        marshal_mailbox: MarshalMailbox<Scheme, Standard<Block>>,
-        epocher: FixedEpocher,
-    ) -> Marshaled<E> {
-        let app = Application::new();
-        Marshaled::new(context.child("marshaled"), app, marshal_mailbox, epocher)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn create_consensus(
-        context: &E,
-        partition_prefix: String,
-        mailbox_size: usize,
-        leader_timeout: Duration,
-        certification_timeout: Duration,
-        nullify_retry: Duration,
-        fetch_timeout: Duration,
-        activity_timeout: ViewDelta,
-        skip_timeout: ViewDelta,
-        fetch_concurrent: usize,
-        blocker: B,
-        page_cache: CacheRef,
-        scheme: Scheme,
-        genesis_digest: Digest,
-        marshaled: Marshaled<E>,
-        marshal_mailbox: MarshalMailbox<Scheme, Standard<Block>>,
-        strategy: S,
-    ) -> ConsensusEngine<E, B, S> {
-        Consensus::new(
-            context.child("consensus"),
-            simplex::Config {
-                epoch: EPOCH,
-                scheme,
-                automaton: marshaled.clone(),
-                relay: marshaled,
-                reporter: marshal_mailbox,
-                partition: format!("{}-consensus", partition_prefix),
-                mailbox_size: NZUsize!(mailbox_size),
-                floor: simplex::Floor::Genesis(genesis_digest),
-                leader_timeout,
-                certification_timeout,
-                timeout_retry: nullify_retry,
-                fetch_timeout,
-                activity_timeout,
-                skip_timeout,
-                fetch_concurrent: NZUsize!(fetch_concurrent),
-                forwarding: simplex::ForwardingPolicy::Disabled,
-                replay_buffer: REPLAY_BUFFER,
-                write_buffer: WRITE_BUFFER,
-                blocker,
-                page_cache,
-                elector: Random,
-                strategy,
+        let (orchestrator, orchestrator_mailbox) = orchestrator::Actor::new(
+            context.child("orchestrator"),
+            orchestrator::Config {
+                oracle: config.blocker.clone(),
+                application: application.clone(),
+                provider,
+                marshal: marshal_mailbox,
+                strategy: config.strategy.clone(),
+                leader_timeout: config.leader_timeout,
+                certification_timeout: config.certification_timeout,
+                muxer_size: MAILBOX_SIZE.get(),
+                mailbox_size: MAILBOX_SIZE,
+                partition_prefix: format!("{}_consensus", config.partition_prefix),
+                epoch_length: BLOCKS_PER_EPOCH,
+                genesis_digest,
+                _phantom: PhantomData,
             },
-        )
+        );
+
+        Self {
+            context: ContextCell::new(context),
+            config,
+            dkg,
+            dkg_mailbox,
+            buffer,
+            buffered_mailbox,
+            marshal,
+            marshaled: application,
+            orchestrator,
+            orchestrator_mailbox,
+        }
     }
 
-    /// Start the [simplex::Engine].
     #[allow(clippy::too_many_arguments)]
     pub fn start(
         mut self,
-        pending: (
+        votes: (
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
-        recovered: (
+        certificates: (
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
@@ -504,29 +335,38 @@ where
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
-        marshal: (
-            handler::Receiver<Digest>,
-            impl TargetedResolver<
-                Key = handler::Key<Digest>,
-                Subscriber = handler::Annotation,
-                PublicKey = PublicKey,
-            >,
+        dkg: (
+            impl Sender<PublicKey = PublicKey>,
+            impl Receiver<PublicKey = PublicKey>,
         ),
+        marshal: (
+            resolver::handler::Receiver<Digest>,
+            resolver::p2p::Mailbox<Digest, PublicKey>,
+        ),
+        callback: Box<dyn UpdateCallBack<MinSig, PublicKey>>,
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
-            self.run(pending, recovered, resolver, broadcast, marshal)
+            self.run(
+                votes,
+                certificates,
+                resolver,
+                broadcast,
+                dkg,
+                marshal,
+                callback
+            )
         )
     }
 
     #[allow(clippy::too_many_arguments)]
     async fn run(
         self,
-        pending: (
+        votes: (
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
-        recovered: (
+        certificates: (
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
@@ -538,32 +378,38 @@ where
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
-        marshal: (
-            handler::Receiver<Digest>,
-            impl TargetedResolver<
-                Key = handler::Key<Digest>,
-                Subscriber = handler::Annotation,
-                PublicKey = PublicKey,
-            >,
+        dkg: (
+            impl Sender<PublicKey = PublicKey>,
+            impl Receiver<PublicKey = PublicKey>,
         ),
+        marshal: (
+            resolver::handler::Receiver<Digest>,
+            resolver::p2p::Mailbox<Digest, PublicKey>,
+        ),
+        callback: Box<dyn UpdateCallBack<MinSig, PublicKey>>,
     ) {
-        // Start the buffer
+        let dkg_handle = self.dkg.start(
+            Some(self.config.output),
+            self.config.share,
+            self.orchestrator_mailbox,
+            dkg,
+            callback,
+        );
         let buffer_handle = self.buffer.start(broadcast);
-
-        // Start marshal
+        let reporters = Reporters::<Update<Block>, _, _>::from((self.marshaled, self.dkg_mailbox));
         let marshal_handle = self
             .marshal
-            .start(self.marshaled, self.buffer_mailbox, marshal);
+            .start(reporters, self.buffered_mailbox, marshal);
+        let orchestrator_handle = self.orchestrator.start(votes, certificates, resolver);
 
-        // Start consensus
-        //
-        // We start the application prior to consensus to ensure we can handle enqueued events from consensus (otherwise
-        // restart could block).
-        let consensus_handle = self.consensus.start(pending, recovered, resolver);
-
-        // Wait for any actor to finish
-        let handles: Vec<Handle<()>> = vec![buffer_handle, marshal_handle, consensus_handle];
-        if let Err(e) = try_join_all(handles).await {
+        if let Err(e) = try_join_all(vec![
+            dkg_handle,
+            buffer_handle,
+            marshal_handle,
+            orchestrator_handle,
+        ])
+        .await
+        {
             error!(?e, "engine failed");
         } else {
             warn!("engine stopped");

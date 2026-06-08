@@ -20,8 +20,11 @@ commonware-storage = { workspace = true }
 commonware-stream = { workspace = true }
 commonware-utils = { workspace = true }
 commonware-parallel = { workspace = true }
+commonware-math = { workspace = true }
+nunchi-dkg = { workspace = true }
 bytes = { workspace = true }
 rand = { workspace = true }
+rand_core = { workspace = true }
 thiserror = { workspace = true }
 futures = { workspace = true }
 tracing = { workspace = true }
@@ -30,5 +33,4 @@ serde = { version = "1.0.219", features = ["derive"] }
 prometheus-client = { workspace = true }
 
 [dev-dependencies]
-commonware-math = { workspace = true }
 tracing-subscriber = { version = "0.3.19", features = ["fmt", "json"] }

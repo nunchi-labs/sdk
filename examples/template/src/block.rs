@@ -2,11 +2,20 @@ use crate::consensus::{Context, Finalization, Notarization, Scheme};
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_consensus::{types::Height, CertifiableBlock, Heightable};
-use commonware_cryptography::{sha256::Digest, Digestible, Hasher, Sha256};
+use commonware_cryptography::{
+    ed25519,
+    sha256::{Digest, Sha256},
+    Committable, Digest as EmptyDigest, Digestible, Hasher, Signer,
+};
 use commonware_parallel::Strategy;
+use nunchi_dkg::{DealerLog, ReshareBlock};
 use rand::rngs::OsRng;
+use std::num::NonZeroU32;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Genesis message to use during initialization.
+const GENESIS: &[u8] = b"commonware is neat";
+
+#[derive(Clone, Debug)]
 pub struct Block {
     /// The consensus context when this block was proposed.
     pub context: Context,
@@ -20,9 +29,25 @@ pub struct Block {
     /// The timestamp of the block (in milliseconds since the Unix epoch).
     pub timestamp: u64,
 
+    /// An optional outcome of a dealing operation.
+    pub log: Option<DealerLog>,
+
     /// Pre-computed digest of the block.
     digest: Digest,
 }
+
+impl PartialEq for Block {
+    fn eq(&self, other: &Self) -> bool {
+        self.context == other.context
+            && self.parent == other.parent
+            && self.height == other.height
+            && self.timestamp == other.timestamp
+            && self.digest == other.digest
+            && self.log.encode() == other.log.encode()
+    }
+}
+
+impl Eq for Block {}
 
 impl Block {
     fn compute_digest(
@@ -30,22 +55,31 @@ impl Block {
         parent: &Digest,
         height: Height,
         timestamp: u64,
+        log: &Option<DealerLog>,
     ) -> Digest {
         let mut hasher = Sha256::new();
         hasher.update(&context.encode());
         hasher.update(parent);
         hasher.update(&height.get().to_be_bytes());
         hasher.update(&timestamp.to_be_bytes());
+        hasher.update(&log.encode());
         hasher.finalize()
     }
 
-    pub fn new(context: Context, parent: Digest, height: Height, timestamp: u64) -> Self {
-        let digest = Self::compute_digest(&context, &parent, height, timestamp);
+    pub fn new(
+        context: Context,
+        parent: Digest,
+        height: Height,
+        timestamp: u64,
+        log: Option<DealerLog>,
+    ) -> Self {
+        let digest = Self::compute_digest(&context, &parent, height, timestamp, &log);
         Self {
             context,
             parent,
             height,
             timestamp,
+            log,
             digest,
         }
     }
@@ -57,24 +91,27 @@ impl Write for Block {
         self.parent.write(writer);
         self.height.write(writer);
         UInt(self.timestamp).write(writer);
+        self.log.write(writer);
     }
 }
 
 impl Read for Block {
-    type Cfg = ();
+    type Cfg = NonZeroU32;
 
-    fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let context = Context::read(reader)?;
         let parent = Digest::read(reader)?;
         let height = Height::read(reader)?;
         let timestamp = UInt::read(reader)?.0;
+        let log = Read::read_cfg(reader, cfg)?;
 
-        let digest = Self::compute_digest(&context, &parent, height, timestamp);
+        let digest = Self::compute_digest(&context, &parent, height, timestamp, &log);
         Ok(Self {
             context,
             parent,
             height,
             timestamp,
+            log,
             digest,
         })
     }
@@ -86,6 +123,7 @@ impl EncodeSize for Block {
             + self.parent.encode_size()
             + self.height.encode_size()
             + UInt(self.timestamp).encode_size()
+            + self.log.encode_size()
     }
 }
 
@@ -95,6 +133,31 @@ impl Digestible for Block {
     fn digest(&self) -> Digest {
         self.digest
     }
+}
+
+impl Committable for Block {
+    type Commitment = Digest;
+
+    fn commitment(&self) -> Digest {
+        self.digest()
+    }
+}
+
+pub fn genesis() -> Block {
+    use commonware_consensus::types::{Epoch, Round, View};
+
+    let genesis_context = Context {
+        round: Round::new(Epoch::zero(), View::zero()),
+        leader: ed25519::PrivateKey::from_seed(0).public_key(),
+        parent: (View::zero(), <Digest as EmptyDigest>::EMPTY),
+    };
+    Block::new(
+        genesis_context,
+        Sha256::hash(GENESIS),
+        Height::zero(),
+        0,
+        None,
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -121,13 +184,12 @@ impl Write for Notarized {
 }
 
 impl Read for Notarized {
-    type Cfg = ();
+    type Cfg = NonZeroU32;
 
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let proof = Notarization::read(buf)?;
-        let block = Block::read(buf)?;
+        let block = Block::read_cfg(buf, cfg)?;
 
-        // Ensure the proof is for the block
         if proof.proposal.payload != block.digest() {
             return Err(Error::Invalid(
                 "types::Notarized",
@@ -168,13 +230,12 @@ impl Write for Finalized {
 }
 
 impl Read for Finalized {
-    type Cfg = ();
+    type Cfg = NonZeroU32;
 
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let proof = Finalization::read(buf)?;
-        let block = Block::read(buf)?;
+        let block = Block::read_cfg(buf, cfg)?;
 
-        // Ensure the proof is for the block
         if proof.proposal.payload != block.digest() {
             return Err(Error::Invalid(
                 "types::Finalized",
@@ -208,5 +269,11 @@ impl CertifiableBlock for Block {
 
     fn context(&self) -> Self::Context {
         self.context.clone()
+    }
+}
+
+impl ReshareBlock for Block {
+    fn reshare_log(&self) -> Option<&DealerLog> {
+        self.log.as_ref()
     }
 }

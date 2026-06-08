@@ -10,6 +10,7 @@ use commonware_cryptography::{ed25519, sha256, Digest as _, Digestible, Hasher, 
 use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_utils::{Acknowledgement, SystemTimeExt};
 use futures::StreamExt;
+use nunchi_dkg as dkg;
 use rand::Rng;
 use std::time::{Duration, SystemTime};
 use tracing::info;
@@ -25,6 +26,7 @@ const MAX_BLOCK_TIMESTAMP_MS: u64 = 7_258_118_400_000;
 pub struct Application {
     submitter: Submitter,
     max_block_transactions: usize,
+    dkg: Option<dkg::Mailbox<Block>>,
 }
 
 impl Application {
@@ -40,6 +42,7 @@ impl Application {
             Height::zero(),
             0,
             Vec::new(),
+            None,
         )
     }
 
@@ -47,6 +50,19 @@ impl Application {
         Self {
             submitter,
             max_block_transactions,
+            dkg: None,
+        }
+    }
+
+    pub fn with_dkg(
+        submitter: Submitter,
+        max_block_transactions: usize,
+        dkg: dkg::Mailbox<Block>,
+    ) -> Self {
+        Self {
+            submitter,
+            max_block_transactions,
+            dkg: Some(dkg),
         }
     }
 }
@@ -80,6 +96,10 @@ where
         );
 
         let transactions = self.submitter.pending(self.max_block_transactions).await;
+        let reshare_log = match &mut self.dkg {
+            Some(dkg) => dkg.act().await,
+            None => None,
+        };
 
         Some(Block::new(
             context,
@@ -87,6 +107,7 @@ where
             parent.height.next(),
             current,
             transactions,
+            reshare_log,
         ))
     }
 
@@ -137,6 +158,7 @@ impl Reporter for Application {
                 height = %block.height(),
                 digest = ?block.digest(),
                 transactions = block.transactions.len(),
+                has_reshare_log = block.reshare_log.is_some(),
                 "finalized block"
             );
             ack.acknowledge();

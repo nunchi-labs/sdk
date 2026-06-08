@@ -1,14 +1,12 @@
 mod common;
 
 use common::network::{
-    deterministic_state, lossy_link, reliable_link, TestNetworkBuilder, ValidatorConfig,
+    deterministic_state, lossy_link, reliable_link, TestNetworkBuilder, ThresholdFixture,
+    ValidatorConfig,
 };
-use commonware_consensus::simplex::scheme::bls12381_threshold::vrf as bls12381_threshold;
-use commonware_cryptography::bls12381::primitives::variant::MinSig;
 use commonware_macros::{select, test_traced};
-use commonware_p2p::simulated::Link;
 use commonware_runtime::{deterministic, Clock, Runner as _};
-use nunchi_template::NAMESPACE;
+use nunchi_template::BLOCKS_PER_EPOCH;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::time::Duration;
 use tracing::info;
@@ -32,13 +30,8 @@ fn reaches_height_with_lossy_links() {
 }
 
 #[test_traced]
-fn reaches_height_1k() {
-    let link = Link {
-        latency: Duration::from_millis(80),
-        jitter: Duration::from_millis(10),
-        success_rate: 0.98,
-    };
-    deterministic_state(10, 0, link, 1000);
+fn reaches_next_epoch_after_reshare() {
+    deterministic_state(5, 0, reliable_link(), BLOCKS_PER_EPOCH.get() + 25);
 }
 
 #[test_traced]
@@ -75,7 +68,7 @@ fn recovers_unclean_shutdown() {
     let n = 5;
     let required_container = 100;
     let mut rng = StdRng::seed_from_u64(0);
-    let fixture = bls12381_threshold::fixture::<MinSig, _>(&mut rng, NAMESPACE, n);
+    let fixture = ThresholdFixture::new(&mut rng, n);
 
     let mut runs = 0;
     let mut prev_checkpoint = None;

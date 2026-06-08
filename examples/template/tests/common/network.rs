@@ -1,8 +1,10 @@
-use commonware_consensus::{
-    marshal, simplex::scheme::bls12381_threshold::vrf as bls12381_threshold, types::ViewDelta,
-};
+use commonware_consensus::marshal;
 use commonware_cryptography::{
-    bls12381::primitives::variant::MinSig, certificate::mocks::Fixture, ed25519, Signer,
+    bls12381::{
+        dkg::feldman_desmedt::{deal, Output},
+        primitives::{group, variant::MinSig},
+    },
+    ed25519, Signer,
 };
 use commonware_p2p::{
     simulated::{self, Link, Network, Oracle, Receiver, Sender},
@@ -13,15 +15,18 @@ use commonware_runtime::{
     deterministic::{self, Runner},
     Clock, Metrics, Runner as _, Supervisor,
 };
-use commonware_utils::{ordered::Set, NZUsize, NZU32};
+use commonware_utils::{
+    ordered::{Map, Set},
+    N3f1, NZUsize, NZU32,
+};
 use governor::Quota;
+use nunchi_dkg::{ContinueOnUpdate, PeerConfig};
 use nunchi_template::{
     engine::{Config, Engine},
-    PublicKey, NAMESPACE,
+    PublicKey,
 };
 use std::{
     collections::{HashMap, HashSet},
-    num::NonZeroU32,
     time::Duration,
 };
 
@@ -32,15 +37,42 @@ const PENDING_CHANNEL: u64 = 0;
 const RECOVERED_CHANNEL: u64 = 1;
 const RESOLVER_CHANNEL: u64 = 2;
 const BROADCAST_CHANNEL: u64 = 3;
-const BACKFILL_CHANNEL: u64 = 4;
+const DKG_CHANNEL: u64 = 4;
+const BACKFILL_CHANNEL: u64 = 5;
 
 type Channel = (
     Sender<PublicKey, deterministic::Context>,
     Receiver<PublicKey>,
 );
 
-type ThresholdScheme = bls12381_threshold::Scheme<PublicKey, MinSig>;
-type ThresholdFixture = Fixture<ThresholdScheme>;
+#[derive(Clone)]
+pub(crate) struct ThresholdFixture {
+    output: Output<MinSig, PublicKey>,
+    shares: Map<PublicKey, group::Share>,
+    private_keys: Vec<ed25519::PrivateKey>,
+    participants: Vec<PublicKey>,
+}
+
+impl ThresholdFixture {
+    pub(crate) fn new(rng: impl rand_core::CryptoRngCore, validators: u32) -> Self {
+        let private_keys = (0..validators)
+            .map(|seed| ed25519::PrivateKey::from_seed(seed as u64))
+            .collect::<Vec<_>>();
+        let participants = private_keys
+            .iter()
+            .map(|signer| signer.public_key())
+            .collect::<Vec<_>>();
+        let participants_set = Set::from_iter_dedup(participants.clone());
+        let (output, shares) = deal::<MinSig, _, N3f1>(rng, Default::default(), participants_set)
+            .expect("trusted initial deal should succeed");
+        Self {
+            output,
+            shares,
+            private_keys,
+            participants,
+        }
+    }
+}
 
 pub(crate) fn reliable_link() -> Link {
     Link {
@@ -78,6 +110,7 @@ struct ValidatorChannels {
     recovered: Channel,
     resolver: Channel,
     broadcast: Channel,
+    dkg: Channel,
     backfill: Channel,
 }
 
@@ -137,25 +170,30 @@ impl TestNetworkBuilder {
         );
         network.start();
 
-        let fixture = self.fixture.unwrap_or_else(|| {
-            bls12381_threshold::fixture::<MinSig, _>(context, NAMESPACE, self.validators)
-        });
-        let Fixture {
-            schemes,
+        let fixture = self
+            .fixture
+            .unwrap_or_else(|| ThresholdFixture::new(&mut *context, self.validators));
+        let ThresholdFixture {
+            output,
+            shares,
             private_keys,
             participants,
-            ..
         } = fixture;
         let registrations = register_validators(&mut oracle, &participants).await;
         let participants_set = Set::from_iter_dedup(participants.clone());
+        let peer_config = PeerConfig {
+            num_participants_per_round: vec![participants.len() as u32],
+            participants: participants_set.clone(),
+        };
 
         let mut network = TestNetwork {
             context,
             oracle,
-            schemes,
+            output,
+            shares,
             private_keys,
             participants,
-            participants_set,
+            peer_config,
             registrations,
             validator_config: self.validator_config,
         };
@@ -171,10 +209,11 @@ impl TestNetworkBuilder {
 pub(crate) struct TestNetwork<'a> {
     context: &'a deterministic::Context,
     oracle: Oracle<PublicKey, deterministic::Context>,
-    schemes: Vec<ThresholdScheme>,
+    output: Output<MinSig, PublicKey>,
+    shares: Map<PublicKey, group::Share>,
     private_keys: Vec<ed25519::PrivateKey>,
     participants: Vec<PublicKey>,
-    participants_set: Set<PublicKey>,
+    peer_config: PeerConfig<PublicKey>,
     registrations: HashMap<PublicKey, ValidatorChannels>,
     validator_config: ValidatorConfig,
 }
@@ -192,19 +231,26 @@ impl TestNetwork<'_> {
 
     pub(crate) async fn start_validator(&mut self, index: usize) {
         let signer = &self.private_keys[index];
-        let scheme = &self.schemes[index];
         let public_key = signer.public_key();
         let channels = self
             .registrations
             .remove(&public_key)
             .expect("validator was already started");
+        let share = self
+            .shares
+            .get_value(&public_key)
+            .cloned()
+            .expect("started validator must have an initial share");
 
         start_validator(
             self.context,
             &self.oracle,
-            signer,
-            scheme,
-            self.participants_set.clone(),
+            ValidatorIdentity {
+                signer,
+                output: self.output.clone(),
+                share,
+                peer_config: self.peer_config.clone(),
+            },
             channels,
             self.validator_config.clone(),
         )
@@ -322,6 +368,7 @@ async fn register_validators(
             .register(BROADCAST_CHANNEL, TEST_QUOTA)
             .await
             .unwrap();
+        let dkg = oracle.register(DKG_CHANNEL, TEST_QUOTA).await.unwrap();
         let backfill = oracle.register(BACKFILL_CHANNEL, TEST_QUOTA).await.unwrap();
         registrations.insert(
             validator.clone(),
@@ -330,6 +377,7 @@ async fn register_validators(
                 recovered,
                 resolver,
                 broadcast,
+                dkg,
                 backfill,
             },
         );
@@ -337,39 +385,40 @@ async fn register_validators(
     registrations
 }
 
+struct ValidatorIdentity<'a> {
+    signer: &'a ed25519::PrivateKey,
+    output: Output<MinSig, PublicKey>,
+    share: group::Share,
+    peer_config: PeerConfig<PublicKey>,
+}
+
 async fn start_validator(
     context: &deterministic::Context,
     oracle: &Oracle<PublicKey, deterministic::Context>,
-    signer: &ed25519::PrivateKey,
-    scheme: &ThresholdScheme,
-    participants: Set<PublicKey>,
+    identity: ValidatorIdentity<'_>,
     channels: ValidatorChannels,
     cfg: ValidatorConfig,
 ) {
+    let ValidatorIdentity {
+        signer,
+        output,
+        share,
+        peer_config,
+    } = identity;
     let public_key = signer.public_key();
     let uid = format!("validator_{public_key}");
     let config: Config<_, _, _> = Config {
         blocker: oracle.control(public_key.clone()),
-        provider: oracle.manager(),
+        manager: oracle.manager(),
         partition_prefix: uid.clone(),
         blocks_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
         finalized_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
-        me: signer.public_key(),
-        polynomial: scheme.polynomial().clone(),
-        share: scheme.share().cloned().unwrap(),
-        participants,
-        mailbox_size: 1024,
-        deque_size: 10,
+        signer: signer.clone(),
+        output,
+        share: Some(share),
+        peer_config,
         leader_timeout: cfg.leader_timeout,
         certification_timeout: cfg.certification_timeout,
-        nullify_retry: Duration::from_secs(10),
-        fetch_timeout: Duration::from_secs(1),
-        activity_timeout: ViewDelta::new(10),
-        skip_timeout: ViewDelta::new(5),
-        max_fetch_count: 10,
-        max_fetch_size: 1024 * 512,
-        fetch_concurrent: 10,
-        fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(10).unwrap()),
         strategy: Sequential,
     };
 
@@ -397,7 +446,9 @@ async fn start_validator(
         channels.recovered,
         channels.resolver,
         channels.broadcast,
+        channels.dkg,
         marshal_resolver,
+        ContinueOnUpdate::boxed(),
     );
 }
 
