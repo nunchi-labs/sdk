@@ -10,7 +10,7 @@ use crate::LedgerError;
 use async_trait::async_trait;
 use commonware_codec::{Encode, Read, ReadExt};
 use commonware_cryptography::sha256::Digest;
-use nunchi_common::state_db::{Namespace, StateDb};
+use nunchi_common::state_db::{Namespace, StateStore};
 
 /// Namespace owned by the coin module within the shared [`StateDb`].
 const NS: Namespace = Namespace::new(COINS_NAMESPACE);
@@ -79,19 +79,13 @@ pub trait CoinDB {
 
     /// Stage a balance. An amount of 0 removes the entry so empty balances leave no state.
     fn set_balance(&mut self, account: &Address, coin: &CoinId, amount: u128);
-
-    /// Flush staged writes, returning the new authenticated state root.
-    async fn commit(&mut self) -> Result<Digest, LedgerError>;
-
-    /// The most recently committed authenticated state root.
-    fn root(&self) -> Digest;
 }
 
 #[async_trait]
-impl<S: StateDb + Send + Sync> CoinDB for S {
+impl<S: StateStore + Send + Sync> CoinDB for S {
     async fn nonce(&self, id: &Address) -> Result<u64, LedgerError> {
         let key = NS.key(Table::Account, &encoded(id));
-        match StateDb::get(self, &key)
+        match StateStore::get(self, &key)
             .await
             .map_err(|err| LedgerError::Storage(err.to_string()))?
         {
@@ -102,12 +96,12 @@ impl<S: StateDb + Send + Sync> CoinDB for S {
 
     fn set_nonce(&mut self, id: &Address, nonce: u64) {
         let key = NS.key(Table::Account, &encoded(id));
-        StateDb::set(self, key, encoded(&nonce));
+        StateStore::set(self, key, encoded(&nonce));
     }
 
     async fn account_policy(&self, id: &Address) -> Result<Option<AccountPolicy>, LedgerError> {
         let key = NS.key(Table::AccountPolicy, &encoded(id));
-        match StateDb::get(self, &key)
+        match StateStore::get(self, &key)
             .await
             .map_err(|err| LedgerError::Storage(err.to_string()))?
         {
@@ -118,12 +112,12 @@ impl<S: StateDb + Send + Sync> CoinDB for S {
 
     fn set_account_policy(&mut self, id: &Address, policy: &AccountPolicy) {
         let key = NS.key(Table::AccountPolicy, &encoded(id));
-        StateDb::set(self, key, encoded(policy));
+        StateStore::set(self, key, encoded(policy));
     }
 
     async fn factory_nonce(&self) -> Result<u64, LedgerError> {
         let key = NS.key(Table::Factory, &[]);
-        match StateDb::get(self, &key)
+        match StateStore::get(self, &key)
             .await
             .map_err(|err| LedgerError::Storage(err.to_string()))?
         {
@@ -134,12 +128,12 @@ impl<S: StateDb + Send + Sync> CoinDB for S {
 
     fn set_factory_nonce(&mut self, nonce: u64) {
         let key = NS.key(Table::Factory, &[]);
-        StateDb::set(self, key, encoded(&nonce));
+        StateStore::set(self, key, encoded(&nonce));
     }
 
     async fn token(&self, coin: &CoinId) -> Result<Option<TokenDefinition>, LedgerError> {
         let key = NS.key(Table::Token, &encoded(coin));
-        match StateDb::get(self, &key)
+        match StateStore::get(self, &key)
             .await
             .map_err(|err| LedgerError::Storage(err.to_string()))?
         {
@@ -150,12 +144,12 @@ impl<S: StateDb + Send + Sync> CoinDB for S {
 
     fn set_token(&mut self, token: &TokenDefinition) {
         let key = NS.key(Table::Token, &encoded(&token.id));
-        StateDb::set(self, key, encoded(token));
+        StateStore::set(self, key, encoded(token));
     }
 
     async fn balance(&self, account: &Address, coin: &CoinId) -> Result<u128, LedgerError> {
         let key = balance_key(account, coin);
-        match StateDb::get(self, &key)
+        match StateStore::get(self, &key)
             .await
             .map_err(|err| LedgerError::Storage(err.to_string()))?
         {
@@ -167,19 +161,9 @@ impl<S: StateDb + Send + Sync> CoinDB for S {
     fn set_balance(&mut self, account: &Address, coin: &CoinId, amount: u128) {
         let key = balance_key(account, coin);
         if amount == 0 {
-            StateDb::remove(self, key);
+            StateStore::remove(self, key);
         } else {
-            StateDb::set(self, key, encoded(&amount));
+            StateStore::set(self, key, encoded(&amount));
         }
-    }
-
-    async fn commit(&mut self) -> Result<Digest, LedgerError> {
-        StateDb::commit(self)
-            .await
-            .map_err(|err| LedgerError::Storage(err.to_string()))
-    }
-
-    fn root(&self) -> Digest {
-        StateDb::root(self)
     }
 }

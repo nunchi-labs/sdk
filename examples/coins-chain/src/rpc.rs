@@ -1,34 +1,42 @@
 //! Aggregated JSON-RPC for the coins-chain example.
 
-use commonware_consensus::types::Height;
-use commonware_storage::Context as StorageContext;
 use jsonrpsee::{
     core::{RegisterMethodError, RpcResult},
     RpcModule,
 };
-use nunchi_coins::{rpc::CoinsRpc, Transaction};
-use nunchi_rpc::{decode_hex, encode_hex, invalid_params, params, RpcBuildError, RpcRouter};
+use nunchi_coins::{
+    rpc::{CoinQuery, CoinsRpc},
+    Transaction,
+};
+use nunchi_rpc::{
+    decode_hex, encode_hex, invalid_params, module_error, params, RpcBuildError, RpcRouter,
+};
 use serde::{Deserialize, Serialize};
 
-use crate::{execution::NodeHandle, txpool::Submitter};
+use crate::execution::SharedAppliedHeight;
+use crate::txpool::Submitter;
 
 /// Shared RPC context for one coins-chain node.
+///
+/// Generic over the coin query backend: a live node serves from its stateful databases (see
+/// [`crate::execution::NodeHandle::query`]); tests can serve from any other [`CoinQuery`]
+/// implementation such as [`nunchi_coins::rpc::SharedLedger`].
 #[derive(Clone)]
-pub struct RpcContext<E: StorageContext> {
-    handle: NodeHandle<E>,
+pub struct RpcContext<Q> {
+    query: Q,
+    applied_height: SharedAppliedHeight,
 }
 
-impl<E: StorageContext> RpcContext<E> {
-    pub fn new(handle: NodeHandle<E>) -> Self {
-        Self { handle }
+impl<Q: CoinQuery> RpcContext<Q> {
+    pub fn new(query: Q, applied_height: SharedAppliedHeight) -> Self {
+        Self {
+            query,
+            applied_height,
+        }
     }
 
-    pub fn handle(&self) -> &NodeHandle<E> {
-        &self.handle
-    }
-
-    pub async fn applied_height(&self) -> Height {
-        *self.handle.applied_height.lock().await
+    pub fn query(&self) -> &Q {
+        &self.query
     }
 }
 
@@ -54,25 +62,27 @@ pub struct SubmitTransactionResponse {
 /// Downstream applications can follow this pattern: create one router over their node context,
 /// merge SDK modules via their `register` entry points (such as [`nunchi_coins::rpc::register`]),
 /// then merge any app-specific methods.
-pub fn module<E>(handle: NodeHandle<E>) -> Result<RpcModule<RpcContext<E>>, RpcBuildError>
+pub fn module<Q>(
+    query: Q,
+    submitter: Submitter,
+    applied_height: SharedAppliedHeight,
+) -> Result<RpcModule<RpcContext<Q>>, RpcBuildError>
 where
-    E: StorageContext + Send + 'static,
+    Q: CoinQuery,
 {
-    let coins = handle.ledger.clone();
-    let submitter = handle.submitter.clone();
-    let mut router = RpcRouter::new(RpcContext::new(handle));
-    nunchi_coins::rpc::register(&mut router, CoinsRpc::new(coins))?;
+    let mut router = RpcRouter::new(RpcContext::new(query.clone(), applied_height));
+    nunchi_coins::rpc::register(&mut router, CoinsRpc::new(query))?;
     router.merge(coin_submit_module(router.context(), submitter)?)?;
     router.merge(chain_module(router.context())?)?;
     Ok(router.into_module())
 }
 
-fn coin_submit_module<E>(
-    context: std::sync::Arc<RpcContext<E>>,
+fn coin_submit_module<Q>(
+    context: std::sync::Arc<RpcContext<Q>>,
     submitter: Submitter,
-) -> Result<RpcModule<RpcContext<E>>, RegisterMethodError>
+) -> Result<RpcModule<RpcContext<Q>>, RegisterMethodError>
 where
-    E: StorageContext + Send + 'static,
+    Q: CoinQuery,
 {
     let mut module = RpcModule::from_arc(context);
     module.register_method("coins.submit_transaction", move |raw, _, _| {
@@ -94,19 +104,23 @@ where
     Ok(module)
 }
 
-fn chain_module<E>(
-    context: std::sync::Arc<RpcContext<E>>,
-) -> Result<RpcModule<RpcContext<E>>, RegisterMethodError>
+fn chain_module<Q>(
+    context: std::sync::Arc<RpcContext<Q>>,
+) -> Result<RpcModule<RpcContext<Q>>, RegisterMethodError>
 where
-    E: StorageContext + Send + 'static,
+    Q: CoinQuery,
 {
     let mut module = RpcModule::from_arc(context);
     module.register_async_method("chain.status", |_raw, context, _| async move {
-        let ledger = context.handle.ledger.lock().await;
-        let applied_height = *context.handle.applied_height.lock().await;
+        let state_root = context
+            .query
+            .state_root()
+            .await
+            .map_err(|err| module_error(format!("failed to read state root: {err}")))?;
+        let applied_height = *context.applied_height.lock().await;
         RpcResult::Ok(StatusResponse {
             applied_height: applied_height.get(),
-            state_root: encode_hex(&ledger.root()),
+            state_root: encode_hex(&state_root),
         })
     })?;
     Ok(module)

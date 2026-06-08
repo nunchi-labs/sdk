@@ -20,13 +20,14 @@ use commonware_utils::{
     N3f1, NZUsize, NZU32,
 };
 use governor::Quota;
-use nunchi_coins::Address;
+use nunchi_coins::{Address, Ledger};
 use nunchi_coins_chain::{
     engine::{Config, Engine},
-    execution::{NodeHandle, SharedLedger},
+    execution::NodeHandle,
     txpool::Submitter,
     PublicKey,
 };
+use nunchi_common::QmdbReader;
 use nunchi_dkg::{ContinueOnUpdate, PeerConfig};
 use std::{
     collections::{HashMap, HashSet},
@@ -48,6 +49,7 @@ type Channel = (
     Sender<PublicKey, deterministic::Context>,
     Receiver<PublicKey>,
 );
+type ReadLedger = Ledger<QmdbReader<deterministic::Context>>;
 
 #[derive(Clone)]
 pub(crate) struct ThresholdFixture {
@@ -337,7 +339,7 @@ impl TestNetwork<'_> {
             .collect()
     }
 
-    /// The transaction submitter for validator `index` — a client's ingress to that node.
+    /// The transaction submitter for validator `index`; a client's ingress to that node.
     pub(crate) fn submitter(&self, index: usize) -> Submitter {
         self.nodes
             .get(&self.participants[index])
@@ -346,12 +348,17 @@ impl TestNetwork<'_> {
             .clone()
     }
 
-    /// Snapshot, in registration order, every started validator's shared coin ledger.
-    pub(crate) fn ledger_handles(&self) -> Vec<SharedLedger<deterministic::Context>> {
-        self.participants
-            .iter()
-            .filter_map(|participant| self.nodes.get(participant).map(|node| node.ledger.clone()))
-            .collect()
+    /// Snapshot, in registration order, every started validator's committed coin ledger.
+    pub(crate) async fn ledgers(&self) -> Vec<ReadLedger> {
+        let mut ledgers = Vec::new();
+        for participant in &self.participants {
+            let Some(node) = self.nodes.get(participant) else {
+                continue;
+            };
+            let db = node.stateful.subscribe_databases().await;
+            ledgers.push(Ledger::new(QmdbReader::new(db)));
+        }
+        ledgers
     }
 
     /// Poll until every node's ledger shows the expected nonce for each listed account.
@@ -368,12 +375,11 @@ impl TestNetwork<'_> {
     }
 
     async fn all_nonces_reached(&self, expected: &[(Address, u64)]) -> bool {
-        let handles = self.ledger_handles();
-        if handles.len() != self.participants.len() {
+        let ledgers = self.ledgers().await;
+        if ledgers.len() != self.participants.len() {
             return false;
         }
-        for shared in handles {
-            let ledger = shared.lock().await;
+        for ledger in ledgers {
             for (account, target) in expected {
                 let nonce = ledger.nonce(account).await.expect("nonce read failed");
                 if nonce != *target {
