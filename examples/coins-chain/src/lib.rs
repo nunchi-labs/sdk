@@ -23,7 +23,7 @@ pub mod execution;
 pub mod rpc;
 pub mod txpool;
 
-pub use block::{Block, Finalized, Notarized, MAX_TRANSACTIONS};
+pub use block::{Block, Finalized, Notarized, StateCommitment, MAX_TRANSACTIONS};
 pub use consensus::{
     Activity, Context, EdScheme, EpochProvider, Finalization, Identity, Notarization, Provider,
     PublicKey, Scheme, Seed, Seedable, Signature, ThresholdScheme,

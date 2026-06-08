@@ -16,6 +16,15 @@ use std::num::NonZeroU32;
 /// Bounds the work a peer can force us to do when decoding an untrusted block.
 pub const MAX_TRANSACTIONS: u64 = 4_096;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StateCommitment {
+    /// Authenticated state root after executing the block's transactions.
+    pub root: Digest,
+
+    /// QMDB operation range that supports state sync to `root`.
+    pub range: NonEmptyRange<Location>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Block {
     /// The consensus context when this block was proposed.
@@ -70,8 +79,7 @@ impl Block {
         timestamp: u64,
         transactions: &[Transaction],
         reshare_log: &Option<DealerLog>,
-        state_root: &Digest,
-        state_range: &NonEmptyRange<Location>,
+        state: &StateCommitment,
     ) -> Digest {
         let mut hasher = Sha256::new();
         hasher.update(&context.encode());
@@ -83,8 +91,8 @@ impl Block {
             hasher.update(&transaction.encode());
         }
         hasher.update(&reshare_log.encode());
-        hasher.update(state_root);
-        hasher.update(&state_range.encode());
+        hasher.update(&state.root);
+        hasher.update(&state.range.encode());
         hasher.finalize()
     }
 
@@ -95,8 +103,7 @@ impl Block {
         timestamp: u64,
         transactions: Vec<Transaction>,
         reshare_log: Option<DealerLog>,
-        state_root: Digest,
-        state_range: NonEmptyRange<Location>,
+        state: StateCommitment,
     ) -> Self {
         let digest = Self::compute_digest(
             &context,
@@ -105,8 +112,7 @@ impl Block {
             timestamp,
             &transactions,
             &reshare_log,
-            &state_root,
-            &state_range,
+            &state,
         );
         Self {
             context,
@@ -115,8 +121,8 @@ impl Block {
             timestamp,
             transactions,
             reshare_log,
-            state_root,
-            state_range,
+            state_root: state.root,
+            state_range: state.range,
             digest,
         }
     }
@@ -160,6 +166,10 @@ impl Read for Block {
         let reshare_log = Read::read_cfg(reader, cfg)?;
         let state_root = Digest::read(reader)?;
         let state_range = NonEmptyRange::read(reader)?;
+        let state = StateCommitment {
+            root: state_root,
+            range: state_range,
+        };
 
         let digest = Self::compute_digest(
             &context,
@@ -168,8 +178,7 @@ impl Read for Block {
             timestamp,
             &transactions,
             &reshare_log,
-            &state_root,
-            &state_range,
+            &state,
         );
         Ok(Self {
             context,
@@ -178,8 +187,8 @@ impl Read for Block {
             timestamp,
             transactions,
             reshare_log,
-            state_root,
-            state_range,
+            state_root: state.root,
+            state_range: state.range,
             digest,
         })
     }

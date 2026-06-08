@@ -1,6 +1,6 @@
 use crate::execution::SharedAppliedHeight;
 use crate::txpool::Submitter;
-use crate::{Block, Context, Scheme, EPOCH};
+use crate::{Block, Context, Scheme, StateCommitment, EPOCH};
 use commonware_consensus::{
     types::{Height, Round, View},
     Heightable,
@@ -59,8 +59,10 @@ impl Application {
             0,
             Vec::new(),
             None,
-            empty_state_root(),
-            non_empty_range!(Location::new(0), Location::new(1)),
+            StateCommitment {
+                root: empty_state_root(),
+                range: non_empty_range!(Location::new(0), Location::new(1)),
+            },
         )
     }
 
@@ -214,8 +216,10 @@ where
             timestamp,
             transactions,
             reshare_log,
-            merkleized.root(),
-            state_range,
+            StateCommitment {
+                root: merkleized.root(),
+                range: state_range,
+            },
         );
         Some(Proposed { block, merkleized })
     }
