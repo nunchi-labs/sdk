@@ -1,30 +1,58 @@
-use crate::COINS_NAMESPACE;
-use commonware_codec::{Encode, EncodeSize, Error, Read, ReadExt, Write};
-use commonware_cryptography::{Hasher, Sha256};
-pub use nunchi_common::{AccountPolicyError, AccountType, MultisigPolicy};
+use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
+pub use nunchi_common::{AccountPolicyError, MultisigPolicy};
+use nunchi_crypto::PublicKey;
 
-pub type AccountId = nunchi_crypto::PublicKey;
+pub type Address = nunchi_common::Address;
 
 pub type PrivateKey = nunchi_crypto::PrivateKey;
 pub type Signature = nunchi_crypto::Signature;
 
 const ACCOUNT_POLICY_MULTISIG: u8 = 1;
+const ACCOUNT_TYPE_EXTERNAL: u8 = 0;
+const ACCOUNT_TYPE_MULTISIG: u8 = 1;
 
-/// Derive a stable multisig account identifier from its initial policy.
-///
-/// The domain-separated derivation binds the identifier used during
-/// bootstrap to the canonical initial policy. Future policy rotation must
-/// use a separate operation authorized by the currently registered policy;
-/// it must not reuse the bootstrap registration rules.
-///
-/// `COINS_NAMESPACE` is also used as the coin-operation signing namespace.
-/// The `"account/multisig/v1"` tag keeps this derivation domain-separated.
-pub fn multisig_account_id(policy: &MultisigPolicy) -> AccountId {
-    let mut hasher = Sha256::new();
-    hasher.update(COINS_NAMESPACE);
-    hasher.update(b"account/multisig/v1");
-    hasher.update(&policy.encode());
-    AccountId::synthetic(hasher.finalize())
+/// Authorization scheme currently registered for a coin account.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AccountType {
+    External,
+    Multisig,
+}
+
+impl Write for AccountType {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        match self {
+            Self::External => ACCOUNT_TYPE_EXTERNAL.write(buf),
+            Self::Multisig => ACCOUNT_TYPE_MULTISIG.write(buf),
+        }
+    }
+}
+
+impl Read for AccountType {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+        match u8::read(buf)? {
+            ACCOUNT_TYPE_EXTERNAL => Ok(Self::External),
+            ACCOUNT_TYPE_MULTISIG => Ok(Self::Multisig),
+            tag => Err(Error::InvalidEnum(tag)),
+        }
+    }
+}
+
+impl EncodeSize for AccountType {
+    fn encode_size(&self) -> usize {
+        1
+    }
+}
+
+/// Derive a stable multisig address from its initial policy.
+pub fn multisig_account_id(policy: &MultisigPolicy) -> Address {
+    Address::multisig(policy)
+}
+
+/// Derive an external account address from a public key.
+pub fn external_account_id(public_key: &PublicKey) -> Address {
+    Address::external(public_key)
 }
 
 /// A coin account authorization policy persisted by the coin ledger.
@@ -34,7 +62,7 @@ pub enum AccountPolicy {
 }
 
 impl AccountPolicy {
-    pub fn multisig(threshold: u16, signers: Vec<AccountId>) -> Result<Self, AccountPolicyError> {
+    pub fn multisig(threshold: u16, signers: Vec<PublicKey>) -> Result<Self, AccountPolicyError> {
         Ok(Self::Multisig(MultisigPolicy::new(threshold, signers)?))
     }
 
@@ -78,13 +106,13 @@ impl EncodeSize for AccountPolicy {
 /// An account known to the coin ledger.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Account {
-    pub id: AccountId,
+    pub id: Address,
     pub kind: AccountType,
     pub nonce: u64,
 }
 
 impl Account {
-    pub fn new(id: AccountId, kind: AccountType, nonce: u64) -> Self {
+    pub fn new(id: Address, kind: AccountType, nonce: u64) -> Self {
         Self { id, kind, nonce }
     }
 }
@@ -102,7 +130,7 @@ impl Read for Account {
 
     fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
-            id: AccountId::read(buf)?,
+            id: Address::read(buf)?,
             kind: AccountType::read(buf)?,
             nonce: u64::read(buf)?,
         })
@@ -123,7 +151,7 @@ mod tests {
 
     #[test]
     fn account_roundtrips_with_external_id() {
-        let id = PrivateKey::ed25519_from_seed(1).public_key();
+        let id = external_account_id(&PrivateKey::ed25519_from_seed(1).public_key());
         let account = Account::new(id, AccountType::External, 42);
 
         assert_eq!(Account::decode(account.encode().as_ref()).unwrap(), account);
@@ -131,7 +159,9 @@ mod tests {
 
     #[test]
     fn account_roundtrips_with_multisig_kind() {
-        let id = PrivateKey::secp256r1_from_seed(1).public_key();
+        let key = PrivateKey::secp256r1_from_seed(1);
+        let policy = MultisigPolicy::new(1, vec![key.public_key()]).unwrap();
+        let id = multisig_account_id(&policy);
         let account = Account::new(id, AccountType::Multisig, 42);
 
         assert_eq!(Account::decode(account.encode().as_ref()).unwrap(), account);
@@ -147,10 +177,6 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(multisig_account_id(&first), multisig_account_id(&second));
-        assert_eq!(
-            multisig_account_id(&first).curve(),
-            nunchi_crypto::Curve::Synthetic
-        );
     }
 
     #[test]
@@ -177,17 +203,6 @@ mod tests {
         assert_eq!(
             MultisigPolicy::new(1, vec![signer.clone(), signer]),
             Err(AccountPolicyError::DuplicateSigner)
-        );
-    }
-
-    #[test]
-    fn multisig_policy_rejects_synthetic_signers() {
-        let signer = PrivateKey::ed25519_from_seed(1).public_key();
-        let policy = MultisigPolicy::new(1, vec![signer]).unwrap();
-
-        assert_eq!(
-            MultisigPolicy::new(1, vec![multisig_account_id(&policy)]),
-            Err(AccountPolicyError::SyntheticSigner)
         );
     }
 

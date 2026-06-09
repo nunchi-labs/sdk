@@ -5,7 +5,7 @@
 //! blanket impl below means any [`StateDb`] is automatically a [`CoinDB`], so the coin module
 //! composes onto the same store as every other module without bespoke wiring.
 
-use super::{AccountId, AccountPolicy, CoinId, TokenDefinition, COINS_NAMESPACE};
+use super::{AccountPolicy, Address, CoinId, TokenDefinition, COINS_NAMESPACE};
 use crate::LedgerError;
 use commonware_codec::{Encode, Read, ReadExt};
 use commonware_cryptography::sha256::Digest;
@@ -41,7 +41,7 @@ fn decoded<T: Read<Cfg = ()>>(bytes: &[u8]) -> Result<T, LedgerError> {
     T::read(&mut buf).map_err(|err| LedgerError::Storage(err.to_string()))
 }
 
-fn balance_key(account: &AccountId, coin: &CoinId) -> Digest {
+fn balance_key(account: &Address, coin: &CoinId) -> Digest {
     let mut logical = encoded(account);
     logical.extend_from_slice(coin.encode().as_ref());
     NS.key(Table::Balance, &logical)
@@ -50,16 +50,16 @@ fn balance_key(account: &AccountId, coin: &CoinId) -> Digest {
 #[allow(async_fn_in_trait)]
 pub trait CoinDB {
     /// Current nonce for `id` (0 if the account has never transacted).
-    async fn nonce(&self, id: &AccountId) -> Result<u64, LedgerError>;
+    async fn nonce(&self, id: &Address) -> Result<u64, LedgerError>;
 
     /// Stage the next nonce for `id`.
-    fn set_nonce(&mut self, id: &AccountId, nonce: u64);
+    fn set_nonce(&mut self, id: &Address, nonce: u64);
 
     /// Look up a registered multisig account policy.
-    async fn account_policy(&self, id: &AccountId) -> Result<Option<AccountPolicy>, LedgerError>;
+    async fn account_policy(&self, id: &Address) -> Result<Option<AccountPolicy>, LedgerError>;
 
     /// Stage an account policy at `id`.
-    fn set_account_policy(&mut self, id: &AccountId, policy: &AccountPolicy);
+    fn set_account_policy(&mut self, id: &Address, policy: &AccountPolicy);
 
     /// Next token-derivation nonce for the [`crate::TokenFactory`] (0 if no token exists yet).
     async fn factory_nonce(&self) -> Result<u64, LedgerError>;
@@ -74,10 +74,10 @@ pub trait CoinDB {
     fn set_token(&mut self, token: &TokenDefinition);
 
     /// Balance of `coin` held by `account` (0 if none).
-    async fn balance(&self, account: &AccountId, coin: &CoinId) -> Result<u128, LedgerError>;
+    async fn balance(&self, account: &Address, coin: &CoinId) -> Result<u128, LedgerError>;
 
     /// Stage a balance. An amount of 0 removes the entry so empty balances leave no state.
-    fn set_balance(&mut self, account: &AccountId, coin: &CoinId, amount: u128);
+    fn set_balance(&mut self, account: &Address, coin: &CoinId, amount: u128);
 
     /// Flush staged writes, returning the new authenticated state root.
     async fn commit(&mut self) -> Result<Digest, LedgerError>;
@@ -87,7 +87,7 @@ pub trait CoinDB {
 }
 
 impl<S: StateDb> CoinDB for S {
-    async fn nonce(&self, id: &AccountId) -> Result<u64, LedgerError> {
+    async fn nonce(&self, id: &Address) -> Result<u64, LedgerError> {
         let key = NS.key(Table::Account, &encoded(id));
         match StateDb::get(self, &key)
             .await
@@ -98,12 +98,12 @@ impl<S: StateDb> CoinDB for S {
         }
     }
 
-    fn set_nonce(&mut self, id: &AccountId, nonce: u64) {
+    fn set_nonce(&mut self, id: &Address, nonce: u64) {
         let key = NS.key(Table::Account, &encoded(id));
         StateDb::set(self, key, encoded(&nonce));
     }
 
-    async fn account_policy(&self, id: &AccountId) -> Result<Option<AccountPolicy>, LedgerError> {
+    async fn account_policy(&self, id: &Address) -> Result<Option<AccountPolicy>, LedgerError> {
         let key = NS.key(Table::AccountPolicy, &encoded(id));
         match StateDb::get(self, &key)
             .await
@@ -114,7 +114,7 @@ impl<S: StateDb> CoinDB for S {
         }
     }
 
-    fn set_account_policy(&mut self, id: &AccountId, policy: &AccountPolicy) {
+    fn set_account_policy(&mut self, id: &Address, policy: &AccountPolicy) {
         let key = NS.key(Table::AccountPolicy, &encoded(id));
         StateDb::set(self, key, encoded(policy));
     }
@@ -151,7 +151,7 @@ impl<S: StateDb> CoinDB for S {
         StateDb::set(self, key, encoded(token));
     }
 
-    async fn balance(&self, account: &AccountId, coin: &CoinId) -> Result<u128, LedgerError> {
+    async fn balance(&self, account: &Address, coin: &CoinId) -> Result<u128, LedgerError> {
         let key = balance_key(account, coin);
         match StateDb::get(self, &key)
             .await
@@ -162,7 +162,7 @@ impl<S: StateDb> CoinDB for S {
         }
     }
 
-    fn set_balance(&mut self, account: &AccountId, coin: &CoinId, amount: u128) {
+    fn set_balance(&mut self, account: &Address, coin: &CoinId, amount: u128) {
         let key = balance_key(account, coin);
         if amount == 0 {
             StateDb::remove(self, key);

@@ -1,5 +1,5 @@
 use super::{
-    multisig_account_id, Account, AccountId, AccountPolicy, AccountType, Authorization, CoinId,
+    multisig_account_id, Account, AccountPolicy, AccountType, Address, Authorization, CoinId,
     CoinOperation, TokenDefinition, TokenFactory, Transaction,
 };
 use crate::db::CoinDB;
@@ -12,12 +12,12 @@ pub enum LedgerError {
     #[error("bad transaction signature: {0}")]
     BadSignature(#[from] SignatureError),
     #[error("unknown account policy {0:?}")]
-    UnknownAccountPolicy(Box<AccountId>),
+    UnknownAccountPolicy(Box<Address>),
     #[error("account policy mismatch for {0:?}")]
-    AccountPolicyMismatch(Box<AccountId>),
+    AccountPolicyMismatch(Box<Address>),
     #[error("nonce mismatch for {account:?}: expected {expected}, got {actual}")]
     NonceMismatch {
-        account: Box<AccountId>,
+        account: Box<Address>,
         expected: u64,
         actual: u64,
     },
@@ -35,7 +35,7 @@ pub enum LedgerError {
     Unauthorized,
     #[error("insufficient balance for {account:?} in {coin:?}: available {available}, required {required}")]
     InsufficientBalance {
-        account: Box<AccountId>,
+        account: Box<Address>,
         coin: Box<CoinId>,
         available: u128,
         required: u128,
@@ -75,7 +75,7 @@ impl<D: CoinDB> Ledger<D> {
         self.db
     }
 
-    pub async fn account(&self, id: &AccountId) -> Result<Account, LedgerError> {
+    pub async fn account(&self, id: &Address) -> Result<Account, LedgerError> {
         let kind = if self.db.account_policy(id).await?.is_some() {
             AccountType::Multisig
         } else {
@@ -84,7 +84,7 @@ impl<D: CoinDB> Ledger<D> {
         Ok(Account::new(id.clone(), kind, self.db.nonce(id).await?))
     }
 
-    pub async fn nonce(&self, id: &AccountId) -> Result<u64, LedgerError> {
+    pub async fn nonce(&self, id: &Address) -> Result<u64, LedgerError> {
         self.db.nonce(id).await
     }
 
@@ -92,7 +92,7 @@ impl<D: CoinDB> Ledger<D> {
         self.db.token(coin).await
     }
 
-    pub async fn balance(&self, account: &AccountId, coin: &CoinId) -> Result<u128, LedgerError> {
+    pub async fn balance(&self, account: &Address, coin: &CoinId) -> Result<u128, LedgerError> {
         self.db.balance(account, coin).await
     }
 
@@ -121,9 +121,9 @@ impl<D: CoinDB> Ledger<D> {
 
     pub async fn register_account_policy(
         &mut self,
-        account_id: AccountId,
+        account_id: Address,
         policy: AccountPolicy,
-    ) -> Result<AccountId, LedgerError> {
+    ) -> Result<Address, LedgerError> {
         let expected = match &policy {
             AccountPolicy::Multisig(policy) => multisig_account_id(policy),
         };
@@ -141,7 +141,7 @@ impl<D: CoinDB> Ledger<D> {
 
     pub async fn create_token(
         &mut self,
-        issuer: AccountId,
+        issuer: Address,
         spec: super::CoinSpec,
     ) -> Result<CoinId, LedgerError> {
         let mut factory = TokenFactory::with_nonce(self.db.factory_nonce().await?);
@@ -172,9 +172,8 @@ impl<D: CoinDB> Ledger<D> {
     async fn ensure_authorized(&self, tx: &Transaction) -> Result<(), LedgerError> {
         tx.verify()?;
 
-        match (&tx.account_type, &tx.authorization, &tx.payload.operation) {
+        match (&tx.authorization, &tx.payload.operation) {
             (
-                AccountType::Multisig,
                 Authorization::Multisig { policy, .. },
                 CoinOperation::RegisterAccountPolicy {
                     account_id,
@@ -199,21 +198,17 @@ impl<D: CoinDB> Ledger<D> {
                     None => {}
                 }
             }
-            (
-                AccountType::External,
-                Authorization::Single(_),
-                CoinOperation::RegisterAccountPolicy { .. },
-            ) => {
+            (Authorization::Single { .. }, CoinOperation::RegisterAccountPolicy { .. }) => {
                 return Err(LedgerError::Unauthorized);
             }
-            (AccountType::External, Authorization::Single(_), _) => {
+            (Authorization::Single { .. }, _) => {
                 if self.db.account_policy(&tx.account_id).await?.is_some() {
                     return Err(LedgerError::AccountPolicyMismatch(Box::new(
                         tx.account_id.clone(),
                     )));
                 }
             }
-            (AccountType::Multisig, Authorization::Multisig { policy, .. }, _) => {
+            (Authorization::Multisig { policy, .. }, _) => {
                 match self.db.account_policy(&tx.account_id).await? {
                     Some(AccountPolicy::Multisig(registered)) if &registered == policy => {}
                     Some(_) => {
@@ -228,7 +223,6 @@ impl<D: CoinDB> Ledger<D> {
                     }
                 }
             }
-            _ => return Err(LedgerError::BadSignature(SignatureError::IncompatibleKey)),
         }
 
         Ok(())
@@ -236,7 +230,7 @@ impl<D: CoinDB> Ledger<D> {
 
     async fn apply_operation(
         &mut self,
-        signer: &AccountId,
+        signer: &Address,
         operation: &CoinOperation,
     ) -> Result<(), LedgerError> {
         match operation {
@@ -284,7 +278,7 @@ impl<D: CoinDB> Ledger<D> {
         Ok(())
     }
 
-    async fn ensure_issuer(&self, signer: &AccountId, coin: &CoinId) -> Result<(), LedgerError> {
+    async fn ensure_issuer(&self, signer: &Address, coin: &CoinId) -> Result<(), LedgerError> {
         let token = self
             .db
             .token(coin)
@@ -333,7 +327,7 @@ impl<D: CoinDB> Ledger<D> {
 
     async fn credit(
         &mut self,
-        account: &AccountId,
+        account: &Address,
         coin: CoinId,
         amount: u128,
     ) -> Result<(), LedgerError> {
@@ -350,7 +344,7 @@ impl<D: CoinDB> Ledger<D> {
 
     async fn debit(
         &mut self,
-        account: &AccountId,
+        account: &Address,
         coin: CoinId,
         amount: u128,
     ) -> Result<(), LedgerError> {
@@ -397,15 +391,15 @@ mod tests {
         CoinSpec::new("NCH", "Nunchi", 9, supply, max)
     }
 
-    fn account(key: &PrivateKey) -> AccountId {
-        key.public_key()
+    fn address(key: &PrivateKey) -> Address {
+        crate::external_account_id(&key.public_key())
     }
 
-    fn multisig_account(policy: &MultisigPolicy) -> AccountId {
+    fn multisig_account(policy: &MultisigPolicy) -> Address {
         multisig_account_id(policy)
     }
 
-    fn policy_account(policy: &AccountPolicy) -> AccountId {
+    fn policy_account(policy: &AccountPolicy) -> Address {
         match policy {
             AccountPolicy::Multisig(policy) => multisig_account(policy),
         }
@@ -416,7 +410,7 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let mut ledger = ledger(context).await;
-            let alice = account(&PrivateKey::ed25519_from_seed(1));
+            let alice = address(&PrivateKey::ed25519_from_seed(1));
 
             let empty_root = ledger.root();
             let coin = ledger
@@ -441,8 +435,8 @@ mod tests {
         runner.start(|context| async move {
             let mut ledger = ledger(context).await;
             let alice_key = PrivateKey::ed25519_from_seed(1);
-            let alice = account(&alice_key);
-            let bob = account(&PrivateKey::ed25519_from_seed(2));
+            let alice = address(&alice_key);
+            let bob = address(&PrivateKey::ed25519_from_seed(2));
 
             let coin = ledger
                 .create_token(alice.clone(), spec(1_000, None))
@@ -473,8 +467,8 @@ mod tests {
         runner.start(|context| async move {
             let mut ledger = ledger(context).await;
             let alice_key = PrivateKey::ed25519_from_seed(1);
-            let alice = account(&alice_key);
-            let bob = account(&PrivateKey::ed25519_from_seed(2));
+            let alice = address(&alice_key);
+            let bob = address(&PrivateKey::ed25519_from_seed(2));
 
             let coin = ledger
                 .create_token(alice.clone(), spec(1_000, None))
@@ -510,8 +504,8 @@ mod tests {
         runner.start(|context| async move {
             let mut ledger = ledger(context).await;
             let alice_key = PrivateKey::ed25519_from_seed(1);
-            let alice = account(&alice_key);
-            let bob = account(&PrivateKey::ed25519_from_seed(2));
+            let alice = address(&alice_key);
+            let bob = address(&PrivateKey::ed25519_from_seed(2));
 
             let coin = ledger
                 .create_token(alice.clone(), spec(1_000, None))
@@ -531,7 +525,7 @@ mod tests {
             tx.payload.operation = CoinOperation::Transfer {
                 coin,
                 from: alice,
-                to: account(&PrivateKey::ed25519_from_seed(3)),
+                to: address(&PrivateKey::ed25519_from_seed(3)),
                 amount: 1,
             };
 
@@ -547,7 +541,7 @@ mod tests {
     fn committed_state_survives_reopen() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let alice = account(&PrivateKey::ed25519_from_seed(1));
+            let alice = address(&PrivateKey::ed25519_from_seed(1));
 
             let coin = {
                 let mut ledger = ledger(context.child("open")).await;
@@ -573,7 +567,7 @@ mod tests {
             let alice_a = PrivateKey::ed25519_from_seed(1);
             let alice_b = PrivateKey::secp256r1_from_seed(2);
             let alice_c = PrivateKey::ed25519_from_seed(3);
-            let bob = account(&PrivateKey::ed25519_from_seed(4));
+            let bob = address(&PrivateKey::ed25519_from_seed(4));
             let policy = MultisigPolicy::new(
                 2,
                 vec![
@@ -644,7 +638,7 @@ mod tests {
                 CoinOperation::Transfer {
                     coin,
                     from: alice,
-                    to: account(&PrivateKey::ed25519_from_seed(3)),
+                    to: address(&PrivateKey::ed25519_from_seed(3)),
                     amount: 1,
                 },
             );
@@ -754,7 +748,7 @@ mod tests {
                 CoinOperation::Transfer {
                     coin,
                     from: alice.clone(),
-                    to: account(&alice_a),
+                    to: address(&alice_a),
                     amount: 1,
                 },
             );
@@ -800,7 +794,7 @@ mod tests {
         runner.start(|context| async move {
             let mut ledger = ledger(context).await;
             let alice_key = PrivateKey::ed25519_from_seed(1);
-            let alice = account(&alice_key);
+            let alice = address(&alice_key);
             let attacker = PrivateKey::ed25519_from_seed(2);
             let policy = MultisigPolicy::new(1, vec![attacker.public_key()]).unwrap();
             let coin = ledger

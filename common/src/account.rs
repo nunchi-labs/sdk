@@ -1,42 +1,61 @@
-use commonware_codec::{Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
-use nunchi_crypto::{Curve, PublicKey};
+use commonware_codec::{Encode, EncodeSize, Error, FixedSize, RangeCfg, Read, ReadExt, Write};
+use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+use nunchi_crypto::PublicKey;
 use thiserror::Error;
 
-const ACCOUNT_TYPE_EXTERNAL: u8 = 0;
-const ACCOUNT_TYPE_MULTISIG: u8 = 1;
+const ADDRESS_DOMAIN: &[u8] = b"nunchi/account/v1";
+const ADDRESS_EXTERNAL: u8 = 0;
+const ADDRESS_MULTISIG: u8 = 1;
 
-/// Authorization scheme expected for an account.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AccountType {
-    External,
-    Multisig,
-}
+/// A unified Nunchi account address.
+///
+/// Addresses are derived identifiers, not public keys. Different account kinds
+/// hash typed material into the same fixed-width address space.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct Address(Digest);
 
-impl Write for AccountType {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        match self {
-            Self::External => ACCOUNT_TYPE_EXTERNAL.write(buf),
-            Self::Multisig => ACCOUNT_TYPE_MULTISIG.write(buf),
-        }
+impl Address {
+    /// Derive an external-account address from a curve-tagged public key.
+    pub fn external(public_key: &PublicKey) -> Self {
+        Self::derive(ADDRESS_EXTERNAL, &public_key.encode())
+    }
+
+    /// Derive a multisig account's bootstrap address from its initial policy.
+    pub fn multisig(policy: &MultisigPolicy) -> Self {
+        Self::derive(ADDRESS_MULTISIG, &policy.encode())
+    }
+
+    fn derive(kind: u8, material: &[u8]) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(ADDRESS_DOMAIN);
+        hasher.update(&[kind]);
+        hasher.update(material);
+        Self(hasher.finalize())
     }
 }
 
-impl Read for AccountType {
+impl From<PublicKey> for Address {
+    fn from(value: PublicKey) -> Self {
+        Self::external(&value)
+    }
+}
+
+impl Write for Address {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.0.write(buf);
+    }
+}
+
+impl Read for Address {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
-        match u8::read(buf)? {
-            ACCOUNT_TYPE_EXTERNAL => Ok(Self::External),
-            ACCOUNT_TYPE_MULTISIG => Ok(Self::Multisig),
-            tag => Err(Error::InvalidEnum(tag)),
-        }
+        Ok(Self(Digest::read(buf)?))
     }
 }
 
-impl EncodeSize for AccountType {
-    fn encode_size(&self) -> usize {
-        1
-    }
+impl FixedSize for Address {
+    const SIZE: usize = Digest::SIZE;
 }
 
 /// Maximum number of signers a threshold multisig policy can carry.
@@ -66,13 +85,6 @@ impl MultisigPolicy {
                 signers: signers.len(),
             });
         }
-        if signers
-            .iter()
-            .any(|signer| signer.curve() == Curve::Synthetic)
-        {
-            return Err(AccountPolicyError::SyntheticSigner);
-        }
-
         let original_signers = signers.len();
         signers.sort_by_cached_key(|signer| signer.encode().as_ref().to_vec());
         signers.dedup();
@@ -129,8 +141,37 @@ pub enum AccountPolicyError {
     ThresholdExceedsSigners { threshold: u16, signers: usize },
     #[error("multisig signers must be unique")]
     DuplicateSigner,
-    #[error("synthetic account identifiers cannot be multisig signers")]
-    SyntheticSigner,
     #[error("multisig has {actual} signers, but the maximum is {max}")]
     TooManySigners { max: usize, actual: usize },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_codec::{DecodeExt, Encode};
+    use nunchi_crypto::PrivateKey;
+
+    #[test]
+    fn addresses_share_a_fixed_width_space_and_roundtrip() {
+        let ed = PrivateKey::ed25519_from_seed(1).public_key();
+        let secp = PrivateKey::secp256r1_from_seed(1).public_key();
+        let ed_address = Address::external(&ed);
+        let secp_address = Address::external(&secp);
+
+        assert_eq!(ed_address.encode().len(), Digest::SIZE);
+        assert_eq!(secp_address.encode().len(), Digest::SIZE);
+        assert_ne!(ed_address, secp_address);
+        assert_eq!(
+            Address::decode(ed_address.encode().as_ref()).unwrap(),
+            ed_address
+        );
+    }
+
+    #[test]
+    fn address_derivation_separates_external_and_multisig_accounts() {
+        let signer = PrivateKey::ed25519_from_seed(1).public_key();
+        let policy = MultisigPolicy::new(1, vec![signer.clone()]).unwrap();
+
+        assert_ne!(Address::external(&signer), Address::multisig(&policy));
+    }
 }

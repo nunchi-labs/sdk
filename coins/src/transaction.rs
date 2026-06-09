@@ -1,4 +1,4 @@
-use super::{AccountId, CoinId, CoinSpec, MultisigPolicy};
+use super::{Address, CoinId, CoinSpec, MultisigPolicy};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use nunchi_common::Operation;
 
@@ -12,7 +12,7 @@ const OP_REGISTER_ACCOUNT_POLICY: u8 = 4;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CoinOperation {
     RegisterAccountPolicy {
-        account_id: AccountId,
+        account_id: Address,
         policy: MultisigPolicy,
     },
     CreateToken {
@@ -20,18 +20,18 @@ pub enum CoinOperation {
     },
     Mint {
         coin: CoinId,
-        to: AccountId,
+        to: Address,
         amount: u128,
     },
     Burn {
         coin: CoinId,
-        from: AccountId,
+        from: Address,
         amount: u128,
     },
     Transfer {
         coin: CoinId,
-        from: AccountId,
-        to: AccountId,
+        from: Address,
+        to: Address,
         amount: u128,
     },
 }
@@ -82,7 +82,7 @@ impl Read for CoinOperation {
     fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         match u8::read(buf)? {
             OP_REGISTER_ACCOUNT_POLICY => Ok(Self::RegisterAccountPolicy {
-                account_id: AccountId::read(buf)?,
+                account_id: Address::read(buf)?,
                 policy: MultisigPolicy::read(buf)?,
             }),
             OP_CREATE_TOKEN => Ok(Self::CreateToken {
@@ -90,18 +90,18 @@ impl Read for CoinOperation {
             }),
             OP_MINT => Ok(Self::Mint {
                 coin: CoinId::read(buf)?,
-                to: AccountId::read(buf)?,
+                to: Address::read(buf)?,
                 amount: u128::read(buf)?,
             }),
             OP_BURN => Ok(Self::Burn {
                 coin: CoinId::read(buf)?,
-                from: AccountId::read(buf)?,
+                from: Address::read(buf)?,
                 amount: u128::read(buf)?,
             }),
             OP_TRANSFER => Ok(Self::Transfer {
                 coin: CoinId::read(buf)?,
-                from: AccountId::read(buf)?,
-                to: AccountId::read(buf)?,
+                from: Address::read(buf)?,
+                to: Address::read(buf)?,
                 amount: u128::read(buf)?,
             }),
             tag => Err(Error::InvalidEnum(tag)),
