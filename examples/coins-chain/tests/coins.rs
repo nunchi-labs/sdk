@@ -4,9 +4,14 @@ use common::network::{
     deterministic_state, lossy_link, reliable_link, TestNetworkBuilder, ThresholdFixture,
     ValidatorConfig,
 };
+use commonware_cryptography::Signer as _;
 use commonware_macros::{select, test_traced};
 use commonware_p2p::simulated::Link;
 use commonware_runtime::{deterministic, Clock, Runner as _};
+use nunchi_authority::{
+    proposal_id, AuthorityOperation, MultisigPolicy, RegistryChange,
+    Transaction as AuthorityTransaction,
+};
 use nunchi_coins::{
     Address, CoinId, CoinOperation, CoinSpec, PrivateKey, TokenFactory, Transaction,
 };
@@ -23,6 +28,10 @@ const CAROL: u64 = 102;
 
 fn key(seed: u64) -> PrivateKey {
     PrivateKey::from_seed(seed)
+}
+
+fn authority_key(seed: u64) -> nunchi_crypto::PrivateKey {
+    nunchi_crypto::PrivateKey::from_seed(seed)
 }
 
 fn gold_spec() -> CoinSpec {
@@ -296,5 +305,74 @@ fn coin_balances_match_submitted_transactions() {
             + ledger.balance(&bob, &coin).await.unwrap()
             + ledger.balance(&carol, &coin).await.unwrap();
         assert_eq!(total, token.total_supply, "balances must conserve supply");
+    });
+}
+
+#[test_traced]
+fn authority_registry_updates_onchain() {
+    let executor = deterministic::Runner::timed(Duration::from_secs(120));
+    executor.start(|mut context| async move {
+        let mut network = TestNetworkBuilder::new(VALIDATORS)
+            .build(&mut context)
+            .await;
+        network.start_all().await;
+
+        let owners = [authority_key(500), authority_key(501), authority_key(502)];
+        let owner_ids = owners
+            .iter()
+            .map(nunchi_crypto::PrivateKey::public_key)
+            .collect::<Vec<_>>();
+        let initial = network.participants().to_vec();
+        let added = commonware_cryptography::ed25519::PrivateKey::from_seed(900).public_key();
+        let change = RegistryChange::AddValidator {
+            validator: added.clone(),
+        };
+        let proposal = proposal_id(&change, 3);
+        let submitter = network.submitter(0);
+
+        submitter.submit(AuthorityTransaction::sign(
+            &owners[0],
+            0,
+            AuthorityOperation::Configure {
+                policy: MultisigPolicy {
+                    owners: owner_ids,
+                    threshold: 2,
+                },
+                initial_validators: initial.clone(),
+                epoch: 0,
+            },
+        ));
+        submitter.submit(AuthorityTransaction::sign(
+            &owners[0],
+            1,
+            AuthorityOperation::Propose {
+                change,
+                effective_epoch: 3,
+            },
+        ));
+        submitter.submit(AuthorityTransaction::sign(
+            &owners[1],
+            0,
+            AuthorityOperation::Approve { proposal },
+        ));
+        submitter.submit(AuthorityTransaction::sign(
+            &owners[2],
+            0,
+            AuthorityOperation::Execute { proposal },
+        ));
+
+        network.run_until_height(12).await;
+
+        let ledgers = network.authority_ledgers().await;
+        assert_eq!(ledgers.len(), VALIDATORS as usize);
+
+        for ledger in ledgers {
+            let epoch_4 = ledger.epoch_registry(4).await.unwrap().unwrap();
+            let epoch_5 = ledger.epoch_registry(5).await.unwrap().unwrap();
+            assert!(epoch_4.players.contains(&added));
+            assert!(!epoch_4.dealers.contains(&added));
+            assert!(epoch_5.players.contains(&added));
+            assert!(epoch_5.dealers.contains(&added));
+        }
     });
 }

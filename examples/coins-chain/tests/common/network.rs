@@ -20,6 +20,7 @@ use commonware_utils::{
     N3f1, NZUsize, NZU32,
 };
 use governor::Quota;
+use nunchi_authority::AuthorityLedger;
 use nunchi_coins::{Address, Ledger};
 use nunchi_coins_chain::{
     engine::{Config, Engine},
@@ -50,6 +51,7 @@ type Channel = (
     Receiver<PublicKey>,
 );
 type ReadLedger = Ledger<QmdbReader<deterministic::Context>>;
+type ReadAuthorityLedger = AuthorityLedger<QmdbReader<deterministic::Context>>;
 
 #[derive(Clone)]
 pub(crate) struct ThresholdFixture {
@@ -233,6 +235,10 @@ impl TestNetwork<'_> {
         self.context
     }
 
+    pub(crate) fn participants(&self) -> &[PublicKey] {
+        &self.participants
+    }
+
     pub(crate) async fn start_all(&mut self) {
         for index in 0..self.private_keys.len() {
             self.start_validator(index).await;
@@ -357,6 +363,18 @@ impl TestNetwork<'_> {
             };
             let db = node.stateful.subscribe_databases().await;
             ledgers.push(Ledger::new(QmdbReader::new(db)));
+        }
+        ledgers
+    }
+
+    pub(crate) async fn authority_ledgers(&self) -> Vec<ReadAuthorityLedger> {
+        let mut ledgers = Vec::new();
+        for participant in &self.participants {
+            let Some(node) = self.nodes.get(participant) else {
+                continue;
+            };
+            let db = node.stateful.subscribe_databases().await;
+            ledgers.push(AuthorityLedger::new(QmdbReader::new(db)));
         }
         ledgers
     }

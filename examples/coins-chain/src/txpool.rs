@@ -1,10 +1,10 @@
 //! A node's local pool of submitted transactions.
 
+use crate::Transaction;
 use commonware_cryptography::sha256::Digest;
 use commonware_runtime::{Handle, Spawner};
 use futures::channel::{mpsc, oneshot};
 use futures::StreamExt;
-use nunchi_coins::Transaction;
 use std::collections::BTreeMap;
 use tracing::debug;
 
@@ -28,7 +28,8 @@ pub struct Submitter {
 
 impl Submitter {
     /// Submit a signed transaction to this node.
-    pub fn submit(&self, transaction: Transaction) {
+    pub fn submit(&self, transaction: impl Into<Transaction>) {
+        let transaction = transaction.into();
         let _ = self
             .sender
             .unbounded_send(Message::Submit(Box::new(transaction)));
@@ -85,18 +86,16 @@ impl TxPool {
     async fn run(mut self) {
         while let Some(message) = self.receiver.next().await {
             match message {
-                Message::Submit(transaction) => match transaction.verify() {
-                    Ok(_) => {
+                Message::Submit(transaction) => {
+                    if transaction.verify() {
                         self.pending.insert(transaction.digest(), *transaction);
-                    }
-                    Err(e) => {
+                    } else {
                         debug!(
                             txhash = ?transaction.digest(),
-                            err = ?e,
                             "transaction being dropped"
                         );
                     }
-                },
+                }
                 Message::Prune(digests) => {
                     for digest in digests {
                         self.pending.remove(&digest);
@@ -108,9 +107,9 @@ impl TxPool {
                     // Order by (account, nonce) so an account's operations stay in nonce order within a
                     // block and therefore apply without tripping the ledger's nonce gate.
                     transactions.sort_by(|a, b| {
-                        a.account_id
-                            .cmp(&b.account_id)
-                            .then(a.payload.nonce.cmp(&b.payload.nonce))
+                        a.ordering_key()
+                            .cmp(&b.ordering_key())
+                            .then(a.nonce().cmp(&b.nonce()))
                     });
                     transactions.truncate(limit);
                     let _ = responder.send(transactions);

@@ -73,7 +73,7 @@ fn rpc_serves_status_and_filters_submissions_over_http() {
         assert_eq!(accepted.hash, encode_hex(&transaction.digest()));
         assert_eq!(
             submitter.pending(usize::MAX).await,
-            vec![transaction.clone()]
+            vec![transaction.clone().into()]
         );
 
         // Corrupting the signature is rejected at ingress instead of being dropped silently.
@@ -96,7 +96,10 @@ fn rpc_serves_status_and_filters_submissions_over_http() {
             other => panic!("expected invalid-params call error, got {other:?}"),
         }
         // The pool still only holds the valid submission.
-        assert_eq!(submitter.pending(usize::MAX).await, vec![transaction]);
+        assert_eq!(
+            submitter.pending(usize::MAX).await,
+            vec![transaction.into()]
+        );
 
         server.stop().expect("stop RPC server");
     });
