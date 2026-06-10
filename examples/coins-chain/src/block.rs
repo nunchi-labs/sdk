@@ -2,17 +2,19 @@ use crate::consensus::{Context, Finalization, Notarization, Scheme};
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_consensus::{types::Height, CertifiableBlock, Heightable};
-use commonware_cryptography::{sha256::Digest, Digestible, Hasher, Sha256};
+use commonware_cryptography::{sha256::Digest, Committable, Digestible, Hasher, Sha256};
 use commonware_parallel::Strategy;
 use nunchi_coins::Transaction;
+use nunchi_dkg::{DealerLog, ReshareBlock};
 use rand::rngs::OsRng;
+use std::num::NonZeroU32;
 
 /// Upper bound on the number of coin transactions a single block may carry.
 ///
 /// Bounds the work a peer can force us to do when decoding an untrusted block.
 pub const MAX_TRANSACTIONS: u64 = 4_096;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct Block {
     /// The consensus context when this block was proposed.
     pub context: Context,
@@ -29,9 +31,26 @@ pub struct Block {
     /// The coin transactions to execute when this block is finalized.
     pub transactions: Vec<Transaction>,
 
+    /// Optional DKG/reshare dealer log included for epoch transitions.
+    pub reshare_log: Option<DealerLog>,
+
     /// Pre-computed digest of the block.
     digest: Digest,
 }
+
+impl PartialEq for Block {
+    fn eq(&self, other: &Self) -> bool {
+        self.context == other.context
+            && self.parent == other.parent
+            && self.height == other.height
+            && self.timestamp == other.timestamp
+            && self.transactions == other.transactions
+            && self.digest == other.digest
+            && self.reshare_log.encode() == other.reshare_log.encode()
+    }
+}
+
+impl Eq for Block {}
 
 impl Block {
     fn compute_digest(
@@ -40,6 +59,7 @@ impl Block {
         height: Height,
         timestamp: u64,
         transactions: &[Transaction],
+        reshare_log: &Option<DealerLog>,
     ) -> Digest {
         let mut hasher = Sha256::new();
         hasher.update(&context.encode());
@@ -50,6 +70,7 @@ impl Block {
         for transaction in transactions {
             hasher.update(&transaction.encode());
         }
+        hasher.update(&reshare_log.encode());
         hasher.finalize()
     }
 
@@ -59,14 +80,23 @@ impl Block {
         height: Height,
         timestamp: u64,
         transactions: Vec<Transaction>,
+        reshare_log: Option<DealerLog>,
     ) -> Self {
-        let digest = Self::compute_digest(&context, &parent, height, timestamp, &transactions);
+        let digest = Self::compute_digest(
+            &context,
+            &parent,
+            height,
+            timestamp,
+            &transactions,
+            &reshare_log,
+        );
         Self {
             context,
             parent,
             height,
             timestamp,
             transactions,
+            reshare_log,
             digest,
         }
     }
@@ -82,13 +112,14 @@ impl Write for Block {
         for transaction in &self.transactions {
             transaction.write(writer);
         }
+        self.reshare_log.write(writer);
     }
 }
 
 impl Read for Block {
-    type Cfg = ();
+    type Cfg = NonZeroU32;
 
-    fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let context = Context::read(reader)?;
         let parent = Digest::read(reader)?;
         let height = Height::read(reader)?;
@@ -104,14 +135,23 @@ impl Read for Block {
         for _ in 0..count {
             transactions.push(Transaction::read(reader)?);
         }
+        let reshare_log = Read::read_cfg(reader, cfg)?;
 
-        let digest = Self::compute_digest(&context, &parent, height, timestamp, &transactions);
+        let digest = Self::compute_digest(
+            &context,
+            &parent,
+            height,
+            timestamp,
+            &transactions,
+            &reshare_log,
+        );
         Ok(Self {
             context,
             parent,
             height,
             timestamp,
             transactions,
+            reshare_log,
             digest,
         })
     }
@@ -129,6 +169,7 @@ impl EncodeSize for Block {
                 .iter()
                 .map(EncodeSize::encode_size)
                 .sum::<usize>()
+            + self.reshare_log.encode_size()
     }
 }
 
@@ -137,6 +178,14 @@ impl Digestible for Block {
 
     fn digest(&self) -> Digest {
         self.digest
+    }
+}
+
+impl Committable for Block {
+    type Commitment = Digest;
+
+    fn commitment(&self) -> Digest {
+        self.digest()
     }
 }
 
@@ -164,11 +213,11 @@ impl Write for Notarized {
 }
 
 impl Read for Notarized {
-    type Cfg = ();
+    type Cfg = NonZeroU32;
 
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let proof = Notarization::read(buf)?;
-        let block = Block::read(buf)?;
+        let block = Block::read_cfg(buf, cfg)?;
 
         // Ensure the proof is for the block
         if proof.proposal.payload != block.digest() {
@@ -211,11 +260,11 @@ impl Write for Finalized {
 }
 
 impl Read for Finalized {
-    type Cfg = ();
+    type Cfg = NonZeroU32;
 
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let proof = Finalization::read(buf)?;
-        let block = Block::read(buf)?;
+        let block = Block::read_cfg(buf, cfg)?;
 
         // Ensure the proof is for the block
         if proof.proposal.payload != block.digest() {
@@ -251,5 +300,11 @@ impl CertifiableBlock for Block {
 
     fn context(&self) -> Self::Context {
         self.context.clone()
+    }
+}
+
+impl ReshareBlock for Block {
+    fn reshare_log(&self) -> Option<&DealerLog> {
+        self.reshare_log.as_ref()
     }
 }

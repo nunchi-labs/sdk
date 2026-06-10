@@ -3,6 +3,7 @@ members = [
     "common",
     "coins",
     "crypto",
+    "dkg",
     "examples/template",
     "examples/coins-chain",
 ]
@@ -17,6 +18,7 @@ license = "MIT OR Apache-2.0"
 nunchi-coins = { version = "2026.5.0", path = "coins" }
 nunchi-common = { version = "2026.5.0", path = "common" }
 nunchi-crypto = { version = "2026.5.0", path = "crypto" }
+nunchi-dkg = { version = "2026.5.0", path = "dkg" }
 nunchi-template = { version = "2026.5.0", path = "examples/template" }
 nunchi-coins-chain = { version = "2026.5.0", path = "examples/coins-chain" }
 commonware-actor = "2026.5.0"
@@ -37,6 +39,7 @@ commonware-parallel = "2026.5.0"
 thiserror = "2.0.12"
 bytes = "1.7.1"
 rand = "0.8.5"
+rand_core = "0.6.4"
 futures = "0.3.31"
 tracing = "0.1.41"
 governor = "0.10.2"

@@ -1,17 +1,15 @@
 mod common;
 
 use common::network::{
-    deterministic_state, lossy_link, reliable_link, TestNetworkBuilder, ValidatorConfig,
+    deterministic_state, lossy_link, reliable_link, TestNetworkBuilder, ThresholdFixture,
+    ValidatorConfig,
 };
-use commonware_consensus::simplex::scheme::bls12381_threshold::vrf as bls12381_threshold;
-use commonware_cryptography::bls12381::primitives::variant::MinSig;
 use commonware_macros::{select, test_traced};
 use commonware_p2p::simulated::Link;
 use commonware_runtime::{deterministic, Clock, Runner as _};
 use nunchi_coins::{
     Address, CoinId, CoinOperation, CoinSpec, PrivateKey, TokenFactory, Transaction,
 };
-use nunchi_coins_chain::NAMESPACE;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::time::Duration;
 use tracing::info;
@@ -99,7 +97,7 @@ fn recovers_unclean_shutdown() {
     let n = 5;
     let required_container = 100;
     let mut rng = StdRng::seed_from_u64(0);
-    let fixture = bls12381_threshold::fixture::<MinSig, _>(&mut rng, NAMESPACE, n);
+    let fixture = ThresholdFixture::new(&mut rng, n);
 
     let mut runs = 0;
     let mut prev_checkpoint = None;

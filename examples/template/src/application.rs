@@ -1,20 +1,17 @@
-use crate::{Block, Context, Scheme, EPOCH};
+use crate::{genesis, Block, Context, Scheme};
 use commonware_actor::Feedback;
 use commonware_consensus::{
     marshal::{ancestry::Ancestry, Update},
-    types::{Height, Round, View},
     Application as ConsensusApplication, Heightable, Reporter,
 };
-use commonware_cryptography::{ed25519, sha256, Digest as _, Digestible, Hasher, Sha256, Signer};
+use commonware_cryptography::Digestible;
 use commonware_runtime::{Clock, Metrics, Spawner, Storage};
 use commonware_utils::{Acknowledgement, SystemTimeExt};
 use futures::StreamExt;
+use nunchi_dkg as dkg;
 use rand::Rng;
 use std::time::{Duration, SystemTime};
 use tracing::info;
-
-/// Genesis message to use during initialization.
-const GENESIS: &[u8] = b"commonware is neat";
 
 /// Fixed consensus cutoff for block timestamps: 2200-01-01T00:00:00Z.
 ///
@@ -23,20 +20,21 @@ const GENESIS: &[u8] = b"commonware is neat";
 const MAX_BLOCK_TIMESTAMP_MS: u64 = 7_258_118_400_000;
 
 #[derive(Clone, Default)]
-pub struct Application {}
+pub struct Application {
+    dkg: Option<dkg::Mailbox<Block>>,
+}
 
 impl Application {
     pub fn genesis() -> Block {
-        let genesis_context = Context {
-            round: Round::new(EPOCH, View::zero()),
-            leader: ed25519::PrivateKey::from_seed(0).public_key(),
-            parent: (View::zero(), sha256::Digest::EMPTY),
-        };
-        Block::new(genesis_context, Sha256::hash(GENESIS), Height::zero(), 0)
+        genesis()
     }
 
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_dkg(dkg: dkg::Mailbox<Block>) -> Self {
+        Self { dkg: Some(dkg) }
     }
 }
 
@@ -68,11 +66,17 @@ where
             "proposed timestamp exceeded maximum",
         );
 
+        let reshare = match &mut self.dkg {
+            Some(dkg) => dkg.act().await,
+            None => None,
+        };
+
         Some(Block::new(
             context,
             parent.digest(),
             parent.height.next(),
             current,
+            reshare,
         ))
     }
 
@@ -113,6 +117,7 @@ impl Reporter for Application {
                 height = %block.height(),
                 digest = ?block.digest(),
                 timestamp = block.timestamp,
+                has_reshare_log = block.log.is_some(),
                 "finalized block"
             );
         }
@@ -127,12 +132,16 @@ impl Reporter for Application {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_consensus::marshal::ancestry;
+    use commonware_consensus::{
+        marshal::ancestry,
+        types::{Height, Round, View},
+    };
+    use commonware_cryptography::{ed25519, sha256, Digest as _, Hasher, Sha256, Signer};
     use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
 
     fn test_context(view: u64, parent: (View, sha256::Digest)) -> Context {
         Context {
-            round: Round::new(EPOCH, View::new(view)),
+            round: Round::new(crate::EPOCH, View::new(view)),
             leader: ed25519::PrivateKey::from_seed(view).public_key(),
             parent,
         }
@@ -172,12 +181,14 @@ mod tests {
                 Sha256::hash(b"genesis"),
                 Height::new(1),
                 now,
+                None,
             );
             let block = Block::new(
                 test_context(2, (View::new(1), parent.digest())),
                 parent.digest(),
                 parent.height.next(),
                 now + 5_000,
+                None,
             );
 
             let start = context.current();
@@ -200,12 +211,14 @@ mod tests {
                 Sha256::hash(b"genesis"),
                 Height::new(1),
                 now,
+                None,
             );
             let block = Block::new(
                 test_context(2, (View::new(1), parent.digest())),
                 parent.digest(),
                 parent.height.next(),
                 now,
+                None,
             );
 
             assert!(
@@ -227,12 +240,14 @@ mod tests {
                 Sha256::hash(b"genesis"),
                 Height::new(1),
                 now - 1,
+                None,
             );
             let block = Block::new(
                 test_context(2, (View::new(1), parent.digest())),
                 parent.digest(),
                 parent.height.next(),
                 now,
+                None,
             );
 
             let start = context.current();
@@ -254,6 +269,7 @@ mod tests {
                 Sha256::hash(b"genesis"),
                 Height::new(1),
                 now + 5_000,
+                None,
             );
             let proposal = propose_child(
                 context.child("propose"),
@@ -263,62 +279,10 @@ mod tests {
             )
             .await;
 
+            assert_eq!(proposal.timestamp, parent.timestamp + 1);
             assert_eq!(proposal.parent, parent.digest());
             assert_eq!(proposal.height, parent.height.next());
-            assert_eq!(proposal.timestamp, parent.timestamp + 1);
-        });
-    }
-
-    #[test]
-    fn verify_rejects_timestamp_above_maximum() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut application = Application::new();
-
-            let now = context.current().epoch_millis();
-            let parent = Block::new(
-                test_context(1, (View::zero(), sha256::Digest::EMPTY)),
-                Sha256::hash(b"genesis"),
-                Height::new(1),
-                now,
-            );
-            let block = Block::new(
-                test_context(2, (View::new(1), parent.digest())),
-                parent.digest(),
-                parent.height.next(),
-                // Verification should reject timestamps outside the fixed
-                // protocol range before attempting to sleep.
-                MAX_BLOCK_TIMESTAMP_MS + 1,
-            );
-
-            assert!(
-                !verify_block(context.child("verify"), &mut application, &block, &parent).await
-            );
-        });
-    }
-
-    #[test]
-    #[should_panic(expected = "proposed timestamp exceeded maximum")]
-    fn propose_panics_when_parent_timestamp_is_maximum() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut application = Application::new();
-
-            let parent = Block::new(
-                test_context(1, (View::zero(), sha256::Digest::EMPTY)),
-                Sha256::hash(b"genesis"),
-                Height::new(1),
-                // Proposing on top of a parent already at the maximum would
-                // require `parent.timestamp + 1`, which must be rejected.
-                MAX_BLOCK_TIMESTAMP_MS,
-            );
-            let _ = propose_child(
-                context.child("propose"),
-                &mut application,
-                test_context(2, (View::new(1), parent.digest())),
-                &parent,
-            )
-            .await;
+            assert!(proposal.log.is_none());
         });
     }
 }

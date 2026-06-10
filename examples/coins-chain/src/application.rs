@@ -12,6 +12,7 @@ use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_storage::Context as StorageContext;
 use commonware_utils::{Acknowledgement, SystemTimeExt};
 use futures::StreamExt;
+use nunchi_dkg as dkg;
 use rand::Rng;
 use std::time::{Duration, SystemTime};
 use tracing::info;
@@ -27,6 +28,7 @@ pub struct Application<E: StorageContext> {
     submitter: Submitter,
     ledger: SharedLedger<E>,
     max_block_transactions: usize,
+    dkg: Option<dkg::Mailbox<Block>>,
 }
 
 impl<E: StorageContext> Clone for Application<E> {
@@ -35,6 +37,7 @@ impl<E: StorageContext> Clone for Application<E> {
             submitter: self.submitter.clone(),
             ledger: self.ledger.clone(),
             max_block_transactions: self.max_block_transactions,
+            dkg: self.dkg.clone(),
         }
     }
 }
@@ -52,6 +55,7 @@ impl<E: StorageContext> Application<E> {
             Height::zero(),
             0,
             Vec::new(),
+            None,
         )
     }
 
@@ -64,6 +68,21 @@ impl<E: StorageContext> Application<E> {
             submitter,
             ledger,
             max_block_transactions,
+            dkg: None,
+        }
+    }
+
+    pub fn with_dkg(
+        submitter: Submitter,
+        ledger: SharedLedger<E>,
+        max_block_transactions: usize,
+        dkg: dkg::Mailbox<Block>,
+    ) -> Self {
+        Self {
+            submitter,
+            ledger,
+            max_block_transactions,
+            dkg: Some(dkg),
         }
     }
 
@@ -123,6 +142,10 @@ where
         // can starve valid transactions behind lower-sorting unauthorized entries.
         let pending = self.submitter.pending(usize::MAX).await;
         let transactions = self.filter_authorized(pending).await;
+        let reshare_log = match &mut self.dkg {
+            Some(dkg) => dkg.act().await,
+            None => None,
+        };
 
         Some(Block::new(
             context,
@@ -130,6 +153,7 @@ where
             parent.height.next(),
             current,
             transactions,
+            reshare_log,
         ))
     }
 
@@ -182,6 +206,7 @@ impl<E: StorageContext> Reporter for Application<E> {
                 height = %block.height(),
                 digest = ?block.digest(),
                 transactions = block.transactions.len(),
+                has_reshare_log = block.reshare_log.is_some(),
                 "finalized block"
             );
             ack.acknowledge();

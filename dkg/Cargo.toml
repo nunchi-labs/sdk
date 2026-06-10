@@ -1,34 +1,29 @@
 [package]
-name = "nunchi-coins-chain"
+name = "nunchi-dkg"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "A demo blockchain that executes the Nunchi coins module, used for coin-operation integration tests."
+description = "Reusable DKG and resharing support for Nunchi examples."
 
 [dependencies]
-nunchi-coins = { workspace = true }
-nunchi-common = { workspace = true }
-nunchi-dkg = { workspace = true }
 commonware-actor = { workspace = true }
-commonware-broadcast = { workspace = true }
 commonware-codec = { workspace = true }
 commonware-consensus = { workspace = true, features = ["mocks"] }
 commonware-cryptography = { workspace = true, features = ["mocks"] }
+commonware-formatting = { workspace = true }
 commonware-macros = { workspace = true }
+commonware-math = { workspace = true }
 commonware-p2p = { workspace = true }
-commonware-resolver = { workspace = true }
+commonware-parallel = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-storage = { workspace = true }
 commonware-utils = { workspace = true }
-commonware-parallel = { workspace = true }
 bytes = { workspace = true }
+futures = { workspace = true }
 rand = { workspace = true }
 rand_core = { workspace = true }
-thiserror = { workspace = true }
-futures = { workspace = true }
+serde = { version = "1.0.219", features = ["derive"] }
 tracing = { workspace = true }
-governor = { workspace = true }
 
 [dev-dependencies]
-commonware-math = { workspace = true }
 tracing-subscriber = { version = "0.3.19", features = ["fmt", "json"] }

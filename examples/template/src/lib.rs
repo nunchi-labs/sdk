@@ -1,42 +1,35 @@
 use commonware_consensus::types::Epoch;
 use commonware_formatting::hex;
-use commonware_utils::NZU64;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    num::{NonZero, NonZeroU32, NonZeroUsize},
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
 };
 
 mod block;
 mod consensus;
+mod namespace;
 
 pub mod application;
 pub mod engine;
 
-pub use block::{Block, Finalized, Notarized};
+pub use block::{genesis, Block, Finalized, Notarized};
 pub use consensus::{
-    Activity, Context, Finalization, Identity, Notarization, PublicKey, Scheme, Seed, Seedable,
-    Signature,
+    Activity, Context, EdScheme, EpochProvider, Finalization, Identity, Notarization, Provider,
+    PublicKey, Scheme, Seed, Seedable, Signature, ThresholdScheme,
 };
+pub use namespace::APPLICATION as NAMESPACE;
+pub use nunchi_dkg::PeerConfig;
 
-/// The unique namespace prefix used in all signing operations to prevent signature replay attacks.
-pub const NAMESPACE: &[u8] = b"_ALTO";
+/// The number of blocks in an epoch.
+///
+/// Production systems should use a much larger value, as DKG/reshare safety depends on
+/// synchrony during the epoch window.
+pub const BLOCKS_PER_EPOCH: NonZeroU64 = commonware_utils::NZU64!(200);
 
-/// The epoch number used in [commonware_consensus::simplex].
-///
-/// Because the template does not implement reconfiguration (validator set changes and resharing), we hardcode the epoch to 0.
-///
-/// For an example of how to implement reconfiguration and resharing, see [commonware-reshare](https://github.com/commonwarexyz/monorepo/tree/main/examples/reshare).
+/// The bootstrap epoch number used in [commonware_consensus::simplex].
 pub const EPOCH: Epoch = Epoch::zero();
-
-/// The epoch length used in [commonware_consensus::simplex].
-///
-/// Because the template does not implement reconfiguration (validator set changes and resharing), we hardcode the epoch length to u64::MAX (to
-/// stay in the first epoch forever).
-///
-/// For an example of how to implement reconfiguration and resharing, see [commonware-reshare](https://github.com/commonwarexyz/monorepo/tree/main/examples/reshare).
-pub const EPOCH_LENGTH: NonZero<u64> = NZU64!(u64::MAX);
 
 #[repr(u8)]
 pub enum Kind {
@@ -125,7 +118,7 @@ pub struct Peers {
 #[cfg(test)]
 mod type_tests {
     use super::*;
-    use commonware_codec::{DecodeExt, Encode};
+    use commonware_codec::{Decode, Encode};
     use commonware_consensus::{
         simplex::{
             scheme::bls12381_threshold::vrf as bls12381_threshold,
@@ -138,6 +131,7 @@ mod type_tests {
         Digest, Digestible, Hasher, Sha256, Signer,
     };
     use commonware_parallel::Sequential;
+    use commonware_utils::NZU32;
     use rand::{rngs::StdRng, SeedableRng};
 
     #[test]
@@ -153,7 +147,7 @@ mod type_tests {
             parent: (View::new(8), sha256::Digest::EMPTY),
         };
         let digest = Sha256::hash(b"hello world");
-        let block = Block::new(context, digest, Height::new(10), 100);
+        let block = Block::new(context, digest, Height::new(10), 100, None);
         let proposal = Proposal::new(
             Round::new(EPOCH, View::new(9)),
             View::new(8),
@@ -169,7 +163,8 @@ mod type_tests {
         let notarized = Notarized::new(notarization, block.clone());
 
         let encoded = notarized.encode();
-        let decoded = Notarized::decode(encoded).expect("failed to decode notarized");
+        let decoded =
+            Notarized::decode_cfg(encoded, &NZU32!(n)).expect("failed to decode notarized");
         assert_eq!(notarized, decoded);
         assert!(notarized.verify(&schemes[0], &Sequential));
     }
@@ -187,7 +182,7 @@ mod type_tests {
             parent: (View::new(8), sha256::Digest::EMPTY),
         };
         let digest = Sha256::hash(b"hello world");
-        let block = Block::new(context, digest, Height::new(10), 100);
+        let block = Block::new(context, digest, Height::new(10), 100, None);
         let proposal = Proposal::new(
             Round::new(EPOCH, View::new(9)),
             View::new(8),
@@ -203,7 +198,8 @@ mod type_tests {
         let finalized = Finalized::new(finalization, block.clone());
 
         let encoded = finalized.encode();
-        let decoded = Finalized::decode(encoded).expect("failed to decode finalized");
+        let decoded =
+            Finalized::decode_cfg(encoded, &NZU32!(n)).expect("failed to decode finalized");
         assert_eq!(finalized, decoded);
         assert!(finalized.verify(&schemes[0], &Sequential));
     }
