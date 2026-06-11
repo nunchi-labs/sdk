@@ -7,8 +7,9 @@ mod transaction;
 
 pub use account::{AccountPolicyError, Address, MultisigPolicy, MAX_MULTISIG_SIGNERS};
 pub use state_db::{
-    CommitState, Namespace, QmdbBackend, QmdbBatch, QmdbConfig, QmdbDatabaseSet, QmdbMerkleized,
-    QmdbOperation, QmdbReader, QmdbState, QmdbUnmerkleized, StateDb, StateError, StateStore,
+    CommitState, Namespace, Overlay, QmdbBackend, QmdbBatch, QmdbConfig, QmdbDatabaseSet,
+    QmdbMerkleized, QmdbOperation, QmdbReader, QmdbState, QmdbUnmerkleized, StateDb, StateError,
+    StateStore,
 };
 pub use transaction::{
     AccountSignature, Authorization, Operation, Transaction, TransactionPayload,

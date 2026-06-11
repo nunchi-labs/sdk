@@ -259,6 +259,53 @@ impl<E: Context> StateStore for QmdbBatch<E> {
     }
 }
 
+/// Stages writes in memory over a borrowed [`StateStore`], folding them into the underlying
+/// store only on [`Overlay::commit`].
+///
+/// Dropping an overlay discards its staged writes, so a multi-step operation that fails partway
+/// through leaves the underlying store untouched.
+pub struct Overlay<'a, S> {
+    inner: &'a mut S,
+    staged: BTreeMap<Digest, Option<Vec<u8>>>,
+}
+
+impl<'a, S: StateStore> Overlay<'a, S> {
+    pub fn new(inner: &'a mut S) -> Self {
+        Self {
+            inner,
+            staged: BTreeMap::new(),
+        }
+    }
+
+    /// Fold the staged writes into the underlying store.
+    pub fn commit(self) {
+        let Self { inner, staged } = self;
+        for (key, value) in staged {
+            match value {
+                Some(value) => inner.set(key, value),
+                None => inner.remove(key),
+            }
+        }
+    }
+}
+
+impl<S: StateStore + Sync> StateStore for Overlay<'_, S> {
+    async fn get(&self, key: &Digest) -> Result<Option<Vec<u8>>, StateError> {
+        if let Some(staged) = self.staged.get(key) {
+            return Ok(staged.clone());
+        }
+        self.inner.get(key).await
+    }
+
+    fn set(&mut self, key: Digest, value: Vec<u8>) {
+        self.staged.insert(key, Some(value));
+    }
+
+    fn remove(&mut self, key: Digest) {
+        self.staged.insert(key, None);
+    }
+}
+
 /// Read-only access to a QMDB database set owned by a `Stateful` actor.
 #[derive(Clone)]
 pub struct QmdbReader<E: Context> {
