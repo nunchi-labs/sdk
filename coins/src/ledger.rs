@@ -147,12 +147,12 @@ impl<D: CoinDB> Ledger<D> {
     ) -> Result<CoinId, LedgerError> {
         let mut factory = TokenFactory::with_nonce(self.db.factory_nonce().await?);
         let token = factory.create(issuer.clone(), spec)?;
-        self.db.set_factory_nonce(factory.next_nonce());
 
         let id = token.id;
         if self.db.token(&id).await?.is_some() {
             return Err(LedgerError::DuplicateToken(id));
         }
+        self.db.set_factory_nonce(factory.next_nonce());
         self.db.set_token(&token);
         if token.total_supply > 0 {
             self.credit(&issuer, id, token.total_supply).await?;
