@@ -90,18 +90,13 @@ impl<E: StorageContext> Application<E> {
         &self,
         pending: Vec<nunchi_coins::Transaction>,
     ) -> Vec<nunchi_coins::Transaction> {
-        let state = self.ledger.lock().await;
+        let ledger = self.ledger.lock().await;
         let mut transactions = Vec::with_capacity(self.max_block_transactions.min(pending.len()));
         for transaction in pending {
             if transactions.len() == self.max_block_transactions {
                 break;
             }
-            if state
-                .ledger
-                .validate_authorization(&transaction)
-                .await
-                .is_ok()
-            {
+            if ledger.validate_authorization(&transaction).await.is_ok() {
                 transactions.push(transaction);
             }
         }
@@ -218,17 +213,13 @@ impl<E: StorageContext> Reporter for Application<E> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::execution::ChainState;
     use crate::txpool::TxPool;
-    use commonware_consensus::types::Height;
     use commonware_runtime::{deterministic, Runner as _};
-    use futures::lock::Mutex as AsyncMutex;
     use nunchi_coins::{
         multisig_account_id, AccountPolicy, CoinOperation, CoinSpec, Ledger, MultisigPolicy,
         PrivateKey, Transaction,
     };
     use nunchi_common::QmdbState;
-    use std::sync::Arc;
 
     fn spec() -> CoinSpec {
         CoinSpec::new("NCH", "Nunchi", 9, 1_000, None)
@@ -242,11 +233,7 @@ mod tests {
             let db = QmdbState::init(context, "application-test")
                 .await
                 .expect("init state db");
-            let ledger = Ledger::new(db);
-            let shared = Arc::new(AsyncMutex::new(ChainState {
-                ledger,
-                applied_height: Height::zero(),
-            }));
+            let shared = SharedLedger::new(Ledger::new(db));
             let app = Application::new(submitter, shared.clone(), 16);
 
             let alice_a = PrivateKey::ed25519_from_seed(1);
@@ -267,7 +254,6 @@ mod tests {
             shared
                 .lock()
                 .await
-                .ledger
                 .register_account_policy(account_id, AccountPolicy::Multisig(policy))
                 .await
                 .expect("register policy");

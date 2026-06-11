@@ -12,21 +12,18 @@ use commonware_runtime::{Handle, Spawner};
 use commonware_storage::Context;
 use commonware_utils::{acknowledgement::Exact, Acknowledgement};
 use futures::lock::Mutex as AsyncMutex;
-use nunchi_coins::{Ledger, LedgerError};
+use nunchi_coins::{rpc::SharedLedger as SharedCoinLedger, LedgerError};
 use nunchi_common::QmdbState;
 use std::collections::VecDeque;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tracing::debug;
 
-/// A validator's committed coin ledger plus the height of the last finalized block applied to it.
-pub struct ChainState<E: Context> {
-    pub ledger: Ledger<QmdbState<E>>,
-    pub applied_height: Height,
-}
-
 /// A coin ledger shared between the [`Executor`] (which writes) and clients/tests (which read).
-pub type SharedLedger<E> = Arc<AsyncMutex<ChainState<E>>>;
+pub type SharedLedger<E> = SharedCoinLedger<QmdbState<E>>;
+
+/// The height of the last finalized block applied to a node's ledger.
+pub type SharedAppliedHeight = Arc<AsyncMutex<Height>>;
 
 /// A node's externally reachable handles, returned by [`Engine::new`](crate::engine::Engine::new):
 /// submit transactions to this node, and read its committed coin ledger.
@@ -37,6 +34,7 @@ pub type SharedLedger<E> = Arc<AsyncMutex<ChainState<E>>>;
 pub struct NodeHandle<E: Context> {
     pub submitter: Submitter,
     pub ledger: SharedLedger<E>,
+    pub applied_height: SharedAppliedHeight,
 }
 
 /// A finalized block delivered to the executor, with the acknowledgement the marshal awaits.
@@ -75,6 +73,7 @@ impl Reporter for Mailbox {
 /// Drives validator's coin ledger forward as blocks finalize.
 pub struct Executor<E: Context> {
     ledger: SharedLedger<E>,
+    applied_height: SharedAppliedHeight,
     receiver: mailbox::Receiver<FinalizedBlock>,
     submitter: Submitter,
 }
@@ -85,12 +84,14 @@ impl<E: Context + Spawner + Send + 'static> Executor<E> {
         context: &E,
         capacity: NonZeroUsize,
         ledger: SharedLedger<E>,
+        applied_height: SharedAppliedHeight,
         submitter: Submitter,
     ) -> (Self, Mailbox) {
         let (sender, receiver) = mailbox::new(context.child("mailbox"), capacity);
         (
             Self {
                 ledger,
+                applied_height,
                 receiver,
                 submitter,
             },
@@ -122,14 +123,14 @@ impl<E: Context + Spawner + Send + 'static> Executor<E> {
 
     /// Apply a finalized block, returning the digests of transactions that took effect.
     async fn apply_block(&self, block: &Block) -> Result<Vec<Digest>, LedgerError> {
-        let mut state = self.ledger.lock().await;
+        let mut ledger = self.ledger.lock().await;
         let mut applied = Vec::new();
         for transaction in &block.transactions {
             // Operations that don't currently apply (e.g. a transaction whose ledger nonce hasn't
             // been reached yet, or whose token doesn't exist yet) are skipped rather than fatal.
             // Every node skips the same ones, so convergence is preserved and the chain never halts
             // on a transaction that isn't applicable in this position.
-            match state.ledger.apply_transaction(transaction).await {
+            match ledger.apply_transaction(transaction).await {
                 Ok(()) => applied.push(transaction.digest()),
                 Err(err @ LedgerError::Storage(_)) => {
                     return Err(err);
@@ -144,11 +145,11 @@ impl<E: Context + Spawner + Send + 'static> Executor<E> {
 
         // Only commit when the block actually mutated state.
         if !applied.is_empty() {
-            if let Err(err @ LedgerError::Storage(_)) = state.ledger.commit().await {
+            if let Err(err @ LedgerError::Storage(_)) = ledger.commit().await {
                 return Err(err);
             }
         }
-        state.applied_height = block.height();
+        *self.applied_height.lock().await = block.height();
         Ok(applied)
     }
 }

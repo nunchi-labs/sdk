@@ -6,6 +6,9 @@ mod codec;
 mod db;
 mod factory;
 mod ledger;
+/// JSON-RPC surface for the coin module (enabled by the default `rpc` feature).
+#[cfg(feature = "rpc")]
+pub mod rpc;
 mod transaction;
 
 pub use account::{

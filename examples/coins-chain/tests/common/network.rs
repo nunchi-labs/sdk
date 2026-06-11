@@ -373,13 +373,9 @@ impl TestNetwork<'_> {
             return false;
         }
         for shared in handles {
-            let state = shared.lock().await;
+            let ledger = shared.lock().await;
             for (account, target) in expected {
-                let nonce = state
-                    .ledger
-                    .nonce(account)
-                    .await
-                    .expect("nonce read failed");
+                let nonce = ledger.nonce(account).await.expect("nonce read failed");
                 if nonce != *target {
                     return false;
                 }

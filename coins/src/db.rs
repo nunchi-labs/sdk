@@ -7,6 +7,7 @@
 
 use super::{AccountPolicy, Address, CoinId, TokenDefinition, COINS_NAMESPACE};
 use crate::LedgerError;
+use async_trait::async_trait;
 use commonware_codec::{Encode, Read, ReadExt};
 use commonware_cryptography::sha256::Digest;
 use nunchi_common::state_db::{Namespace, StateDb};
@@ -47,7 +48,7 @@ fn balance_key(account: &Address, coin: &CoinId) -> Digest {
     NS.key(Table::Balance, &logical)
 }
 
-#[allow(async_fn_in_trait)]
+#[async_trait]
 pub trait CoinDB {
     /// Current nonce for `id` (0 if the account has never transacted).
     async fn nonce(&self, id: &Address) -> Result<u64, LedgerError>;
@@ -86,7 +87,8 @@ pub trait CoinDB {
     fn root(&self) -> Digest;
 }
 
-impl<S: StateDb> CoinDB for S {
+#[async_trait]
+impl<S: StateDb + Send + Sync> CoinDB for S {
     async fn nonce(&self, id: &Address) -> Result<u64, LedgerError> {
         let key = NS.key(Table::Account, &encoded(id));
         match StateDb::get(self, &key)
