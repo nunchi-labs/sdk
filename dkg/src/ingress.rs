@@ -21,7 +21,7 @@ where
     B: ReshareBlock,
     A: Acknowledgement,
 {
-    /// A request for the [Actor]'s next [DealerLog] for inclusion within a block.
+    /// A request for the [`crate::Actor`]'s next [DealerLog] for inclusion within a block.
     Act {
         response: oneshot::Sender<Option<DealerLog>>,
     },

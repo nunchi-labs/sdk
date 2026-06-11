@@ -1,4 +1,15 @@
-//! A demo blockchain that runs the Nunchi coins module under consensus.
+//! A demo blockchain that runs the Nunchi coins module under real consensus.
+//!
+//! The chain reuses the consensus, marshal, and engine wiring of the `nunchi-template` example, but
+//! its blocks carry [`nunchi_coins`] transactions and each validator executes the finalized block
+//! stream into its own authenticated coin [`Ledger`](nunchi_coins::Ledger).
+//!
+//! Transactions enter the chain exactly as they would on a real network: a client signs a
+//! transaction and submits it to a *specific* node's [`txpool`] (there is no gossip — each node only
+//! proposes the transactions it received). When that node leads, it includes them in its block;
+//! once finalized, every node executes them into its ledger. Each [`execution::NodeHandle`]
+//! exposes a node's transaction submitter and committed ledger so clients (and the integration
+//! tests in `tests/`) can drive and observe the chain.
 
 use commonware_consensus::types::Epoch;
 use std::num::NonZeroU64;

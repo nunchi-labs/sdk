@@ -1,5 +1,5 @@
 use super::codec::{read_string, string_encode_size, write_string};
-use super::AccountId;
+use super::Address;
 use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::sha256::Digest;
 
@@ -106,7 +106,7 @@ impl EncodeSize for CoinSpec {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TokenDefinition {
     pub id: CoinId,
-    pub issuer: AccountId,
+    pub issuer: Address,
     pub symbol: String,
     pub name: String,
     pub decimals: u8,
@@ -115,7 +115,7 @@ pub struct TokenDefinition {
 }
 
 impl TokenDefinition {
-    pub fn from_spec(id: CoinId, issuer: AccountId, spec: CoinSpec) -> Self {
+    pub fn from_spec(id: CoinId, issuer: Address, spec: CoinSpec) -> Self {
         Self {
             id,
             issuer,
@@ -146,7 +146,7 @@ impl Read for TokenDefinition {
     fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             id: CoinId::read(buf)?,
-            issuer: AccountId::read(buf)?,
+            issuer: Address::read(buf)?,
             symbol: read_string(buf, MAX_SYMBOL_BYTES, "TokenDefinition::symbol")?,
             name: read_string(buf, MAX_NAME_BYTES, "TokenDefinition::name")?,
             decimals: u8::read(buf)?,

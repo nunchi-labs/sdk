@@ -86,7 +86,7 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
 
 type DkgActor<E, P> = dkg::Actor<E, P, Block>;
 type DkgMailbox = dkg::Mailbox<Block>;
-type Marshaled<E> = Deferred<E, Scheme, Application, Block, FixedEpocher>;
+type Marshaled<E> = Deferred<E, Scheme, Application<E>, Block, FixedEpocher>;
 type SchemeProvider = Provider<Scheme, ed25519::PrivateKey>;
 type FinalizationsArchive<E> = immutable::Archive<E, Digest, Finalization>;
 type BlocksArchive<E> = immutable::Archive<E, Digest, Block>;
@@ -163,7 +163,7 @@ where
         );
         let node_handle = NodeHandle {
             submitter: submitter.clone(),
-            ledger: shared_ledger,
+            ledger: shared_ledger.clone(),
         };
         let txpool = txpool.start(context.child("txpool"));
         let executor = coins_executor.start(executor_context);
@@ -289,7 +289,7 @@ where
             config.signer.clone(),
             certificate_verifier,
         );
-        let genesis = Application::genesis();
+        let genesis = Application::<E>::genesis();
         let genesis_digest = genesis.digest();
         let (marshal, marshal_mailbox, _processed_height) = MarshalActor::init(
             context.child("marshal"),
@@ -323,6 +323,7 @@ where
             context.child("application"),
             Application::with_dkg(
                 submitter,
+                shared_ledger,
                 config.max_block_transactions,
                 dkg_mailbox.clone(),
             ),

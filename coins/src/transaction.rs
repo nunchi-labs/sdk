@@ -1,32 +1,37 @@
-use super::{AccountId, CoinId, CoinSpec, COINS_NAMESPACE};
+use super::{Address, CoinId, CoinSpec, MultisigPolicy};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
-use nunchi_common::Operation as CommonOperation;
+use nunchi_common::Operation;
 
 const OP_CREATE_TOKEN: u8 = 0;
 const OP_MINT: u8 = 1;
 const OP_BURN: u8 = 2;
 const OP_TRANSFER: u8 = 3;
+const OP_REGISTER_ACCOUNT_POLICY: u8 = 4;
 
 /// A ledger operation authorized by a signed transaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CoinOperation {
+    RegisterAccountPolicy {
+        account_id: Address,
+        policy: MultisigPolicy,
+    },
     CreateToken {
         spec: CoinSpec,
     },
     Mint {
         coin: CoinId,
-        to: AccountId,
+        to: Address,
         amount: u128,
     },
     Burn {
         coin: CoinId,
-        from: AccountId,
+        from: Address,
         amount: u128,
     },
     Transfer {
         coin: CoinId,
-        from: AccountId,
-        to: AccountId,
+        from: Address,
+        to: Address,
         amount: u128,
     },
 }
@@ -34,6 +39,11 @@ pub enum CoinOperation {
 impl Write for CoinOperation {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         match self {
+            Self::RegisterAccountPolicy { account_id, policy } => {
+                OP_REGISTER_ACCOUNT_POLICY.write(buf);
+                account_id.write(buf);
+                policy.write(buf);
+            }
             Self::CreateToken { spec } => {
                 OP_CREATE_TOKEN.write(buf);
                 spec.write(buf);
@@ -71,23 +81,27 @@ impl Read for CoinOperation {
 
     fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         match u8::read(buf)? {
+            OP_REGISTER_ACCOUNT_POLICY => Ok(Self::RegisterAccountPolicy {
+                account_id: Address::read(buf)?,
+                policy: MultisigPolicy::read(buf)?,
+            }),
             OP_CREATE_TOKEN => Ok(Self::CreateToken {
                 spec: CoinSpec::read(buf)?,
             }),
             OP_MINT => Ok(Self::Mint {
                 coin: CoinId::read(buf)?,
-                to: AccountId::read(buf)?,
+                to: Address::read(buf)?,
                 amount: u128::read(buf)?,
             }),
             OP_BURN => Ok(Self::Burn {
                 coin: CoinId::read(buf)?,
-                from: AccountId::read(buf)?,
+                from: Address::read(buf)?,
                 amount: u128::read(buf)?,
             }),
             OP_TRANSFER => Ok(Self::Transfer {
                 coin: CoinId::read(buf)?,
-                from: AccountId::read(buf)?,
-                to: AccountId::read(buf)?,
+                from: Address::read(buf)?,
+                to: Address::read(buf)?,
                 amount: u128::read(buf)?,
             }),
             tag => Err(Error::InvalidEnum(tag)),
@@ -98,6 +112,9 @@ impl Read for CoinOperation {
 impl EncodeSize for CoinOperation {
     fn encode_size(&self) -> usize {
         1 + match self {
+            Self::RegisterAccountPolicy { account_id, policy } => {
+                account_id.encode_size() + policy.encode_size()
+            }
             Self::CreateToken { spec } => spec.encode_size(),
             Self::Mint { coin, to, amount } => {
                 coin.encode_size() + to.encode_size() + amount.encode_size()
@@ -115,9 +132,9 @@ impl EncodeSize for CoinOperation {
     }
 }
 
-impl CommonOperation for CoinOperation {
-    const NAMESPACE: &'static [u8] = COINS_NAMESPACE;
+impl Operation for CoinOperation {
+    const NAMESPACE: &'static [u8] = super::COINS_NAMESPACE;
 }
 
-pub type TransactionPayload = nunchi_common::TransactionPayload<CoinOperation>;
 pub type Transaction = nunchi_common::Transaction<CoinOperation>;
+pub type TransactionPayload = nunchi_common::TransactionPayload<CoinOperation>;

@@ -105,11 +105,11 @@ impl TxPool {
                 Message::Pending { limit, responder } => {
                     let mut transactions: Vec<Transaction> =
                         self.pending.values().cloned().collect();
-                    // Order by (signer, nonce) so a signer's operations stay in nonce order within a
+                    // Order by (account, nonce) so an account's operations stay in nonce order within a
                     // block and therefore apply without tripping the ledger's nonce gate.
                     transactions.sort_by(|a, b| {
-                        a.signer
-                            .cmp(&b.signer)
+                        a.account_id
+                            .cmp(&b.account_id)
                             .then(a.payload.nonce.cmp(&b.payload.nonce))
                     });
                     transactions.truncate(limit);

@@ -8,7 +8,7 @@ use commonware_macros::{select, test_traced};
 use commonware_p2p::simulated::Link;
 use commonware_runtime::{deterministic, Clock, Runner as _};
 use nunchi_coins::{
-    AccountId, CoinId, CoinOperation, CoinSpec, PrivateKey, TokenFactory, Transaction,
+    Address, CoinId, CoinOperation, CoinSpec, PrivateKey, TokenFactory, Transaction,
 };
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::time::Duration;
@@ -32,7 +32,7 @@ fn gold_spec() -> CoinSpec {
 /// The id Alice's token will be assigned: it is the first token created on the chain, so the token
 /// factory derives it with nonce 0.
 fn gold_coin() -> CoinId {
-    TokenFactory::derive_coin_id(&key(ALICE).public_key(), 0, &gold_spec())
+    TokenFactory::derive_coin_id(&Address::from(key(ALICE).public_key()), 0, &gold_spec())
 }
 
 #[test_traced]
@@ -158,12 +158,12 @@ fn recovers_unclean_shutdown() {
 /// the transactions submitted to it, yet the whole network converges on the result.
 async fn submit_scenario(
     network: &common::network::TestNetwork<'_>,
-) -> (AccountId, AccountId, AccountId) {
+) -> (Address, Address, Address) {
     let alice = key(ALICE);
     let bob = key(BOB);
-    let alice_id = alice.public_key();
-    let bob_id = bob.public_key();
-    let carol_id = key(CAROL).public_key();
+    let alice_id = Address::from(alice.public_key());
+    let bob_id = Address::from(bob.public_key());
+    let carol_id = Address::from(key(CAROL).public_key());
     let coin = gold_coin();
 
     let node0 = network.submitter(0);
