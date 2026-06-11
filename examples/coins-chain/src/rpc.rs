@@ -7,7 +7,7 @@ use jsonrpsee::{
     RpcModule,
 };
 use nunchi_coins::{rpc::CoinsRpc, Transaction};
-use nunchi_rpc::{decode_hex, encode_hex, params, RpcBuildError, RpcRouter};
+use nunchi_rpc::{decode_hex, encode_hex, invalid_params, params, RpcBuildError, RpcRouter};
 use serde::{Deserialize, Serialize};
 
 use crate::{execution::NodeHandle, txpool::Submitter};
@@ -52,7 +52,8 @@ pub struct SubmitTransactionResponse {
 /// Build the complete coins-chain RPC module.
 ///
 /// Downstream applications can follow this pattern: create one router over their node context,
-/// merge SDK modules such as `nunchi_coins::rpc::module`, then merge any app-specific methods.
+/// merge SDK modules via their `register` entry points (such as [`nunchi_coins::rpc::register`]),
+/// then merge any app-specific methods.
 pub fn module<E>(handle: NodeHandle<E>) -> Result<RpcModule<RpcContext<E>>, RpcBuildError>
 where
     E: StorageContext + Send + 'static,
@@ -77,6 +78,13 @@ where
     module.register_method("coins.submit_transaction", move |raw, _, _| {
         let params: SubmitTransactionParams = params(&raw)?;
         let transaction: Transaction = decode_hex(&params.transaction, "coin transaction")?;
+        // Reject invalid signatures at the door; the txpool would only drop them silently.
+        // Acceptance is still no guarantee of inclusion: ingress past this point is
+        // fire-and-forget, and application-level validity (nonce, balances) is enforced
+        // at proposal and execution time.
+        transaction
+            .verify()
+            .map_err(|err| invalid_params(format!("transaction failed verification: {err}")))?;
         let hash = transaction.digest();
         submitter.submit(transaction);
         RpcResult::Ok(SubmitTransactionResponse {
