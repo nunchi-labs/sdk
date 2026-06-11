@@ -2,7 +2,8 @@ use crate::application::Application;
 use crate::execution::NodeHandle;
 use crate::txpool::TxPool;
 use crate::{
-    Block, EpochProvider, Finalization, Provider, PublicKey, Scheme, BLOCKS_PER_EPOCH, NAMESPACE,
+    Block, EpochProvider, Finalization, Provider, PublicKey, Scheme, StateCommitment,
+    BLOCKS_PER_EPOCH, NAMESPACE,
 };
 use commonware_broadcast::buffered;
 use commonware_consensus::{
@@ -28,7 +29,7 @@ use commonware_cryptography::{
     BatchVerifier, Digestible, Signer,
 };
 use commonware_glue::stateful::{
-    db::{AttachableResolver, SyncEngineConfig},
+    db::{AttachableResolver, ManagedDb as _, SyncEngineConfig},
     Config as StatefulConfig, Mailbox as StatefulMailbox, Stateful as StatefulActor, SyncPlan,
 };
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
@@ -146,6 +147,15 @@ where
     stateful_mailbox: StatefulAppMailbox<E>,
 }
 
+/// Placeholder for the peer state-sync resolver.
+///
+/// `commonware_glue::stateful::db::p2p::standard::Actor` would slot in here, but as of
+/// commonware 2026.5.0 it requires `Op: Codec<Cfg = ()>`, which only fixed-encoding QMDB
+/// operations satisfy; the shared state database is variable-value (`Vec<u8>`), whose
+/// operation codec config is `((), (RangeCfg, ()))`. Until upstream threads the codec config
+/// through its resolver (or this chain moves to fixed-size values), peer state sync stays
+/// disabled: no startup path attaches a state-sync floor, so every node recovers exclusively
+/// via marshal backfill and this resolver is never asked to fetch.
 #[derive(Clone, Copy, Debug, Default)]
 struct NoStateSyncResolver;
 
@@ -339,8 +349,41 @@ where
             config.signer.clone(),
             certificate_verifier,
         );
-        let genesis = Application::genesis();
+        // The genesis block commits to the root of an empty state database. Derive it from a
+        // dedicated, never-written partition (rather than hardcoding the digest) so it stays
+        // correct across QMDB versions and is identical on fresh boots and restarts alike.
+        let genesis_state = {
+            let empty = QmdbBackend::init(
+                context.child("genesis_state"),
+                QmdbState::<E>::config_with_page_cache(
+                    &format!("{}-genesis-coins", config.partition_prefix),
+                    page_cache.clone(),
+                ),
+            )
+            .await
+            .expect("failed to initialize empty state database for genesis commitment");
+            let target = empty.sync_target().await;
+            StateCommitment {
+                root: target.root,
+                range: target.range,
+            }
+        };
+        let applied_height = Arc::new(AsyncMutex::new(Height::zero()));
+        let app = Application::with_dkg(
+            submitter.clone(),
+            config.max_block_transactions,
+            dkg_mailbox.clone(),
+            applied_height.clone(),
+            genesis_state,
+        );
+        let genesis = app.genesis_block();
         let genesis_digest = genesis.digest();
+        // The sync plan drives both marshal (its startup anchor below) and the stateful actor
+        // (via `StatefulConfig::plan`), so the two always agree on the startup decision. No
+        // finalized floor is ever attached here, so nodes recover via marshal backfill.
+        let plan =
+            SyncPlan::<_, Scheme, Standard<Block>>::init(&context, config.partition_prefix.clone())
+                .await;
         let (marshal, marshal_mailbox, _processed_height) = MarshalActor::init(
             context.child("marshal"),
             finalizations_by_height,
@@ -348,7 +391,7 @@ where
             marshal::Config {
                 provider: provider.clone(),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                start: marshal::Start::Genesis(genesis),
+                start: plan.marshal_start(genesis),
                 partition_prefix: format!("{}_marshal", config.partition_prefix),
                 mailbox_size: MAILBOX_SIZE,
                 view_retention_timeout: ViewDelta::new(
@@ -372,16 +415,6 @@ where
         let db_config = QmdbState::<E>::config_with_page_cache(
             &format!("{}-coins", config.partition_prefix),
             page_cache,
-        );
-        let plan =
-            SyncPlan::<_, Scheme, Standard<Block>>::init(&context, config.partition_prefix.clone())
-                .await;
-        let applied_height = Arc::new(AsyncMutex::new(Height::zero()));
-        let app = Application::with_dkg(
-            submitter.clone(),
-            config.max_block_transactions,
-            dkg_mailbox.clone(),
-            applied_height.clone(),
         );
         let (stateful, stateful_mailbox) = StatefulActor::init(
             context.child("stateful"),
