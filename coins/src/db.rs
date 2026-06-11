@@ -7,9 +7,9 @@
 
 use super::{AccountPolicy, Address, CoinId, TokenDefinition, COINS_NAMESPACE};
 use crate::LedgerError;
+use async_trait::async_trait;
 use commonware_codec::{Encode, Read, ReadExt};
 use commonware_cryptography::sha256::Digest;
-use jsonrpsee::core::async_trait;
 use nunchi_common::state_db::{Namespace, StateDb};
 
 /// Namespace owned by the coin module within the shared [`StateDb`].
