@@ -16,6 +16,7 @@ commonware-actor = { workspace = true }
 commonware-broadcast = { workspace = true }
 commonware-codec = { workspace = true }
 commonware-consensus = { workspace = true, features = ["mocks"] }
+commonware-formatting = { workspace = true }
 commonware-cryptography = { workspace = true, features = ["mocks"] }
 commonware-glue = { workspace = true }
 commonware-macros = { workspace = true }
@@ -34,8 +35,11 @@ tracing = { workspace = true }
 governor = { workspace = true }
 jsonrpsee = { workspace = true }
 serde = { workspace = true }
+toml = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 
 [dev-dependencies]
 commonware-math = { workspace = true }
 jsonrpsee = { workspace = true, features = ["http-client"] }
-tracing-subscriber = { version = "0.3.19", features = ["fmt", "json"] }
+tracing-subscriber = { workspace = true, features = ["fmt", "json"] }
