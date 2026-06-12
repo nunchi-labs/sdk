@@ -56,16 +56,13 @@ impl Node {
             .join(" ")
     }
 
+    // Status is judged by process lifecycle (spawn failures, exit codes), never by scanning log
+    // content: chatty consensus logs contain transient "failed ..." lines on healthy nodes.
     pub fn add_log(&mut self, line: impl Into<String>) {
-        let line = line.into();
         if self.logs.len() == MAX_LOG_LINES {
             self.logs.pop_front();
         }
-        let lower = line.to_lowercase();
-        if lower.contains("error") || lower.contains("panicked") || lower.contains("failed") {
-            self.status = NodeStatus::Error;
-        }
-        self.logs.push_back(line);
+        self.logs.push_back(line.into());
     }
 
     pub fn start(
