@@ -1,7 +1,6 @@
 //! Node-facing handles for submitting transactions and observing stateful execution.
 
 use crate::application::Application;
-use crate::txpool::Submitter;
 use commonware_consensus::types::Height;
 use commonware_cryptography::sha256::Digest;
 use commonware_glue::stateful::Mailbox as StatefulMailbox;
@@ -9,8 +8,11 @@ use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_storage::Context;
 use futures::lock::Mutex as AsyncMutex;
 use jsonrpsee::core::async_trait;
-use nunchi_coins::{rpc::CoinQuery, Address, CoinId, Ledger, LedgerError, TokenDefinition};
+use nunchi_coins::{
+    rpc::CoinQuery, Address, CoinId, Ledger, LedgerError, TokenDefinition, Transaction,
+};
 use nunchi_common::QmdbReader;
+use nunchi_mempool::MempoolHandle;
 use std::sync::Arc;
 
 /// The height of the last finalized block applied to a node's ledger.
@@ -26,7 +28,7 @@ pub struct NodeHandle<E>
 where
     E: Context + Spawner + Metrics + Clock + rand::Rng,
 {
-    pub submitter: Submitter,
+    pub submitter: MempoolHandle<Transaction>,
     pub stateful: StatefulMailbox<E, Application>,
     pub applied_height: SharedAppliedHeight,
 }
@@ -36,7 +38,7 @@ where
     E: Context + Spawner + Metrics + Clock + rand::Rng,
 {
     pub fn new(
-        submitter: Submitter,
+        submitter: MempoolHandle<Transaction>,
         stateful: StatefulMailbox<E, Application>,
         applied_height: SharedAppliedHeight,
     ) -> Self {

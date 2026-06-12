@@ -21,7 +21,6 @@ pub mod application;
 pub mod engine;
 pub mod execution;
 pub mod rpc;
-pub mod txpool;
 
 pub use block::{Block, Finalized, Notarized, StateCommitment, MAX_TRANSACTIONS};
 pub use consensus::{
