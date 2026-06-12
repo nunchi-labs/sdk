@@ -2,6 +2,9 @@ use commonware_codec::{Encode, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_cryptography::sha256::Digest;
 use nunchi_authority::Transaction as AuthorityTransaction;
 use nunchi_coins::Transaction as CoinTransaction;
+use nunchi_common::Address;
+use nunchi_crypto::SignatureError;
+use nunchi_mempool::PoolTransaction;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Transaction {
@@ -24,17 +27,50 @@ impl Transaction {
         }
     }
 
-    pub fn ordering_key(&self) -> Vec<u8> {
+    pub fn account_id(&self) -> &Address {
         match self {
-            Self::Coin(tx) => tx.account_id.encode().as_ref().to_vec(),
-            Self::Authority(tx) => tx.account_id.encode().as_ref().to_vec(),
+            Self::Coin(tx) => &tx.account_id,
+            Self::Authority(tx) => &tx.account_id,
         }
+    }
+
+    pub fn ordering_key(&self) -> Vec<u8> {
+        self.account_id().encode().as_ref().to_vec()
     }
 
     pub fn nonce(&self) -> u64 {
         match self {
             Self::Coin(tx) => tx.payload.nonce,
             Self::Authority(tx) => tx.payload.nonce,
+        }
+    }
+}
+
+impl PoolTransaction for Transaction {
+    type Digest = Digest;
+    type AccountId = Address;
+    type VerifyError = SignatureError;
+
+    fn digest(&self) -> Self::Digest {
+        Self::digest(self)
+    }
+
+    fn account_id(&self) -> &Self::AccountId {
+        self.account_id()
+    }
+
+    fn nonce(&self) -> u64 {
+        self.nonce()
+    }
+
+    fn encoded_size(&self) -> usize {
+        EncodeSize::encode_size(self)
+    }
+
+    fn verify(&self) -> Result<(), Self::VerifyError> {
+        match self {
+            Self::Coin(tx) => tx.verify(),
+            Self::Authority(tx) => tx.verify(),
         }
     }
 }

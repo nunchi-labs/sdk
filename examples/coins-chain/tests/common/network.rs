@@ -26,11 +26,11 @@ use nunchi_coins_chain::{
     channels,
     engine::{Config, Engine},
     execution::NodeHandle,
-    txpool::Submitter,
-    PublicKey,
+    PublicKey, Transaction,
 };
 use nunchi_common::QmdbReader;
 use nunchi_dkg::{ContinueOnUpdate, PeerConfig};
+use nunchi_mempool::{MempoolHandle, PoolConfig};
 use std::{
     collections::{HashMap, HashSet},
     time::Duration,
@@ -340,7 +340,7 @@ impl TestNetwork<'_> {
     }
 
     /// The transaction submitter for validator `index`; a client's ingress to that node.
-    pub(crate) fn submitter(&self, index: usize) -> Submitter {
+    pub(crate) fn submitter(&self, index: usize) -> MempoolHandle<Transaction> {
         self.nodes
             .get(&self.participants[index])
             .expect("validator not started")
@@ -459,6 +459,7 @@ async fn start_validator(
         certification_timeout: cfg.certification_timeout,
         strategy: Sequential,
         max_block_transactions: MAX_BLOCK_TRANSACTIONS,
+        pool_config: PoolConfig::default(),
     };
 
     let validator_context = context.child("validator").with_attribute("id", &uid);

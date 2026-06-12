@@ -1,20 +1,21 @@
 //! Aggregated JSON-RPC for the coins-chain example.
 
+use commonware_cryptography::sha256::Digest;
 use jsonrpsee::{
     core::{RegisterMethodError, RpcResult},
     RpcModule,
 };
-use nunchi_coins::{
-    rpc::{CoinQuery, CoinsRpc},
-    Transaction,
-};
-use nunchi_rpc::{
-    decode_hex, encode_hex, invalid_params, module_error, params, RpcBuildError, RpcRouter,
-};
+use nunchi_coins::rpc::{CoinQuery, CoinsMempoolRpc, CoinsRpc, MempoolIngress};
+use nunchi_coins::Transaction as CoinTransaction;
+use nunchi_mempool::{AdmissionError, MempoolHandle, TxStatus};
+use nunchi_rpc::{encode_hex, module_error, RpcBuildError, RpcRouter};
 use serde::{Deserialize, Serialize};
 
-use crate::execution::SharedAppliedHeight;
-use crate::txpool::Submitter;
+use crate::{execution::SharedAppliedHeight, Transaction};
+
+pub use nunchi_coins::rpc::{
+    SubmitTransactionParams, SubmitTransactionResponse, TransactionStatusResponse,
+};
 
 /// Shared RPC context for one coins-chain node.
 ///
@@ -46,25 +47,36 @@ pub struct StatusResponse {
     pub state_root: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct SubmitTransactionParams {
-    /// Commonware-codec encoded `nunchi_coins::Transaction` bytes, formatted as hex.
-    pub transaction: String,
+#[derive(Clone)]
+struct ChainMempoolIngress {
+    mempool: MempoolHandle<Transaction>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct SubmitTransactionResponse {
-    pub hash: String,
+impl ChainMempoolIngress {
+    fn new(mempool: MempoolHandle<Transaction>) -> Self {
+        Self { mempool }
+    }
+}
+
+#[jsonrpsee::core::async_trait]
+impl MempoolIngress for ChainMempoolIngress {
+    async fn submit(&self, transaction: CoinTransaction) -> Result<Digest, AdmissionError> {
+        self.mempool.submit(transaction.into()).await
+    }
+
+    async fn status(&self, digest: Digest) -> Option<TxStatus> {
+        self.mempool.status(digest).await
+    }
 }
 
 /// Build the complete coins-chain RPC module.
 ///
 /// Downstream applications can follow this pattern: create one router over their node context,
-/// merge SDK modules via their `register` entry points (such as [`nunchi_coins::rpc::register`]),
-/// then merge any app-specific methods.
+/// merge SDK modules via their `register` entry points (such as [`nunchi_coins::rpc::register`]
+/// and [`nunchi_coins::rpc::register_mempool`]), then merge any app-specific methods.
 pub fn module<Q>(
     query: Q,
-    submitter: Submitter,
+    mempool: MempoolHandle<Transaction>,
     applied_height: SharedAppliedHeight,
 ) -> Result<RpcModule<RpcContext<Q>>, RpcBuildError>
 where
@@ -72,36 +84,12 @@ where
 {
     let mut router = RpcRouter::new(RpcContext::new(query.clone(), applied_height));
     nunchi_coins::rpc::register(&mut router, CoinsRpc::new(query))?;
-    router.merge(coin_submit_module(router.context(), submitter)?)?;
+    nunchi_coins::rpc::register_mempool(
+        &mut router,
+        CoinsMempoolRpc::new(ChainMempoolIngress::new(mempool)),
+    )?;
     router.merge(chain_module(router.context())?)?;
     Ok(router.into_module())
-}
-
-fn coin_submit_module<Q>(
-    context: std::sync::Arc<RpcContext<Q>>,
-    submitter: Submitter,
-) -> Result<RpcModule<RpcContext<Q>>, RegisterMethodError>
-where
-    Q: CoinQuery,
-{
-    let mut module = RpcModule::from_arc(context);
-    module.register_method("coins.submit_transaction", move |raw, _, _| {
-        let params: SubmitTransactionParams = params(&raw)?;
-        let transaction: Transaction = decode_hex(&params.transaction, "coin transaction")?;
-        // Reject invalid signatures at the door; the txpool would only drop them silently.
-        // Acceptance is still no guarantee of inclusion: ingress past this point is
-        // fire-and-forget, and application-level validity (nonce, balances) is enforced
-        // at proposal and execution time.
-        transaction
-            .verify()
-            .map_err(|err| invalid_params(format!("transaction failed verification: {err}")))?;
-        let hash = transaction.digest();
-        submitter.submit(transaction);
-        RpcResult::Ok(SubmitTransactionResponse {
-            hash: encode_hex(&hash),
-        })
-    })?;
-    Ok(module)
 }
 
 fn chain_module<Q>(

@@ -6,11 +6,12 @@ license.workspace = true
 description = "A demo blockchain that executes the Nunchi coins module, used for coin-operation integration tests."
 
 [dependencies]
-nunchi-coins = { workspace = true }
+nunchi-coins = { workspace = true, features = ["mempool"] }
 nunchi-authority = { workspace = true }
 nunchi-common = { workspace = true }
 nunchi-crypto = { workspace = true }
 nunchi-dkg = { workspace = true }
+nunchi-mempool = { workspace = true }
 nunchi-rpc = { workspace = true }
 commonware-actor = { workspace = true }
 commonware-broadcast = { workspace = true }

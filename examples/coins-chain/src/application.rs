@@ -1,5 +1,4 @@
 use crate::execution::SharedAppliedHeight;
-use crate::txpool::Submitter;
 use crate::{Block, Context, Scheme, StateCommitment, Transaction, EPOCH};
 use commonware_consensus::{
     types::{Height, Round, View},
@@ -16,9 +15,11 @@ use commonware_utils::{non_empty_range, range::NonEmptyRange, SystemTimeExt};
 use futures::StreamExt;
 use nunchi_authority::{AuthorityError, AuthorityLedger};
 use nunchi_coins::{Ledger, LedgerError};
-use nunchi_common::{Overlay, QmdbBatch, QmdbDatabaseSet, QmdbMerkleized, StateStore};
+use nunchi_common::{Address, Overlay, QmdbBatch, QmdbDatabaseSet, QmdbMerkleized, StateStore};
 use nunchi_dkg as dkg;
+use nunchi_mempool::MempoolHandle;
 use rand::Rng;
+use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 use tracing::debug;
 
@@ -51,7 +52,7 @@ impl ExecutionError {
 /// The consensus application for the coins chain.
 #[derive(Clone)]
 pub struct Application {
-    submitter: Submitter,
+    submitter: MempoolHandle<Transaction>,
     max_block_transactions: usize,
     dkg: Option<dkg::Mailbox<Block>>,
     applied_height: SharedAppliedHeight,
@@ -79,7 +80,7 @@ impl Application {
     }
 
     pub fn new(
-        submitter: Submitter,
+        submitter: MempoolHandle<Transaction>,
         max_block_transactions: usize,
         applied_height: SharedAppliedHeight,
         genesis_state: StateCommitment,
@@ -94,7 +95,7 @@ impl Application {
     }
 
     pub fn with_dkg(
-        submitter: Submitter,
+        submitter: MempoolHandle<Transaction>,
         max_block_transactions: usize,
         dkg: dkg::Mailbox<Block>,
         applied_height: SharedAppliedHeight,
@@ -244,7 +245,7 @@ where
     type Context = Context;
     type Block = Block;
     type Databases = QmdbDatabaseSet<E>;
-    type InputProvider = Submitter;
+    type InputProvider = MempoolHandle<Transaction>;
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
         Target::new(block.state_root, block.state_range.clone())
@@ -360,6 +361,15 @@ where
         _databases: &Self::Databases,
     ) {
         let applied = block.transactions.iter().map(Transaction::digest).collect();
+        let mut account_nonces: HashMap<Address, u64> = HashMap::new();
+        // enforce sequential nonces
+        for transaction in &block.transactions {
+            let next = transaction.nonce() + 1;
+            account_nonces
+                .entry(transaction.account_id().clone())
+                .and_modify(|nonce| *nonce = (*nonce).max(next))
+                .or_insert(next);
+        }
         debug!(
             height = %block.height(),
             digest = ?block.digest(),
@@ -368,14 +378,17 @@ where
             "finalized block"
         );
         *self.applied_height.lock().await = block.height();
-        self.submitter.prune(applied);
+        self.submitter.finalized(
+            applied,
+            account_nonces.into_iter().collect(),
+            block.height().get(),
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::txpool::TxPool;
     use commonware_runtime::{deterministic, Runner as _};
     use commonware_utils::sync::AsyncRwLock;
     use futures::lock::Mutex as AsyncMutex;
@@ -384,6 +397,7 @@ mod tests {
         Transaction as CoinTransaction,
     };
     use nunchi_common::{QmdbBackend, QmdbState};
+    use nunchi_mempool::{Mempool, PoolConfig};
     use std::sync::Arc;
 
     fn spec() -> CoinSpec {
@@ -394,7 +408,7 @@ mod tests {
     fn proposal_skips_unregistered_multisig() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let (_, submitter) = TxPool::new();
+            let (_mempool, submitter) = Mempool::new(PoolConfig::default());
             let config = QmdbState::<deterministic::Context>::config(&context, "application-test");
             let db = QmdbBackend::init(context, config)
                 .await

@@ -1,8 +1,7 @@
 use crate::application::Application;
 use crate::execution::NodeHandle;
-use crate::txpool::TxPool;
 use crate::{
-    Block, EpochProvider, Finalization, Provider, PublicKey, Scheme, StateCommitment,
+    Block, EpochProvider, Finalization, Provider, PublicKey, Scheme, StateCommitment, Transaction,
     BLOCKS_PER_EPOCH, NAMESPACE,
 };
 use commonware_broadcast::buffered;
@@ -44,6 +43,7 @@ use futures::{future::try_join_all, lock::Mutex as AsyncMutex};
 use governor::clock::Clock as GClock;
 use nunchi_common::{QmdbBackend, QmdbOperation, QmdbState};
 use nunchi_dkg::{self as dkg, orchestrator, PeerConfig, UpdateCallBack, MAX_SUPPORTED_MODE};
+use nunchi_mempool::{Mempool, PoolConfig};
 use rand::{CryptoRng, Rng};
 use rand_core::CryptoRngCore;
 use std::{
@@ -93,6 +93,7 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
     pub certification_timeout: Duration,
     pub strategy: S,
     pub max_block_transactions: usize,
+    pub pool_config: PoolConfig,
 }
 
 type DkgActor<E, P> = dkg::Actor<E, P, Block>;
@@ -142,7 +143,7 @@ where
     marshal: Marshal<E, S>,
     orchestrator: Orchestrator<E, B, S>,
     orchestrator_mailbox: orchestrator::Mailbox<MinSig, PublicKey>,
-    txpool: Handle<()>,
+    mempool: Handle<()>,
     stateful: StatefulApp<E>,
     stateful_mailbox: StatefulAppMailbox<E>,
 }
@@ -225,8 +226,8 @@ where
 {
     /// Create a new [Engine].
     pub async fn new(context: E, config: Config<B, P, S>) -> (Self, NodeHandle<E>) {
-        let (txpool, submitter) = TxPool::new();
-        let txpool = txpool.start(context.child("txpool"));
+        let (mempool, submitter) = Mempool::<Transaction>::new(config.pool_config.clone());
+        let mempool = mempool.start(context.child("mempool"));
 
         let page_cache = CacheRef::from_pooler(&context, PAGE_CACHE_PAGE_SIZE, PAGE_CACHE_CAPACITY);
         let consensus_namespace = union(NAMESPACE, b"_CONSENSUS");
@@ -474,7 +475,7 @@ where
             marshal,
             orchestrator,
             orchestrator_mailbox,
-            txpool,
+            mempool,
             stateful,
             stateful_mailbox,
         };
@@ -575,7 +576,7 @@ where
             marshal_handle,
             stateful_handle,
             orchestrator_handle,
-            self.txpool,
+            self.mempool,
         ])
         .await
         {

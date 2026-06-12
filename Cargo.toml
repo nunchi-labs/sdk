@@ -6,6 +6,7 @@ members = [
     "crypto",
     "dkg",
     "narae",
+    "mempool",
     "rpc",
     "examples/template",
     "examples/coins-chain",
@@ -23,6 +24,7 @@ nunchi-authority = { version = "2026.5.0", path = "authority" }
 nunchi-common = { version = "2026.5.0", path = "common" }
 nunchi-crypto = { version = "2026.5.0", path = "crypto" }
 nunchi-dkg = { version = "2026.5.0", path = "dkg" }
+nunchi-mempool = { version = "2026.5.0", path = "mempool" }
 nunchi-rpc = { version = "2026.5.0", path = "rpc" }
 nunchi-template = { version = "2026.5.0", path = "examples/template" }
 nunchi-coins-chain = { version = "2026.5.0", path = "examples/coins-chain" }

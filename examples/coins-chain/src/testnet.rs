@@ -29,6 +29,7 @@ use commonware_runtime::{tokio, Runner as _, Supervisor as _};
 use commonware_utils::{ordered::Set, N3f1, NZUsize, NZU32};
 use governor::Quota;
 use nunchi_dkg::{ContinueOnUpdate, PeerConfig, MAX_SUPPORTED_MODE};
+use nunchi_mempool::PoolConfig;
 use rand::{rngs::StdRng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -367,6 +368,7 @@ async fn start_node(
         certification_timeout: Duration::from_millis(config.consensus.certification_timeout_ms),
         strategy: Sequential,
         max_block_transactions: config.max_block_transactions,
+        pool_config: PoolConfig::default(),
     };
 
     let resolver_config = marshal::resolver::p2p::Config {
