@@ -12,6 +12,7 @@ use nunchi_rpc::{decode_hex, encode_hex, module_error, RpcRouter};
 use serde::{Deserialize, Serialize};
 
 use crate::{Address, CoinDB, CoinId, Ledger, LedgerError, TokenDefinition};
+use nunchi_common::CommitState;
 
 /// Read-only coin state required by the coin RPC server.
 #[async_trait]
@@ -53,7 +54,7 @@ impl<D> Clone for SharedLedger<D> {
 #[async_trait]
 impl<D> CoinQuery for SharedLedger<D>
 where
-    D: CoinDB + Send + Sync + 'static,
+    D: CoinDB + CommitState + Send + Sync + 'static,
 {
     async fn nonce(&self, account: Address) -> Result<u64, LedgerError> {
         self.lock().await.nonce(&account).await

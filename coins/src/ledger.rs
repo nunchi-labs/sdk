@@ -4,6 +4,7 @@ use super::{
 };
 use crate::db::CoinDB;
 use commonware_cryptography::sha256::Digest;
+use nunchi_common::CommitState;
 use nunchi_crypto::SignatureError;
 use thiserror::Error;
 
@@ -146,27 +147,17 @@ impl<D: CoinDB> Ledger<D> {
     ) -> Result<CoinId, LedgerError> {
         let mut factory = TokenFactory::with_nonce(self.db.factory_nonce().await?);
         let token = factory.create(issuer.clone(), spec)?;
-        self.db.set_factory_nonce(factory.next_nonce());
 
         let id = token.id;
         if self.db.token(&id).await?.is_some() {
             return Err(LedgerError::DuplicateToken(id));
         }
+        self.db.set_factory_nonce(factory.next_nonce());
         self.db.set_token(&token);
         if token.total_supply > 0 {
             self.credit(&issuer, id, token.total_supply).await?;
         }
         Ok(id)
-    }
-
-    /// Flush staged writes, returning the new authenticated state root.
-    pub async fn commit(&mut self) -> Result<Digest, LedgerError> {
-        self.db.commit().await
-    }
-
-    /// The most recently committed authenticated state root.
-    pub fn root(&self) -> Digest {
-        self.db.root()
     }
 
     async fn ensure_authorized(&self, tx: &Transaction) -> Result<(), LedgerError> {
@@ -362,6 +353,21 @@ impl<D: CoinDB> Ledger<D> {
         }
         self.db.set_balance(account, &coin, available - amount);
         Ok(())
+    }
+}
+
+impl<D: CoinDB + CommitState> Ledger<D> {
+    /// Flush staged writes, returning the new authenticated state root.
+    pub async fn commit(&mut self) -> Result<Digest, LedgerError> {
+        self.db
+            .commit()
+            .await
+            .map_err(|err| LedgerError::Storage(err.to_string()))
+    }
+
+    /// The most recently committed authenticated state root.
+    pub fn root(&self) -> Digest {
+        self.db.root()
     }
 }
 

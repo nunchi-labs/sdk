@@ -1,155 +1,110 @@
-//! Execution of finalized blocks against the coins ledger.
+//! Node-facing handles for submitting transactions and observing stateful execution.
 
-use crate::block::Block;
+use crate::application::Application;
 use crate::txpool::Submitter;
-use commonware_actor::{
-    mailbox::{self, Policy},
-    Feedback,
-};
-use commonware_consensus::{marshal::Update, types::Height, Heightable, Reporter};
+use commonware_consensus::types::Height;
 use commonware_cryptography::sha256::Digest;
-use commonware_runtime::{Handle, Spawner};
+use commonware_glue::stateful::Mailbox as StatefulMailbox;
+use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_storage::Context;
-use commonware_utils::{acknowledgement::Exact, Acknowledgement};
 use futures::lock::Mutex as AsyncMutex;
-use nunchi_coins::{rpc::SharedLedger as SharedCoinLedger, LedgerError};
-use nunchi_common::QmdbState;
-use std::collections::VecDeque;
-use std::num::NonZeroUsize;
+use jsonrpsee::core::async_trait;
+use nunchi_coins::{rpc::CoinQuery, Address, CoinId, Ledger, LedgerError, TokenDefinition};
+use nunchi_common::QmdbReader;
 use std::sync::Arc;
-use tracing::debug;
-
-/// A coin ledger shared between the [`Executor`] (which writes) and clients/tests (which read).
-pub type SharedLedger<E> = SharedCoinLedger<QmdbState<E>>;
 
 /// The height of the last finalized block applied to a node's ledger.
 pub type SharedAppliedHeight = Arc<AsyncMutex<Height>>;
 
 /// A node's externally reachable handles, returned by [`Engine::new`](crate::engine::Engine::new):
-/// submit transactions to this node, and read its committed coin ledger.
+/// submit transactions to this node, and subscribe to its stateful databases.
 ///
 /// In production a node has exactly one of these. An in-process multi-node harness collects them
 /// (e.g. into a map keyed by public key) to drive and observe multiple validators.
 #[derive(Clone)]
-pub struct NodeHandle<E: Context> {
+pub struct NodeHandle<E>
+where
+    E: Context + Spawner + Metrics + Clock + rand::Rng,
+{
     pub submitter: Submitter,
-    pub ledger: SharedLedger<E>,
+    pub stateful: StatefulMailbox<E, Application>,
     pub applied_height: SharedAppliedHeight,
 }
 
-/// A finalized block delivered to the executor, with the acknowledgement the marshal awaits.
-struct FinalizedBlock {
-    block: Block,
-    ack: Exact,
-}
-
-impl Policy for FinalizedBlock {
-    type Overflow = VecDeque<Self>;
-
-    // Finalized blocks must never be dropped: any block that doesn't fit the bounded ready queue is
-    // retained in overflow and delivered later.
-    fn handle(overflow: &mut Self::Overflow, message: Self) {
-        overflow.push_back(message);
-    }
-}
-
-/// The executor's report sink.
-#[derive(Clone)]
-pub struct Mailbox {
-    sender: mailbox::Sender<FinalizedBlock>,
-}
-
-impl Reporter for Mailbox {
-    type Activity = Update<Block>;
-
-    fn report(&mut self, activity: Self::Activity) -> Feedback {
-        match activity {
-            Update::Block(block, ack) => self.sender.enqueue(FinalizedBlock { block, ack }),
-            Update::Tip(..) => Feedback::Ok,
-        }
-    }
-}
-
-/// Drives validator's coin ledger forward as blocks finalize.
-pub struct Executor<E: Context> {
-    ledger: SharedLedger<E>,
-    applied_height: SharedAppliedHeight,
-    receiver: mailbox::Receiver<FinalizedBlock>,
-    submitter: Submitter,
-}
-
-impl<E: Context + Spawner + Send + 'static> Executor<E> {
-    /// Create an executor and its [`Mailbox`] report sink.
+impl<E> NodeHandle<E>
+where
+    E: Context + Spawner + Metrics + Clock + rand::Rng,
+{
     pub fn new(
-        context: &E,
-        capacity: NonZeroUsize,
-        ledger: SharedLedger<E>,
-        applied_height: SharedAppliedHeight,
         submitter: Submitter,
-    ) -> (Self, Mailbox) {
-        let (sender, receiver) = mailbox::new(context.child("mailbox"), capacity);
-        (
-            Self {
-                ledger,
-                applied_height,
-                receiver,
-                submitter,
-            },
-            Mailbox { sender },
-        )
-    }
-
-    /// Spawn the execution loop.
-    pub fn start(self, context: E) -> Handle<()> {
-        context.spawn(|_| self.run())
-    }
-
-    async fn run(mut self) {
-        while let Some(FinalizedBlock { block, ack }) = self.receiver.recv().await {
-            match self.apply_block(&block).await {
-                Ok(applied) => {
-                    self.submitter.prune(applied);
-                    ack.acknowledge();
-                }
-                Err(e) => {
-                    // TODO: in this case, we should not panic but bubble the
-                    // error up to gracefully shut down the application. Alas,
-                    // we have no graceful shutdown yet.
-                    panic!("failed to apply block: {e}")
-                }
-            }
+        stateful: StatefulMailbox<E, Application>,
+        applied_height: SharedAppliedHeight,
+    ) -> Self {
+        Self {
+            submitter,
+            stateful,
+            applied_height,
         }
     }
 
-    /// Apply a finalized block, returning the digests of transactions that took effect.
-    async fn apply_block(&self, block: &Block) -> Result<Vec<Digest>, LedgerError> {
-        let mut ledger = self.ledger.lock().await;
-        let mut applied = Vec::new();
-        for transaction in &block.transactions {
-            // Operations that don't currently apply (e.g. a transaction whose ledger nonce hasn't
-            // been reached yet, or whose token doesn't exist yet) are skipped rather than fatal.
-            // Every node skips the same ones, so convergence is preserved and the chain never halts
-            // on a transaction that isn't applicable in this position.
-            match ledger.apply_transaction(transaction).await {
-                Ok(()) => applied.push(transaction.digest()),
-                Err(err @ LedgerError::Storage(_)) => {
-                    return Err(err);
-                }
-                Err(error) => debug!(
-                    height = %block.height(),
-                    ?error,
-                    "skipped coin transaction"
-                ),
-            }
-        }
+    /// A read-only coin query backend over this node's committed databases, suitable for
+    /// serving the coin RPC (see [`crate::rpc::module`]).
+    pub fn query(&self) -> StatefulQuery<E> {
+        StatefulQuery::new(self.stateful.clone())
+    }
+}
 
-        // Only commit when the block actually mutated state.
-        if !applied.is_empty() {
-            if let Err(err @ LedgerError::Storage(_)) = ledger.commit().await {
-                return Err(err);
-            }
+/// Read-only coin queries answered from the stateful actor's committed databases.
+pub struct StatefulQuery<E>
+where
+    E: Context + Spawner + Metrics + Clock + rand::Rng,
+{
+    stateful: StatefulMailbox<E, Application>,
+}
+
+impl<E> Clone for StatefulQuery<E>
+where
+    E: Context + Spawner + Metrics + Clock + rand::Rng,
+{
+    fn clone(&self) -> Self {
+        Self {
+            stateful: self.stateful.clone(),
         }
-        *self.applied_height.lock().await = block.height();
-        Ok(applied)
+    }
+}
+
+impl<E> StatefulQuery<E>
+where
+    E: Context + Spawner + Metrics + Clock + rand::Rng,
+{
+    pub fn new(stateful: StatefulMailbox<E, Application>) -> Self {
+        Self { stateful }
+    }
+
+    async fn ledger(&self) -> Ledger<QmdbReader<E>> {
+        Ledger::new(QmdbReader::new(self.stateful.subscribe_databases().await))
+    }
+}
+
+#[async_trait]
+impl<E> CoinQuery for StatefulQuery<E>
+where
+    E: Context + Spawner + Metrics + Clock + rand::Rng + Send + Sync + 'static,
+{
+    async fn nonce(&self, account: Address) -> Result<u64, LedgerError> {
+        self.ledger().await.nonce(&account).await
+    }
+
+    async fn token(&self, coin: CoinId) -> Result<Option<TokenDefinition>, LedgerError> {
+        self.ledger().await.token(&coin).await
+    }
+
+    async fn balance(&self, account: Address, coin: CoinId) -> Result<u128, LedgerError> {
+        self.ledger().await.balance(&account, &coin).await
+    }
+
+    async fn state_root(&self) -> Result<Digest, LedgerError> {
+        let db = self.stateful.subscribe_databases().await;
+        Ok(QmdbReader::new(db).root().await)
     }
 }

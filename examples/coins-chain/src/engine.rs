@@ -1,8 +1,9 @@
 use crate::application::Application;
-use crate::execution::{Executor, Mailbox as ExecutorReporter, NodeHandle};
+use crate::execution::NodeHandle;
 use crate::txpool::TxPool;
 use crate::{
-    Block, EpochProvider, Finalization, Provider, PublicKey, Scheme, BLOCKS_PER_EPOCH, NAMESPACE,
+    Block, EpochProvider, Finalization, Provider, PublicKey, Scheme, StateCommitment,
+    BLOCKS_PER_EPOCH, NAMESPACE,
 };
 use commonware_broadcast::buffered;
 use commonware_consensus::{
@@ -27,20 +28,26 @@ use commonware_cryptography::{
     sha256::Digest,
     BatchVerifier, Digestible, Signer,
 };
+use commonware_glue::stateful::{
+    db::{AttachableResolver, ManagedDb as _, SyncEngineConfig},
+    Config as StatefulConfig, Mailbox as StatefulMailbox, Stateful as StatefulActor, SyncPlan,
+};
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     buffer::paged::CacheRef, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics,
-    Network, Spawner, Storage,
+    Network, Spawner, Storage, ThreadPooler,
 };
 use commonware_storage::archive::immutable;
-use commonware_utils::{union, NZUsize, NZU16, NZU64};
+use commonware_utils::{channel::oneshot, sync::AsyncRwLock, union, NZUsize, NZU16, NZU64};
 use futures::{future::try_join_all, lock::Mutex as AsyncMutex};
-use nunchi_coins::{rpc::SharedLedger, Ledger};
-use nunchi_common::QmdbState;
+use governor::clock::Clock as GClock;
+use nunchi_common::{QmdbBackend, QmdbOperation, QmdbState};
 use nunchi_dkg::{self as dkg, orchestrator, PeerConfig, UpdateCallBack, MAX_SUPPORTED_MODE};
+use rand::{CryptoRng, Rng};
 use rand_core::CryptoRngCore;
 use std::{
+    future::Future,
     marker::PhantomData,
     num::{NonZero, NonZeroU16, NonZeroUsize},
     sync::Arc,
@@ -64,7 +71,11 @@ const PAGE_CACHE_PAGE_SIZE: NonZeroU16 = NZU16!(4_096); // 4KB
 const PAGE_CACHE_CAPACITY: NonZero<usize> = NZUsize!(8_192); // 32MB
 const MAX_REPAIR: NonZero<usize> = NZUsize!(50);
 const MAX_PENDING_ACKS: NonZero<usize> = NZUsize!(16);
-const EXECUTOR_MAILBOX_CAPACITY: NonZero<usize> = NZUsize!(1_024);
+const STATE_SYNC_FETCH_BATCH_SIZE: NonZero<u64> = NZU64!(1_024);
+const STATE_SYNC_APPLY_BATCH_SIZE: usize = 4_096;
+const STATE_SYNC_MAX_OUTSTANDING_REQUESTS: usize = 8;
+const STATE_SYNC_UPDATE_CHANNEL_SIZE: NonZero<usize> = NZUsize!(256);
+const STATE_SYNC_MAX_RETAINED_ROOTS: usize = 32;
 
 /// Configuration for the [Engine].
 pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = PublicKey>, S: Strategy>
@@ -86,7 +97,9 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
 
 type DkgActor<E, P> = dkg::Actor<E, P, Block>;
 type DkgMailbox = dkg::Mailbox<Block>;
-type Marshaled<E> = Deferred<E, Scheme, Application<E>, Block, FixedEpocher>;
+type StatefulApp<E> = StatefulActor<E, Application, Scheme, Standard<Block>, NoStateSyncResolver>;
+type StatefulAppMailbox<E> = StatefulMailbox<E, Application>;
+type Marshaled<E> = Deferred<E, Scheme, StatefulAppMailbox<E>, Block, FixedEpocher>;
 type SchemeProvider = Provider<Scheme, ed25519::PrivateKey>;
 type FinalizationsArchive<E> = immutable::Archive<E, Digest, Finalization>;
 type BlocksArchive<E> = immutable::Archive<E, Digest, Block>;
@@ -105,7 +118,17 @@ type Orchestrator<E, B, S> = orchestrator::Actor<E, B, Marshaled<E>, Scheme, Ran
 #[allow(clippy::type_complexity)]
 pub struct Engine<E, B, P, S>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
+    E: BufferPooler
+        + Spawner
+        + Metrics
+        + CryptoRngCore
+        + CryptoRng
+        + Rng
+        + Clock
+        + GClock
+        + Storage
+        + ThreadPooler
+        + Network,
     B: Blocker<PublicKey = PublicKey>,
     P: Manager<PublicKey = PublicKey>,
     S: Strategy,
@@ -117,12 +140,67 @@ where
     buffer: buffered::Engine<E, PublicKey, Block, P>,
     buffered_mailbox: buffered::Mailbox<PublicKey, Block>,
     marshal: Marshal<E, S>,
-    marshaled: Marshaled<E>,
     orchestrator: Orchestrator<E, B, S>,
     orchestrator_mailbox: orchestrator::Mailbox<MinSig, PublicKey>,
-    executor: Handle<()>,
     txpool: Handle<()>,
-    reporter: ExecutorReporter,
+    stateful: StatefulApp<E>,
+    stateful_mailbox: StatefulAppMailbox<E>,
+}
+
+/// Placeholder for the peer state-sync resolver.
+///
+/// `commonware_glue::stateful::db::p2p::standard::Actor` would slot in here, but as of
+/// commonware 2026.5.0 it requires `Op: Codec<Cfg = ()>`, which only fixed-encoding QMDB
+/// operations satisfy; the shared state database is variable-value (`Vec<u8>`), whose
+/// operation codec config is `((), (RangeCfg, ()))`. Until upstream threads the codec config
+/// through its resolver (or this chain moves to fixed-size values), peer state sync stays
+/// disabled: no startup path attaches a state-sync floor, so every node recovers exclusively
+/// via marshal backfill and this resolver is never asked to fetch.
+#[derive(Clone, Copy, Debug, Default)]
+struct NoStateSyncResolver;
+
+#[derive(Debug, thiserror::Error)]
+#[error("peer state sync resolver is not configured")]
+struct NoStateSyncError;
+
+impl<E> AttachableResolver<QmdbBackend<E>> for NoStateSyncResolver
+where
+    E: commonware_storage::Context + Send + Sync + 'static,
+{
+    fn attach_database(
+        &self,
+        _db: Arc<AsyncRwLock<QmdbBackend<E>>>,
+    ) -> impl Future<Output = ()> + Send {
+        std::future::ready(())
+    }
+}
+
+impl commonware_storage::qmdb::sync::resolver::Resolver for NoStateSyncResolver {
+    type Family = commonware_storage::mmr::Family;
+    type Digest = Digest;
+    type Op = QmdbOperation;
+    type Error = NoStateSyncError;
+
+    fn get_operations<'a>(
+        &'a self,
+        _op_count: commonware_storage::mmr::Location,
+        _start_loc: commonware_storage::mmr::Location,
+        _max_ops: NonZero<u64>,
+        _include_pinned_nodes: bool,
+        _cancel_rx: oneshot::Receiver<()>,
+    ) -> impl Future<
+        Output = Result<
+            commonware_storage::qmdb::sync::resolver::FetchResult<
+                Self::Family,
+                Self::Op,
+                Self::Digest,
+            >,
+            Self::Error,
+        >,
+    > + Send
+           + 'a {
+        std::future::ready(Err(NoStateSyncError))
+    }
 }
 
 impl<E, B, P, S> Engine<E, B, P, S>
@@ -131,8 +209,12 @@ where
         + Spawner
         + Metrics
         + CryptoRngCore
+        + CryptoRng
+        + Rng
         + Clock
+        + GClock
         + Storage
+        + ThreadPooler
         + Network
         + Send
         + 'static,
@@ -144,29 +226,7 @@ where
     /// Create a new [Engine].
     pub async fn new(context: E, config: Config<B, P, S>) -> (Self, NodeHandle<E>) {
         let (txpool, submitter) = TxPool::new();
-        let coin_state = QmdbState::init(
-            context.child("coins_state"),
-            &format!("{}-coins", config.partition_prefix),
-        )
-        .await
-        .expect("failed to initialize coin state");
-        let shared_ledger = SharedLedger::new(Ledger::new(coin_state));
-        let applied_height = Arc::new(AsyncMutex::new(Height::zero()));
-        let executor_context = context.child("coins_executor");
-        let (coins_executor, reporter) = Executor::new(
-            &executor_context,
-            EXECUTOR_MAILBOX_CAPACITY,
-            shared_ledger.clone(),
-            applied_height.clone(),
-            submitter.clone(),
-        );
-        let node_handle = NodeHandle {
-            submitter: submitter.clone(),
-            ledger: shared_ledger.clone(),
-            applied_height,
-        };
         let txpool = txpool.start(context.child("txpool"));
-        let executor = coins_executor.start(executor_context);
 
         let page_cache = CacheRef::from_pooler(&context, PAGE_CACHE_PAGE_SIZE, PAGE_CACHE_CAPACITY);
         let consensus_namespace = union(NAMESPACE, b"_CONSENSUS");
@@ -289,8 +349,41 @@ where
             config.signer.clone(),
             certificate_verifier,
         );
-        let genesis = Application::<E>::genesis();
+        // The genesis block commits to the root of an empty state database. Derive it from a
+        // dedicated, never-written partition (rather than hardcoding the digest) so it stays
+        // correct across QMDB versions and is identical on fresh boots and restarts alike.
+        let genesis_state = {
+            let empty = QmdbBackend::init(
+                context.child("genesis_state"),
+                QmdbState::<E>::config_with_page_cache(
+                    &format!("{}-genesis-coins", config.partition_prefix),
+                    page_cache.clone(),
+                ),
+            )
+            .await
+            .expect("failed to initialize empty state database for genesis commitment");
+            let target = empty.sync_target().await;
+            StateCommitment {
+                root: target.root,
+                range: target.range,
+            }
+        };
+        let applied_height = Arc::new(AsyncMutex::new(Height::zero()));
+        let app = Application::with_dkg(
+            submitter.clone(),
+            config.max_block_transactions,
+            dkg_mailbox.clone(),
+            applied_height.clone(),
+            genesis_state,
+        );
+        let genesis = app.genesis_block();
         let genesis_digest = genesis.digest();
+        // The sync plan drives both marshal (its startup anchor below) and the stateful actor
+        // (via `StatefulConfig::plan`), so the two always agree on the startup decision. No
+        // finalized floor is ever attached here, so nodes recover via marshal backfill.
+        let plan =
+            SyncPlan::<_, Scheme, Standard<Block>>::init(&context, config.partition_prefix.clone())
+                .await;
         let (marshal, marshal_mailbox, _processed_height) = MarshalActor::init(
             context.child("marshal"),
             finalizations_by_height,
@@ -298,7 +391,7 @@ where
             marshal::Config {
                 provider: provider.clone(),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                start: marshal::Start::Genesis(genesis),
+                start: plan.marshal_start(genesis),
                 partition_prefix: format!("{}_marshal", config.partition_prefix),
                 mailbox_size: MAILBOX_SIZE,
                 view_retention_timeout: ViewDelta::new(
@@ -319,14 +412,35 @@ where
         )
         .await;
 
+        let db_config = QmdbState::<E>::config_with_page_cache(
+            &format!("{}-coins", config.partition_prefix),
+            page_cache,
+        );
+        let (stateful, stateful_mailbox) = StatefulActor::init(
+            context.child("stateful"),
+            StatefulConfig {
+                application: app,
+                db_config,
+                input_provider: submitter.clone(),
+                marshal: marshal_mailbox.clone(),
+                max_pending_acks: MAX_PENDING_ACKS,
+                mailbox_size: MAILBOX_SIZE,
+                plan,
+                resolvers: NoStateSyncResolver,
+                sync_config: SyncEngineConfig {
+                    fetch_batch_size: STATE_SYNC_FETCH_BATCH_SIZE,
+                    apply_batch_size: STATE_SYNC_APPLY_BATCH_SIZE,
+                    max_outstanding_requests: STATE_SYNC_MAX_OUTSTANDING_REQUESTS,
+                    update_channel_size: STATE_SYNC_UPDATE_CHANNEL_SIZE,
+                    max_retained_roots: STATE_SYNC_MAX_RETAINED_ROOTS,
+                },
+            },
+        );
+        let node_handle = NodeHandle::new(submitter, stateful_mailbox.clone(), applied_height);
+
         let application = Deferred::new(
             context.child("application"),
-            Application::with_dkg(
-                submitter,
-                shared_ledger,
-                config.max_block_transactions,
-                dkg_mailbox.clone(),
-            ),
+            stateful_mailbox.clone(),
             marshal_mailbox.clone(),
             FixedEpocher::new(BLOCKS_PER_EPOCH),
         );
@@ -358,12 +472,11 @@ where
             buffer,
             buffered_mailbox,
             marshal,
-            marshaled: application,
             orchestrator,
             orchestrator_mailbox,
-            executor,
             txpool,
-            reporter,
+            stateful,
+            stateful_mailbox,
         };
         (engine, node_handle)
     }
@@ -448,20 +561,20 @@ where
             callback,
         );
         let buffer_handle = self.buffer.start(broadcast);
-        let app_and_dkg =
-            Reporters::<Update<Block>, _, _>::from((self.marshaled, self.dkg_mailbox));
-        let reporters = Reporters::<Update<Block>, _, _>::from((app_and_dkg, self.reporter));
+        let reporters =
+            Reporters::<Update<Block>, _, _>::from((self.stateful_mailbox, self.dkg_mailbox));
         let marshal_handle = self
             .marshal
             .start(reporters, self.buffered_mailbox, marshal);
+        let stateful_handle = self.stateful.start();
         let orchestrator_handle = self.orchestrator.start(votes, certificates, resolver);
 
         if let Err(e) = try_join_all(vec![
             dkg_handle,
             buffer_handle,
             marshal_handle,
+            stateful_handle,
             orchestrator_handle,
-            self.executor,
             self.txpool,
         ])
         .await

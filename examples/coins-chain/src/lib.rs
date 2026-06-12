@@ -1,15 +1,15 @@
 //! A demo blockchain that runs the Nunchi coins module under real consensus.
 //!
 //! The chain reuses the consensus, marshal, and engine wiring of the `nunchi-template` example, but
-//! its blocks carry [`nunchi_coins`] transactions and each validator executes the finalized block
-//! stream into its own authenticated coin [`Ledger`](nunchi_coins::Ledger).
+//! its blocks carry [`nunchi_coins`] transactions and the Commonware stateful actor executes each
+//! finalized block into an authenticated coin [`Ledger`](nunchi_coins::Ledger).
 //!
 //! Transactions enter the chain exactly as they would on a real network: a client signs a
-//! transaction and submits it to a *specific* node's [`txpool`] (there is no gossip — each node only
-//! proposes the transactions it received). When that node leads, it includes them in its block;
-//! once finalized, every node executes them into its ledger. Each [`execution::NodeHandle`]
-//! exposes a node's transaction submitter and committed ledger so clients (and the integration
-//! tests in `tests/`) can drive and observe the chain.
+//! transaction and submits it to a *specific* node's [`txpool`] (there is no gossip; each node only
+//! proposes the transactions it received). When that node leads, it includes executable
+//! transactions in its block; once finalized, stateful execution commits them into QMDB. The
+//! [`execution::NodeHandle`] exposes each node's transaction submitter and stateful database
+//! subscription so clients (and the integration tests in `tests/`) can drive and observe the chain.
 
 use commonware_consensus::types::Epoch;
 use std::num::NonZeroU64;
@@ -23,7 +23,7 @@ pub mod execution;
 pub mod rpc;
 pub mod txpool;
 
-pub use block::{Block, Finalized, Notarized, MAX_TRANSACTIONS};
+pub use block::{Block, Finalized, Notarized, StateCommitment, MAX_TRANSACTIONS};
 pub use consensus::{
     Activity, Context, EdScheme, EpochProvider, Finalization, Identity, Notarization, Provider,
     PublicKey, Scheme, Seed, Seedable, Signature, ThresholdScheme,

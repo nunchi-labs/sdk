@@ -233,13 +233,12 @@ fn coin_state_converges_across_validators() {
         let (alice, bob, _carol) = submit_scenario(&network).await;
         network.run_until_nonces(&[(alice, 4), (bob, 1)]).await;
 
-        let handles = network.ledger_handles();
-        assert_eq!(handles.len(), VALIDATORS as usize);
+        let ledgers = network.ledgers().await;
+        assert_eq!(ledgers.len(), VALIDATORS as usize);
 
         let mut roots = Vec::new();
-        for shared in &handles {
-            let ledger = shared.lock().await;
-            roots.push(ledger.root());
+        for ledger in &ledgers {
+            roots.push(ledger.db().root().await);
         }
 
         let reference = roots[0];
@@ -270,12 +269,11 @@ fn coin_balances_match_submitted_transactions() {
             .await;
 
         // Inspect any node; convergence (asserted separately) guarantees they all agree.
-        let shared = network
-            .ledger_handles()
+        let ledgers = network.ledgers().await;
+        let ledger = ledgers
             .into_iter()
             .next()
             .expect("at least one validator ledger");
-        let ledger = shared.lock().await;
         let coin = gold_coin();
 
         // Alice: 1_000_000 - 300_000 (to Bob) + 50_000 (mint) - 100_000 (burn) = 650_000.

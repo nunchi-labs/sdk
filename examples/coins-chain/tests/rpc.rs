@@ -11,7 +11,6 @@ use jsonrpsee::{
 };
 use nunchi_coins::{rpc::SharedLedger, CoinOperation, CoinSpec, Ledger, PrivateKey, Transaction};
 use nunchi_coins_chain::{
-    execution::NodeHandle,
     rpc::{self, StatusResponse, SubmitTransactionParams, SubmitTransactionResponse},
     txpool::TxPool,
 };
@@ -22,21 +21,18 @@ use std::sync::Arc;
 #[test]
 fn rpc_serves_status_and_filters_submissions_over_http() {
     tokio::Runner::default().start(|context| async move {
-        // A node handle without the full engine: a transaction pool plus a fresh ledger.
+        // An RPC backend without the full engine: a transaction pool plus a fresh ledger.
         let (txpool, submitter) = TxPool::new();
         let _txpool = txpool.start(context.child("txpool"));
         let db = QmdbState::init(context.child("coins_state"), "rpc-test-coins")
             .await
             .expect("init coin state");
         let ledger = SharedLedger::new(Ledger::new(db));
-        let handle = NodeHandle {
-            submitter: submitter.clone(),
-            ledger: ledger.clone(),
-            applied_height: Arc::new(AsyncMutex::new(Height::zero())),
-        };
+        let applied_height = Arc::new(AsyncMutex::new(Height::zero()));
         let expected_root = encode_hex(&ledger.lock().await.root());
 
-        let module = rpc::module(handle).expect("build RPC module");
+        let module = rpc::module(ledger.clone(), submitter.clone(), applied_height)
+            .expect("build RPC module");
         let server = ServerBuilder::default()
             .build("127.0.0.1:0")
             .await

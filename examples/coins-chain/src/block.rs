@@ -4,6 +4,8 @@ use commonware_codec::{varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, W
 use commonware_consensus::{types::Height, CertifiableBlock, Heightable};
 use commonware_cryptography::{sha256::Digest, Committable, Digestible, Hasher, Sha256};
 use commonware_parallel::Strategy;
+use commonware_storage::mmr::Location;
+use commonware_utils::range::NonEmptyRange;
 use nunchi_coins::Transaction;
 use nunchi_dkg::{DealerLog, ReshareBlock};
 use rand::rngs::OsRng;
@@ -13,6 +15,15 @@ use std::num::NonZeroU32;
 ///
 /// Bounds the work a peer can force us to do when decoding an untrusted block.
 pub const MAX_TRANSACTIONS: u64 = 4_096;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StateCommitment {
+    /// Authenticated state root after executing the block's transactions.
+    pub root: Digest,
+
+    /// QMDB operation range that supports state sync to `root`.
+    pub range: NonEmptyRange<Location>,
+}
 
 #[derive(Clone, Debug)]
 pub struct Block {
@@ -34,6 +45,12 @@ pub struct Block {
     /// Optional DKG/reshare dealer log included for epoch transitions.
     pub reshare_log: Option<DealerLog>,
 
+    /// Authenticated state root after executing `transactions`.
+    pub state_root: Digest,
+
+    /// QMDB operation range that supports state sync to `state_root`.
+    pub state_range: NonEmptyRange<Location>,
+
     /// Pre-computed digest of the block.
     digest: Digest,
 }
@@ -45,8 +62,10 @@ impl PartialEq for Block {
             && self.height == other.height
             && self.timestamp == other.timestamp
             && self.transactions == other.transactions
-            && self.digest == other.digest
             && self.reshare_log.encode() == other.reshare_log.encode()
+            && self.state_root == other.state_root
+            && self.state_range == other.state_range
+            && self.digest == other.digest
     }
 }
 
@@ -60,6 +79,7 @@ impl Block {
         timestamp: u64,
         transactions: &[Transaction],
         reshare_log: &Option<DealerLog>,
+        state: &StateCommitment,
     ) -> Digest {
         let mut hasher = Sha256::new();
         hasher.update(&context.encode());
@@ -71,6 +91,8 @@ impl Block {
             hasher.update(&transaction.encode());
         }
         hasher.update(&reshare_log.encode());
+        hasher.update(&state.root);
+        hasher.update(&state.range.encode());
         hasher.finalize()
     }
 
@@ -81,6 +103,7 @@ impl Block {
         timestamp: u64,
         transactions: Vec<Transaction>,
         reshare_log: Option<DealerLog>,
+        state: StateCommitment,
     ) -> Self {
         let digest = Self::compute_digest(
             &context,
@@ -89,6 +112,7 @@ impl Block {
             timestamp,
             &transactions,
             &reshare_log,
+            &state,
         );
         Self {
             context,
@@ -97,6 +121,8 @@ impl Block {
             timestamp,
             transactions,
             reshare_log,
+            state_root: state.root,
+            state_range: state.range,
             digest,
         }
     }
@@ -113,6 +139,8 @@ impl Write for Block {
             transaction.write(writer);
         }
         self.reshare_log.write(writer);
+        self.state_root.write(writer);
+        self.state_range.write(writer);
     }
 }
 
@@ -136,6 +164,12 @@ impl Read for Block {
             transactions.push(Transaction::read(reader)?);
         }
         let reshare_log = Read::read_cfg(reader, cfg)?;
+        let state_root = Digest::read(reader)?;
+        let state_range = NonEmptyRange::read(reader)?;
+        let state = StateCommitment {
+            root: state_root,
+            range: state_range,
+        };
 
         let digest = Self::compute_digest(
             &context,
@@ -144,6 +178,7 @@ impl Read for Block {
             timestamp,
             &transactions,
             &reshare_log,
+            &state,
         );
         Ok(Self {
             context,
@@ -152,6 +187,8 @@ impl Read for Block {
             timestamp,
             transactions,
             reshare_log,
+            state_root: state.root,
+            state_range: state.range,
             digest,
         })
     }
@@ -170,6 +207,8 @@ impl EncodeSize for Block {
                 .map(EncodeSize::encode_size)
                 .sum::<usize>()
             + self.reshare_log.encode_size()
+            + self.state_root.encode_size()
+            + self.state_range.encode_size()
     }
 }
 
