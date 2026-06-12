@@ -2206,6 +2206,7 @@ dependencies = [
  "jsonrpsee",
  "nunchi-common",
  "nunchi-crypto",
+ "nunchi-mempool",
  "nunchi-rpc",
  "serde",
  "thiserror 2.0.18",
@@ -2236,6 +2237,7 @@ dependencies = [
  "nunchi-coins",
  "nunchi-common",
  "nunchi-dkg",
+ "nunchi-mempool",
  "nunchi-rpc",
  "rand 0.8.6",
  "rand_core 0.6.4",
@@ -2294,6 +2296,21 @@ dependencies = [
  "serde",
  "tracing",
  "tracing-subscriber 0.3.23",
+]
+
+[[package]]
+name = "nunchi-mempool"
+version = "2026.5.0"
+dependencies = [
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-runtime",
+ "futures",
+ "nunchi-common",
+ "nunchi-crypto",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

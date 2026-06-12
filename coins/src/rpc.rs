@@ -1,5 +1,13 @@
 //! JSON-RPC surface for the coin module.
 
+#[cfg(feature = "mempool")]
+mod mempool;
+#[cfg(feature = "mempool")]
+pub use mempool::{
+    register_mempool, CoinMempoolServer, CoinsMempoolRpc, MempoolIngress, SubmitTransactionParams,
+    SubmitTransactionResponse, TransactionStatusResponse,
+};
+
 use std::sync::Arc;
 
 use commonware_cryptography::sha256::Digest;
@@ -174,9 +182,8 @@ pub struct RootResponse {
 
 /// Register the coin module's query RPC methods into a downstream router.
 ///
-/// TODO(@distractedm1nd): Transaction submission is intentionally not registered here while the example chain owns the
-/// transaction ingress. Once mempool ownership moves into the coin module, `coins.submit_transaction`
-/// can be added to [`Coins`] and implemented on [`CoinsRpc`].
+/// Transaction submission lives in [`register_mempool`] (behind the `mempool`
+/// feature) so chains without a pool can still serve queries.
 pub fn register<Context, Q>(
     router: &mut RpcRouter<Context>,
     rpc: CoinsRpc<Q>,
