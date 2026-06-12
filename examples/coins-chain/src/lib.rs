@@ -21,6 +21,7 @@ pub mod application;
 pub mod engine;
 pub mod execution;
 pub mod rpc;
+pub mod testnet;
 pub mod transaction;
 pub mod txpool;
 
