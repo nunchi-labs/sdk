@@ -41,14 +41,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Run { dir } => {
             let manifest_path = manifest_path(&dir);
             let config = Config::read_manifest(&manifest_path)?;
-            config.validate()?;
+            ensure_executables(&config)?;
             narae::run(config, std::env::current_dir()?)?;
         }
         Command::Up { chain } => {
             let manifest_path = generate(chain)?;
             let config = Config::read_manifest(&manifest_path)?;
-            config.validate()?;
+            ensure_executables(&config)?;
             narae::run(config, std::env::current_dir()?)?;
+        }
+    }
+    Ok(())
+}
+
+/// Fail fast with a build hint instead of opening a dashboard full of spawn errors.
+fn ensure_executables(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
+    for node in &config.nodes {
+        let command = Path::new(&node.command);
+        if command.is_absolute() && !command.exists() {
+            return Err(format!(
+                "node executable not found: {} (build it with `cargo build -p nunchi-coins-chain --bin coins-chain-node`)",
+                command.display()
+            )
+            .into());
         }
     }
     Ok(())

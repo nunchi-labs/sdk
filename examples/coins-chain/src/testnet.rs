@@ -6,6 +6,7 @@
 //! tokio runtime with authenticated peer discovery, and serves the aggregated JSON-RPC module.
 
 use crate::{
+    channels,
     engine::{Config as EngineConfig, Engine},
     rpc, PublicKey, NAMESPACE,
 };
@@ -44,13 +45,6 @@ const DEFAULT_MAX_BLOCK_TRANSACTIONS: usize = 256;
 const DEFAULT_MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 const DEFAULT_CHANNEL_BACKLOG: usize = 1024;
 
-const PENDING_CHANNEL: u64 = 0;
-const RECOVERED_CHANNEL: u64 = 1;
-const RESOLVER_CHANNEL: u64 = 2;
-const BROADCAST_CHANNEL: u64 = 3;
-const DKG_CHANNEL: u64 = 4;
-const BACKFILL_CHANNEL: u64 = 5;
-
 #[derive(Clone, Debug)]
 pub struct LocalTestnetConfig {
     pub validators: u32,
@@ -58,18 +52,6 @@ pub struct LocalTestnetConfig {
     pub base_rpc_port: u16,
     pub base_data_dir: PathBuf,
     pub seed: u64,
-}
-
-impl LocalTestnetConfig {
-    pub fn new(validators: u32, base_port: u16, base_data_dir: impl Into<PathBuf>) -> Self {
-        Self {
-            validators,
-            base_port,
-            base_rpc_port: 8545,
-            base_data_dir: base_data_dir.into(),
-            seed: 0,
-        }
-    }
 }
 
 /// The manifest written next to the generated node configs; process runners read this to know
@@ -162,6 +144,7 @@ impl Default for ConsensusConfig {
 pub struct NetworkConfig {
     pub max_message_size: u32,
     pub channel_backlog: usize,
+    /// Received-message rate limit per p2p channel. `0` disables the limit.
     pub channel_rate_per_second: u32,
 }
 
@@ -362,12 +345,12 @@ async fn start_node(
     );
     let mut register =
         |channel| network.register(channel, channel_rate, config.networking.channel_backlog);
-    let pending = register(PENDING_CHANNEL);
-    let recovered = register(RECOVERED_CHANNEL);
-    let resolver = register(RESOLVER_CHANNEL);
-    let broadcast = register(BROADCAST_CHANNEL);
-    let dkg = register(DKG_CHANNEL);
-    let backfill = register(BACKFILL_CHANNEL);
+    let pending = register(channels::PENDING);
+    let recovered = register(channels::RECOVERED);
+    let resolver = register(channels::RESOLVER);
+    let broadcast = register(channels::BROADCAST);
+    let dkg = register(channels::DKG);
+    let backfill = register(channels::BACKFILL);
     network.start();
 
     let engine_config: EngineConfig<_, _, _> = EngineConfig {

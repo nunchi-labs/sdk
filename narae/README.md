@@ -4,9 +4,11 @@
 validator configs for an example chain (trusted key setup plus an initial threshold deal),
 launches one `coins-chain-node` process per validator, and tails their logs side by side.
 
-Generate configs and start a 4-validator coins-chain devnet in one step:
+Generate configs and start a 4-validator coins-chain devnet in one step (the node binary must
+be built first; narae will tell you if it's missing):
 
 ```sh
+cargo build -p nunchi-coins-chain --bin coins-chain-node
 cargo run -p narae -- up coins-chain
 ```
 

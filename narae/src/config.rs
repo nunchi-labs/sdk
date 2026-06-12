@@ -52,7 +52,8 @@ impl Config {
                 cwd: None,
                 env: vec![EnvVar {
                     key: "RUST_LOG".to_string(),
-                    value: "info".to_string(),
+                    // Let the operator turn the node log level knob from outside.
+                    value: std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
                 }],
             })
             .collect();
@@ -61,33 +62,6 @@ impl Config {
             nodes,
         }
     }
-
-    pub fn validate(&self) -> Result<(), ValidationError> {
-        if self.nodes.is_empty() {
-            return Err(ValidationError::NoNodes);
-        }
-        for node in &self.nodes {
-            if node.name.trim().is_empty() {
-                return Err(ValidationError::EmptyNodeName);
-            }
-            if node.command.trim().is_empty() {
-                return Err(ValidationError::EmptyCommand {
-                    node: node.name.clone(),
-                });
-            }
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum ValidationError {
-    #[error("config must contain at least one node")]
-    NoNodes,
-    #[error("node names cannot be empty")]
-    EmptyNodeName,
-    #[error("node {node:?} has an empty command")]
-    EmptyCommand { node: String },
 }
 
 fn resolve_manifest_path(path: PathBuf, manifest_dir: Option<&Path>) -> PathBuf {
