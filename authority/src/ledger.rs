@@ -9,6 +9,12 @@ use nunchi_common::Authorization;
 use nunchi_crypto::SignatureError;
 use thiserror::Error;
 
+/// How far past the current epoch a Configure or Propose may schedule a change.
+///
+/// Every registry change rematerializes the epoch registries from its effective epoch through the
+/// latest epoch ever materialized, so this bound keeps that span (and the refresh cost) small.
+pub const MAX_EPOCH_LOOKAHEAD: u64 = 100;
+
 #[derive(Debug, Error, Clone, Eq, PartialEq)]
 pub enum AuthorityError {
     #[error("bad authority transaction signature: {0}")]
@@ -136,8 +142,14 @@ impl<D: AuthorityDB> AuthorityLedger<D> {
                 initial_validators,
                 epoch,
             } => {
-                self.configure(signer, policy.clone(), initial_validators.clone(), *epoch)
-                    .await
+                self.configure(
+                    signer,
+                    policy.clone(),
+                    initial_validators.clone(),
+                    *epoch,
+                    current_epoch,
+                )
+                .await
             }
             AuthorityOperation::Propose {
                 change,
@@ -147,20 +159,27 @@ impl<D: AuthorityDB> AuthorityLedger<D> {
                 .await
                 .map(|_| ()),
             AuthorityOperation::Approve { proposal } => self.approve(signer, proposal).await,
-            AuthorityOperation::Execute { proposal } => self.execute(signer, proposal).await,
+            AuthorityOperation::Execute { proposal } => {
+                self.execute(signer, proposal, current_epoch).await
+            }
         }
     }
 
+    // TODO(@erenyegit): configuration is currently first-come-first-served; whoever lands the
+    // first Configure transaction owns the authority set. Pin the policy at genesis once genesis
+    // configuration is set up.
     async fn configure(
         &mut self,
         signer: &OwnerId,
         mut policy: MultisigPolicy,
         initial_validators: Vec<ValidatorId>,
         epoch: EpochNumber,
+        current_epoch: EpochNumber,
     ) -> Result<(), AuthorityError> {
         if self.db.policy().await?.is_some() {
             return Err(AuthorityError::AlreadyConfigured);
         }
+        check_epoch_window(epoch, current_epoch)?;
         policy.owners = sorted_unique(policy.owners).ok_or(AuthorityError::InvalidPolicy)?;
         if policy.threshold == 0 || policy.threshold as usize > policy.owners.len() {
             return Err(AuthorityError::InvalidPolicy);
@@ -181,7 +200,7 @@ impl<D: AuthorityDB> AuthorityLedger<D> {
                 removed_from: None,
             });
         }
-        self.refresh_epoch(epoch).await
+        self.refresh_epochs(epoch, epoch).await
     }
 
     async fn propose_change(
@@ -192,9 +211,7 @@ impl<D: AuthorityDB> AuthorityLedger<D> {
         current_epoch: EpochNumber,
     ) -> Result<ProposalId, AuthorityError> {
         self.require_owner(signer).await?;
-        if effective_epoch < current_epoch {
-            return Err(AuthorityError::InvalidEpoch);
-        }
+        check_epoch_window(effective_epoch, current_epoch)?;
         let id = proposal_id(&change, effective_epoch);
         if self.db.proposal(&id).await?.is_some() {
             return Err(AuthorityError::ProposalExists);
@@ -237,6 +254,7 @@ impl<D: AuthorityDB> AuthorityLedger<D> {
         &mut self,
         signer: &OwnerId,
         proposal: &ProposalId,
+        current_epoch: EpochNumber,
     ) -> Result<(), AuthorityError> {
         let policy = self.require_owner(signer).await?;
         let mut proposal = self
@@ -246,6 +264,11 @@ impl<D: AuthorityDB> AuthorityLedger<D> {
             .ok_or(AuthorityError::ProposalNotFound(*proposal))?;
         if proposal.executed {
             return Err(AuthorityError::ProposalAlreadyExecuted);
+        }
+        // Executing past the effective epoch would rewrite registries consensus may already have
+        // consumed; a stale proposal must be re-proposed at a future epoch instead.
+        if proposal.proposed_epoch < current_epoch {
+            return Err(AuthorityError::InvalidEpoch);
         }
         if proposal.approvals.len() < policy.threshold as usize {
             return Err(AuthorityError::InsufficientApprovals {
@@ -312,8 +335,7 @@ impl<D: AuthorityDB> AuthorityLedger<D> {
             dealer_from,
             removed_from: None,
         });
-        self.refresh_epoch(player_from).await?;
-        self.refresh_epoch(dealer_from).await
+        self.refresh_epochs(player_from, dealer_from).await
     }
 
     async fn remove_validator(
@@ -334,38 +356,61 @@ impl<D: AuthorityDB> AuthorityLedger<D> {
         }
         schedule.removed_from = Some(removed_from);
         self.db.set_validator(&schedule);
-        self.refresh_epoch(removed_from).await
+        self.refresh_epochs(removed_from, removed_from).await
     }
 
-    async fn refresh_epoch(&mut self, epoch: EpochNumber) -> Result<(), AuthorityError> {
-        let mut players = Vec::new();
-        let mut dealers = Vec::new();
-        for validator in self.db.validator_index().await? {
-            let Some(schedule) = self.db.validator(&validator).await? else {
-                continue;
-            };
-            if schedule.is_player_at(epoch) {
-                players.push(validator.clone());
-            }
-            if schedule.is_dealer_at(epoch) {
-                dealers.push(validator);
-            }
-        }
-        self.db.set_epoch_registry(&EpochRegistry {
-            epoch,
-            players: normalize(players),
-            dealers: normalize(dealers),
-        });
-        if self
+    /// Rematerialize the epoch registries for `from..=to`.
+    ///
+    /// The range is extended through the latest epoch already materialized: a schedule change
+    /// affects every epoch at or after it takes effect, so previously written registries would
+    /// otherwise go stale. The span is bounded because scheduled epochs are capped by
+    /// [`MAX_EPOCH_LOOKAHEAD`].
+    async fn refresh_epochs(
+        &mut self,
+        from: EpochNumber,
+        to: EpochNumber,
+    ) -> Result<(), AuthorityError> {
+        let to = self
             .db
             .latest_indexed_epoch()
             .await?
-            .is_none_or(|latest| epoch > latest)
-        {
-            self.db.set_latest_indexed_epoch(epoch);
+            .map_or(to, |latest| latest.max(to));
+        let mut schedules = Vec::new();
+        for validator in self.db.validator_index().await? {
+            if let Some(schedule) = self.db.validator(&validator).await? {
+                schedules.push(schedule);
+            }
         }
+        for epoch in from..=to {
+            let players = schedules
+                .iter()
+                .filter(|schedule| schedule.is_player_at(epoch))
+                .map(|schedule| schedule.validator.clone())
+                .collect();
+            let dealers = schedules
+                .iter()
+                .filter(|schedule| schedule.is_dealer_at(epoch))
+                .map(|schedule| schedule.validator.clone())
+                .collect();
+            self.db.set_epoch_registry(&EpochRegistry {
+                epoch,
+                players: normalize(players),
+                dealers: normalize(dealers),
+            });
+        }
+        self.db.set_latest_indexed_epoch(to);
         Ok(())
     }
+}
+
+fn check_epoch_window(
+    epoch: EpochNumber,
+    current_epoch: EpochNumber,
+) -> Result<(), AuthorityError> {
+    if epoch < current_epoch || epoch > current_epoch.saturating_add(MAX_EPOCH_LOOKAHEAD) {
+        return Err(AuthorityError::InvalidEpoch);
+    }
+    Ok(())
 }
 
 pub fn proposal_id(change: &RegistryChange, proposed_epoch: EpochNumber) -> ProposalId {
@@ -438,6 +483,58 @@ mod tests {
         (ledger, owners, validators)
     }
 
+    /// Sign and apply a single operation using the owner's current nonce.
+    async fn submit(
+        ledger: &mut AuthorityLedger<MemoryState>,
+        owner: &PrivateKey,
+        operation: AuthorityOperation,
+        current_epoch: EpochNumber,
+    ) -> Result<(), AuthorityError> {
+        let nonce = ledger.db().nonce(&owner.public_key()).await.unwrap();
+        ledger
+            .apply_transaction(&Transaction::sign(owner, nonce, operation), current_epoch)
+            .await
+    }
+
+    /// Run the full propose/approve/execute flow for `change` (threshold 2 of the first three
+    /// owners), all at `current_epoch`.
+    async fn govern(
+        ledger: &mut AuthorityLedger<MemoryState>,
+        owners: &[PrivateKey],
+        change: RegistryChange,
+        effective_epoch: EpochNumber,
+        current_epoch: EpochNumber,
+    ) {
+        let proposal = proposal_id(&change, effective_epoch);
+        submit(
+            ledger,
+            &owners[0],
+            AuthorityOperation::Propose {
+                change,
+                effective_epoch,
+            },
+            current_epoch,
+        )
+        .await
+        .unwrap();
+        submit(
+            ledger,
+            &owners[1],
+            AuthorityOperation::Approve { proposal },
+            current_epoch,
+        )
+        .await
+        .unwrap();
+        submit(
+            ledger,
+            &owners[2],
+            AuthorityOperation::Execute { proposal },
+            current_epoch,
+        )
+        .await
+        .unwrap();
+    }
+
     #[test]
     fn configure_indexes_initial_dealers_and_players() {
         commonware_runtime::deterministic::Runner::default().start(|_| async move {
@@ -456,35 +553,7 @@ mod tests {
             let change = RegistryChange::AddValidator {
                 validator: added.clone(),
             };
-            let id = proposal_id(&change, 3);
-            ledger
-                .apply_transaction(
-                    &Transaction::sign(
-                        &owners[0],
-                        1,
-                        AuthorityOperation::Propose {
-                            change,
-                            effective_epoch: 3,
-                        },
-                    ),
-                    3,
-                )
-                .await
-                .unwrap();
-            ledger
-                .apply_transaction(
-                    &Transaction::sign(&owners[1], 0, AuthorityOperation::Approve { proposal: id }),
-                    3,
-                )
-                .await
-                .unwrap();
-            ledger
-                .apply_transaction(
-                    &Transaction::sign(&owners[2], 0, AuthorityOperation::Execute { proposal: id }),
-                    3,
-                )
-                .await
-                .unwrap();
+            govern(&mut ledger, &owners, change, 3, 3).await;
 
             let epoch_4 = ledger.epoch_registry(4).await.unwrap().unwrap();
             let epoch_5 = ledger.epoch_registry(5).await.unwrap().unwrap();
@@ -507,39 +576,230 @@ mod tests {
             let change = RegistryChange::RemoveValidator {
                 validator: removed.clone(),
             };
-            let id = proposal_id(&change, 2);
-            ledger
-                .apply_transaction(
-                    &Transaction::sign(
-                        &owners[0],
-                        1,
-                        AuthorityOperation::Propose {
-                            change,
-                            effective_epoch: 2,
-                        },
-                    ),
-                    2,
-                )
-                .await
-                .unwrap();
-            ledger
-                .apply_transaction(
-                    &Transaction::sign(&owners[1], 0, AuthorityOperation::Approve { proposal: id }),
-                    2,
-                )
-                .await
-                .unwrap();
-            ledger
-                .apply_transaction(
-                    &Transaction::sign(&owners[2], 0, AuthorityOperation::Execute { proposal: id }),
-                    2,
-                )
-                .await
-                .unwrap();
+            govern(&mut ledger, &owners, change, 2, 2).await;
 
             let epoch_3 = ledger.epoch_registry(3).await.unwrap().unwrap();
             assert!(!epoch_3.players.contains(&removed));
             assert!(!epoch_3.dealers.contains(&removed));
+        });
+    }
+
+    #[test]
+    fn change_refreshes_previously_materialized_epochs() {
+        commonware_runtime::deterministic::Runner::default().start(|_| async move {
+            let (mut ledger, owners, validators) = configured().await;
+
+            // Adding a validator at epoch 3 materializes registries for epochs 4 and 5.
+            let added = validator(12);
+            let add = RegistryChange::AddValidator {
+                validator: added.clone(),
+            };
+            govern(&mut ledger, &owners, add, 3, 3).await;
+
+            // Removing a validator at epoch 3 takes effect at epoch 4 and must also be reflected
+            // in the already-materialized epoch 5 registry.
+            let removed = validators[0].clone();
+            let remove = RegistryChange::RemoveValidator {
+                validator: removed.clone(),
+            };
+            govern(&mut ledger, &owners, remove, 3, 3).await;
+
+            for epoch in [4, 5] {
+                let registry = ledger.epoch_registry(epoch).await.unwrap().unwrap();
+                assert!(!registry.players.contains(&removed));
+                assert!(!registry.dealers.contains(&removed));
+                assert!(registry.players.contains(&added));
+            }
+        });
+    }
+
+    #[test]
+    fn removed_validator_can_be_readded() {
+        commonware_runtime::deterministic::Runner::default().start(|_| async move {
+            let (mut ledger, owners, validators) = configured().await;
+            let target = validators[0].clone();
+
+            let remove = RegistryChange::RemoveValidator {
+                validator: target.clone(),
+            };
+            govern(&mut ledger, &owners, remove, 0, 0).await;
+            let epoch_1 = ledger.epoch_registry(1).await.unwrap().unwrap();
+            assert!(!epoch_1.players.contains(&target));
+
+            // Once removed (effective epoch 1), the validator can be added back.
+            let add = RegistryChange::AddValidator {
+                validator: target.clone(),
+            };
+            govern(&mut ledger, &owners, add, 1, 1).await;
+
+            let epoch_2 = ledger.epoch_registry(2).await.unwrap().unwrap();
+            let epoch_3 = ledger.epoch_registry(3).await.unwrap().unwrap();
+            assert!(epoch_2.players.contains(&target));
+            assert!(!epoch_2.dealers.contains(&target));
+            assert!(epoch_3.players.contains(&target));
+            assert!(epoch_3.dealers.contains(&target));
+        });
+    }
+
+    #[test]
+    fn execute_after_effective_epoch_is_rejected() {
+        commonware_runtime::deterministic::Runner::default().start(|_| async move {
+            let (mut ledger, owners, _) = configured().await;
+            let change = RegistryChange::AddValidator {
+                validator: validator(12),
+            };
+            let proposal = proposal_id(&change, 1);
+            submit(
+                &mut ledger,
+                &owners[0],
+                AuthorityOperation::Propose {
+                    change,
+                    effective_epoch: 1,
+                },
+                1,
+            )
+            .await
+            .unwrap();
+            submit(
+                &mut ledger,
+                &owners[1],
+                AuthorityOperation::Approve { proposal },
+                1,
+            )
+            .await
+            .unwrap();
+
+            // The effective epoch has passed by the time the proposal is executed.
+            let result = submit(
+                &mut ledger,
+                &owners[2],
+                AuthorityOperation::Execute { proposal },
+                2,
+            )
+            .await;
+            assert_eq!(result, Err(AuthorityError::InvalidEpoch));
+        });
+    }
+
+    #[test]
+    fn propose_outside_epoch_window_is_rejected() {
+        commonware_runtime::deterministic::Runner::default().start(|_| async move {
+            let (mut ledger, owners, _) = configured().await;
+            for effective_epoch in [0, 2 + MAX_EPOCH_LOOKAHEAD] {
+                let result = submit(
+                    &mut ledger,
+                    &owners[0],
+                    AuthorityOperation::Propose {
+                        change: RegistryChange::AddValidator {
+                            validator: validator(12),
+                        },
+                        effective_epoch,
+                    },
+                    1,
+                )
+                .await;
+                assert_eq!(result, Err(AuthorityError::InvalidEpoch));
+            }
+        });
+    }
+
+    #[test]
+    fn duplicate_approval_is_rejected() {
+        commonware_runtime::deterministic::Runner::default().start(|_| async move {
+            let (mut ledger, owners, _) = configured().await;
+            let change = RegistryChange::AddValidator {
+                validator: validator(12),
+            };
+            let proposal = proposal_id(&change, 0);
+            submit(
+                &mut ledger,
+                &owners[0],
+                AuthorityOperation::Propose {
+                    change,
+                    effective_epoch: 0,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+
+            // Proposing counts as the proposer's approval, so approving again is rejected.
+            let result = submit(
+                &mut ledger,
+                &owners[0],
+                AuthorityOperation::Approve { proposal },
+                0,
+            )
+            .await;
+            assert_eq!(result, Err(AuthorityError::ApprovalAlreadyRecorded));
+        });
+    }
+
+    #[test]
+    fn execute_below_threshold_is_rejected() {
+        commonware_runtime::deterministic::Runner::default().start(|_| async move {
+            let (mut ledger, owners, _) = configured().await;
+            let change = RegistryChange::AddValidator {
+                validator: validator(12),
+            };
+            let proposal = proposal_id(&change, 0);
+            submit(
+                &mut ledger,
+                &owners[0],
+                AuthorityOperation::Propose {
+                    change,
+                    effective_epoch: 0,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+
+            let result = submit(
+                &mut ledger,
+                &owners[1],
+                AuthorityOperation::Execute { proposal },
+                0,
+            )
+            .await;
+            assert_eq!(
+                result,
+                Err(AuthorityError::InsufficientApprovals {
+                    required: 2,
+                    actual: 1,
+                })
+            );
+        });
+    }
+
+    #[test]
+    fn nonce_mismatch_is_rejected() {
+        commonware_runtime::deterministic::Runner::default().start(|_| async move {
+            let (mut ledger, owners, _) = configured().await;
+            // owners[0] consumed nonce 0 on Configure, so the next transaction must use nonce 1.
+            let result = ledger
+                .apply_transaction(
+                    &Transaction::sign(
+                        &owners[0],
+                        5,
+                        AuthorityOperation::Propose {
+                            change: RegistryChange::AddValidator {
+                                validator: validator(12),
+                            },
+                            effective_epoch: 0,
+                        },
+                    ),
+                    0,
+                )
+                .await;
+            assert_eq!(
+                result,
+                Err(AuthorityError::NonceMismatch {
+                    owner: Box::new(owners[0].public_key()),
+                    expected: 1,
+                    actual: 5,
+                })
+            );
         });
     }
 }

@@ -6,11 +6,11 @@ mod transaction;
 mod types;
 
 pub use db::AuthorityDB;
-pub use ledger::{proposal_id, AuthorityError, AuthorityLedger};
+pub use ledger::{proposal_id, AuthorityError, AuthorityLedger, MAX_EPOCH_LOOKAHEAD};
 pub use transaction::{AuthorityOperation, Transaction, TransactionPayload};
 pub use types::{
     EpochNumber, EpochRegistry, MultisigPolicy, OwnerId, Proposal, ProposalId, RegistryChange,
-    ValidatorId, ValidatorSchedule,
+    ValidatorId, ValidatorSchedule, MAX_VALIDATORS,
 };
 
 /// Domain separator used for authority transaction signatures and state keys.

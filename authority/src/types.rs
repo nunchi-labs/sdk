@@ -1,6 +1,10 @@
-use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{ed25519, sha256::Digest};
+use nunchi_common::MAX_MULTISIG_SIGNERS;
 use nunchi_crypto::PublicKey;
+
+/// Maximum number of validators accepted in a wire-decoded list.
+pub const MAX_VALIDATORS: usize = 1024;
 
 pub type EpochNumber = u64;
 pub type OwnerId = PublicKey;
@@ -66,30 +70,14 @@ pub(crate) fn normalize<T: Ord>(mut values: Vec<T>) -> Vec<T> {
     values
 }
 
-fn write_vec<T: Write>(values: &[T], buf: &mut impl bytes::BufMut) {
-    UInt(values.len() as u64).write(buf);
-    for value in values {
-        value.write(buf);
-    }
-}
-
-fn read_vec<T: Read<Cfg = ()>>(buf: &mut impl bytes::Buf) -> Result<Vec<T>, Error> {
-    let count = UInt::<u64>::read(buf)?.0;
-    let mut values = Vec::with_capacity(count as usize);
-    for _ in 0..count {
-        values.push(T::read(buf)?);
-    }
-    Ok(values)
-}
-
-fn vec_size<T: EncodeSize>(values: &[T]) -> usize {
-    UInt(values.len() as u64).encode_size()
-        + values.iter().map(EncodeSize::encode_size).sum::<usize>()
+/// Codec config for vectors decoded only from trusted local storage, never the wire.
+pub(crate) fn stored_vec_cfg() -> (RangeCfg<usize>, ()) {
+    (RangeCfg::from(..), ())
 }
 
 impl Write for MultisigPolicy {
     fn write(&self, buf: &mut impl bytes::BufMut) {
-        write_vec(&self.owners, buf);
+        self.owners.write(buf);
         self.threshold.write(buf);
     }
 }
@@ -99,7 +87,8 @@ impl Read for MultisigPolicy {
 
     fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
-            owners: read_vec(buf)?,
+            // Policies arrive on the wire inside Configure, so the owner list is bounded.
+            owners: Vec::read_cfg(buf, &(RangeCfg::new(0..=MAX_MULTISIG_SIGNERS), ()))?,
             threshold: u16::read(buf)?,
         })
     }
@@ -107,7 +96,7 @@ impl Read for MultisigPolicy {
 
 impl EncodeSize for MultisigPolicy {
     fn encode_size(&self) -> usize {
-        vec_size(&self.owners) + self.threshold.encode_size()
+        self.owners.encode_size() + self.threshold.encode_size()
     }
 }
 
@@ -157,7 +146,7 @@ impl Write for Proposal {
         self.id.write(buf);
         self.change.write(buf);
         self.proposed_epoch.write(buf);
-        write_vec(&self.approvals, buf);
+        self.approvals.write(buf);
         (self.executed as u8).write(buf);
     }
 }
@@ -169,7 +158,7 @@ impl Read for Proposal {
         let id = ProposalId::read(buf)?;
         let change = RegistryChange::read(buf)?;
         let proposed_epoch = EpochNumber::read(buf)?;
-        let approvals = read_vec(buf)?;
+        let approvals = Vec::read_cfg(buf, &stored_vec_cfg())?;
         let executed = match u8::read(buf)? {
             0 => false,
             1 => true,
@@ -190,7 +179,7 @@ impl EncodeSize for Proposal {
         self.id.encode_size()
             + self.change.encode_size()
             + self.proposed_epoch.encode_size()
-            + vec_size(&self.approvals)
+            + self.approvals.encode_size()
             + 1
     }
 }
@@ -244,8 +233,8 @@ impl EncodeSize for ValidatorSchedule {
 impl Write for EpochRegistry {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.epoch.write(buf);
-        write_vec(&self.players, buf);
-        write_vec(&self.dealers, buf);
+        self.players.write(buf);
+        self.dealers.write(buf);
     }
 }
 
@@ -255,14 +244,14 @@ impl Read for EpochRegistry {
     fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
             epoch: EpochNumber::read(buf)?,
-            players: read_vec(buf)?,
-            dealers: read_vec(buf)?,
+            players: Vec::read_cfg(buf, &stored_vec_cfg())?,
+            dealers: Vec::read_cfg(buf, &stored_vec_cfg())?,
         })
     }
 }
 
 impl EncodeSize for EpochRegistry {
     fn encode_size(&self) -> usize {
-        self.epoch.encode_size() + vec_size(&self.players) + vec_size(&self.dealers)
+        self.epoch.encode_size() + self.players.encode_size() + self.dealers.encode_size()
     }
 }

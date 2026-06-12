@@ -1,7 +1,7 @@
 //! Persistence layer for the authority module.
 
 use crate::{
-    types::{normalize, OwnerId},
+    types::{normalize, stored_vec_cfg, OwnerId},
     AuthorityError, EpochNumber, EpochRegistry, MultisigPolicy, Proposal, ProposalId, ValidatorId,
     ValidatorSchedule, AUTHORITY_NAMESPACE,
 };
@@ -131,14 +131,18 @@ impl<S: StateStore> AuthorityDB for S {
             .await
             .map_err(|err| AuthorityError::Storage(err.to_string()))?
         {
-            Some(bytes) => decoded::<VecCodec<ValidatorId>>(&bytes).map(|values| values.0),
+            Some(bytes) => {
+                let mut buf = bytes.as_slice();
+                Vec::read_cfg(&mut buf, &stored_vec_cfg())
+                    .map_err(|err| AuthorityError::Storage(err.to_string()))
+            }
             None => Ok(Vec::new()),
         }
     }
 
     fn set_validator_index(&mut self, validators: &[ValidatorId]) {
         let validators = normalize(validators.to_vec());
-        StateStore::set(self, validator_vec_key(), encoded(&VecCodec(validators)));
+        StateStore::set(self, validator_vec_key(), encoded(&validators));
     }
 
     async fn validator(
@@ -201,41 +205,5 @@ impl<S: StateStore> AuthorityDB for S {
 
     fn set_latest_indexed_epoch(&mut self, epoch: EpochNumber) {
         StateStore::set(self, latest_epoch_key(), encoded(&epoch));
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct VecCodec<T>(Vec<T>);
-
-impl<T: commonware_codec::Write> commonware_codec::Write for VecCodec<T> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        commonware_codec::varint::UInt(self.0.len() as u64).write(buf);
-        for value in &self.0 {
-            value.write(buf);
-        }
-    }
-}
-
-impl<T: Read<Cfg = ()>> Read for VecCodec<T> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let count = commonware_codec::varint::UInt::<u64>::read(buf)?.0;
-        let mut values = Vec::with_capacity(count as usize);
-        for _ in 0..count {
-            values.push(T::read(buf)?);
-        }
-        Ok(Self(values))
-    }
-}
-
-impl<T: commonware_codec::EncodeSize> commonware_codec::EncodeSize for VecCodec<T> {
-    fn encode_size(&self) -> usize {
-        commonware_codec::varint::UInt(self.0.len() as u64).encode_size()
-            + self
-                .0
-                .iter()
-                .map(commonware_codec::EncodeSize::encode_size)
-                .sum::<usize>()
     }
 }

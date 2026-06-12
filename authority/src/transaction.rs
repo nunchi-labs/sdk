@@ -1,5 +1,5 @@
-use crate::{types::RegistryChange, AUTHORITY_NAMESPACE};
-use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
+use crate::{types::RegistryChange, AUTHORITY_NAMESPACE, MAX_VALIDATORS};
+use commonware_codec::{EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::sha256::Digest;
 use nunchi_common::Operation as CommonOperation;
 
@@ -37,10 +37,7 @@ impl Write for AuthorityOperation {
             } => {
                 OP_CONFIGURE.write(buf);
                 policy.write(buf);
-                commonware_codec::varint::UInt(initial_validators.len() as u64).write(buf);
-                for validator in initial_validators {
-                    validator.write(buf);
-                }
+                initial_validators.write(buf);
                 epoch.write(buf);
             }
             Self::Propose {
@@ -70,11 +67,8 @@ impl Read for AuthorityOperation {
         match u8::read(buf)? {
             OP_CONFIGURE => {
                 let policy = crate::MultisigPolicy::read(buf)?;
-                let count = commonware_codec::varint::UInt::<u64>::read(buf)?.0;
-                let mut initial_validators = Vec::with_capacity(count as usize);
-                for _ in 0..count {
-                    initial_validators.push(crate::ValidatorId::read(buf)?);
-                }
+                let initial_validators =
+                    Vec::read_cfg(buf, &(RangeCfg::new(0..=MAX_VALIDATORS), ()))?;
                 Ok(Self::Configure {
                     policy,
                     initial_validators,
@@ -103,15 +97,7 @@ impl EncodeSize for AuthorityOperation {
                 policy,
                 initial_validators,
                 epoch,
-            } => {
-                policy.encode_size()
-                    + commonware_codec::varint::UInt(initial_validators.len() as u64).encode_size()
-                    + initial_validators
-                        .iter()
-                        .map(EncodeSize::encode_size)
-                        .sum::<usize>()
-                    + epoch.encode_size()
-            }
+            } => policy.encode_size() + initial_validators.encode_size() + epoch.encode_size(),
             Self::Propose {
                 change,
                 effective_epoch,
@@ -127,3 +113,43 @@ impl CommonOperation for AuthorityOperation {
 
 pub type TransactionPayload = nunchi_common::TransactionPayload<AuthorityOperation>;
 pub type Transaction = nunchi_common::Transaction<AuthorityOperation>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::MultisigPolicy;
+    use commonware_codec::{DecodeExt, Encode};
+    use commonware_cryptography::{ed25519, Signer as _};
+    use nunchi_common::MAX_MULTISIG_SIGNERS;
+    use nunchi_crypto::PrivateKey;
+
+    fn configure(owners: usize, validators: usize) -> AuthorityOperation {
+        AuthorityOperation::Configure {
+            policy: MultisigPolicy {
+                owners: vec![PrivateKey::from_seed(0).public_key(); owners],
+                threshold: 1,
+            },
+            initial_validators: vec![ed25519::PrivateKey::from_seed(0).public_key(); validators],
+            epoch: 0,
+        }
+    }
+
+    #[test]
+    fn decode_roundtrips_within_bounds() {
+        let operation = configure(MAX_MULTISIG_SIGNERS, MAX_VALIDATORS);
+        let decoded = AuthorityOperation::decode(operation.encode()).unwrap();
+        assert_eq!(decoded, operation);
+    }
+
+    #[test]
+    fn decode_rejects_oversized_owner_list() {
+        let operation = configure(MAX_MULTISIG_SIGNERS + 1, 0);
+        assert!(AuthorityOperation::decode(operation.encode()).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_oversized_validator_list() {
+        let operation = configure(1, MAX_VALIDATORS + 1);
+        assert!(AuthorityOperation::decode(operation.encode()).is_err());
+    }
+}
