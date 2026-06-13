@@ -2194,6 +2194,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nunchi-authority"
+version = "2026.5.0"
+dependencies = [
+ "bytes",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-runtime",
+ "nunchi-common",
+ "nunchi-crypto",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "nunchi-coins"
 version = "2026.5.0"
 dependencies = [
@@ -2233,8 +2246,10 @@ dependencies = [
  "futures",
  "governor",
  "jsonrpsee",
+ "nunchi-authority",
  "nunchi-coins",
  "nunchi-common",
+ "nunchi-crypto",
  "nunchi-dkg",
  "nunchi-rpc",
  "rand 0.8.6",

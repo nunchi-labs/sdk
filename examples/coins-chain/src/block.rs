@@ -1,4 +1,5 @@
 use crate::consensus::{Context, Finalization, Notarization, Scheme};
+use crate::Transaction;
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_consensus::{types::Height, CertifiableBlock, Heightable};
@@ -6,7 +7,6 @@ use commonware_cryptography::{sha256::Digest, Committable, Digestible, Hasher, S
 use commonware_parallel::Strategy;
 use commonware_storage::mmr::Location;
 use commonware_utils::range::NonEmptyRange;
-use nunchi_coins::Transaction;
 use nunchi_dkg::{DealerLog, ReshareBlock};
 use rand::rngs::OsRng;
 use std::num::NonZeroU32;
