@@ -9,11 +9,14 @@ This repository will contain modules for building public and private blockchains
 
 ### Blockchain Basics
 
-* Coins - defines what a coin is, other basic financial functions
-* Bridge - moves coins between chains
-* Oracle - takes in price feeds and provides them to other modules.  Time series database.
-* Chat - allows humans or agents to publish to permanent on-chain public conversations
-* Factory - wrapper of coins for mass issuance 
+* [`coins`](coins/) - defines what a coin and account are. Also contains other basic financial functions
+* [`crypto`](crypto/) - defines key primitives and wrappers around commonware cryptographic primitives
+* [`rpc`](rpc/) - core abstractions for modular RPC
+* [`dkg`](dkg/) - contains dkg resharing ceremony logic and a consensus engine orchestator
+* `bridge` - moves coins between chains
+* `oracle` - takes in price feeds and provides them to other modules
+* `chat` - allows humans or agents to publish to permanent on-chain public conversations
+* `factory` - wrapper of coins for mass issuance 
 
 ### Network Infrastructure 
 
