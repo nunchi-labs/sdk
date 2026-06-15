@@ -6,6 +6,7 @@ mod codec;
 mod db;
 mod factory;
 mod ledger;
+mod module;
 /// JSON-RPC surface for the coin module (enabled by the default `rpc` feature).
 #[cfg(feature = "rpc")]
 pub mod rpc;
@@ -19,6 +20,7 @@ pub use asset::{CoinId, CoinSpec, TokenDefinition, MAX_NAME_BYTES, MAX_SYMBOL_BY
 pub use db::CoinDB;
 pub use factory::TokenFactory;
 pub use ledger::{Ledger, LedgerError};
+pub use module::Coins;
 pub use nunchi_common::{AccountSignature, Authorization};
 pub use transaction::{CoinOperation, Transaction, TransactionPayload};
 

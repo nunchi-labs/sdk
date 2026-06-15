@@ -2272,8 +2272,10 @@ dependencies = [
  "commonware-runtime",
  "commonware-storage",
  "commonware-utils",
+ "futures",
  "nunchi-crypto",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

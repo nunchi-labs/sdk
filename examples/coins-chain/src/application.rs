@@ -1,6 +1,6 @@
 use crate::execution::SharedAppliedHeight;
 use crate::txpool::Submitter;
-use crate::{Block, Context, Scheme, StateCommitment, Transaction, EPOCH};
+use crate::{Block, Context, RuntimeTransaction, Scheme, StateCommitment, EPOCH};
 use commonware_consensus::{
     types::{Height, Round, View},
     Heightable,
@@ -14,9 +14,7 @@ use commonware_runtime::{Clock, Metrics, Spawner, Storage};
 use commonware_storage::{mmr::Location, qmdb::sync::Target};
 use commonware_utils::{non_empty_range, range::NonEmptyRange, SystemTimeExt};
 use futures::StreamExt;
-use nunchi_authority::{AuthorityError, AuthorityLedger};
-use nunchi_coins::{Ledger, LedgerError};
-use nunchi_common::{Overlay, QmdbBatch, QmdbDatabaseSet, QmdbMerkleized, StateStore};
+use nunchi_common::{Overlay, PoolTransaction, QmdbBatch, QmdbDatabaseSet, QmdbMerkleized};
 use nunchi_dkg as dkg;
 use rand::Rng;
 use std::time::{Duration, SystemTime};
@@ -27,26 +25,6 @@ const GENESIS: &[u8] = b"nunchi coins chain";
 
 /// Fixed consensus cutoff for block timestamps: 2200-01-01T00:00:00Z.
 const MAX_BLOCK_TIMESTAMP_MS: u64 = 7_258_118_400_000;
-
-/// A module-level execution failure for a single transaction.
-///
-/// Failed writes never reach the underlying batch (proposal runs each candidate in an
-/// [`Overlay`]; block execution aborts), so errors carry no state.
-#[derive(Debug)]
-enum ExecutionError {
-    Coin(LedgerError),
-    Authority(AuthorityError),
-}
-
-impl ExecutionError {
-    /// Storage failures indicate local corruption, not transaction invalidity.
-    fn is_storage(&self) -> bool {
-        matches!(
-            self,
-            Self::Coin(LedgerError::Storage(_)) | Self::Authority(AuthorityError::Storage(_))
-        )
-    }
-}
 
 /// The consensus application for the coins chain.
 #[derive(Clone)]
@@ -122,9 +100,8 @@ impl Application {
     async fn build_valid_transactions<E: Storage + Clock + Metrics>(
         &self,
         batches: <QmdbDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
-        authority_epoch: u64,
-        candidates: Vec<Transaction>,
-    ) -> (Vec<Transaction>, QmdbMerkleized<E>) {
+        candidates: Vec<RuntimeTransaction>,
+    ) -> (Vec<RuntimeTransaction>, QmdbMerkleized<E>) {
         let mut batch = QmdbBatch::new(batches);
         let mut included = Vec::new();
 
@@ -135,15 +112,14 @@ impl Application {
             // Each candidate executes against an overlay so a transaction that fails partway
             // through leaves no writes behind: the proposed state root must commit only to the
             // transactions actually included in the block.
-            match Self::execute_transaction(Overlay::new(&mut batch), &transaction, authority_epoch)
-                .await
-            {
-                Ok(overlay) => {
+            let mut overlay = Overlay::new(&mut batch);
+            match transaction.validate(&mut overlay).await {
+                Ok(()) => {
                     overlay.commit();
                     included.push(transaction);
                 }
                 Err(error) if error.is_storage() => {
-                    panic!("storage failure while building block: {error:?}");
+                    panic!("storage failure while building block: {error}");
                 }
                 Err(error) => {
                     debug!(?error, "skipping non-executable txpool transaction");
@@ -165,15 +141,14 @@ impl Application {
     /// must never report a block permanently invalid because of a local fault.
     async fn execute_block<E: Storage + Clock + Metrics>(
         batches: <QmdbDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
-        authority_epoch: u64,
-        transactions: &[Transaction],
+        transactions: &[RuntimeTransaction],
     ) -> Option<QmdbMerkleized<E>> {
         let mut batch = QmdbBatch::new(batches);
         for transaction in transactions {
-            match Self::execute_transaction(batch, transaction, authority_epoch).await {
-                Ok(next_batch) => batch = next_batch,
+            match transaction.apply(&mut batch).await {
+                Ok(()) => {}
                 Err(error) if error.is_storage() => {
-                    panic!("storage failure while executing block: {error:?}");
+                    panic!("storage failure while executing block: {error}");
                 }
                 Err(_) => return None,
             }
@@ -184,32 +159,6 @@ impl Application {
                 .await
                 .expect("merkleization failed while executing block"),
         )
-    }
-
-    /// Dispatch one transaction to its module's ledger over `store`.
-    ///
-    /// On failure the store is dropped, discarding any partial writes the transaction staged.
-    async fn execute_transaction<S: StateStore + Send + Sync>(
-        store: S,
-        transaction: &Transaction,
-        current_epoch: u64,
-    ) -> Result<S, ExecutionError> {
-        match transaction {
-            Transaction::Coin(tx) => {
-                let mut ledger = Ledger::new(store);
-                match ledger.apply_transaction(tx).await {
-                    Ok(()) => Ok(ledger.into_inner()),
-                    Err(error) => Err(ExecutionError::Coin(error)),
-                }
-            }
-            Transaction::Authority(tx) => {
-                let mut ledger = AuthorityLedger::new(store);
-                match ledger.apply_transaction(tx, current_epoch).await {
-                    Ok(()) => Ok(ledger.into_inner()),
-                    Err(error) => Err(ExecutionError::Authority(error)),
-                }
-            }
-        }
     }
 
     fn state_range<E: Storage + Clock + Metrics>(
@@ -268,10 +217,7 @@ where
         // control and eviction. Bounding this fetch while the pool remains unbounded
         // can starve valid transactions behind lower-sorting unexecutable entries.
         let candidates = input.pending(usize::MAX).await;
-        let authority_epoch = context.round.epoch().get();
-        let (transactions, merkleized) = self
-            .build_valid_transactions(batches, authority_epoch, candidates)
-            .await;
+        let (transactions, merkleized) = self.build_valid_transactions(batches, candidates).await;
         let state_range = Self::state_range(&merkleized);
         let reshare_log = match &mut self.dkg {
             Some(dkg) => dkg.act().await,
@@ -314,12 +260,7 @@ where
             return None;
         }
 
-        let merkleized = Self::execute_block(
-            batches,
-            block.context.round.epoch().get(),
-            &block.transactions,
-        )
-        .await?;
+        let merkleized = Self::execute_block(batches, &block.transactions).await?;
         let state_range = Self::state_range(&merkleized);
         if merkleized.root() != block.state_root || state_range != block.state_range {
             return None;
@@ -333,13 +274,9 @@ where
         block: &Self::Block,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
-        let merkleized = Self::execute_block(
-            batches,
-            block.context.round.epoch().get(),
-            &block.transactions,
-        )
-        .await
-        .expect("certified block failed deterministic execution");
+        let merkleized = Self::execute_block(batches, &block.transactions)
+            .await
+            .expect("certified block failed deterministic execution");
         let state_range = Self::state_range(&merkleized);
         assert_eq!(
             merkleized.root(),
@@ -359,7 +296,7 @@ where
         block: &Self::Block,
         _databases: &Self::Databases,
     ) {
-        let applied = block.transactions.iter().map(Transaction::digest).collect();
+        let applied = block.transactions.iter().map(|tx| tx.digest()).collect();
         debug!(
             height = %block.height(),
             digest = ?block.digest(),
@@ -380,8 +317,8 @@ mod tests {
     use commonware_utils::sync::AsyncRwLock;
     use futures::lock::Mutex as AsyncMutex;
     use nunchi_coins::{
-        multisig_account_id, AccountPolicy, CoinOperation, CoinSpec, MultisigPolicy, PrivateKey,
-        Transaction as CoinTransaction,
+        multisig_account_id, AccountPolicy, CoinOperation, CoinSpec, Ledger, MultisigPolicy,
+        PrivateKey, Transaction as CoinTransaction,
     };
     use nunchi_common::{QmdbBackend, QmdbState};
     use std::sync::Arc;
@@ -424,7 +361,7 @@ mod tests {
             // The multisig policy is unregistered, so the candidate is excluded at proposal time.
             let batches = databases.new_batches().await;
             let (included, _) = app
-                .build_valid_transactions(batches, 0, vec![tx.clone().into()])
+                .build_valid_transactions(batches, vec![tx.clone().into()])
                 .await;
             assert!(included.is_empty());
 
@@ -444,7 +381,7 @@ mod tests {
 
             let batches = databases.new_batches().await;
             let (included, _) = app
-                .build_valid_transactions(batches, 0, vec![tx.clone().into()])
+                .build_valid_transactions(batches, vec![tx.clone().into()])
                 .await;
             assert_eq!(included, vec![tx.into()]);
         });

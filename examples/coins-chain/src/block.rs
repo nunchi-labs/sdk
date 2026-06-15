@@ -11,6 +11,8 @@ use nunchi_dkg::{DealerLog, ReshareBlock};
 use rand::rngs::OsRng;
 use std::num::NonZeroU32;
 
+use crate::RuntimeTransaction;
+
 /// Upper bound on the number of coin transactions a single block may carry.
 ///
 /// Bounds the work a peer can force us to do when decoding an untrusted block.
@@ -39,8 +41,8 @@ pub struct Block {
     /// The timestamp of the block (in milliseconds since the Unix epoch).
     pub timestamp: u64,
 
-    /// The coin transactions to execute when this block is finalized.
-    pub transactions: Vec<Transaction>,
+    /// Runtime transactions to execute when this block is finalized.
+    pub transactions: Vec<RuntimeTransaction>,
 
     /// Optional DKG/reshare dealer log included for epoch transitions.
     pub reshare_log: Option<DealerLog>,
@@ -77,7 +79,7 @@ impl Block {
         parent: &Digest,
         height: Height,
         timestamp: u64,
-        transactions: &[Transaction],
+        transactions: &[RuntimeTransaction],
         reshare_log: &Option<DealerLog>,
         state: &StateCommitment,
     ) -> Digest {
@@ -101,7 +103,7 @@ impl Block {
         parent: Digest,
         height: Height,
         timestamp: u64,
-        transactions: Vec<Transaction>,
+        transactions: Vec<RuntimeTransaction>,
         reshare_log: Option<DealerLog>,
         state: StateCommitment,
     ) -> Self {
@@ -161,7 +163,7 @@ impl Read for Block {
         }
         let mut transactions = Vec::with_capacity(count as usize);
         for _ in 0..count {
-            transactions.push(Transaction::read(reader)?);
+            transactions.push(RuntimeTransaction::read(reader)?);
         }
         let reshare_log = Read::read_cfg(reader, cfg)?;
         let state_root = Digest::read(reader)?;

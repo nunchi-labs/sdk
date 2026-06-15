@@ -21,7 +21,7 @@ pub mod application;
 pub mod engine;
 pub mod execution;
 pub mod rpc;
-pub mod transaction;
+pub mod runtime;
 pub mod txpool;
 
 pub use block::{Block, Finalized, Notarized, StateCommitment, MAX_TRANSACTIONS};
@@ -29,7 +29,7 @@ pub use consensus::{
     Activity, Context, EdScheme, EpochProvider, Finalization, Identity, Notarization, Provider,
     PublicKey, Scheme, Seed, Seedable, Signature, ThresholdScheme,
 };
-pub use transaction::Transaction;
+pub use runtime::{RuntimeError, RuntimeTransaction};
 
 /// Namespace prefix used in all consensus signing operations to prevent signature replay attacks.
 pub const NAMESPACE: &[u8] = b"_NUNCHI_COINS_CHAIN";

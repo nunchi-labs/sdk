@@ -15,3 +15,5 @@ commonware-runtime = { workspace = true }
 commonware-storage = { workspace = true }
 commonware-parallel = { workspace = true }
 commonware-utils = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }

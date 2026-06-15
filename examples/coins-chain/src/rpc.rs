@@ -96,7 +96,7 @@ where
             .verify()
             .map_err(|err| invalid_params(format!("transaction failed verification: {err}")))?;
         let hash = transaction.digest();
-        submitter.submit(transaction);
+        submitter.submit(transaction.into());
         RpcResult::Ok(SubmitTransactionResponse {
             hash: encode_hex(&hash),
         })
