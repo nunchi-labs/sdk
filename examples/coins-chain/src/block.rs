@@ -28,7 +28,7 @@ pub struct StateCommitment {
 }
 
 #[derive(Clone, Debug)]
-pub struct Block {
+pub struct Block<Tx = RuntimeTransaction> {
     /// The consensus context when this block was proposed.
     pub context: Context,
 
@@ -42,7 +42,7 @@ pub struct Block {
     pub timestamp: u64,
 
     /// Runtime transactions to execute when this block is finalized.
-    pub transactions: Vec<RuntimeTransaction>,
+    pub transactions: Vec<Tx>,
 
     /// Optional DKG/reshare dealer log included for epoch transitions.
     pub reshare_log: Option<DealerLog>,
@@ -57,7 +57,10 @@ pub struct Block {
     digest: Digest,
 }
 
-impl PartialEq for Block {
+impl<Tx> PartialEq for Block<Tx>
+where
+    Tx: PartialEq,
+{
     fn eq(&self, other: &Self) -> bool {
         self.context == other.context
             && self.parent == other.parent
@@ -71,15 +74,18 @@ impl PartialEq for Block {
     }
 }
 
-impl Eq for Block {}
+impl<Tx: Eq> Eq for Block<Tx> {}
 
-impl Block {
+impl<Tx> Block<Tx>
+where
+    Tx: EncodeSize + Write,
+{
     fn compute_digest(
         context: &Context,
         parent: &Digest,
         height: Height,
         timestamp: u64,
-        transactions: &[RuntimeTransaction],
+        transactions: &[Tx],
         reshare_log: &Option<DealerLog>,
         state: &StateCommitment,
     ) -> Digest {
@@ -103,7 +109,7 @@ impl Block {
         parent: Digest,
         height: Height,
         timestamp: u64,
-        transactions: Vec<RuntimeTransaction>,
+        transactions: Vec<Tx>,
         reshare_log: Option<DealerLog>,
         state: StateCommitment,
     ) -> Self {
@@ -130,7 +136,10 @@ impl Block {
     }
 }
 
-impl Write for Block {
+impl<Tx> Write for Block<Tx>
+where
+    Tx: Write,
+{
     fn write(&self, writer: &mut impl BufMut) {
         self.context.write(writer);
         self.parent.write(writer);
@@ -146,7 +155,10 @@ impl Write for Block {
     }
 }
 
-impl Read for Block {
+impl<Tx> Read for Block<Tx>
+where
+    Tx: EncodeSize + Read<Cfg = ()> + Write,
+{
     type Cfg = NonZeroU32;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
@@ -163,7 +175,7 @@ impl Read for Block {
         }
         let mut transactions = Vec::with_capacity(count as usize);
         for _ in 0..count {
-            transactions.push(RuntimeTransaction::read(reader)?);
+            transactions.push(Tx::read(reader)?);
         }
         let reshare_log = Read::read_cfg(reader, cfg)?;
         let state_root = Digest::read(reader)?;
@@ -196,7 +208,10 @@ impl Read for Block {
     }
 }
 
-impl EncodeSize for Block {
+impl<Tx> EncodeSize for Block<Tx>
+where
+    Tx: EncodeSize,
+{
     fn encode_size(&self) -> usize {
         self.context.encode_size()
             + self.parent.encode_size()
@@ -214,7 +229,10 @@ impl EncodeSize for Block {
     }
 }
 
-impl Digestible for Block {
+impl<Tx> Digestible for Block<Tx>
+where
+    Tx: Clone + Send + Sync + 'static,
+{
     type Digest = Digest;
 
     fn digest(&self) -> Digest {
@@ -222,7 +240,10 @@ impl Digestible for Block {
     }
 }
 
-impl Committable for Block {
+impl<Tx> Committable for Block<Tx>
+where
+    Tx: Clone + Send + Sync + 'static,
+{
     type Commitment = Digest;
 
     fn commitment(&self) -> Digest {
@@ -324,19 +345,25 @@ impl EncodeSize for Finalized {
     }
 }
 
-impl commonware_consensus::Block for Block {
+impl<Tx> commonware_consensus::Block for Block<Tx>
+where
+    Tx: Clone + EncodeSize + Read<Cfg = ()> + Send + Sync + Write + 'static,
+{
     fn parent(&self) -> Digest {
         self.parent
     }
 }
 
-impl Heightable for Block {
+impl<Tx> Heightable for Block<Tx> {
     fn height(&self) -> Height {
         self.height
     }
 }
 
-impl CertifiableBlock for Block {
+impl<Tx> CertifiableBlock for Block<Tx>
+where
+    Tx: Clone + EncodeSize + Read<Cfg = ()> + Send + Sync + Write + 'static,
+{
     type Context = Context;
 
     fn context(&self) -> Self::Context {
@@ -344,7 +371,10 @@ impl CertifiableBlock for Block {
     }
 }
 
-impl ReshareBlock for Block {
+impl<Tx> ReshareBlock for Block<Tx>
+where
+    Tx: Clone + EncodeSize + Read<Cfg = ()> + Send + Sync + Write + 'static,
+{
     fn reshare_log(&self) -> Option<&DealerLog> {
         self.reshare_log.as_ref()
     }

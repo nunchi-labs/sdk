@@ -1,5 +1,5 @@
 use crate::execution::SharedAppliedHeight;
-use crate::txpool::Submitter;
+use crate::txpool::RuntimeSubmitter;
 use crate::{Block, CoinsRuntime, Context, Scheme, StateCommitment, EPOCH};
 use commonware_consensus::{
     types::{Height, Round, View},
@@ -19,6 +19,7 @@ use nunchi_common::{
 };
 use nunchi_dkg as dkg;
 use rand::Rng;
+use std::marker::PhantomData;
 use std::time::{Duration, SystemTime};
 use tracing::debug;
 
@@ -28,22 +29,21 @@ const GENESIS: &[u8] = b"nunchi coins chain";
 /// Fixed consensus cutoff for block timestamps: 2200-01-01T00:00:00Z.
 const MAX_BLOCK_TIMESTAMP_MS: u64 = 7_258_118_400_000;
 
-type ChainTransaction = <CoinsRuntime as Runtime>::Transaction;
-
 /// The consensus application for the coins chain.
 #[derive(Clone)]
-pub struct Application {
-    submitter: Submitter,
+pub struct Application<R: Runtime = CoinsRuntime> {
+    submitter: RuntimeSubmitter<R>,
     max_block_transactions: usize,
-    dkg: Option<dkg::Mailbox<Block>>,
+    dkg: Option<dkg::Mailbox<Block<R::Transaction>>>,
     applied_height: SharedAppliedHeight,
     genesis_state: StateCommitment,
+    _runtime: PhantomData<R>,
 }
 
-impl Application {
+impl<R: Runtime> Application<R> {
     /// The genesis block, committing to `genesis_state` (the root of an empty state database,
     /// derived at startup by [`Engine::new`](crate::engine::Engine)).
-    pub fn genesis_block(&self) -> Block {
+    pub fn genesis_block(&self) -> Block<R::Transaction> {
         let genesis_context = Context {
             round: Round::new(EPOCH, View::zero()),
             leader: ed25519::PrivateKey::from_seed(0).public_key(),
@@ -61,7 +61,7 @@ impl Application {
     }
 
     pub fn new(
-        submitter: Submitter,
+        submitter: RuntimeSubmitter<R>,
         max_block_transactions: usize,
         applied_height: SharedAppliedHeight,
         genesis_state: StateCommitment,
@@ -72,13 +72,14 @@ impl Application {
             dkg: None,
             applied_height,
             genesis_state,
+            _runtime: PhantomData,
         }
     }
 
     pub fn with_dkg(
-        submitter: Submitter,
+        submitter: RuntimeSubmitter<R>,
         max_block_transactions: usize,
-        dkg: dkg::Mailbox<Block>,
+        dkg: dkg::Mailbox<Block<R::Transaction>>,
         applied_height: SharedAppliedHeight,
         genesis_state: StateCommitment,
     ) -> Self {
@@ -88,10 +89,11 @@ impl Application {
             dkg: Some(dkg),
             applied_height,
             genesis_state,
+            _runtime: PhantomData,
         }
     }
 
-    fn timestamp<E: Clock>(runtime_context: &E, parent: &Block) -> Option<u64> {
+    fn timestamp<E: Clock>(runtime_context: &E, parent: &Block<R::Transaction>) -> Option<u64> {
         let mut current = runtime_context.current().epoch_millis();
         if current <= parent.timestamp {
             current = parent.timestamp.checked_add(1)?;
@@ -104,8 +106,8 @@ impl Application {
     async fn build_valid_transactions<E: Storage + Clock + Metrics>(
         &self,
         batches: <QmdbDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
-        candidates: Vec<ChainTransaction>,
-    ) -> (Vec<ChainTransaction>, QmdbMerkleized<E>) {
+        candidates: Vec<R::Transaction>,
+    ) -> (Vec<R::Transaction>, QmdbMerkleized<E>) {
         let mut batch = QmdbBatch::new(batches);
         let mut included = Vec::new();
 
@@ -117,12 +119,12 @@ impl Application {
             // through leaves no writes behind: the proposed state root must commit only to the
             // transactions actually included in the block.
             let mut overlay = Overlay::new(&mut batch);
-            match CoinsRuntime::validate(&mut overlay, &transaction).await {
+            match R::validate(&mut overlay, &transaction).await {
                 Ok(()) => {
                     overlay.commit();
                     included.push(transaction);
                 }
-                Err(error) if CoinsRuntime::is_storage_error(&error) => {
+                Err(error) if R::is_storage_error(&error) => {
                     panic!("storage failure while building block: {error}");
                 }
                 Err(error) => {
@@ -145,13 +147,13 @@ impl Application {
     /// must never report a block permanently invalid because of a local fault.
     async fn execute_block<E: Storage + Clock + Metrics>(
         batches: <QmdbDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
-        transactions: &[ChainTransaction],
+        transactions: &[R::Transaction],
     ) -> Option<QmdbMerkleized<E>> {
         let mut batch = QmdbBatch::new(batches);
         for transaction in transactions {
-            match CoinsRuntime::apply(&mut batch, transaction).await {
+            match R::apply(&mut batch, transaction).await {
                 Ok(()) => {}
-                Err(error) if CoinsRuntime::is_storage_error(&error) => {
+                Err(error) if R::is_storage_error(&error) => {
                     panic!("storage failure while executing block: {error}");
                 }
                 Err(_) => return None,
@@ -174,8 +176,8 @@ impl Application {
 
     async fn verify_timestamp<E: Clock>(
         runtime_context: &E,
-        block: &Block,
-        parent: &Block,
+        block: &Block<R::Transaction>,
+        parent: &Block<R::Transaction>,
     ) -> bool {
         if block.timestamp <= parent.timestamp || block.timestamp > MAX_BLOCK_TIMESTAMP_MS {
             return false;
@@ -189,15 +191,16 @@ impl Application {
     }
 }
 
-impl<E> StatefulApplication<E> for Application
+impl<E, R> StatefulApplication<E> for Application<R>
 where
     E: Rng + Spawner + Metrics + Clock + Storage,
+    R: Runtime + Clone + Send + Sync + 'static,
 {
     type SigningScheme = Scheme;
     type Context = Context;
-    type Block = Block;
+    type Block = Block<R::Transaction>;
     type Databases = QmdbDatabaseSet<E>;
-    type InputProvider = Submitter;
+    type InputProvider = RuntimeSubmitter<R>;
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
         Target::new(block.state_root, block.state_range.clone())
@@ -347,7 +350,7 @@ mod tests {
                 range: genesis_target.range,
             };
             let applied_height = Arc::new(AsyncMutex::new(Height::zero()));
-            let app = Application::new(submitter, 16, applied_height, genesis_state);
+            let app: Application = Application::new(submitter, 16, applied_height, genesis_state);
 
             let alice_a = PrivateKey::ed25519_from_seed(1);
             let alice_b = PrivateKey::secp256r1_from_seed(2);
