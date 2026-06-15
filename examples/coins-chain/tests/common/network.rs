@@ -23,7 +23,6 @@ use governor::Quota;
 use nunchi_authority::AuthorityLedger;
 use nunchi_coins::{Address, Ledger};
 use nunchi_coins_chain::{
-    channels,
     engine::{Config, Engine},
     execution::NodeHandle,
     txpool::Submitter,
@@ -39,6 +38,13 @@ use std::{
 const FREEZER_TABLE_INITIAL_SIZE: u32 = 2u32.pow(14); // 1MB
 const TEST_QUOTA: Quota = Quota::per_second(NZU32!(u32::MAX));
 const MAX_BLOCK_TRANSACTIONS: usize = 256;
+
+const PENDING_CHANNEL: u64 = 0;
+const RECOVERED_CHANNEL: u64 = 1;
+const RESOLVER_CHANNEL: u64 = 2;
+const BROADCAST_CHANNEL: u64 = 3;
+const DKG_CHANNEL: u64 = 4;
+const BACKFILL_CHANNEL: u64 = 5;
 
 type Channel = (
     Sender<PublicKey, deterministic::Context>,
@@ -526,27 +532,18 @@ async fn register_validators(
     let mut registrations = HashMap::new();
     for validator in validators.iter() {
         let oracle = oracle.control(validator.clone());
-        let pending = oracle
-            .register(channels::PENDING, TEST_QUOTA)
-            .await
-            .unwrap();
+        let pending = oracle.register(PENDING_CHANNEL, TEST_QUOTA).await.unwrap();
         let recovered = oracle
-            .register(channels::RECOVERED, TEST_QUOTA)
+            .register(RECOVERED_CHANNEL, TEST_QUOTA)
             .await
             .unwrap();
-        let resolver = oracle
-            .register(channels::RESOLVER, TEST_QUOTA)
-            .await
-            .unwrap();
+        let resolver = oracle.register(RESOLVER_CHANNEL, TEST_QUOTA).await.unwrap();
         let broadcast = oracle
-            .register(channels::BROADCAST, TEST_QUOTA)
+            .register(BROADCAST_CHANNEL, TEST_QUOTA)
             .await
             .unwrap();
-        let dkg = oracle.register(channels::DKG, TEST_QUOTA).await.unwrap();
-        let backfill = oracle
-            .register(channels::BACKFILL, TEST_QUOTA)
-            .await
-            .unwrap();
+        let dkg = oracle.register(DKG_CHANNEL, TEST_QUOTA).await.unwrap();
+        let backfill = oracle.register(BACKFILL_CHANNEL, TEST_QUOTA).await.unwrap();
         registrations.insert(
             validator.clone(),
             ValidatorChannels {
