@@ -1,7 +1,7 @@
 # sdk
 The Nunchi SDK is an easy-to-use modular blockchain framework offering financial primitives for commonware-based chains. The core of the framework can be found in the [`nunchi-coins`](coins/) crate
 
-By adopting the Nunchi SDK for your project, you adopt tbe coin definiton and bridging stule, but arent forced to adopt anything else.  The Nunchi SDK is designed around the specific needs of specalized, localized, high speed finance.  
+A chain built with the Nunchi SDK adopts our coin model, account model, dkg resharing, and bridging setup. The SDK is handcrafted for the requirements of specialized low-latency finance.
 
 ## Modules
 
