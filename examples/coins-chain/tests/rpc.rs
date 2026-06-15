@@ -12,8 +12,7 @@ use jsonrpsee::{
 use nunchi_coins::{rpc::SharedLedger, CoinOperation, CoinSpec, Ledger, PrivateKey, Transaction};
 use nunchi_coins_chain::{
     rpc::{self, StatusResponse, SubmitTransactionParams, SubmitTransactionResponse},
-    txpool::TxPool,
-    RuntimeTransaction,
+    RuntimeTransaction, TxPool,
 };
 use nunchi_common::QmdbState;
 use nunchi_rpc::{encode_hex, ServerBuilder};

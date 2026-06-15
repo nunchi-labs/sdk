@@ -14,7 +14,7 @@ pub fn genesis_payload() -> sha256::Digest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{txpool::TxPool, StateCommitment};
+    use crate::{StateCommitment, TxPool};
     use commonware_consensus::types::Height;
     use commonware_glue::stateful::db::DatabaseSet as _;
     use commonware_runtime::{deterministic, Runner as _};

@@ -25,8 +25,7 @@ use nunchi_coins::{Address, Ledger};
 use nunchi_coins_chain::{
     engine::{Config, Engine},
     execution::NodeHandle,
-    txpool::Submitter,
-    PublicKey,
+    PublicKey, Submitter,
 };
 use nunchi_common::QmdbReader;
 use nunchi_dkg::{ContinueOnUpdate, PeerConfig};

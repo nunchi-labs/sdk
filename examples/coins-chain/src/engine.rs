@@ -1,8 +1,7 @@
 use crate::application::{self, Application};
 use crate::execution::NodeHandle;
-use crate::txpool::TxPool;
 use crate::{
-    Block, EpochProvider, Finalization, Provider, PublicKey, Scheme, StateCommitment,
+    Block, EpochProvider, Finalization, Provider, PublicKey, Scheme, StateCommitment, TxPool,
     BLOCKS_PER_EPOCH, NAMESPACE,
 };
 use commonware_broadcast::buffered;
