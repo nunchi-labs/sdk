@@ -1,6 +1,6 @@
 use crate::execution::SharedAppliedHeight;
 use crate::txpool::Submitter;
-use crate::{Block, Context, RuntimeTransaction, Scheme, StateCommitment, EPOCH};
+use crate::{Block, CoinsRuntime, Context, Scheme, StateCommitment, EPOCH};
 use commonware_consensus::{
     types::{Height, Round, View},
     Heightable,
@@ -14,7 +14,9 @@ use commonware_runtime::{Clock, Metrics, Spawner, Storage};
 use commonware_storage::{mmr::Location, qmdb::sync::Target};
 use commonware_utils::{non_empty_range, range::NonEmptyRange, SystemTimeExt};
 use futures::StreamExt;
-use nunchi_common::{Overlay, PoolTransaction, QmdbBatch, QmdbDatabaseSet, QmdbMerkleized};
+use nunchi_common::{
+    Overlay, PoolTransaction, QmdbBatch, QmdbDatabaseSet, QmdbMerkleized, Runtime,
+};
 use nunchi_dkg as dkg;
 use rand::Rng;
 use std::time::{Duration, SystemTime};
@@ -25,6 +27,8 @@ const GENESIS: &[u8] = b"nunchi coins chain";
 
 /// Fixed consensus cutoff for block timestamps: 2200-01-01T00:00:00Z.
 const MAX_BLOCK_TIMESTAMP_MS: u64 = 7_258_118_400_000;
+
+type ChainTransaction = <CoinsRuntime as Runtime>::Transaction;
 
 /// The consensus application for the coins chain.
 #[derive(Clone)]
@@ -100,8 +104,8 @@ impl Application {
     async fn build_valid_transactions<E: Storage + Clock + Metrics>(
         &self,
         batches: <QmdbDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
-        candidates: Vec<RuntimeTransaction>,
-    ) -> (Vec<RuntimeTransaction>, QmdbMerkleized<E>) {
+        candidates: Vec<ChainTransaction>,
+    ) -> (Vec<ChainTransaction>, QmdbMerkleized<E>) {
         let mut batch = QmdbBatch::new(batches);
         let mut included = Vec::new();
 
@@ -113,12 +117,12 @@ impl Application {
             // through leaves no writes behind: the proposed state root must commit only to the
             // transactions actually included in the block.
             let mut overlay = Overlay::new(&mut batch);
-            match transaction.validate(&mut overlay).await {
+            match CoinsRuntime::validate(&mut overlay, &transaction).await {
                 Ok(()) => {
                     overlay.commit();
                     included.push(transaction);
                 }
-                Err(error) if error.is_storage() => {
+                Err(error) if CoinsRuntime::is_storage_error(&error) => {
                     panic!("storage failure while building block: {error}");
                 }
                 Err(error) => {
@@ -141,13 +145,13 @@ impl Application {
     /// must never report a block permanently invalid because of a local fault.
     async fn execute_block<E: Storage + Clock + Metrics>(
         batches: <QmdbDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
-        transactions: &[RuntimeTransaction],
+        transactions: &[ChainTransaction],
     ) -> Option<QmdbMerkleized<E>> {
         let mut batch = QmdbBatch::new(batches);
         for transaction in transactions {
-            match transaction.apply(&mut batch).await {
+            match CoinsRuntime::apply(&mut batch, transaction).await {
                 Ok(()) => {}
-                Err(error) if error.is_storage() => {
+                Err(error) if CoinsRuntime::is_storage_error(&error) => {
                     panic!("storage failure while executing block: {error}");
                 }
                 Err(_) => return None,

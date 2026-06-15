@@ -29,7 +29,7 @@ pub use consensus::{
     Activity, Context, EdScheme, EpochProvider, Finalization, Identity, Notarization, Provider,
     PublicKey, Scheme, Seed, Seedable, Signature, ThresholdScheme,
 };
-pub use runtime::{RuntimeError, RuntimeTransaction};
+pub use runtime::{CoinsRuntime, RuntimeError, RuntimeTransaction};
 
 /// Namespace prefix used in all consensus signing operations to prevent signature replay attacks.
 pub const NAMESPACE: &[u8] = b"_NUNCHI_COINS_CHAIN";

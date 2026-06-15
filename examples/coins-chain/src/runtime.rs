@@ -7,10 +7,13 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use commonware_cryptography::sha256::Digest;
 use nunchi_coins::{Coins, LedgerError};
-use nunchi_common::{ChainModule, PoolTransaction, StateStore};
+use nunchi_common::{ChainModule, PoolTransaction, Runtime, StateStore};
 use thiserror::Error;
 
 const TX_COINS: u8 = 0;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CoinsRuntime;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RuntimeTransaction {
@@ -29,25 +32,34 @@ impl RuntimeError {
     }
 }
 
-impl RuntimeTransaction {
-    pub async fn validate<S>(&self, state: &mut S) -> Result<(), RuntimeError>
+impl Runtime for CoinsRuntime {
+    type Transaction = RuntimeTransaction;
+    type Error = RuntimeError;
+
+    async fn validate<S>(state: &mut S, transaction: &Self::Transaction) -> Result<(), Self::Error>
     where
         S: StateStore + Send + Sync,
     {
-        match self {
-            Self::Coins(transaction) => Coins::validate(state, transaction).await?,
+        match transaction {
+            RuntimeTransaction::Coins(transaction) => Coins::validate(state, transaction).await?,
         }
         Ok(())
     }
 
-    pub async fn apply<S>(&self, state: &mut S) -> Result<(), RuntimeError>
+    async fn apply<S>(state: &mut S, transaction: &Self::Transaction) -> Result<(), Self::Error>
     where
         S: StateStore + Send + Sync,
     {
-        match self {
-            Self::Coins(transaction) => Coins::apply(state, transaction.clone()).await?,
+        match transaction {
+            RuntimeTransaction::Coins(transaction) => {
+                Coins::apply(state, transaction.clone()).await?
+            }
         };
         Ok(())
+    }
+
+    fn is_storage_error(error: &Self::Error) -> bool {
+        error.is_storage()
     }
 }
 

@@ -8,7 +8,7 @@ mod runtime;
 mod transaction;
 
 pub use account::{AccountPolicyError, Address, MultisigPolicy, MAX_MULTISIG_SIGNERS};
-pub use runtime::{ChainModule, ConsensusExtension, NoConsensusExtension};
+pub use runtime::{ChainModule, ConsensusExtension, NoConsensusExtension, Runtime};
 pub use state_db::{
     CommitState, Namespace, Overlay, QmdbBackend, QmdbBatch, QmdbConfig, QmdbDatabaseSet,
     QmdbMerkleized, QmdbOperation, QmdbReader, QmdbState, QmdbUnmerkleized, StateDb, StateError,
