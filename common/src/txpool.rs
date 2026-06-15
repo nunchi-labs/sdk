@@ -84,7 +84,8 @@ impl<T: PoolTransaction> Clone for Submitter<T> {
 
 impl<T: PoolTransaction> Submitter<T> {
     /// Submit a signed transaction to this node.
-    pub fn submit(&self, transaction: T) {
+    pub fn submit(&self, transaction: impl Into<T>) {
+        let transaction = transaction.into();
         let _ = self
             .sender
             .unbounded_send(Message::Submit(Box::new(transaction)));

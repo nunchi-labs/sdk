@@ -5,7 +5,11 @@ use commonware_cryptography::{sha256, Hasher, Sha256};
 /// Genesis message to use during initialization.
 const GENESIS: &[u8] = b"nunchi coins chain";
 
-pub type Application<R = crate::CoinsRuntime> = nunchi_chain::Application<R>;
+pub type Application = nunchi_chain::Application<
+    crate::CoinsRuntime,
+    nunchi_chain::DkgExtension<crate::RuntimeTransaction>,
+>;
+pub type BasicApplication<R = crate::CoinsRuntime> = nunchi_chain::Application<R>;
 
 pub fn genesis_payload() -> sha256::Digest {
     Sha256::hash(GENESIS)
@@ -24,7 +28,7 @@ mod tests {
         multisig_account_id, AccountPolicy, CoinOperation, CoinSpec, Ledger, MultisigPolicy,
         PrivateKey, Transaction as CoinTransaction,
     };
-    use nunchi_common::{QmdbBackend, QmdbBatch, QmdbDatabaseSet, QmdbState};
+    use nunchi_common::{QmdbBackend, QmdbBatch, QmdbDatabaseSet, QmdbState, RuntimeContext};
     use std::sync::Arc;
 
     fn spec() -> CoinSpec {
@@ -47,7 +51,7 @@ mod tests {
                 range: genesis_target.range,
             };
             let applied_height = Arc::new(AsyncMutex::new(Height::zero()));
-            let app: Application = Application::new(
+            let app: BasicApplication = BasicApplication::new(
                 submitter,
                 16,
                 applied_height,
@@ -70,7 +74,11 @@ mod tests {
 
             let batches = databases.new_batches().await;
             let (included, _) = app
-                .build_valid_transactions(batches, vec![tx.clone().into()])
+                .build_valid_transactions(
+                    batches,
+                    RuntimeContext::default(),
+                    vec![tx.clone().into()],
+                )
                 .await;
             assert!(included.is_empty());
 
@@ -89,7 +97,11 @@ mod tests {
 
             let batches = databases.new_batches().await;
             let (included, _) = app
-                .build_valid_transactions(batches, vec![tx.clone().into()])
+                .build_valid_transactions(
+                    batches,
+                    RuntimeContext::default(),
+                    vec![tx.clone().into()],
+                )
                 .await;
             assert_eq!(included, vec![tx.into()]);
         });

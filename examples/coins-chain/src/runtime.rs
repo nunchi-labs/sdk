@@ -9,6 +9,10 @@ nunchi_runtime_macros::nunchi_runtime! {
                 transaction: nunchi_coins::Transaction,
                 storage: nunchi_coins::LedgerError::Storage(_),
             },
+            Authority: nunchi_authority::Authority {
+                transaction: nunchi_authority::Transaction,
+                storage: nunchi_authority::AuthorityError::Storage(_),
+            },
         },
     }
 }

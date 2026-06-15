@@ -179,61 +179,51 @@ async fn submit_scenario(
     let node1 = network.submitter(1);
 
     // Alice: create GOLD, send some to Bob, mint a bit more, burn a bit.
-    node0.submit(
-        Transaction::sign(&alice, 0, CoinOperation::CreateToken { spec: gold_spec() }).into(),
-    );
-    node0.submit(
-        Transaction::sign(
-            &alice,
-            1,
-            CoinOperation::Transfer {
-                coin,
-                from: alice_id.clone(),
-                to: bob_id.clone(),
-                amount: 300_000,
-            },
-        )
-        .into(),
-    );
-    node0.submit(
-        Transaction::sign(
-            &alice,
-            2,
-            CoinOperation::Mint {
-                coin,
-                to: alice_id.clone(),
-                amount: 50_000,
-            },
-        )
-        .into(),
-    );
-    node0.submit(
-        Transaction::sign(
-            &alice,
-            3,
-            CoinOperation::Burn {
-                coin,
-                from: alice_id.clone(),
-                amount: 100_000,
-            },
-        )
-        .into(),
-    );
+    node0.submit(Transaction::sign(
+        &alice,
+        0,
+        CoinOperation::CreateToken { spec: gold_spec() },
+    ));
+    node0.submit(Transaction::sign(
+        &alice,
+        1,
+        CoinOperation::Transfer {
+            coin,
+            from: alice_id.clone(),
+            to: bob_id.clone(),
+            amount: 300_000,
+        },
+    ));
+    node0.submit(Transaction::sign(
+        &alice,
+        2,
+        CoinOperation::Mint {
+            coin,
+            to: alice_id.clone(),
+            amount: 50_000,
+        },
+    ));
+    node0.submit(Transaction::sign(
+        &alice,
+        3,
+        CoinOperation::Burn {
+            coin,
+            from: alice_id.clone(),
+            amount: 100_000,
+        },
+    ));
 
     // Bob: forward some of what he received to Carol.
-    node1.submit(
-        Transaction::sign(
-            &bob,
-            0,
-            CoinOperation::Transfer {
-                coin,
-                from: bob_id.clone(),
-                to: carol_id.clone(),
-                amount: 120_000,
-            },
-        )
-        .into(),
-    );
+    node1.submit(Transaction::sign(
+        &bob,
+        0,
+        CoinOperation::Transfer {
+            coin,
+            from: bob_id.clone(),
+            to: carol_id.clone(),
+            amount: 120_000,
+        },
+    ));
 
     (alice_id, bob_id, carol_id)
 }

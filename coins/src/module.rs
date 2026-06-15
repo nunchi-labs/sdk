@@ -1,6 +1,6 @@
 //! Runtime module adapter for the coin ledger.
 
-use nunchi_common::{ChainModule, Namespace, StateDb, StateStore, Transaction};
+use nunchi_common::{ChainModule, Namespace, RuntimeContext, StateDb, StateStore, Transaction};
 
 use crate::{CoinOperation, Ledger, LedgerError, COINS_NAMESPACE};
 
@@ -27,7 +27,11 @@ impl ChainModule for Coins {
         Ok(Vec::new())
     }
 
-    async fn validate<S>(state: &mut S, transaction: &Self::Transaction) -> Result<(), Self::Error>
+    async fn validate<S>(
+        state: &mut S,
+        _context: RuntimeContext,
+        transaction: &Self::Transaction,
+    ) -> Result<(), Self::Error>
     where
         S: StateStore + Send + Sync,
     {
@@ -37,6 +41,7 @@ impl ChainModule for Coins {
 
     async fn apply<S>(
         state: &mut S,
+        _context: RuntimeContext,
         transaction: Self::Transaction,
     ) -> Result<Vec<Self::Event>, Self::Error>
     where

@@ -10,10 +10,12 @@ use std::ops::Deref;
 
 pub use nunchi_chain::SharedAppliedHeight;
 
-use crate::CoinsRuntime;
+use crate::{application::Application, CoinsRuntime, RuntimeTransaction};
 
-pub type ChainNodeHandle<E> = nunchi_chain::NodeHandle<E, CoinsRuntime>;
-pub type ChainStatefulQuery<E> = nunchi_chain::StatefulQuery<E, CoinsRuntime>;
+pub type ChainNodeHandle<E> =
+    nunchi_chain::NodeHandle<E, CoinsRuntime, nunchi_chain::DkgExtension<RuntimeTransaction>>;
+pub type ChainStatefulQuery<E> =
+    nunchi_chain::StatefulQuery<E, CoinsRuntime, nunchi_chain::DkgExtension<RuntimeTransaction>>;
 
 /// A coins-chain node's externally reachable handles.
 #[derive(Clone)]
@@ -30,7 +32,7 @@ where
 {
     pub fn new(
         submitter: nunchi_chain::RuntimeSubmitter<CoinsRuntime>,
-        stateful: commonware_glue::stateful::Mailbox<E, nunchi_chain::Application<CoinsRuntime>>,
+        stateful: commonware_glue::stateful::Mailbox<E, Application>,
         applied_height: SharedAppliedHeight,
     ) -> Self {
         Self {
@@ -74,9 +76,7 @@ impl<E> StatefulQuery<E>
 where
     E: Context + Spawner + Metrics + Clock + rand::Rng,
 {
-    pub fn new(
-        stateful: commonware_glue::stateful::Mailbox<E, nunchi_chain::Application<CoinsRuntime>>,
-    ) -> Self {
+    pub fn new(stateful: commonware_glue::stateful::Mailbox<E, Application>) -> Self {
         Self(ChainStatefulQuery::new(stateful))
     }
 

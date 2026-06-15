@@ -261,6 +261,7 @@ pub fn nunchi_runtime(input: TokenStream) -> TokenStream {
 
             async fn validate<S>(
                 state: &mut S,
+                context: nunchi_common::RuntimeContext,
                 transaction: &Self::Transaction,
             ) -> Result<(), Self::Error>
             where
@@ -269,7 +270,11 @@ pub fn nunchi_runtime(input: TokenStream) -> TokenStream {
                 match transaction {
                     #(
                         #transaction::#variants(transaction) => {
-                            <#module_paths as nunchi_common::ChainModule>::validate(state, transaction)
+                            <#module_paths as nunchi_common::ChainModule>::validate(
+                                state,
+                                context,
+                                transaction,
+                            )
                                 .await
                                 .map_err(#error::#variants)?;
                         }
@@ -280,6 +285,7 @@ pub fn nunchi_runtime(input: TokenStream) -> TokenStream {
 
             async fn apply<S>(
                 state: &mut S,
+                context: nunchi_common::RuntimeContext,
                 transaction: &Self::Transaction,
             ) -> Result<(), Self::Error>
             where
@@ -290,6 +296,7 @@ pub fn nunchi_runtime(input: TokenStream) -> TokenStream {
                         #transaction::#variants(transaction) => {
                             <#module_paths as nunchi_common::ChainModule>::apply(
                                 state,
+                                context,
                                 transaction.clone(),
                             )
                             .await

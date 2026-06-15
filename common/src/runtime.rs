@@ -4,11 +4,18 @@
 //! while a generated or hand-written runtime can aggregate selected modules into one transaction
 //! enum, one genesis config, one event stream, and one chain application.
 
-use std::future::Future;
+use std::{fmt::Debug, future::Future};
 
 use commonware_codec::{EncodeSize, Read, Write};
 
 use crate::{Namespace, PoolTransaction, StateDb, StateStore};
+
+/// Deterministic execution context supplied by the chain application.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RuntimeContext {
+    /// Consensus epoch for the block being proposed, verified, or applied.
+    pub epoch: u64,
+}
 
 /// A stateful SDK module that can be selected into a chain runtime.
 ///
@@ -50,6 +57,7 @@ pub trait ChainModule {
     /// the real batch when the transaction is selected.
     fn validate<S>(
         state: &mut S,
+        context: RuntimeContext,
         transaction: &Self::Transaction,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send
     where
@@ -58,6 +66,7 @@ pub trait ChainModule {
     /// Apply a transaction to state.
     fn apply<S>(
         state: &mut S,
+        context: RuntimeContext,
         transaction: Self::Transaction,
     ) -> impl Future<Output = Result<Vec<Self::Event>, Self::Error>> + Send
     where
@@ -79,6 +88,7 @@ pub trait Runtime {
     /// Validate a transaction against scratch state.
     fn validate<S>(
         state: &mut S,
+        context: RuntimeContext,
         transaction: &Self::Transaction,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send
     where
@@ -87,6 +97,7 @@ pub trait Runtime {
     /// Apply a transaction to real proposal/execution state.
     fn apply<S>(
         state: &mut S,
+        context: RuntimeContext,
         transaction: &Self::Transaction,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send
     where
@@ -97,13 +108,29 @@ pub trait Runtime {
     fn is_storage_error(error: &Self::Error) -> bool;
 }
 
-/// Optional consensus-side extension carried by blocks but driven outside ordinary transactions.
-pub trait ConsensusExtension<Block> {
+/// Consensus-side payload carried by blocks but driven outside ordinary transactions.
+pub trait BlockExtension: 'static {
     /// Extension payload embedded in a proposed block.
-    type Payload: Clone + Send + Sync + 'static;
+    type Payload: Clone
+        + Debug
+        + EncodeSize
+        + Read<Cfg = Self::ReadCfg>
+        + Write
+        + Send
+        + Sync
+        + 'static;
 
-    /// Produce an optional payload for the next proposal.
-    fn propose(&mut self) -> impl Future<Output = Option<Self::Payload>> + Send;
+    /// Codec config used to decode the extension payload.
+    type ReadCfg: Clone + Send + Sync + 'static;
+
+    /// Payload to use for genesis blocks.
+    fn genesis_payload() -> Self::Payload;
+}
+
+/// Optional consensus-side extension driven outside ordinary transactions.
+pub trait ConsensusExtension<Block>: BlockExtension + Clone + Send + 'static {
+    /// Produce a payload for the next proposal.
+    fn propose(&mut self) -> impl Future<Output = Self::Payload> + Send;
 
     /// Verify the extension payload on a candidate block.
     fn verify(&mut self, block: &Block) -> impl Future<Output = bool> + Send;
@@ -116,19 +143,26 @@ pub trait ConsensusExtension<Block> {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoConsensusExtension;
 
+impl BlockExtension for NoConsensusExtension {
+    type Payload = ();
+    type ReadCfg = ();
+
+    fn genesis_payload() -> Self::Payload {}
+}
+
 impl<Block> ConsensusExtension<Block> for NoConsensusExtension
 where
     Block: Sync,
 {
-    type Payload = ();
-
-    async fn propose(&mut self) -> Option<Self::Payload> {
-        None
+    fn propose(&mut self) -> impl Future<Output = Self::Payload> + Send {
+        std::future::ready(())
     }
 
-    async fn verify(&mut self, _block: &Block) -> bool {
-        true
+    fn verify(&mut self, _block: &Block) -> impl Future<Output = bool> + Send {
+        std::future::ready(true)
     }
 
-    async fn finalized(&mut self, _block: &Block) {}
+    fn finalized(&mut self, _block: &Block) -> impl Future<Output = ()> + Send {
+        std::future::ready(())
+    }
 }
