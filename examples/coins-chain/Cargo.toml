@@ -13,6 +13,7 @@ nunchi-common = { workspace = true }
 nunchi-crypto = { workspace = true }
 nunchi-dkg = { workspace = true }
 nunchi-rpc = { workspace = true }
+nunchi-runtime-macros = { workspace = true }
 commonware-actor = { workspace = true }
 commonware-broadcast = { workspace = true }
 commonware-codec = { workspace = true }
@@ -29,7 +30,6 @@ commonware-parallel = { workspace = true }
 bytes = { workspace = true }
 rand = { workspace = true }
 rand_core = { workspace = true }
-thiserror = { workspace = true }
 futures = { workspace = true }
 tracing = { workspace = true }
 governor = { workspace = true }

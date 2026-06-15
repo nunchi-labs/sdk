@@ -18,4 +18,5 @@ commonware-storage = { workspace = true }
 commonware-utils = { workspace = true }
 futures = { workspace = true }
 rand = { workspace = true }
+thiserror = { workspace = true }
 tracing = { workspace = true }

@@ -1,34 +1,27 @@
-//! Node-facing handles for submitting transactions and observing stateful execution.
+//! Coins-chain node-facing handles and query adapter.
 
-use crate::application::Application;
-use crate::txpool::Submitter;
-use commonware_consensus::types::Height;
 use commonware_cryptography::sha256::Digest;
-use commonware_glue::stateful::Mailbox as StatefulMailbox;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_storage::Context;
-use futures::lock::Mutex as AsyncMutex;
 use jsonrpsee::core::async_trait;
 use nunchi_coins::{rpc::CoinQuery, Address, CoinId, Ledger, LedgerError, TokenDefinition};
 use nunchi_common::QmdbReader;
-use std::sync::Arc;
+use std::ops::Deref;
 
-/// The height of the last finalized block applied to a node's ledger.
-pub type SharedAppliedHeight = Arc<AsyncMutex<Height>>;
+pub use nunchi_chain::SharedAppliedHeight;
 
-/// A node's externally reachable handles, returned by [`Engine::new`](crate::engine::Engine::new):
-/// submit transactions to this node, and subscribe to its stateful databases.
-///
-/// In production a node has exactly one of these. An in-process multi-node harness collects them
-/// (e.g. into a map keyed by public key) to drive and observe multiple validators.
+use crate::CoinsRuntime;
+
+pub type ChainNodeHandle<E> = nunchi_chain::NodeHandle<E, CoinsRuntime>;
+pub type ChainStatefulQuery<E> = nunchi_chain::StatefulQuery<E, CoinsRuntime>;
+
+/// A coins-chain node's externally reachable handles.
 #[derive(Clone)]
 pub struct NodeHandle<E>
 where
     E: Context + Spawner + Metrics + Clock + rand::Rng,
 {
-    pub submitter: Submitter,
-    pub stateful: StatefulMailbox<E, Application>,
-    pub applied_height: SharedAppliedHeight,
+    inner: ChainNodeHandle<E>,
 }
 
 impl<E> NodeHandle<E>
@@ -36,40 +29,44 @@ where
     E: Context + Spawner + Metrics + Clock + rand::Rng,
 {
     pub fn new(
-        submitter: Submitter,
-        stateful: StatefulMailbox<E, Application>,
+        submitter: nunchi_chain::RuntimeSubmitter<CoinsRuntime>,
+        stateful: commonware_glue::stateful::Mailbox<E, nunchi_chain::Application<CoinsRuntime>>,
         applied_height: SharedAppliedHeight,
     ) -> Self {
         Self {
-            submitter,
-            stateful,
-            applied_height,
+            inner: ChainNodeHandle::new(submitter, stateful, applied_height),
         }
     }
 
     /// A read-only coin query backend over this node's committed databases, suitable for
     /// serving the coin RPC (see [`crate::rpc::module`]).
     pub fn query(&self) -> StatefulQuery<E> {
-        StatefulQuery::new(self.stateful.clone())
+        StatefulQuery(self.inner.query())
+    }
+}
+
+impl<E> Deref for NodeHandle<E>
+where
+    E: Context + Spawner + Metrics + Clock + rand::Rng,
+{
+    type Target = ChainNodeHandle<E>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
     }
 }
 
 /// Read-only coin queries answered from the stateful actor's committed databases.
-pub struct StatefulQuery<E>
+pub struct StatefulQuery<E>(ChainStatefulQuery<E>)
 where
-    E: Context + Spawner + Metrics + Clock + rand::Rng,
-{
-    stateful: StatefulMailbox<E, Application>,
-}
+    E: Context + Spawner + Metrics + Clock + rand::Rng;
 
 impl<E> Clone for StatefulQuery<E>
 where
     E: Context + Spawner + Metrics + Clock + rand::Rng,
 {
     fn clone(&self) -> Self {
-        Self {
-            stateful: self.stateful.clone(),
-        }
+        Self(self.0.clone())
     }
 }
 
@@ -77,12 +74,14 @@ impl<E> StatefulQuery<E>
 where
     E: Context + Spawner + Metrics + Clock + rand::Rng,
 {
-    pub fn new(stateful: StatefulMailbox<E, Application>) -> Self {
-        Self { stateful }
+    pub fn new(
+        stateful: commonware_glue::stateful::Mailbox<E, nunchi_chain::Application<CoinsRuntime>>,
+    ) -> Self {
+        Self(ChainStatefulQuery::new(stateful))
     }
 
     async fn ledger(&self) -> Ledger<QmdbReader<E>> {
-        Ledger::new(QmdbReader::new(self.stateful.subscribe_databases().await))
+        Ledger::new(self.0.reader().await)
     }
 }
 
@@ -104,7 +103,6 @@ where
     }
 
     async fn state_root(&self) -> Result<Digest, LedgerError> {
-        let db = self.stateful.subscribe_databases().await;
-        Ok(QmdbReader::new(db).root().await)
+        Ok(self.0.reader().await.root().await)
     }
 }

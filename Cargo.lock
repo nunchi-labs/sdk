@@ -2223,6 +2223,7 @@ dependencies = [
  "nunchi-common",
  "nunchi-dkg",
  "rand 0.8.6",
+ "thiserror 2.0.18",
  "tracing",
 ]
 
@@ -2273,10 +2274,10 @@ dependencies = [
  "nunchi-crypto",
  "nunchi-dkg",
  "nunchi-rpc",
+ "nunchi-runtime-macros",
  "rand 0.8.6",
  "rand_core 0.6.4",
  "serde",
- "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber 0.3.23",
 ]
@@ -2343,6 +2344,15 @@ dependencies = [
  "jsonrpsee",
  "serde",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "nunchi-runtime-macros"
+version = "2026.5.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
