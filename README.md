@@ -1,4 +1,23 @@
-# sdk
+<p align="center">
+  <img src="assets/logo.png" alt="Nunchi" width="480" />
+</p>
+
+<h3 align="center">Nunchi SDK</h3>
+
+<p align="center">
+  modular blockchain framework adding financial primitives to commonware-based chains
+</p>
+
+<p align="center">
+  <a href="https://docs.nunchi.trade"><strong>Docs</strong></a> &nbsp;&bull;&nbsp;
+  <a href="https://discord.gg/nunchi"><strong>Discord</strong></a> &nbsp;&bull;&nbsp;
+  <a href="https://x.com/nunchi"><strong>X</strong></a>
+</p>
+
+---
+
+
+# What this is
 The Nunchi SDK is an easy-to-use modular blockchain framework offering financial primitives for commonware-based chains. The core of the framework can be found in the [`nunchi-coins`](coins/) crate
 
 A chain built with the Nunchi SDK adopts our coin model, account model, dkg resharing, and bridging setup. The SDK is handcrafted for the requirements of specialized low-latency finance.
