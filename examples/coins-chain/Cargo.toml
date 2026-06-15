@@ -8,6 +8,7 @@ description = "A demo blockchain that executes the Nunchi coins module, used for
 [dependencies]
 nunchi-coins = { workspace = true }
 nunchi-authority = { workspace = true }
+nunchi-chain = { workspace = true }
 nunchi-common = { workspace = true }
 nunchi-crypto = { workspace = true }
 nunchi-dkg = { workspace = true }

@@ -1,4 +1,4 @@
-use crate::application::Application;
+use crate::application::{self, Application};
 use crate::execution::NodeHandle;
 use crate::txpool::TxPool;
 use crate::{
@@ -375,6 +375,7 @@ where
             dkg_mailbox.clone(),
             applied_height.clone(),
             genesis_state,
+            application::genesis_payload(),
         );
         let genesis = app.genesis_block();
         let genesis_digest = genesis.digest();

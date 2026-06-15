@@ -1,12 +1,7 @@
-//! Coins-chain transaction pool aliases.
-//!
-//! The implementation lives in `nunchi-common` so generated runtimes and downstream chains can
-//! reuse the same local ingress pool with their own transaction type.
+//! Coins-chain transaction pool aliases over the reusable `nunchi-chain` pool.
 
-pub type RuntimeSubmitter<R> =
-    nunchi_common::txpool::Submitter<<R as nunchi_common::Runtime>::Transaction>;
-pub type RuntimeTxPool<R> =
-    nunchi_common::txpool::TxPool<<R as nunchi_common::Runtime>::Transaction>;
+pub type RuntimeSubmitter<R> = nunchi_chain::RuntimeSubmitter<R>;
+pub type RuntimeTxPool<R> = nunchi_chain::RuntimeTxPool<R>;
 
 pub type Submitter = RuntimeSubmitter<crate::CoinsRuntime>;
 pub type TxPool = RuntimeTxPool<crate::CoinsRuntime>;
