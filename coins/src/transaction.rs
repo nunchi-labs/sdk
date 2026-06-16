@@ -42,8 +42,7 @@ impl Read for CoinOperationId {
 
     fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         let value = u8::read(buf)?;
-        Self::try_from(value)
-            .map_err(|_| Error::Invalid("CoinOperationId", "invalid operation id"))
+        Self::try_from(value).map_err(|_| Error::Invalid("CoinOperationId", "invalid operation id"))
     }
 }
 
