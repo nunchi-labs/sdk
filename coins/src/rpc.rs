@@ -204,8 +204,8 @@ impl From<TokenDefinition> for TokenResponse {
         Self {
             id: encode_hex(&token.id),
             issuer: encode_hex(&token.issuer),
-            symbol: token.symbol,
-            name: token.name,
+            symbol: token.symbol.into(),
+            name: token.name.into(),
             decimals: token.decimals,
             total_supply: token.total_supply.to_string(),
             max_supply: token.max_supply.map(|supply| supply.to_string()),
