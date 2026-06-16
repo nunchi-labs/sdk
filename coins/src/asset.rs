@@ -1,7 +1,7 @@
-use super::codec::{read_string, string_encode_size, write_string};
 use super::Address;
-use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::sha256::Digest;
+use std::string::FromUtf8Error;
 
 pub const MAX_SYMBOL_BYTES: usize = 32;
 pub const MAX_NAME_BYTES: usize = 128;
@@ -166,4 +166,25 @@ impl EncodeSize for TokenDefinition {
             + self.total_supply.encode_size()
             + self.max_supply.encode_size()
     }
+}
+
+pub(crate) fn write_string(value: &str, buf: &mut impl bytes::BufMut) {
+    value.as_bytes().write(buf);
+}
+
+pub(crate) fn string_encode_size(value: &str) -> usize {
+    value.as_bytes().encode_size()
+}
+
+pub(crate) fn read_string(
+    buf: &mut impl bytes::Buf,
+    max_bytes: usize,
+    context: &'static str,
+) -> Result<String, Error> {
+    let bytes = Vec::<u8>::read_cfg(buf, &(RangeCfg::new(0..=max_bytes), ()))?;
+    String::from_utf8(bytes).map_err(|error| string_error(context, error))
+}
+
+fn string_error(context: &'static str, error: FromUtf8Error) -> Error {
+    Error::Wrapped(context, error.into())
 }

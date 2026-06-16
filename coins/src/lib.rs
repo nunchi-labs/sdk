@@ -2,7 +2,6 @@
 
 mod account;
 mod asset;
-mod codec;
 mod db;
 mod factory;
 mod ledger;
