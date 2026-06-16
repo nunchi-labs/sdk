@@ -1,0 +1,20 @@
+[package]
+name = "narae"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A local testnet process runner with a ratatui log dashboard."
+
+[[bin]]
+name = "narae"
+path = "src/main.rs"
+
+[dependencies]
+ansi-to-tui = "7"
+clap = { workspace = true, features = ["derive"] }
+crossterm = "0.28"
+nunchi-coins-chain = { workspace = true }
+ratatui = "0.29"
+serde = { workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true }

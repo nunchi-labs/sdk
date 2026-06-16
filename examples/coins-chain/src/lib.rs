@@ -21,6 +21,7 @@ pub mod application;
 pub mod engine;
 pub mod execution;
 pub mod rpc;
+pub mod testnet;
 pub mod transaction;
 pub mod txpool;
 
@@ -33,6 +34,19 @@ pub use transaction::Transaction;
 
 /// Namespace prefix used in all consensus signing operations to prevent signature replay attacks.
 pub const NAMESPACE: &[u8] = b"_NUNCHI_COINS_CHAIN";
+
+/// P2P channel identifiers shared by every coins-chain node.
+///
+/// These are wire-protocol constants: every node on a network (and the test harness) must agree
+/// on them, so they live here rather than with any single network setup.
+pub mod channels {
+    pub const PENDING: u64 = 0;
+    pub const RECOVERED: u64 = 1;
+    pub const RESOLVER: u64 = 2;
+    pub const BROADCAST: u64 = 3;
+    pub const DKG: u64 = 4;
+    pub const BACKFILL: u64 = 5;
+}
 
 /// The consensus epoch. The demo chain never reconfigures, so the epoch is hardcoded to 0.
 pub const EPOCH: Epoch = Epoch::zero();
