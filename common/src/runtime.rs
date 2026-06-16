@@ -4,7 +4,7 @@
 //! while a generated or hand-written runtime can aggregate selected modules into one transaction
 //! enum, one genesis config, one event stream, and one chain application.
 
-use std::{fmt::Debug, future::Future};
+use std::future::Future;
 
 use commonware_codec::{EncodeSize, Read, Write};
 
@@ -106,63 +106,4 @@ pub trait Runtime {
     /// Whether an execution error indicates local storage failure instead of deterministic
     /// transaction invalidity.
     fn is_storage_error(error: &Self::Error) -> bool;
-}
-
-/// Consensus-side payload carried by blocks but driven outside ordinary transactions.
-pub trait BlockExtension: 'static {
-    /// Extension payload embedded in a proposed block.
-    type Payload: Clone
-        + Debug
-        + EncodeSize
-        + Read<Cfg = Self::ReadCfg>
-        + Write
-        + Send
-        + Sync
-        + 'static;
-
-    /// Codec config used to decode the extension payload.
-    type ReadCfg: Clone + Send + Sync + 'static;
-
-    /// Payload to use for genesis blocks.
-    fn genesis_payload() -> Self::Payload;
-}
-
-/// Optional consensus-side extension driven outside ordinary transactions.
-pub trait ConsensusExtension<Block>: BlockExtension + Clone + Send + 'static {
-    /// Produce a payload for the next proposal.
-    fn propose(&mut self) -> impl Future<Output = Self::Payload> + Send;
-
-    /// Verify the extension payload on a candidate block.
-    fn verify(&mut self, block: &Block) -> impl Future<Output = bool> + Send;
-
-    /// Observe a finalized block after it is applied.
-    fn finalized(&mut self, block: &Block) -> impl Future<Output = ()> + Send;
-}
-
-/// Empty consensus extension for chains without DKG/authority payloads.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct NoConsensusExtension;
-
-impl BlockExtension for NoConsensusExtension {
-    type Payload = ();
-    type ReadCfg = ();
-
-    fn genesis_payload() -> Self::Payload {}
-}
-
-impl<Block> ConsensusExtension<Block> for NoConsensusExtension
-where
-    Block: Sync,
-{
-    fn propose(&mut self) -> impl Future<Output = Self::Payload> + Send {
-        std::future::ready(())
-    }
-
-    fn verify(&mut self, _block: &Block) -> impl Future<Output = bool> + Send {
-        std::future::ready(true)
-    }
-
-    fn finalized(&mut self, _block: &Block) -> impl Future<Output = ()> + Send {
-        std::future::ready(())
-    }
 }

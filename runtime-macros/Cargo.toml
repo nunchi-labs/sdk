@@ -11,3 +11,11 @@ proc-macro = true
 proc-macro2 = { workspace = true }
 quote = { workspace = true }
 syn = { workspace = true }
+
+[dev-dependencies]
+bytes = { workspace = true }
+commonware-codec = { workspace = true }
+commonware-cryptography = { workspace = true }
+futures = { workspace = true }
+nunchi-common = { workspace = true }
+nunchi-crypto = { workspace = true }

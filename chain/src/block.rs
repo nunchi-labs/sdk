@@ -5,9 +5,10 @@ use commonware_cryptography::{sha256::Digest, Committable, Digestible, Hasher, S
 use commonware_parallel::Strategy;
 use commonware_storage::mmr::Location;
 use commonware_utils::range::NonEmptyRange;
-use nunchi_common::{BlockExtension, NoConsensusExtension};
 use nunchi_dkg::{Context, Finalization, Notarization, Scheme};
 use rand::rngs::OsRng;
+
+use crate::{BlockExtension, NoConsensusExtension};
 
 /// Upper bound on the number of runtime transactions a single block may carry.
 ///

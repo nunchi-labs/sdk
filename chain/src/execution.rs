@@ -3,11 +3,12 @@
 use commonware_glue::stateful::Mailbox as StatefulMailbox;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_storage::Context as StorageContext;
-use nunchi_common::{
-    ConsensusExtension, NoConsensusExtension, QmdbDatabaseSet, QmdbReader, Runtime,
-};
+use nunchi_common::{QmdbDatabaseSet, QmdbReader, Runtime};
 
-use crate::{Application, Block, RuntimeSubmitter, SharedAppliedHeight};
+use crate::{
+    Application, Block, ConsensusExtension, NoConsensusExtension, RuntimeSubmitter,
+    SharedAppliedHeight,
+};
 
 /// A node's externally reachable handles.
 ///

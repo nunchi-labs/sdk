@@ -2350,6 +2350,12 @@ dependencies = [
 name = "nunchi-runtime-macros"
 version = "2026.5.0"
 dependencies = [
+ "bytes",
+ "commonware-codec",
+ "commonware-cryptography",
+ "futures",
+ "nunchi-common",
+ "nunchi-crypto",
  "proc-macro2",
  "quote",
  "syn",

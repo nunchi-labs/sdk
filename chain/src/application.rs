@@ -12,8 +12,7 @@ use commonware_storage::{mmr::Location, qmdb::sync::Target};
 use commonware_utils::{non_empty_range, range::NonEmptyRange, SystemTimeExt};
 use futures::{lock::Mutex as AsyncMutex, StreamExt};
 use nunchi_common::{
-    ConsensusExtension, NoConsensusExtension, Overlay, PoolTransaction, QmdbBatch, QmdbDatabaseSet,
-    QmdbMerkleized, Runtime, RuntimeContext,
+    Overlay, PoolTransaction, QmdbBatch, QmdbDatabaseSet, QmdbMerkleized, Runtime, RuntimeContext,
 };
 use nunchi_dkg::{Context, Scheme};
 use rand::Rng;
@@ -24,7 +23,10 @@ use std::{
 };
 use tracing::debug;
 
-use crate::{Block, DkgExtension, RuntimeSubmitter, StateCommitment};
+use crate::{
+    Block, ConsensusExtension, DkgExtension, NoConsensusExtension, RuntimeSubmitter,
+    StateCommitment,
+};
 
 /// The height of the last finalized block applied to a node's ledger.
 pub type SharedAppliedHeight = Arc<AsyncMutex<Height>>;
