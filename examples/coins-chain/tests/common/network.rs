@@ -459,6 +459,7 @@ async fn start_validator(
         certification_timeout: cfg.certification_timeout,
         strategy: Sequential,
         max_block_transactions: MAX_BLOCK_TRANSACTIONS,
+        genesis: None,
     };
 
     let validator_context = context.child("validator").with_attribute("id", &uid);

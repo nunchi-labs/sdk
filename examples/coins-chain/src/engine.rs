@@ -1,9 +1,9 @@
 use crate::application::Application;
 use crate::execution::NodeHandle;
+use crate::genesis::{genesis_target, state_commitment, ChainGenesis};
 use crate::txpool::TxPool;
 use crate::{
-    Block, EpochProvider, Finalization, Provider, PublicKey, Scheme, StateCommitment,
-    BLOCKS_PER_EPOCH, NAMESPACE,
+    Block, EpochProvider, Finalization, Provider, PublicKey, Scheme, BLOCKS_PER_EPOCH, NAMESPACE,
 };
 use commonware_broadcast::buffered;
 use commonware_consensus::{
@@ -93,6 +93,7 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
     pub certification_timeout: Duration,
     pub strategy: S,
     pub max_block_transactions: usize,
+    pub genesis: Option<ChainGenesis>,
 }
 
 type DkgActor<E, P> = dkg::Actor<E, P, Block>;
@@ -349,24 +350,58 @@ where
             config.signer.clone(),
             certificate_verifier,
         );
-        // The genesis block commits to the root of an empty state database. Derive it from a
-        // dedicated, never-written partition (rather than hardcoding the digest) so it stays
-        // correct across QMDB versions and is identical on fresh boots and restarts alike.
-        let genesis_state = {
+        let state_partition = format!("{}-coins", config.partition_prefix);
+        let db_config =
+            QmdbState::<E>::config_with_page_cache(&state_partition, page_cache.clone());
+
+        // The empty target is still derived from QMDB instead of hardcoded so it stays correct
+        // across storage versions. Non-empty genesis uses it as the fresh-state guard.
+        let empty_state = {
             let empty = QmdbBackend::init(
-                context.child("genesis_state"),
+                context.child("empty_genesis_state"),
                 QmdbState::<E>::config_with_page_cache(
-                    &format!("{}-genesis-coins", config.partition_prefix),
+                    &format!("{}-empty-genesis-coins", config.partition_prefix),
                     page_cache.clone(),
                 ),
             )
             .await
             .expect("failed to initialize empty state database for genesis commitment");
-            let target = empty.sync_target().await;
-            StateCommitment {
-                root: target.root,
-                range: target.range,
-            }
+            state_commitment(empty.sync_target().await)
+        };
+        let genesis_state = if let Some(genesis) = &config.genesis {
+            let fingerprint = commonware_formatting::hex(
+                &genesis
+                    .fingerprint()
+                    .expect("failed to fingerprint statically configured genesis"),
+            );
+            let compute_partition = format!("{}-genesis-{}", config.partition_prefix, fingerprint);
+            let compute_config =
+                QmdbState::<E>::config_with_page_cache(&compute_partition, page_cache.clone());
+            let expected = genesis_target(
+                context.child("genesis_commitment"),
+                compute_config,
+                genesis,
+                &empty_state,
+            )
+            .await
+            .expect("failed to materialize genesis commitment");
+
+            let mut state =
+                QmdbState::init_with_config(context.child("genesis_seed"), db_config.clone())
+                    .await
+                    .expect("failed to initialize state database for genesis seeding");
+            genesis
+                .apply_to_state(&mut state, &empty_state)
+                .await
+                .expect("failed to seed state database with genesis");
+            let actual = state_commitment(state.sync_target().await);
+            assert_eq!(
+                expected, actual,
+                "state database genesis commitment must match the genesis block commitment"
+            );
+            expected
+        } else {
+            empty_state
         };
         let applied_height = Arc::new(AsyncMutex::new(Height::zero()));
         let app = Application::with_dkg(
@@ -412,10 +447,6 @@ where
         )
         .await;
 
-        let db_config = QmdbState::<E>::config_with_page_cache(
-            &format!("{}-coins", config.partition_prefix),
-            page_cache,
-        );
         let (stateful, stateful_mailbox) = StatefulActor::init(
             context.child("stateful"),
             StatefulConfig {

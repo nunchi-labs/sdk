@@ -35,6 +35,7 @@ tracing = { workspace = true }
 governor = { workspace = true }
 jsonrpsee = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 toml = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
