@@ -1,7 +1,6 @@
 use super::Address;
 use commonware_codec::{EncodeSize, Error, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::sha256::Digest;
-use std::string::FromUtf8Error;
 
 pub const MAX_SYMBOL_BYTES: usize = 32;
 pub const MAX_NAME_BYTES: usize = 128;
@@ -182,9 +181,5 @@ pub(crate) fn read_string(
     context: &'static str,
 ) -> Result<String, Error> {
     let bytes = Vec::<u8>::read_cfg(buf, &(RangeCfg::new(0..=max_bytes), ()))?;
-    String::from_utf8(bytes).map_err(|error| string_error(context, error))
-}
-
-fn string_error(context: &'static str, error: FromUtf8Error) -> Error {
-    Error::Wrapped(context, error.into())
+    String::from_utf8(bytes).map_err(|error| Error::Wrapped(context, error.into()))
 }
