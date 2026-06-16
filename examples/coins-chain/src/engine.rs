@@ -1,8 +1,8 @@
 use crate::application::{self, Application};
 use crate::execution::NodeHandle;
 use crate::{
-    Block, EpochProvider, Finalization, Provider, PublicKey, Scheme, StateCommitment, TxPool,
-    BLOCKS_PER_EPOCH, NAMESPACE,
+    Block, EpochProvider, Finalization, Provider, PublicKey, RuntimeTransaction, Scheme,
+    StateCommitment, TxPool, BLOCKS_PER_EPOCH, NAMESPACE,
 };
 use commonware_broadcast::buffered;
 use commonware_consensus::{
@@ -11,11 +11,9 @@ use commonware_consensus::{
         core::Actor as MarshalActor,
         resolver,
         standard::{Deferred, Standard},
-        Update,
     },
     simplex::elector::Random,
     types::{FixedEpocher, Height, ViewDelta},
-    Reporters,
 };
 use commonware_cryptography::{
     bls12381::{
@@ -71,8 +69,8 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
     pub max_block_transactions: usize,
 }
 
-type DkgActor<E, P> = dkg::Actor<E, P, Block>;
-type DkgMailbox = dkg::Mailbox<Block>;
+type DkgActor<E, P> = nunchi_chain::DkgActor<E, P, RuntimeTransaction>;
+type DkgMailbox = nunchi_chain::DkgMailbox<RuntimeTransaction>;
 type StatefulApp<E> = StatefulActor<E, Application, Scheme, Standard<Block>, NoStateSyncResolver>;
 type StatefulAppMailbox<E> = StatefulMailbox<E, Application>;
 type Marshaled<E> = Deferred<E, Scheme, StatefulAppMailbox<E>, Block, FixedEpocher>;
@@ -476,8 +474,7 @@ where
             callback,
         );
         let buffer_handle = self.buffer.start(broadcast);
-        let reporters =
-            Reporters::<Update<Block>, _, _>::from((self.stateful_mailbox, self.dkg_mailbox));
+        let reporters = nunchi_chain::dkg_reporters(self.stateful_mailbox, self.dkg_mailbox);
         let marshal_handle = self
             .marshal
             .start(reporters, self.buffered_mailbox, marshal);

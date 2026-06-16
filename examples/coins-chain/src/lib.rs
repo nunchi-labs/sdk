@@ -27,11 +27,9 @@ pub use nunchi_dkg::{
 };
 pub use runtime::{CoinsRuntime, RuntimeError, RuntimeTransaction};
 
-pub type Block<Tx = RuntimeTransaction> = nunchi_chain::Block<Tx, nunchi_chain::DkgExtension<Tx>>;
-pub type Notarized<Tx = RuntimeTransaction> =
-    nunchi_chain::Notarized<Tx, nunchi_chain::DkgExtension<Tx>>;
-pub type Finalized<Tx = RuntimeTransaction> =
-    nunchi_chain::Finalized<Tx, nunchi_chain::DkgExtension<Tx>>;
+pub type Block<Tx = RuntimeTransaction> = nunchi_chain::DkgBlock<Tx>;
+pub type Notarized<Tx = RuntimeTransaction> = nunchi_chain::DkgNotarized<Tx>;
+pub type Finalized<Tx = RuntimeTransaction> = nunchi_chain::DkgFinalized<Tx>;
 pub type RuntimeSubmitter<R> = nunchi_chain::RuntimeSubmitter<R>;
 pub type RuntimeTxPool<R> = nunchi_chain::RuntimeTxPool<R>;
 pub type Submitter = RuntimeSubmitter<CoinsRuntime>;

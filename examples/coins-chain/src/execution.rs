@@ -12,10 +12,10 @@ pub use nunchi_chain::SharedAppliedHeight;
 
 use crate::{application::Application, CoinsRuntime, RuntimeTransaction};
 
-pub type ChainNodeHandle<E> =
-    nunchi_chain::NodeHandle<E, CoinsRuntime, nunchi_chain::DkgExtension<RuntimeTransaction>>;
-pub type ChainStatefulQuery<E> =
-    nunchi_chain::StatefulQuery<E, CoinsRuntime, nunchi_chain::DkgExtension<RuntimeTransaction>>;
+type DkgExtension = nunchi_chain::DkgExtension<RuntimeTransaction>;
+
+pub type ChainNodeHandle<E> = nunchi_chain::NodeHandle<E, CoinsRuntime, DkgExtension>;
+pub type ChainStatefulQuery<E> = nunchi_chain::StatefulQuery<E, CoinsRuntime, DkgExtension>;
 
 /// A coins-chain node's externally reachable handles.
 #[derive(Clone)]

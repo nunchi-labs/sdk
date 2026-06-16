@@ -24,8 +24,8 @@ use std::{
 use tracing::debug;
 
 use crate::{
-    Block, ConsensusExtension, DkgExtension, NoConsensusExtension, RuntimeSubmitter,
-    StateCommitment,
+    Block, ConsensusExtension, DkgBlock, DkgExtension, DkgMailbox, NoConsensusExtension,
+    RuntimeSubmitter, StateCommitment,
 };
 
 /// The height of the last finalized block applied to a node's ledger.
@@ -39,7 +39,7 @@ const MAX_BLOCK_TIMESTAMP_MS: u64 = 7_258_118_400_000;
 pub struct Application<R, Ext = NoConsensusExtension>
 where
     R: Runtime,
-    Ext: ConsensusExtension<Block<R::Transaction, Ext>> + Sync,
+    Ext: ConsensusExtension + Sync,
 {
     submitter: RuntimeSubmitter<R>,
     max_block_transactions: usize,
@@ -53,7 +53,7 @@ where
 impl<R, Ext> Application<R, Ext>
 where
     R: Runtime,
-    Ext: ConsensusExtension<Block<R::Transaction, Ext>> + Sync,
+    Ext: ConsensusExtension + Sync,
 {
     /// The genesis block, committing to `genesis_state`.
     pub fn genesis_block(&self) -> Block<R::Transaction, Ext> {
@@ -212,12 +212,12 @@ where
 impl<R> Application<R, DkgExtension<R::Transaction>>
 where
     R: Runtime,
-    Block<R::Transaction, DkgExtension<R::Transaction>>: nunchi_dkg::ReshareBlock,
+    DkgBlock<R::Transaction>: nunchi_dkg::ReshareBlock,
 {
     pub fn with_dkg(
         submitter: RuntimeSubmitter<R>,
         max_block_transactions: usize,
-        dkg: nunchi_dkg::Mailbox<Block<R::Transaction, DkgExtension<R::Transaction>>>,
+        dkg: DkgMailbox<R::Transaction>,
         applied_height: SharedAppliedHeight,
         genesis_state: StateCommitment,
         genesis_payload: sha256::Digest,
@@ -237,7 +237,7 @@ impl<E, R, Ext> StatefulApplication<E> for Application<R, Ext>
 where
     E: Rng + Spawner + Metrics + Clock + Storage,
     R: Runtime + Clone + Send + Sync + 'static,
-    Ext: ConsensusExtension<Block<R::Transaction, Ext>> + Sync,
+    Ext: ConsensusExtension + Sync,
 {
     type SigningScheme = Scheme;
     type Context = Context;
@@ -309,10 +309,6 @@ where
             return None;
         }
 
-        if !self.consensus.verify(&block).await {
-            return None;
-        }
-
         let execution_context = RuntimeContext {
             epoch: block.context.round.epoch().get(),
         };
@@ -365,6 +361,5 @@ where
         );
         *self.applied_height.lock().await = block.height();
         self.submitter.prune(applied);
-        self.consensus.finalized(block).await;
     }
 }

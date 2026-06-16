@@ -4,7 +4,7 @@ use commonware_consensus::types::{Epoch, Height, Round, View};
 use commonware_cryptography::{ed25519, sha256, Digest as _, Digestible as _, Signer};
 use commonware_storage::mmr::Location;
 use commonware_utils::non_empty_range;
-use nunchi_chain::{Block, BlockExtension, DkgExtension, StateCommitment};
+use nunchi_chain::{Block, BlockExtension, DkgBlock, StateCommitment};
 use nunchi_dkg::{Context, ReshareBlock};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -104,7 +104,7 @@ fn custom_extension_payload_is_encoded_and_committed() {
 
 #[test]
 fn dkg_reshare_log_is_extension_payload_not_block_field() {
-    let block = Block::<u8, DkgExtension<u8>>::new(
+    let block = DkgBlock::<u8>::new(
         context(),
         sha256::Digest::EMPTY,
         Height::zero(),

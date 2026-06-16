@@ -6,8 +6,7 @@ use commonware_storage::Context as StorageContext;
 use nunchi_common::{QmdbDatabaseSet, QmdbReader, Runtime};
 
 use crate::{
-    Application, Block, ConsensusExtension, NoConsensusExtension, RuntimeSubmitter,
-    SharedAppliedHeight,
+    Application, ConsensusExtension, NoConsensusExtension, RuntimeSubmitter, SharedAppliedHeight,
 };
 
 /// A node's externally reachable handles.
@@ -19,7 +18,7 @@ pub struct NodeHandle<E, R, Ext = NoConsensusExtension>
 where
     E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
     R: Runtime + Clone + Send + Sync + 'static,
-    Ext: ConsensusExtension<Block<R::Transaction, Ext>> + Sync,
+    Ext: ConsensusExtension + Sync,
 {
     pub submitter: RuntimeSubmitter<R>,
     pub stateful: StatefulMailbox<E, Application<R, Ext>>,
@@ -30,7 +29,7 @@ impl<E, R, Ext> NodeHandle<E, R, Ext>
 where
     E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
     R: Runtime + Clone + Send + Sync + 'static,
-    Ext: ConsensusExtension<Block<R::Transaction, Ext>> + Sync,
+    Ext: ConsensusExtension + Sync,
 {
     pub fn new(
         submitter: RuntimeSubmitter<R>,
@@ -55,7 +54,7 @@ pub struct StatefulQuery<E, R, Ext = NoConsensusExtension>
 where
     E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
     R: Runtime + Clone + Send + Sync + 'static,
-    Ext: ConsensusExtension<Block<R::Transaction, Ext>> + Sync,
+    Ext: ConsensusExtension + Sync,
 {
     stateful: StatefulMailbox<E, Application<R, Ext>>,
 }
@@ -64,7 +63,7 @@ impl<E, R, Ext> Clone for StatefulQuery<E, R, Ext>
 where
     E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
     R: Runtime + Clone + Send + Sync + 'static,
-    Ext: ConsensusExtension<Block<R::Transaction, Ext>> + Sync,
+    Ext: ConsensusExtension + Sync,
 {
     fn clone(&self) -> Self {
         Self {
@@ -77,7 +76,7 @@ impl<E, R, Ext> StatefulQuery<E, R, Ext>
 where
     E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
     R: Runtime + Clone + Send + Sync + 'static,
-    Ext: ConsensusExtension<Block<R::Transaction, Ext>> + Sync,
+    Ext: ConsensusExtension + Sync,
 {
     pub fn new(stateful: StatefulMailbox<E, Application<R, Ext>>) -> Self {
         Self { stateful }
