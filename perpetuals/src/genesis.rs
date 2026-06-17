@@ -1,5 +1,5 @@
 use crate::{
-    LedgerError, MarketId, PerpetualDB, PerpetualLedger, derive_market_id, Market, PRICE_SCALE,
+    derive_market_id, LedgerError, Market, MarketId, PerpetualDB, PerpetualLedger, PRICE_SCALE,
 };
 use commonware_codec::DecodeExt;
 use commonware_formatting::from_hex;

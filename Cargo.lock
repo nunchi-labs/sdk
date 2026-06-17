@@ -2615,6 +2615,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "nunchi-perpetuals"
+version = "2026.5.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-formatting",
+ "commonware-runtime",
+ "futures",
+ "jsonrpsee",
+ "nunchi-coins",
+ "nunchi-common",
+ "nunchi-crypto",
+ "nunchi-rpc",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "nunchi-rpc"
 version = "2026.5.0"
 dependencies = [

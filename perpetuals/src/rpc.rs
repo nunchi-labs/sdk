@@ -64,10 +64,7 @@ where
         self.lock().await.market(&market).await
     }
 
-    async fn position(
-        &self,
-        position: PositionId,
-    ) -> Result<Option<Position>, LedgerError> {
+    async fn position(&self, position: PositionId) -> Result<Option<Position>, LedgerError> {
         self.lock().await.position(&position).await
     }
 

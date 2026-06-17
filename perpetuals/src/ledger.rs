@@ -128,7 +128,8 @@ impl<D: PerpetualDB> PerpetualLedger<D> {
         };
         self.db.set_market(&market);
         self.db.set_market_nonce(
-            nonce.checked_add(1)
+            nonce
+                .checked_add(1)
                 .ok_or(LedgerError::MarketNonceOverflow)?,
         );
         Ok(market_id)
@@ -196,7 +197,8 @@ impl<D: PerpetualDB> PerpetualLedger<D> {
         self.db.set_market(&market);
         self.db.set_position(&position);
         self.db.set_position_nonce(
-            nonce.checked_add(1)
+            nonce
+                .checked_add(1)
                 .ok_or(LedgerError::PositionNonceOverflow)?,
         );
         Ok(position_id)
@@ -301,7 +303,12 @@ impl<D: PerpetualDB> PerpetualLedger<D> {
         mark_price: u128,
     ) -> Result<i128, LedgerError> {
         let collateral = to_i128(position.collateral)?;
-        let pnl = pnl(position.side, position.quantity, position.entry_price, mark_price)?;
+        let pnl = pnl(
+            position.side,
+            position.quantity,
+            position.entry_price,
+            mark_price,
+        )?;
         collateral
             .checked_add(pnl)
             .ok_or(LedgerError::ArithmeticOverflow)
@@ -348,14 +355,8 @@ impl<D: PerpetualDB> PerpetualLedger<D> {
                 collateral,
                 leverage_bps,
             } => {
-                self.open_position(
-                    signer.clone(),
-                    *market,
-                    *side,
-                    *collateral,
-                    *leverage_bps,
-                )
-                .await?;
+                self.open_position(signer.clone(), *market, *side, *collateral, *leverage_bps)
+                    .await?;
             }
             PerpetualOperation::AddCollateral { position, amount } => {
                 self.add_collateral(signer, *position, *amount).await?;
@@ -447,9 +448,7 @@ fn pnl(
     if positive {
         Ok(signed)
     } else {
-        signed
-            .checked_neg()
-            .ok_or(LedgerError::ArithmeticOverflow)
+        signed.checked_neg().ok_or(LedgerError::ArithmeticOverflow)
     }
 }
 
