@@ -27,6 +27,8 @@ jobs:
 
   test-and-coverage:
     runs-on: ubuntu-latest
+    env:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
     steps:
       - name: Checkout Repository
@@ -56,13 +58,19 @@ jobs:
           cargo llvm-cov report --locked --codecov --output-path codecov.info
 
       - name: Upload Coverage Data
-        if: github.actor != 'dependabot[bot]'
+        if: github.actor != 'dependabot[bot]' && env.CODECOV_TOKEN != ''
         uses: codecov/codecov-action@v5
         with:
           fail_ci_if_error: false
           files: codecov.info
-          token: ${{ secrets.CODECOV_TOKEN }}
+          token: ${{ env.CODECOV_TOKEN }}
           flags: rust
+
+      - name: Codecov Not Configured
+        if: github.actor != 'dependabot[bot]' && env.CODECOV_TOKEN == ''
+        run: |
+          echo "::notice::Skipping Codecov upload because CODECOV_TOKEN is not configured."
+          echo "::notice::Link Codecov as an org admin, then add CODECOV_TOKEN to this repository's secrets."
 
   unused-dependencies:
     runs-on: ubuntu-latest
