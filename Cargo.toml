@@ -2,6 +2,7 @@
 members = [
     "authority",
     "common",
+    "chain",
     "coins",
     "crypto",
     "dkg",
@@ -20,6 +21,7 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 nunchi-coins = { version = "2026.5.0", path = "coins" }
 nunchi-authority = { version = "2026.5.0", path = "authority" }
+nunchi-chain = { version = "2026.5.0", path = "chain" }
 nunchi-common = { version = "2026.5.0", path = "common" }
 nunchi-crypto = { version = "2026.5.0", path = "crypto" }
 nunchi-dkg = { version = "2026.5.0", path = "dkg" }

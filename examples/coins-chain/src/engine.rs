@@ -1,9 +1,8 @@
-use crate::application::Application;
+use crate::application::{self, Application};
 use crate::execution::NodeHandle;
-use crate::txpool::TxPool;
 use crate::{
-    Block, EpochProvider, Finalization, Provider, PublicKey, Scheme, StateCommitment,
-    BLOCKS_PER_EPOCH, NAMESPACE,
+    Block, EpochProvider, Finalization, Provider, PublicKey, RuntimeTransaction, Scheme,
+    StateCommitment, TxPool, BLOCKS_PER_EPOCH, NAMESPACE,
 };
 use commonware_broadcast::buffered;
 use commonware_consensus::{
@@ -12,11 +11,9 @@ use commonware_consensus::{
         core::Actor as MarshalActor,
         resolver,
         standard::{Deferred, Standard},
-        Update,
     },
     simplex::elector::Random,
     types::{FixedEpocher, Height, ViewDelta},
-    Reporters,
 };
 use commonware_cryptography::{
     bls12381::{
@@ -29,8 +26,8 @@ use commonware_cryptography::{
     BatchVerifier, Digestible, Signer,
 };
 use commonware_glue::stateful::{
-    db::{AttachableResolver, ManagedDb as _, SyncEngineConfig},
-    Config as StatefulConfig, Mailbox as StatefulMailbox, Stateful as StatefulActor, SyncPlan,
+    db::ManagedDb as _, Config as StatefulConfig, Mailbox as StatefulMailbox,
+    Stateful as StatefulActor, SyncPlan,
 };
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
 use commonware_parallel::Strategy;
@@ -39,43 +36,20 @@ use commonware_runtime::{
     Network, Spawner, Storage, ThreadPooler,
 };
 use commonware_storage::archive::immutable;
-use commonware_utils::{channel::oneshot, sync::AsyncRwLock, union, NZUsize, NZU16, NZU64};
+use commonware_utils::union;
 use futures::{future::try_join_all, lock::Mutex as AsyncMutex};
 use governor::clock::Clock as GClock;
-use nunchi_common::{QmdbBackend, QmdbOperation, QmdbState};
+use nunchi_chain::engine::*;
+use nunchi_common::{QmdbBackend, QmdbState};
 use nunchi_dkg::{self as dkg, orchestrator, PeerConfig, UpdateCallBack, MAX_SUPPORTED_MODE};
 use rand::{CryptoRng, Rng};
 use rand_core::CryptoRngCore;
 use std::{
-    future::Future,
     marker::PhantomData,
-    num::{NonZero, NonZeroU16, NonZeroUsize},
     sync::Arc,
     time::{Duration, Instant},
 };
 use tracing::{error, info, warn};
-
-const MAILBOX_SIZE: NonZeroUsize = NZUsize!(1024);
-const DEQUE_SIZE: usize = 10;
-const ACTIVITY_TIMEOUT: ViewDelta = ViewDelta::new(256);
-const SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER: u64 = 10;
-const PRUNABLE_ITEMS_PER_SECTION: NonZero<u64> = NZU64!(4_096);
-const IMMUTABLE_ITEMS_PER_SECTION: NonZero<u64> = NZU64!(262_144);
-const FREEZER_TABLE_RESIZE_FREQUENCY: u8 = 4;
-const FREEZER_TABLE_RESIZE_CHUNK_SIZE: u32 = 2u32.pow(16); // 3MB
-const FREEZER_VALUE_TARGET_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
-const FREEZER_VALUE_COMPRESSION: Option<u8> = Some(3);
-const REPLAY_BUFFER: NonZero<usize> = NZUsize!(8 * 1024 * 1024); // 8MB
-const WRITE_BUFFER: NonZero<usize> = NZUsize!(1024 * 1024); // 1MB
-const PAGE_CACHE_PAGE_SIZE: NonZeroU16 = NZU16!(4_096); // 4KB
-const PAGE_CACHE_CAPACITY: NonZero<usize> = NZUsize!(8_192); // 32MB
-const MAX_REPAIR: NonZero<usize> = NZUsize!(50);
-const MAX_PENDING_ACKS: NonZero<usize> = NZUsize!(16);
-const STATE_SYNC_FETCH_BATCH_SIZE: NonZero<u64> = NZU64!(1_024);
-const STATE_SYNC_APPLY_BATCH_SIZE: usize = 4_096;
-const STATE_SYNC_MAX_OUTSTANDING_REQUESTS: usize = 8;
-const STATE_SYNC_UPDATE_CHANNEL_SIZE: NonZero<usize> = NZUsize!(256);
-const STATE_SYNC_MAX_RETAINED_ROOTS: usize = 32;
 
 /// Configuration for the [Engine].
 pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = PublicKey>, S: Strategy>
@@ -95,8 +69,8 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
     pub max_block_transactions: usize,
 }
 
-type DkgActor<E, P> = dkg::Actor<E, P, Block>;
-type DkgMailbox = dkg::Mailbox<Block>;
+type DkgActor<E, P> = nunchi_chain::DkgActor<E, P, RuntimeTransaction>;
+type DkgMailbox = nunchi_chain::DkgMailbox<RuntimeTransaction>;
 type StatefulApp<E> = StatefulActor<E, Application, Scheme, Standard<Block>, NoStateSyncResolver>;
 type StatefulAppMailbox<E> = StatefulMailbox<E, Application>;
 type Marshaled<E> = Deferred<E, Scheme, StatefulAppMailbox<E>, Block, FixedEpocher>;
@@ -145,62 +119,6 @@ where
     txpool: Handle<()>,
     stateful: StatefulApp<E>,
     stateful_mailbox: StatefulAppMailbox<E>,
-}
-
-/// Placeholder for the peer state-sync resolver.
-///
-/// `commonware_glue::stateful::db::p2p::standard::Actor` would slot in here, but as of
-/// commonware 2026.5.0 it requires `Op: Codec<Cfg = ()>`, which only fixed-encoding QMDB
-/// operations satisfy; the shared state database is variable-value (`Vec<u8>`), whose
-/// operation codec config is `((), (RangeCfg, ()))`. Until upstream threads the codec config
-/// through its resolver (or this chain moves to fixed-size values), peer state sync stays
-/// disabled: no startup path attaches a state-sync floor, so every node recovers exclusively
-/// via marshal backfill and this resolver is never asked to fetch.
-#[derive(Clone, Copy, Debug, Default)]
-struct NoStateSyncResolver;
-
-#[derive(Debug, thiserror::Error)]
-#[error("peer state sync resolver is not configured")]
-struct NoStateSyncError;
-
-impl<E> AttachableResolver<QmdbBackend<E>> for NoStateSyncResolver
-where
-    E: commonware_storage::Context + Send + Sync + 'static,
-{
-    fn attach_database(
-        &self,
-        _db: Arc<AsyncRwLock<QmdbBackend<E>>>,
-    ) -> impl Future<Output = ()> + Send {
-        std::future::ready(())
-    }
-}
-
-impl commonware_storage::qmdb::sync::resolver::Resolver for NoStateSyncResolver {
-    type Family = commonware_storage::mmr::Family;
-    type Digest = Digest;
-    type Op = QmdbOperation;
-    type Error = NoStateSyncError;
-
-    fn get_operations<'a>(
-        &'a self,
-        _op_count: commonware_storage::mmr::Location,
-        _start_loc: commonware_storage::mmr::Location,
-        _max_ops: NonZero<u64>,
-        _include_pinned_nodes: bool,
-        _cancel_rx: oneshot::Receiver<()>,
-    ) -> impl Future<
-        Output = Result<
-            commonware_storage::qmdb::sync::resolver::FetchResult<
-                Self::Family,
-                Self::Op,
-                Self::Digest,
-            >,
-            Self::Error,
-        >,
-    > + Send
-           + 'a {
-        std::future::ready(Err(NoStateSyncError))
-    }
 }
 
 impl<E, B, P, S> Engine<E, B, P, S>
@@ -375,6 +293,7 @@ where
             dkg_mailbox.clone(),
             applied_height.clone(),
             genesis_state,
+            application::genesis_payload(),
         );
         let genesis = app.genesis_block();
         let genesis_digest = genesis.digest();
@@ -427,13 +346,7 @@ where
                 mailbox_size: MAILBOX_SIZE,
                 plan,
                 resolvers: NoStateSyncResolver,
-                sync_config: SyncEngineConfig {
-                    fetch_batch_size: STATE_SYNC_FETCH_BATCH_SIZE,
-                    apply_batch_size: STATE_SYNC_APPLY_BATCH_SIZE,
-                    max_outstanding_requests: STATE_SYNC_MAX_OUTSTANDING_REQUESTS,
-                    update_channel_size: STATE_SYNC_UPDATE_CHANNEL_SIZE,
-                    max_retained_roots: STATE_SYNC_MAX_RETAINED_ROOTS,
-                },
+                sync_config: state_sync_config(),
             },
         );
         let node_handle = NodeHandle::new(submitter, stateful_mailbox.clone(), applied_height);
@@ -561,8 +474,7 @@ where
             callback,
         );
         let buffer_handle = self.buffer.start(broadcast);
-        let reporters =
-            Reporters::<Update<Block>, _, _>::from((self.stateful_mailbox, self.dkg_mailbox));
+        let reporters = nunchi_chain::dkg_reporters(self.stateful_mailbox, self.dkg_mailbox);
         let marshal_handle = self
             .marshal
             .start(reporters, self.buffered_mailbox, marshal);
