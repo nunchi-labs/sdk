@@ -22,6 +22,20 @@ The Nunchi SDK is an easy-to-use modular blockchain framework offering financial
 
 A chain built with the Nunchi SDK adopts our coin model, account model, dkg resharing, and bridging setup. The SDK is handcrafted for the requirements of specialized low-latency finance.
 
+## Genesis setup
+
+Genesis is split across two layers:
+
+* [`coins/src/genesis.rs`](coins/src/genesis.rs) defines the coin-module genesis state:
+  * `CoinsGenesis` collects `account_policies` and `tokens`
+  * `TokenGenesis` defines a token plus its initial `allocations`
+  * allocations are validated against the token's `initial_supply`
+* [`examples/coins-chain/src/genesis.rs`](examples/coins-chain/src/genesis.rs) defines the chain-level wrapper:
+  * `ChainGenesis` composes `authority` genesis with optional `coins` genesis
+  * `apply_to_state` applies the full genesis to chain state and fingerprints it to prevent mismatched re-initialization
+
+In other words, token allocations live in the `coins` module, while the top-level genesis entry point lives one layer above it in the chain.
+
 ## Modules
 
 This repository will contain modules for building public and private blockchains, as well as sequencer systems / rollups. 
@@ -50,4 +64,3 @@ This repository will contain modules for building public and private blockchains
 * `clob` - used on the global chain, provides liquidity between local chain tokens
 * `derivatives` - ingests a price feed and creates derivatives products
 * `stablecoin` - a wrapper of coins special for the needs of stablecoins
-
