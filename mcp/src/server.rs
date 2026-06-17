@@ -1,12 +1,16 @@
 //! MCP server handler: exposes Nunchi JSON-RPC methods and SDK utilities as AI tools.
 //!
-//! Tools fall into two groups:
+//! Tools fall into three groups:
 //! * **Chain tools** – proxy a live Nunchi node's JSON-RPC surface (prefix `coins_` / `chain_`).
 //! * **SDK tools** – offline operations that require no running node (prefix `sdk_`):
 //!   address derivation, coin-ID derivation, and transaction building/signing.
+//! * **Repo tools** – browse the Nunchi SDK source code (prefix `repo_`):
+//!   list files, read file contents, and search for patterns across the codebase.
 //!
 //! All addresses, coin IDs, public keys, private keys, and transactions are passed as lowercase
 //! hex strings produced by the SDK's `commonware_codec::Encode` wire format.
+
+use std::path::{Path, PathBuf};
 
 use commonware_codec::{DecodeExt, Encode};
 use commonware_formatting::{from_hex, hex};
@@ -22,6 +26,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use walkdir::WalkDir;
 
 use crate::client::RpcClient;
 
@@ -197,21 +202,50 @@ pub struct BuildRegisterAccountPolicyParams {
     pub signer_public_keys_hex: Vec<String>,
 }
 
+// ── parameter structs — repo tools ────────────────────────────────────────────
+
+/// Parameters for `repo_list_files`.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct RepoListFilesParams {
+    /// Sub-path within the repository to list.  Use `""` or `"."` for the root.
+    pub path: Option<String>,
+}
+
+/// Parameters for `repo_read_file`.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct RepoReadFileParams {
+    /// Path to the file, relative to the repository root (e.g. `"coins/src/lib.rs"`).
+    pub path: String,
+}
+
+/// Parameters for `repo_search_code`.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct RepoSearchCodeParams {
+    /// String pattern to search for (plain substring match, case-sensitive by default).
+    pub pattern: String,
+    /// Limit search to a sub-path within the repository.  Use `""` or `"."` for all files.
+    pub path: Option<String>,
+    /// When `true`, performs a case-insensitive match. Defaults to `false`.
+    pub case_insensitive: Option<bool>,
+}
+
 // ── server ────────────────────────────────────────────────────────────────────
 
-/// MCP server exposing the Nunchi SDK's chain RPC and offline SDK utilities.
+/// MCP server exposing the Nunchi SDK's chain RPC, offline SDK utilities, and repo source code.
 #[derive(Clone)]
 #[allow(dead_code)]
 pub struct NunchiServer {
     rpc: RpcClient,
+    repo_path: PathBuf,
     tool_router: ToolRouter<Self>,
 }
 
 #[tool_router]
 impl NunchiServer {
-    pub fn new(rpc: RpcClient) -> Self {
+    pub fn new(rpc: RpcClient, repo_path: PathBuf) -> Self {
         Self {
             rpc,
+            repo_path,
             tool_router: Self::tool_router(),
         }
     }
@@ -544,6 +578,71 @@ impl NunchiServer {
         }
     }
 
+    // ── repo source-code tools ────────────────────────────────────────────────
+
+    /// List all source files in the repository (or a sub-directory).
+    ///
+    /// Hidden directories (`.git`, `.github`) and build artifacts (`target/`) are
+    /// automatically excluded.  Returns a newline-separated list of paths relative
+    /// to the repository root.
+    #[tool(
+        name = "repo_list_files",
+        description = "List source files in the Nunchi SDK repository. \
+                        Supply an optional sub-path to narrow the listing. \
+                        Returns newline-separated relative paths. \
+                        Hidden directories and build artifacts are excluded."
+    )]
+    async fn repo_list_files(&self, Parameters(p): Parameters<RepoListFilesParams>) -> String {
+        let sub = p.path.as_deref().unwrap_or(".");
+        match list_repo_files(&self.repo_path, sub) {
+            Ok(files) => files.join("\n"),
+            Err(e) => format!("Error: {e}"),
+        }
+    }
+
+    /// Read the full content of a file in the repository.
+    ///
+    /// The path must be relative to the repository root (e.g. `"coins/src/lib.rs"`).
+    /// Files larger than 256 KiB are truncated with a notice appended.
+    #[tool(
+        name = "repo_read_file",
+        description = "Read the source code of a file in the Nunchi SDK repository. \
+                        Provide the path relative to the repository root (e.g. coins/src/lib.rs). \
+                        Files larger than 256 KiB are truncated."
+    )]
+    async fn repo_read_file(&self, Parameters(p): Parameters<RepoReadFileParams>) -> String {
+        match read_repo_file(&self.repo_path, &p.path) {
+            Ok(content) => content,
+            Err(e) => format!("Error: {e}"),
+        }
+    }
+
+    /// Search for a plain-text pattern across source files in the repository.
+    ///
+    /// Returns matching lines in `path:line_number: content` format, capped at 200 matches.
+    /// Supply an optional sub-path to restrict the search to a directory.
+    #[tool(
+        name = "repo_search_code",
+        description = "Search for a text pattern in the Nunchi SDK source code. \
+                        Returns matching lines as `path:line: content`. \
+                        Optionally restrict to a sub-path and toggle case sensitivity. \
+                        Results are capped at 200 matches."
+    )]
+    async fn repo_search_code(&self, Parameters(p): Parameters<RepoSearchCodeParams>) -> String {
+        let sub = p.path.as_deref().unwrap_or(".");
+        let case_insensitive = p.case_insensitive.unwrap_or(false);
+        match search_repo_code(&self.repo_path, sub, &p.pattern, case_insensitive) {
+            Ok(matches) => {
+                if matches.is_empty() {
+                    "No matches found.".to_string()
+                } else {
+                    matches.join("\n")
+                }
+            }
+            Err(e) => format!("Error: {e}"),
+        }
+    }
+
     // ── private helpers ───────────────────────────────────────────────────────
 
     async fn rpc_call(&self, method: &str, params: Value) -> String {
@@ -599,10 +698,13 @@ fn build_coin_spec_from_params(
     name = "nunchi-mcp",
     version = "2026.5.0",
     instructions = "This server exposes the full Nunchi SDK as a set of tools. \
-                    There are two groups: \
+                    There are three groups: \
                     (1) Chain tools (prefix coins_ / chain_) that query a running node or submit transactions. \
                     (2) SDK tools (prefix sdk_) that work offline to build/sign transactions, \
                         derive account addresses, and compute token identifiers. \
+                    (3) Repo tools (prefix repo_) that browse the Nunchi SDK source code: \
+                        repo_list_files lists files, repo_read_file reads a file's content, \
+                        repo_search_code searches for patterns across the codebase. \
                     All addresses and coin IDs are lowercase hex strings (32 bytes = 64 hex chars). \
                     Public and private keys are curve-tagged hex strings produced by the SDK Encode trait \
                     (first byte is the curve tag: 0x01 = Ed25519, 0x02 = Secp256r1). \
@@ -611,3 +713,153 @@ fn build_coin_spec_from_params(
                     Call chain_status first to confirm the node is reachable."
 )]
 impl ServerHandler for NunchiServer {}
+
+// ── repo helpers ──────────────────────────────────────────────────────────────
+
+/// Directories excluded from all repo listing and search operations.
+const EXCLUDED_DIRS: &[&str] = &[".git", ".github", "target"];
+
+/// Maximum file size returned by `repo_read_file` (256 KiB).
+const MAX_FILE_BYTES: u64 = 256 * 1024;
+
+/// Maximum number of search hits returned by `repo_search_code`.
+const MAX_SEARCH_HITS: usize = 200;
+
+/// Resolve and validate a sub-path inside the repository root.
+///
+/// Returns an error if the resolved path would escape the repository root (path traversal guard).
+fn resolve_repo_path(repo_root: &Path, sub: &str) -> anyhow::Result<PathBuf> {
+    let sub = sub.trim_matches('/');
+    let candidate = if sub.is_empty() || sub == "." {
+        repo_root.to_path_buf()
+    } else {
+        repo_root.join(sub)
+    };
+    // Canonicalize to resolve `..` and symlinks, then verify it stays inside the root.
+    let canonical_root = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.to_path_buf());
+    let canonical_candidate = candidate
+        .canonicalize()
+        .unwrap_or_else(|_| candidate.clone());
+    if !canonical_candidate.starts_with(&canonical_root) {
+        anyhow::bail!("path traversal denied: '{sub}' escapes the repository root");
+    }
+    Ok(candidate)
+}
+
+/// Returns `true` if any component of `path` is an excluded directory.
+fn is_excluded(path: &Path) -> bool {
+    path.components().any(|c| {
+        EXCLUDED_DIRS
+            .iter()
+            .any(|ex| c.as_os_str() == std::ffi::OsStr::new(ex))
+    })
+}
+
+fn list_repo_files(repo_root: &Path, sub: &str) -> anyhow::Result<Vec<String>> {
+    let base = resolve_repo_path(repo_root, sub)?;
+    let canonical_root = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.to_path_buf());
+
+    let mut files = Vec::new();
+    for entry in WalkDir::new(&base)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| {
+            // Skip excluded directory names.
+            !is_excluded(e.path())
+        })
+        .flatten()
+    {
+        if entry.file_type().is_file() {
+            let rel = entry
+                .path()
+                .strip_prefix(&canonical_root)
+                .unwrap_or(entry.path())
+                .to_string_lossy()
+                .into_owned();
+            files.push(rel);
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn read_repo_file(repo_root: &Path, rel_path: &str) -> anyhow::Result<String> {
+    let full = resolve_repo_path(repo_root, rel_path)?;
+    if !full.is_file() {
+        anyhow::bail!("not a file: '{rel_path}'");
+    }
+    let meta = std::fs::metadata(&full)?;
+    if meta.len() > MAX_FILE_BYTES {
+        let mut content = std::fs::read_to_string(&full)?;
+        content.truncate(MAX_FILE_BYTES as usize);
+        content.push_str("\n\n[… truncated: file exceeds 256 KiB]");
+        return Ok(content);
+    }
+    Ok(std::fs::read_to_string(&full)?)
+}
+
+fn search_repo_code(
+    repo_root: &Path,
+    sub: &str,
+    pattern: &str,
+    case_insensitive: bool,
+) -> anyhow::Result<Vec<String>> {
+    let base = resolve_repo_path(repo_root, sub)?;
+    let canonical_root = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.to_path_buf());
+
+    let needle_lower = pattern.to_lowercase();
+    let mut hits = Vec::new();
+
+    'outer: for entry in WalkDir::new(&base)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| !is_excluded(e.path()))
+        .flatten()
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        // Skip large files and binary-looking files (no UTF-8 extension check).
+        let meta = entry.metadata().unwrap_or_else(|_| {
+            // If we can't get metadata, skip.
+            entry.metadata().unwrap()
+        });
+        if meta.len() > MAX_FILE_BYTES {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(entry.path()) else {
+            continue; // skip binary / unreadable files
+        };
+
+        let rel = entry
+            .path()
+            .strip_prefix(&canonical_root)
+            .unwrap_or(entry.path())
+            .to_string_lossy()
+            .into_owned();
+
+        for (line_num, line) in content.lines().enumerate() {
+            let matched = if case_insensitive {
+                line.to_lowercase().contains(&needle_lower)
+            } else {
+                line.contains(pattern)
+            };
+            if matched {
+                hits.push(format!("{}:{}: {}", rel, line_num + 1, line));
+                if hits.len() >= MAX_SEARCH_HITS {
+                    hits.push(format!(
+                        "[… results truncated at {MAX_SEARCH_HITS} matches]"
+                    ));
+                    break 'outer;
+                }
+            }
+        }
+    }
+    Ok(hits)
+}
