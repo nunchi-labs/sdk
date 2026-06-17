@@ -21,6 +21,7 @@ pub mod genesis;
 pub mod rpc;
 pub mod runtime;
 pub mod testnet;
+pub mod transaction;
 
 pub use nunchi_chain::{StateCommitment, MAX_TRANSACTIONS};
 pub use nunchi_dkg::{
@@ -28,10 +29,11 @@ pub use nunchi_dkg::{
     PublicKey, Scheme, Seed, Seedable, Signature, ThresholdScheme,
 };
 pub use runtime::{CoinsRuntime, RuntimeError, RuntimeTransaction};
+pub use transaction::Transaction;
 
-pub type Block<Tx = RuntimeTransaction> = nunchi_chain::DkgBlock<Tx>;
-pub type Notarized<Tx = RuntimeTransaction> = nunchi_chain::DkgNotarized<Tx>;
-pub type Finalized<Tx = RuntimeTransaction> = nunchi_chain::DkgFinalized<Tx>;
+pub type Block<Tx = Transaction> = nunchi_chain::DkgBlock<Tx>;
+pub type Notarized<Tx = Transaction> = nunchi_chain::DkgNotarized<Tx>;
+pub type Finalized<Tx = Transaction> = nunchi_chain::DkgFinalized<Tx>;
 pub type RuntimeSubmitter<R> = nunchi_chain::RuntimeSubmitter<R>;
 pub type RuntimeTxPool<R> = nunchi_chain::RuntimeTxPool<R>;
 pub type Submitter = RuntimeSubmitter<CoinsRuntime>;

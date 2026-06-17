@@ -2,8 +2,8 @@ use crate::application::{self, Application};
 use crate::execution::NodeHandle;
 use crate::genesis::{genesis_target, state_commitment, ChainGenesis};
 use crate::{
-    Block, EpochProvider, Finalization, Provider, PublicKey, RuntimeTransaction, Scheme,
-    TxPool, BLOCKS_PER_EPOCH, NAMESPACE,
+    Block, EpochProvider, Finalization, Provider, PublicKey, Scheme, Transaction, BLOCKS_PER_EPOCH,
+    NAMESPACE,
 };
 use commonware_broadcast::buffered;
 use commonware_consensus::{
@@ -43,6 +43,7 @@ use governor::clock::Clock as GClock;
 use nunchi_chain::engine::*;
 use nunchi_common::{QmdbBackend, QmdbState};
 use nunchi_dkg::{self as dkg, orchestrator, PeerConfig, UpdateCallBack, MAX_SUPPORTED_MODE};
+use nunchi_mempool::{Mempool, PoolConfig};
 use rand::{CryptoRng, Rng};
 use rand_core::CryptoRngCore;
 use std::{
@@ -68,11 +69,12 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
     pub certification_timeout: Duration,
     pub strategy: S,
     pub max_block_transactions: usize,
+    pub pool_config: PoolConfig,
     pub genesis: Option<ChainGenesis>,
 }
 
-type DkgActor<E, P> = nunchi_chain::DkgActor<E, P, RuntimeTransaction>;
-type DkgMailbox = nunchi_chain::DkgMailbox<RuntimeTransaction>;
+type DkgActor<E, P> = nunchi_chain::DkgActor<E, P, Transaction>;
+type DkgMailbox = nunchi_chain::DkgMailbox<Transaction>;
 type StatefulApp<E> = StatefulActor<E, Application, Scheme, Standard<Block>, NoStateSyncResolver>;
 type StatefulAppMailbox<E> = StatefulMailbox<E, Application>;
 type Marshaled<E> = Deferred<E, Scheme, StatefulAppMailbox<E>, Block, FixedEpocher>;
@@ -118,7 +120,7 @@ where
     marshal: Marshal<E, S>,
     orchestrator: Orchestrator<E, B, S>,
     orchestrator_mailbox: orchestrator::Mailbox<MinSig, PublicKey>,
-    txpool: Handle<()>,
+    mempool: Handle<()>,
     stateful: StatefulApp<E>,
     stateful_mailbox: StatefulAppMailbox<E>,
 }
@@ -145,8 +147,8 @@ where
 {
     /// Create a new [Engine].
     pub async fn new(context: E, config: Config<B, P, S>) -> (Self, NodeHandle<E>) {
-        let (txpool, submitter) = TxPool::new();
-        let txpool = txpool.start(context.child("txpool"));
+        let (mempool, submitter) = Mempool::<Transaction>::new(config.pool_config.clone());
+        let mempool = mempool.start(context.child("mempool"));
 
         let page_cache = CacheRef::from_pooler(&context, PAGE_CACHE_PAGE_SIZE, PAGE_CACHE_CAPACITY);
         let consensus_namespace = union(NAMESPACE, b"_CONSENSUS");
@@ -419,7 +421,7 @@ where
             marshal,
             orchestrator,
             orchestrator_mailbox,
-            txpool,
+            mempool,
             stateful,
             stateful_mailbox,
         };
@@ -519,7 +521,7 @@ where
             marshal_handle,
             stateful_handle,
             orchestrator_handle,
-            self.txpool,
+            self.mempool,
         ])
         .await
         {

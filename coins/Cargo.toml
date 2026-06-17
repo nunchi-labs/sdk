@@ -7,6 +7,7 @@ license.workspace = true
 [features]
 default = ["rpc"]
 rpc = ["dep:nunchi-rpc", "dep:jsonrpsee", "dep:futures"]
+mempool = ["dep:nunchi-mempool"]
 
 [dependencies]
 async-trait = { workspace = true }
@@ -14,6 +15,7 @@ bytes = { workspace = true }
 thiserror = { workspace = true }
 nunchi-common = { workspace = true }
 nunchi-crypto = { workspace = true }
+nunchi-mempool = { workspace = true, optional = true }
 nunchi-rpc = { workspace = true, optional = true }
 commonware-codec = { workspace = true }
 commonware-cryptography = { workspace = true }
