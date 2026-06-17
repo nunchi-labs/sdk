@@ -2620,6 +2620,7 @@ version = "2026.5.0"
 dependencies = [
  "bytes",
  "commonware-codec",
+ "commonware-cryptography",
  "commonware-runtime",
  "nunchi-common",
  "nunchi-crypto",

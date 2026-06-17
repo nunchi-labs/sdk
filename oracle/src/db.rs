@@ -1,5 +1,5 @@
 use crate::{FeedDefinition, FeedId, FeedSubmission, OracleError, ORACLE_NAMESPACE};
-use commonware_codec::{Encode, Read};
+use commonware_codec::{Encode, Read, ReadExt};
 use commonware_cryptography::sha256::Digest;
 use nunchi_common::{state_db::Namespace, state_db::StateStore, Address};
 

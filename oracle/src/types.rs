@@ -102,7 +102,7 @@ impl TryFrom<&str> for FeedId {
 
 impl Write for FeedId {
     fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.0.write(buf);
+        self.0.as_bytes().write(buf);
     }
 }
 
@@ -110,14 +110,16 @@ impl Read for FeedId {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
-        let value = String::read_cfg(buf, &RangeCfg::new(1..=MAX_FEED_ID_BYTES))?;
+        let bytes = Vec::<u8>::read_cfg(buf, &(RangeCfg::new(1..=MAX_FEED_ID_BYTES), ()))?;
+        let value = String::from_utf8(bytes)
+            .map_err(|_| Error::Invalid("feed id", "feed id must be valid utf-8"))?;
         Self::new(value).map_err(|_| Error::Invalid("feed id", "invalid"))
     }
 }
 
 impl EncodeSize for FeedId {
     fn encode_size(&self) -> usize {
-        self.0.encode_size()
+        self.0.as_bytes().encode_size()
     }
 }
 
@@ -311,7 +313,7 @@ mod tests {
         let mut encoded = Vec::new();
         FeedPayloadEncoding::Raw.write(&mut encoded);
         vec![0u8; MAX_FEED_PAYLOAD_BYTES + 1].write(&mut encoded);
-        assert!(FeedPayload::decode(encoded).is_err());
+        assert!(FeedPayload::decode(encoded.as_slice()).is_err());
     }
 
     #[test]
