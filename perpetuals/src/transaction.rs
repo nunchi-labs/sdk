@@ -252,8 +252,15 @@ mod tests {
         CoinId(Sha256::hash(label))
     }
 
+    fn sample_nonce() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is before UNIX_EPOCH")
+            .as_nanos() as u64
+    }
+
     fn sample_market_id() -> crate::MarketId {
-        derive_market_id(coin(b"BTC"), coin(b"USD"), coin(b"USDC"), 0)
+        derive_market_id(coin(b"BTC"), coin(b"USD"), coin(b"USDC"), sample_nonce())
     }
 
     fn sample_position_id() -> crate::PositionId {
