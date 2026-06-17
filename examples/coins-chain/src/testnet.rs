@@ -26,7 +26,7 @@ use commonware_p2p::{
     Ingress, Manager,
 };
 use commonware_parallel::Sequential;
-use commonware_runtime::{tokio, Runner as _, Supervisor as _};
+use commonware_runtime::{tokio, Handle, Runner as _, Supervisor as _};
 use commonware_utils::{ordered::Set, N3f1, NZUsize, NZU32};
 use governor::Quota;
 use nunchi_dkg::{ContinueOnUpdate, PeerConfig, MAX_SUPPORTED_MODE};
@@ -190,6 +190,8 @@ pub enum Error {
     TomlSerialize(#[from] toml::ser::Error),
     #[error("failed to parse toml: {0}")]
     TomlDeserialize(#[from] toml::de::Error),
+    #[error("engine stopped unexpectedly: {0}")]
+    Engine(commonware_runtime::Error),
 }
 
 /// Generate node keys, run the trusted initial deal, and write per-node configs plus the
@@ -293,23 +295,63 @@ fn check_port_range(base_port: u16, validators: u32) -> Result<(), Error> {
     Ok(())
 }
 
-/// Run a single validator from a generated config until the process is killed.
+/// Run a single validator from a generated config until it receives a shutdown signal or the
+/// engine stops.
+///
+/// On Unix the node exits cleanly on SIGINT or SIGTERM. On other platforms it responds to
+/// Ctrl-C. If the engine stops before a signal is received the function returns
+/// [`Error::Engine`].
 pub fn run_node(config_path: impl AsRef<Path>) -> Result<(), Error> {
     let config = NodeConfig::read(config_path)?;
     let runtime =
         tokio::Runner::new(tokio::Config::new().with_storage_directory(config.storage_dir.clone()));
     runtime.start(|context| async move {
-        let _rpc_server = start_node(context, config).await?;
-        futures::future::pending::<()>().await;
-        #[allow(unreachable_code)]
-        Ok(())
+        let (_rpc_server, engine_handle) = start_node(context, config).await?;
+        wait_for_shutdown(engine_handle).await
     })
+}
+
+/// Block until a shutdown signal is received or the engine handle resolves.
+async fn wait_for_shutdown(engine_handle: Handle<()>) -> Result<(), Error> {
+    #[cfg(unix)]
+    {
+        use ::tokio::signal::unix::{signal, SignalKind};
+        let mut sigint =
+            signal(SignalKind::interrupt()).map_err(|e| Error::Io(e))?;
+        let mut sigterm =
+            signal(SignalKind::terminate()).map_err(|e| Error::Io(e))?;
+        ::tokio::select! {
+            _ = sigint.recv() => {
+                info!("received SIGINT, shutting down");
+                Ok(())
+            }
+            _ = sigterm.recv() => {
+                info!("received SIGTERM, shutting down");
+                Ok(())
+            }
+            result = engine_handle => {
+                result.map_err(Error::Engine)
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        ::tokio::select! {
+            _ = ::tokio::signal::ctrl_c() => {
+                info!("received Ctrl-C, shutting down");
+                Ok(())
+            }
+            result = engine_handle => {
+                result.map_err(Error::Engine)
+            }
+        }
+    }
 }
 
 async fn start_node(
     context: tokio::Context,
     config: NodeConfig,
-) -> Result<nunchi_rpc::ServerHandle, Error> {
+) -> Result<(nunchi_rpc::ServerHandle, Handle<()>), Error> {
     let private_key = decode_unit::<ed25519::PrivateKey>(&config.private_key, "private_key")?;
     let public_key = private_key.public_key();
     let max_participants = NonZeroU32::new(config.peer_config.max_participants_per_round())
@@ -391,8 +433,8 @@ async fn start_node(
     let marshal_resolver =
         marshal::resolver::p2p::init(context.child("backfill"), resolver_config, backfill);
 
-    let (engine, handle) = Engine::new(context.child("engine"), engine_config).await;
-    engine.start(
+    let (engine, node_handle) = Engine::new(context.child("engine"), engine_config).await;
+    let engine_handle = engine.start(
         pending,
         recovered,
         resolver,
@@ -403,9 +445,9 @@ async fn start_node(
     );
 
     let rpc_module = rpc::module(
-        handle.query(),
-        handle.submitter.clone(),
-        handle.applied_height.clone(),
+        node_handle.query(),
+        node_handle.submitter.clone(),
+        node_handle.applied_height.clone(),
     )?;
     let rpc_server = nunchi_rpc::ServerBuilder::default()
         .build(config.rpc_address)
@@ -413,7 +455,7 @@ async fn start_node(
         .start(rpc_module);
 
     info!(node = %config.name, "coins-chain validator started");
-    Ok(rpc_server)
+    Ok((rpc_server, engine_handle))
 }
 
 fn decode_output(

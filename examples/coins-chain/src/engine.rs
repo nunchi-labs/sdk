@@ -51,7 +51,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 /// Configuration for the [Engine].
 pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = PublicKey>, S: Strategy>
@@ -515,7 +515,7 @@ where
         let stateful_handle = self.stateful.start();
         let orchestrator_handle = self.orchestrator.start(votes, certificates, resolver);
 
-        if let Err(e) = try_join_all(vec![
+        match try_join_all(vec![
             dkg_handle,
             buffer_handle,
             marshal_handle,
@@ -525,9 +525,8 @@ where
         ])
         .await
         {
-            error!(?e, "engine failed");
-        } else {
-            warn!("engine stopped");
+            Err(e) => panic!("engine failed: {e:?}"),
+            Ok(_) => warn!("engine stopped"),
         }
     }
 }
