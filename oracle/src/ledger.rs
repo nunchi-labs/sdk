@@ -324,10 +324,11 @@ mod tests {
 
             {
                 let mut ledger = ledger(context.child("open"), "oracle-reopen").await;
+                let register_nonce = 0u64;
                 ledger
                     .apply_transaction(&Transaction::sign(
                         &owner,
-                        0,
+                        register_nonce,
                         OracleOperation::RegisterFeed {
                             feed_id: feed_id.clone(),
                             metadata: FeedPayload::json(&json!({"kind": "price"})).unwrap(),
