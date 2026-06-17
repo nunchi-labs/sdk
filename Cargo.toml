@@ -17,7 +17,7 @@ resolver = "2"
 [workspace.package]
 version = "2026.5.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license = "BSL"
 
 [workspace.dependencies]
 nunchi-coins = { version = "2026.5.0", path = "coins" }
