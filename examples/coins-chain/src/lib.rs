@@ -20,6 +20,7 @@ mod consensus;
 pub mod application;
 pub mod engine;
 pub mod execution;
+pub mod genesis;
 pub mod rpc;
 pub mod testnet;
 pub mod transaction;

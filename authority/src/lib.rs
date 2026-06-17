@@ -1,11 +1,13 @@
 //! Proof-of-authority validator registry primitives for Nunchi chains.
 
 mod db;
+mod genesis;
 mod ledger;
 mod transaction;
 mod types;
 
 pub use db::AuthorityDB;
+pub use genesis::{AuthorityGenesis, AuthorityPolicyGenesis};
 pub use ledger::{proposal_id, AuthorityError, AuthorityLedger, MAX_EPOCH_LOOKAHEAD};
 pub use transaction::{AuthorityOperation, Transaction, TransactionPayload};
 pub use types::{

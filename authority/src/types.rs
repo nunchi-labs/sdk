@@ -17,6 +17,16 @@ pub struct MultisigPolicy {
     pub threshold: u16,
 }
 
+impl MultisigPolicy {
+    pub fn new(threshold: u16, owners: Vec<OwnerId>) -> Option<Self> {
+        let owners = sorted_unique(owners)?;
+        if threshold == 0 || threshold as usize > owners.len() {
+            return None;
+        }
+        Some(Self { owners, threshold })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RegistryChange {
     AddValidator { validator: ValidatorId },
