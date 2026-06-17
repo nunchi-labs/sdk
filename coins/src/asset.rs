@@ -180,8 +180,8 @@ pub struct CoinSpec {
 
 impl CoinSpec {
     pub fn new(
-        symbol: impl Into<TokenSymbol>,
-        name: impl Into<TokenName>,
+        symbol: TokenSymbol,
+        name: TokenName,
         decimals: u8,
         initial_supply: u128,
         max_supply: Option<u128>,
