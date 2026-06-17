@@ -1,7 +1,8 @@
 use crate::{
     multisig_account_id, AccountPolicy, Address, CoinId, CoinSpec, Ledger, LedgerError,
-    MultisigPolicy,
+    MultisigPolicy, TokenName, TokenSymbol,
 };
+use crate::asset::TokenError;
 use commonware_codec::DecodeExt;
 use commonware_formatting::from_hex;
 use nunchi_crypto::PublicKey;
@@ -78,14 +79,20 @@ impl MultisigPolicyGenesis {
 }
 
 impl CoinSpecGenesis {
-    pub fn spec(&self) -> CoinSpec {
-        CoinSpec::new(
-            self.symbol.clone(),
-            self.name.clone(),
+    pub fn spec(&self) -> Result<CoinSpec, LedgerError> {
+        let symbol = TokenSymbol::try_from(self.symbol.clone()).map_err(
+            |TokenError::InvalidTokenSpec(message)| LedgerError::InvalidTokenSpec(message),
+        )?;
+        let name = TokenName::try_from(self.name.clone()).map_err(
+            |TokenError::InvalidTokenSpec(message)| LedgerError::InvalidTokenSpec(message),
+        )?;
+        Ok(CoinSpec::new(
+            symbol,
+            name,
             self.decimals,
             self.initial_supply,
             self.max_supply,
-        )
+        ))
     }
 }
 
@@ -104,7 +111,7 @@ impl<D: crate::CoinDB> Ledger<D> {
 
         for token in &genesis.tokens {
             let issuer = decode_hex::<Address>(&token.issuer, "token issuer")?;
-            let coin = self.create_token(issuer.clone(), token.spec.spec()).await?;
+            let coin = self.create_token(issuer.clone(), token.spec.spec()?).await?;
             self.apply_allocations(issuer, coin, token.spec.initial_supply, &token.allocations)
                 .await?;
         }

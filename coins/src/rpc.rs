@@ -211,8 +211,8 @@ impl From<TokenDefinition> for TokenResponse {
         Self {
             id: encode_hex(&token.id),
             issuer: encode_hex(&token.issuer),
-            symbol: token.symbol,
-            name: token.name,
+            symbol: token.symbol.into(),
+            name: token.name.into(),
             decimals: token.decimals,
             total_supply: token.total_supply.to_string(),
             max_supply: token.max_supply.map(|supply| supply.to_string()),
@@ -228,7 +228,7 @@ mod tests {
     use commonware_runtime::Runner as _;
 
     use super::*;
-    use crate::{external_account_id, CoinSpec, PrivateKey, TokenFactory};
+    use crate::{external_account_id, CoinSpec, PrivateKey, TokenFactory, TokenName, TokenSymbol};
 
     #[derive(Clone)]
     struct MockQuery {
@@ -244,7 +244,13 @@ mod tests {
     impl MockQuery {
         fn new() -> Self {
             let account = external_account_id(&PrivateKey::ed25519_from_seed(1).public_key());
-            let spec = CoinSpec::new("GOLD", "Gold", 9, 1_000, Some(2_000));
+            let spec = CoinSpec::new(
+                TokenSymbol::new("GOLD").expect("valid token symbol"),
+                TokenName::new("Gold").expect("valid token name"),
+                9,
+                1_000,
+                Some(2_000),
+            );
             let coin = TokenFactory::derive_coin_id(&account, 0, &spec);
             let token = TokenDefinition::from_spec(coin, account.clone(), spec);
             Self {

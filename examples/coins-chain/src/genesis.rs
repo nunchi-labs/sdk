@@ -151,7 +151,7 @@ mod tests {
     use commonware_formatting::hex;
     use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
     use nunchi_authority::{AuthorityDB, AuthorityOperation, Transaction as AuthorityTransaction};
-    use nunchi_coins::{Address, CoinDB, CoinSpec, TokenFactory};
+    use nunchi_coins::{Address, CoinDB, CoinSpec, TokenFactory, TokenName, TokenSymbol};
     use nunchi_crypto::PrivateKey;
 
     fn encode_hex(value: &impl Encode) -> String {
@@ -330,7 +330,16 @@ mod tests {
             let mut ledger = Ledger::new(state);
             let issuer = external(100);
             ledger
-                .create_token(issuer, CoinSpec::new("OLD", "Old", 0, 0, None))
+                .create_token(
+                    issuer,
+                    CoinSpec::new(
+                        TokenSymbol::new("OLD").unwrap(),
+                        TokenName::new("Old").unwrap(),
+                        0,
+                        0,
+                        None,
+                    ),
+                )
                 .await
                 .unwrap();
             state = ledger.into_inner();
@@ -391,7 +400,13 @@ mod tests {
             let issuer = external(100);
             let alice = external(101);
             let bob = external(102);
-            let spec = CoinSpec::new("NCH", "Nunchi", 9, 1_000, Some(2_000));
+            let spec = CoinSpec::new(
+                TokenSymbol::new("NCH").unwrap(),
+                TokenName::new("Nunchi").unwrap(),
+                9,
+                1_000,
+                Some(2_000),
+            );
             let ledger = Ledger::new(state);
             let factory_nonce = CoinDB::factory_nonce(ledger.db())
                 .await

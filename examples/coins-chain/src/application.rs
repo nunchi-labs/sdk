@@ -406,7 +406,7 @@ mod tests {
     use futures::lock::Mutex as AsyncMutex;
     use nunchi_coins::{
         multisig_account_id, AccountPolicy, CoinOperation, CoinSpec, Ledger, MultisigPolicy,
-        PrivateKey, Transaction as CoinTransaction,
+        PrivateKey, TokenName, TokenSymbol, Transaction as CoinTransaction,
     };
     use nunchi_common::{QmdbBackend, QmdbState};
     use nunchi_common::{QmdbBatch, QmdbDatabaseSet};
@@ -414,7 +414,13 @@ mod tests {
     use std::sync::Arc;
 
     fn spec() -> CoinSpec {
-        CoinSpec::new("NCH", "Nunchi", 9, 1_000, None)
+        CoinSpec::new(
+            TokenSymbol::new("NCH").expect("valid token symbol"),
+            TokenName::new("Nunchi").expect("valid token name"),
+            9,
+            1_000,
+            None,
+        )
     }
 
     #[test]

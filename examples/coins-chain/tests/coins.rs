@@ -13,7 +13,8 @@ use nunchi_authority::{
     Transaction as AuthorityTransaction,
 };
 use nunchi_coins::{
-    Address, CoinId, CoinOperation, CoinSpec, PrivateKey, TokenFactory, Transaction,
+    Address, CoinId, CoinOperation, CoinSpec, PrivateKey, TokenFactory, TokenName, TokenSymbol,
+    Transaction,
 };
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::time::Duration;
@@ -35,7 +36,13 @@ fn authority_key(seed: u64) -> nunchi_crypto::PrivateKey {
 }
 
 fn gold_spec() -> CoinSpec {
-    CoinSpec::new("GOLD", "Gold", 9, 1_000_000, None)
+    CoinSpec::new(
+        TokenSymbol::new("GOLD").expect("valid token symbol"),
+        TokenName::new("Gold").expect("valid token name"),
+        9,
+        1_000_000,
+        None,
+    )
 }
 
 /// The id Alice's token will be assigned: it is the first token created on the chain, so the token
@@ -529,7 +536,13 @@ fn mempool_replaces_same_nonce_resubmission() {
                     &alice,
                     0,
                     CoinOperation::CreateToken {
-                        spec: CoinSpec::new("SILV", "Silver", 9, 500_000, None),
+                        spec: CoinSpec::new(
+                            TokenSymbol::new("SILV").expect("valid token symbol"),
+                            TokenName::new("Silver").expect("valid token name"),
+                            9,
+                            500_000,
+                            None,
+                        ),
                     },
                 )
                 .into(),
@@ -560,7 +573,13 @@ fn mempool_replaces_same_nonce_resubmission() {
         let silver = TokenFactory::derive_coin_id(
             &alice_id,
             0,
-            &CoinSpec::new("SILV", "Silver", 9, 500_000, None),
+            &CoinSpec::new(
+                TokenSymbol::new("SILV").expect("valid token symbol"),
+                TokenName::new("Silver").expect("valid token name"),
+                9,
+                500_000,
+                None,
+            ),
         );
         assert!(ledger.token(&silver).await.unwrap().is_some());
         assert!(ledger.token(&gold_coin()).await.unwrap().is_none());

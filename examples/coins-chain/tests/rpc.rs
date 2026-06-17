@@ -11,7 +11,8 @@ use jsonrpsee::{
     types::error::INVALID_PARAMS_CODE,
 };
 use nunchi_coins::{
-    rpc::SharedLedger, CoinOperation, CoinSpec, Ledger, PrivateKey, Transaction as CoinTransaction,
+    rpc::SharedLedger, CoinOperation, CoinSpec, Ledger, PrivateKey, TokenName, TokenSymbol,
+    Transaction as CoinTransaction,
 };
 use nunchi_coins_chain::rpc::{
     self, StatusResponse, SubmitTransactionResponse, TransactionStatusResponse,
@@ -70,7 +71,13 @@ fn rpc_serves_status_and_filters_submissions_over_http() {
             &alice,
             0,
             CoinOperation::CreateToken {
-                spec: CoinSpec::new("GOLD", "Gold", 9, 1_000_000, None),
+                spec: CoinSpec::new(
+                    TokenSymbol::new("GOLD").expect("valid token symbol"),
+                    TokenName::new("Gold").expect("valid token name"),
+                    9,
+                    1_000_000,
+                    None,
+                ),
             },
         );
         let accepted: SubmitTransactionResponse = client

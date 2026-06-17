@@ -173,7 +173,7 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{ed25519, Signer as _};
     use nunchi_authority::{AuthorityOperation, MultisigPolicy};
-    use nunchi_coins::{CoinOperation, CoinSpec, PrivateKey};
+    use nunchi_coins::{CoinOperation, CoinSpec, PrivateKey, TokenName, TokenSymbol};
 
     fn coin_transaction(seed: u64, nonce: u64) -> nunchi_coins::Transaction {
         let signer = PrivateKey::ed25519_from_seed(seed);
@@ -181,7 +181,13 @@ mod tests {
             &signer,
             nonce,
             CoinOperation::CreateToken {
-                spec: CoinSpec::new("NCH", "Nunchi", 9, 1_000, None),
+                spec: CoinSpec::new(
+                    TokenSymbol::new("NCH").unwrap(),
+                    TokenName::new("Nunchi").unwrap(),
+                    9,
+                    1_000,
+                    None,
+                ),
             },
         )
     }

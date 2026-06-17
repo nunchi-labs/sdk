@@ -2,7 +2,6 @@
 
 mod account;
 mod asset;
-mod codec;
 mod db;
 mod factory;
 mod genesis;
@@ -16,7 +15,9 @@ pub use account::{
     external_account_id, multisig_account_id, Account, AccountPolicy, AccountPolicyError,
     AccountType, Address, MultisigPolicy, PrivateKey, Signature,
 };
-pub use asset::{CoinId, CoinSpec, TokenDefinition, MAX_NAME_BYTES, MAX_SYMBOL_BYTES};
+pub use asset::{
+    CoinId, CoinSpec, TokenDefinition, TokenName, TokenSymbol, MAX_NAME_BYTES, MAX_SYMBOL_BYTES,
+};
 pub use db::CoinDB;
 pub use factory::TokenFactory;
 pub use genesis::{
