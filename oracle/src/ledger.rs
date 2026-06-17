@@ -283,11 +283,13 @@ mod tests {
             let owner = account(1);
             let attacker = account(2);
             let feed_id = feed_id("eth/usd");
+            let owner_nonce = 0;
+            let attacker_nonce = 0;
 
             ledger
                 .apply_transaction(&Transaction::sign(
                     &owner,
-                    0,
+                    owner_nonce,
                     OracleOperation::RegisterFeed {
                         feed_id: feed_id.clone(),
                         metadata: FeedPayload::json(&json!({"kind": "price"})).unwrap(),
@@ -299,7 +301,7 @@ mod tests {
             let err = ledger
                 .apply_transaction(&Transaction::sign(
                     &attacker,
-                    0,
+                    attacker_nonce,
                     OracleOperation::Submit {
                         feed_id: feed_id.clone(),
                         observed_at_ms: 10,
