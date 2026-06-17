@@ -155,7 +155,7 @@ mod tests {
     use nunchi_mempool::DropReason;
 
     use super::*;
-    use crate::{CoinOperation, CoinSpec, PrivateKey};
+    use crate::{CoinOperation, CoinSpec, PrivateKey, TokenName, TokenSymbol};
 
     #[derive(Clone, Default)]
     struct MockIngress {
@@ -183,7 +183,13 @@ mod tests {
             &signer,
             0,
             CoinOperation::CreateToken {
-                spec: CoinSpec::new("GOLD", "Gold", 9, 1_000, None),
+                spec: CoinSpec::new(
+                    TokenSymbol::new("GOLD").unwrap(),
+                    TokenName::new("Gold").unwrap(),
+                    9,
+                    1_000,
+                    None,
+                ),
             },
         )
     }
