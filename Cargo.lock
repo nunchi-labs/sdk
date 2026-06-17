@@ -2615,6 +2615,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "nunchi-oracle"
+version = "2026.5.0"
+dependencies = [
+ "bytes",
+ "commonware-codec",
+ "commonware-runtime",
+ "nunchi-common",
+ "nunchi-crypto",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "nunchi-rpc"
 version = "2026.5.0"
 dependencies = [

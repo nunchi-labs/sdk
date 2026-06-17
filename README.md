@@ -33,7 +33,7 @@ This repository will contain modules for building public and private blockchains
 * [`rpc`](rpc/) - core abstractions for modular RPC
 * [`dkg`](dkg/) - contains dkg resharing ceremony logic and a consensus engine orchestator
 * `bridge` - moves coins between chains
-* `oracle` - takes in price feeds and provides them to other modules
+* [`oracle`](oracle/) - takes in arbitrarily shaped feeds, including price feeds, and provides them to other modules
 * `chat` - allows humans or agents to publish to permanent on-chain public conversations
 * `factory` - wrapper of coins for mass issuance 
 
@@ -50,4 +50,3 @@ This repository will contain modules for building public and private blockchains
 * `clob` - used on the global chain, provides liquidity between local chain tokens
 * `derivatives` - ingests a price feed and creates derivatives products
 * `stablecoin` - a wrapper of coins special for the needs of stablecoins
-
