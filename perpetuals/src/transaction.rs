@@ -265,7 +265,9 @@ mod tests {
 
     fn sample_position_id() -> crate::PositionId {
         let owner = Address::external(&PrivateKey::ed25519_from_seed(1).public_key());
-        derive_position_id(&owner, &sample_market_id(), 0)
+        let nonce_bytes = Sha256::hash(b"sample_position_nonce");
+        let nonce = u64::from_le_bytes(nonce_bytes[..8].try_into().expect("slice with incorrect length"));
+        derive_position_id(&owner, &sample_market_id(), nonce)
     }
 
     fn all_operations() -> Vec<PerpetualOperation> {
