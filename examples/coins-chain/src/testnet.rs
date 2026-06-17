@@ -8,6 +8,7 @@
 use crate::{
     channels,
     engine::{Config as EngineConfig, Engine},
+    genesis::ChainGenesis,
     rpc, PublicKey, NAMESPACE,
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
@@ -102,6 +103,7 @@ pub struct NodeConfig {
     pub rpc_address: SocketAddr,
     pub bootstrappers: Vec<BootstrapperConfig>,
     pub storage_dir: PathBuf,
+    pub genesis_path: Option<PathBuf>,
     pub consensus: ConsensusConfig,
     pub networking: NetworkConfig,
     pub max_block_transactions: usize,
@@ -179,6 +181,8 @@ pub enum Error {
     },
     #[error("failed to build RPC module: {0}")]
     RpcBuild(#[from] nunchi_rpc::RpcBuildError),
+    #[error("genesis error: {0}")]
+    Genesis(#[from] crate::genesis::GenesisError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("failed to serialize toml: {0}")]
@@ -254,6 +258,7 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
             rpc_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), rpc_port),
             bootstrappers,
             storage_dir: storage_dir.clone(),
+            genesis_path: None,
             consensus: ConsensusConfig::default(),
             networking: NetworkConfig::default(),
             max_block_transactions: DEFAULT_MAX_BLOCK_TRANSACTIONS,
@@ -367,6 +372,7 @@ async fn start_node(
         certification_timeout: Duration::from_millis(config.consensus.certification_timeout_ms),
         strategy: Sequential,
         max_block_transactions: config.max_block_transactions,
+        genesis: read_genesis(config.genesis_path.as_ref())?,
     };
 
     let resolver_config = marshal::resolver::p2p::Config {
@@ -419,6 +425,12 @@ fn decode_output(
             source,
         }
     })
+}
+
+fn read_genesis(path: Option<&PathBuf>) -> Result<Option<ChainGenesis>, Error> {
+    path.map(ChainGenesis::read)
+        .transpose()
+        .map_err(Error::Genesis)
 }
 
 fn decode_unit<T>(value: &str, field: &'static str) -> Result<T, Error>

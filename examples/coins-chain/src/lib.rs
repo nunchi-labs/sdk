@@ -17,6 +17,7 @@ use std::num::NonZeroU64;
 pub mod application;
 pub mod engine;
 pub mod execution;
+pub mod genesis;
 pub mod rpc;
 pub mod runtime;
 pub mod testnet;

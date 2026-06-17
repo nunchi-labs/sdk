@@ -31,6 +31,8 @@ pub enum AuthorityError {
     EpochOverflow,
     #[error("authority policy is already configured")]
     AlreadyConfigured,
+    #[error("existing authority genesis state does not match configured genesis")]
+    GenesisMismatch,
     #[error("authority policy is not configured")]
     NotConfigured,
     #[error("invalid multisig policy")]
@@ -128,6 +130,46 @@ impl<D: AuthorityDB> AuthorityLedger<D> {
         validator: &ValidatorId,
     ) -> Result<Option<ValidatorSchedule>, AuthorityError> {
         self.db.validator(validator).await
+    }
+
+    pub(crate) async fn seed_genesis(
+        &mut self,
+        policy: MultisigPolicy,
+        initial_validators: Vec<ValidatorId>,
+        epoch: EpochNumber,
+    ) -> Result<(), AuthorityError> {
+        let initial_validators =
+            sorted_unique(initial_validators).ok_or(AuthorityError::InvalidPolicy)?;
+        if initial_validators.is_empty() {
+            return Err(AuthorityError::InvalidPolicy);
+        }
+
+        if let Some(existing) = self.db.policy().await? {
+            if existing != policy || self.db.validator_index().await? != initial_validators {
+                return Err(AuthorityError::GenesisMismatch);
+            }
+            let registry = self
+                .db
+                .epoch_registry(epoch)
+                .await?
+                .ok_or(AuthorityError::GenesisMismatch)?;
+            if registry.players != initial_validators || registry.dealers != initial_validators {
+                return Err(AuthorityError::GenesisMismatch);
+            }
+            return Ok(());
+        }
+
+        self.db.set_policy(&policy);
+        self.db.set_validator_index(&initial_validators);
+        for validator in initial_validators {
+            self.db.set_validator(&ValidatorSchedule {
+                validator,
+                player_from: epoch,
+                dealer_from: epoch,
+                removed_from: None,
+            });
+        }
+        self.refresh_epochs(epoch, epoch).await
     }
 
     async fn apply_operation(
