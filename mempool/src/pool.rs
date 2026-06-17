@@ -103,7 +103,7 @@ impl<T: PoolTransaction> Pool<T> {
         }
         self.index.insert(digest, (account, nonce));
         self.status.insert(digest, TxStatus::Pending);
-        // TODO(@distractedm1nd): gossip broadcast, frward to a commonware_broadcast handler from here.
+        // TODO(@distractedm1nd): gossip broadcast, forward to a commonware_broadcast handler from here.
         Ok(digest)
     }
 
@@ -113,16 +113,16 @@ impl<T: PoolTransaction> Pool<T> {
     pub fn pending(&self, limit: usize) -> Vec<T> {
         let mut out = Vec::new();
         'accounts: for (account, queue) in &self.queues {
-            let mut next = self.committed_nonce(account);
-            for (&nonce, entry) in queue {
-                if nonce != next {
+            for (expected_nonce, (&nonce, entry)) in
+                (self.committed_nonce(account)..).zip(queue.iter())
+            {
+                if nonce != expected_nonce {
                     break;
                 }
                 if out.len() >= limit {
                     break 'accounts;
                 }
                 out.push(entry.tx.clone());
-                next += 1;
             }
         }
         out
@@ -157,16 +157,14 @@ impl<T: PoolTransaction> Pool<T> {
                 continue;
             }
             *committed = new_nonce;
-            loop {
-                let Some(queue) = self.queues.get(&account) else {
+            while let Some(queue) = self.queues.get(&account) {
+                let Some((&nonce, _)) = queue.first_key_value() else {
                     break;
                 };
-                match queue.first_key_value() {
-                    Some((&nonce, _)) if nonce < new_nonce => {
-                        self.remove_entry(&account, nonce, DropReason::StaleNonce);
-                    }
-                    _ => break,
+                if nonce >= new_nonce {
+                    break;
                 }
+                self.remove_entry(&account, nonce, DropReason::StaleNonce);
             }
         }
 

@@ -32,6 +32,9 @@ impl<D: Copy + Eq + Hash> StatusCache<D> {
     /// Record or update a digest's status. New digests evict the oldest entry
     /// once the cache is at capacity; updates keep their original ring slot.
     pub fn insert(&mut self, digest: D, status: TxStatus) {
+        if self.capacity == 0 {
+            return;
+        }
         if let Some(existing) = self.map.get_mut(&digest) {
             *existing = status;
             return;
@@ -75,5 +78,12 @@ mod tests {
         // 1 was inserted first, so it is still the eviction victim.
         assert_eq!(cache.get(&1), None);
         assert_eq!(cache.get(&2), Some(TxStatus::Pending));
+    }
+
+    #[test]
+    fn zero_capacity_retains_nothing() {
+        let mut cache = StatusCache::new(0);
+        cache.insert(1u64, TxStatus::Pending);
+        assert_eq!(cache.get(&1), None);
     }
 }
