@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 default = ["rpc"]
-rpc = ["dep:nunchi-rpc", "dep:jsonrpsee", "dep:serde", "dep:futures"]
+rpc = ["dep:nunchi-rpc", "dep:jsonrpsee", "dep:futures"]
 mempool = ["dep:nunchi-mempool"]
 
 [dependencies]
@@ -19,8 +19,9 @@ nunchi-mempool = { workspace = true, optional = true }
 nunchi-rpc = { workspace = true, optional = true }
 commonware-codec = { workspace = true }
 commonware-cryptography = { workspace = true }
+commonware-formatting = { workspace = true }
 jsonrpsee = { workspace = true, optional = true }
-serde = { workspace = true, optional = true }
+serde = { workspace = true }
 futures = { workspace = true, optional = true }
 
 [dev-dependencies]

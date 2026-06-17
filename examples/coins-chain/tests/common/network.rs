@@ -460,6 +460,7 @@ async fn start_validator(
         strategy: Sequential,
         max_block_transactions: MAX_BLOCK_TRANSACTIONS,
         pool_config: PoolConfig::default(),
+        genesis: None,
     };
 
     let validator_context = context.child("validator").with_attribute("id", &uid);
