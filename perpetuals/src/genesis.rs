@@ -181,4 +181,3 @@ mod tests {
         assert!(matches!(bad.market(0), Err(LedgerError::Storage(_))));
     }
 }
-

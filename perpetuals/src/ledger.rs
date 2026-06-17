@@ -772,10 +772,7 @@ mod tests {
                 .open_position(alice, market_id, Side::Long, 1_000, 10_000)
                 .await
                 .expect("open position");
-            let err = ledger
-                .close_position(&eve, position_id)
-                .await
-                .unwrap_err();
+            let err = ledger.close_position(&eve, position_id).await.unwrap_err();
             assert_eq!(err, LedgerError::Unauthorized);
         });
     }
