@@ -115,7 +115,7 @@ impl From<TokenSymbol> for String {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct TokenName(pub String);
+pub struct TokenName(String);
 
 impl TokenName {
     pub fn new(value: impl Into<String>) -> Result<Self, TokenError> {
@@ -138,7 +138,15 @@ impl TokenName {
 
 impl TryFrom<String> for TokenName {
     type Error = TokenError;
+
     fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<&str> for TokenName {
+    type Error = TokenError;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
         Self::new(value)
     }
 }
