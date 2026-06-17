@@ -40,22 +40,27 @@ fn latest_submission_key(feed_id: &FeedId) -> Digest {
     NS.key(Table::LatestSubmission, feed_id.encode().as_ref())
 }
 
-#[allow(async_fn_in_trait)]
 pub trait OracleDB {
-    async fn nonce(&self, account: &Address) -> Result<u64, OracleError>;
+    fn nonce(
+        &self,
+        account: &Address,
+    ) -> impl std::future::Future<Output = Result<u64, OracleError>> + Send;
     fn set_nonce(&mut self, account: &Address, nonce: u64);
 
-    async fn feed(&self, feed_id: &FeedId) -> Result<Option<FeedDefinition>, OracleError>;
-    fn set_feed(&mut self, definition: &FeedDefinition);
-
-    async fn latest_submission(
+    fn feed(
         &self,
         feed_id: &FeedId,
-    ) -> Result<Option<FeedSubmission>, OracleError>;
+    ) -> impl std::future::Future<Output = Result<Option<FeedDefinition>, OracleError>> + Send;
+    fn set_feed(&mut self, definition: &FeedDefinition);
+
+    fn latest_submission(
+        &self,
+        feed_id: &FeedId,
+    ) -> impl std::future::Future<Output = Result<Option<FeedSubmission>, OracleError>> + Send;
     fn set_latest_submission(&mut self, feed_id: &FeedId, submission: &FeedSubmission);
 }
 
-impl<S: StateStore> OracleDB for S {
+impl<S: StateStore + Sync> OracleDB for S {
     async fn nonce(&self, account: &Address) -> Result<u64, OracleError> {
         match StateStore::get(self, &nonce_key(account))
             .await

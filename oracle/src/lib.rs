@@ -5,11 +5,17 @@
 //! other structured payloads, while raw bytes remain available for custom binary formats.
 
 mod db;
+mod genesis;
 mod ledger;
 mod transaction;
 mod types;
 
+/// JSON-RPC surface for the oracle module (enabled by the default `rpc` feature).
+#[cfg(feature = "rpc")]
+pub mod rpc;
+
 pub use db::OracleDB;
+pub use genesis::{FeedGenesisEntry, OracleGenesis};
 pub use ledger::{OracleError, OracleLedger};
 pub use transaction::{OracleOperation, Transaction, TransactionPayload};
 pub use types::{

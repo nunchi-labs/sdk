@@ -4,12 +4,23 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["rpc"]
+rpc = ["dep:nunchi-rpc", "dep:jsonrpsee", "dep:futures", "dep:async-trait"]
+mempool = ["rpc", "dep:nunchi-mempool"]
+
 [dependencies]
+async-trait = { workspace = true, optional = true }
 bytes = { workspace = true }
 commonware-codec = { workspace = true }
 commonware-cryptography = { workspace = true }
+commonware-formatting = { workspace = true }
+futures = { workspace = true, optional = true }
+jsonrpsee = { workspace = true, optional = true }
 nunchi-common = { workspace = true }
 nunchi-crypto = { workspace = true }
+nunchi-mempool = { workspace = true, optional = true }
+nunchi-rpc = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
