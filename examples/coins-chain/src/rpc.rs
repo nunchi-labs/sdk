@@ -13,8 +13,7 @@ use nunchi_rpc::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::execution::SharedAppliedHeight;
-use crate::txpool::Submitter;
+use crate::{execution::SharedAppliedHeight, Submitter};
 
 /// Shared RPC context for one coins-chain node.
 ///

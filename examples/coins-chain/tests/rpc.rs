@@ -12,7 +12,7 @@ use jsonrpsee::{
 use nunchi_coins::{rpc::SharedLedger, CoinOperation, CoinSpec, Ledger, PrivateKey, Transaction};
 use nunchi_coins_chain::{
     rpc::{self, StatusResponse, SubmitTransactionParams, SubmitTransactionResponse},
-    txpool::TxPool,
+    RuntimeTransaction, TxPool,
 };
 use nunchi_common::QmdbState;
 use nunchi_rpc::{encode_hex, ServerBuilder};
@@ -73,7 +73,7 @@ fn rpc_serves_status_and_filters_submissions_over_http() {
         assert_eq!(accepted.hash, encode_hex(&transaction.digest()));
         assert_eq!(
             submitter.pending(usize::MAX).await,
-            vec![transaction.clone().into()]
+            vec![RuntimeTransaction::from(transaction.clone())]
         );
 
         // Corrupting the signature is rejected at ingress instead of being dropped silently.
@@ -98,7 +98,7 @@ fn rpc_serves_status_and_filters_submissions_over_http() {
         // The pool still only holds the valid submission.
         assert_eq!(
             submitter.pending(usize::MAX).await,
-            vec![transaction.into()]
+            vec![RuntimeTransaction::from(transaction)]
         );
 
         server.stop().expect("stop RPC server");
