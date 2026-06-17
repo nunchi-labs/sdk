@@ -95,8 +95,12 @@ impl Read for TokenSymbol {
 
     fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         let bytes = Vec::<u8>::read_cfg(buf, &(RangeCfg::new(0..=MAX_SYMBOL_BYTES), ()))?;
-        let value = String::from_utf8(bytes)
-            .map_err(|error| Error::Wrapped("TokenSymbol", error.into()))?;
+        let value = String::from_utf8(bytes).map_err(|_| {
+            Error::Wrapped(
+                "TokenSymbol",
+                TokenError::InvalidTokenSpec("token symbol must be valid utf-8").into(),
+            )
+        })?;
 
         Self::new(value).map_err(|error| Error::Wrapped("TokenSymbol", error.into()))
     }
@@ -162,8 +166,12 @@ impl Read for TokenName {
 
     fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         let bytes = Vec::<u8>::read_cfg(buf, &(RangeCfg::new(0..=MAX_NAME_BYTES), ()))?;
-        let value =
-            String::from_utf8(bytes).map_err(|error| Error::Wrapped("TokenName", error.into()))?;
+        let value = String::from_utf8(bytes).map_err(|_| {
+            Error::Wrapped(
+                "TokenName",
+                TokenError::InvalidTokenSpec("token name must be valid utf-8").into(),
+            )
+        })?;
         Self::new(value).map_err(|error| Error::Wrapped("TokenName", error.into()))
     }
 }
