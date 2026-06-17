@@ -316,10 +316,8 @@ async fn wait_for_shutdown(engine_handle: Handle<()>) -> Result<(), Error> {
     #[cfg(unix)]
     {
         use ::tokio::signal::unix::{signal, SignalKind};
-        let mut sigint =
-            signal(SignalKind::interrupt()).map_err(|e| Error::Io(e))?;
-        let mut sigterm =
-            signal(SignalKind::terminate()).map_err(|e| Error::Io(e))?;
+        let mut sigint = signal(SignalKind::interrupt()).map_err(Error::Io)?;
+        let mut sigterm = signal(SignalKind::terminate()).map_err(Error::Io)?;
         ::tokio::select! {
             _ = sigint.recv() => {
                 info!("received SIGINT, shutting down");
@@ -337,7 +335,8 @@ async fn wait_for_shutdown(engine_handle: Handle<()>) -> Result<(), Error> {
     #[cfg(not(unix))]
     {
         ::tokio::select! {
-            _ = ::tokio::signal::ctrl_c() => {
+            result = ::tokio::signal::ctrl_c() => {
+                result.map_err(Error::Io)?;
                 info!("received Ctrl-C, shutting down");
                 Ok(())
             }
