@@ -46,6 +46,10 @@ pub enum LedgerError {
     PositionNotLiquidatable,
     #[error("position is underwater {0:?}")]
     PositionUnderwater(PositionId),
+    #[error("collateral reduction exceeds available balance")]
+    CollateralUnderflow,
+    #[error("collateral reduction would push position into liquidatable territory")]
+    CollateralReductionWouldCauseLiquidation,
     #[error("arithmetic overflow")]
     ArithmeticOverflow,
     #[error("state storage error: {0}")]
@@ -229,6 +233,45 @@ impl<D: PerpetualDB> PerpetualLedger<D> {
         Ok(())
     }
 
+    pub async fn reduce_collateral(
+        &mut self,
+        owner: &Address,
+        position_id: PositionId,
+        amount: u128,
+    ) -> Result<(), LedgerError> {
+        if amount == 0 {
+            return Err(LedgerError::InvalidCollateral);
+        }
+        let mut position = self
+            .db
+            .position(&position_id)
+            .await?
+            .ok_or(LedgerError::UnknownPosition(position_id))?;
+        if &position.owner != owner {
+            return Err(LedgerError::Unauthorized);
+        }
+        let market = self
+            .db
+            .market(&position.market)
+            .await?
+            .ok_or(LedgerError::UnknownMarket(position.market))?;
+        let new_collateral = position
+            .collateral
+            .checked_sub(amount)
+            .ok_or(LedgerError::CollateralUnderflow)?;
+        // The remaining collateral must still be sufficient to keep the position above maintenance margin.
+        let temp = Position {
+            collateral: new_collateral,
+            ..position.clone()
+        };
+        if self.is_liquidatable(&temp, &market).await? {
+            return Err(LedgerError::CollateralReductionWouldCauseLiquidation);
+        }
+        position.collateral = new_collateral;
+        self.db.set_position(&position);
+        Ok(())
+    }
+
     pub async fn close_position(
         &mut self,
         owner: &Address,
@@ -361,6 +404,9 @@ impl<D: PerpetualDB> PerpetualLedger<D> {
             PerpetualOperation::AddCollateral { position, amount } => {
                 self.add_collateral(signer, *position, *amount).await?;
             }
+            PerpetualOperation::ReduceCollateral { position, amount } => {
+                self.reduce_collateral(signer, *position, *amount).await?;
+            }
             PerpetualOperation::ClosePosition { position } => {
                 self.close_position(signer, *position).await?;
             }
@@ -459,8 +505,8 @@ fn to_i128(value: u128) -> Result<i128, LedgerError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
-    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
+    use commonware_cryptography::{Hasher, Sha256};
+    use commonware_runtime::{deterministic, Runner as _};
     use nunchi_common::QmdbState;
     use nunchi_crypto::PrivateKey;
 
@@ -491,7 +537,7 @@ mod tests {
                 coin(b"USDC"),
                 50_000,
                 500,
-                50_000 * PRICE_SCALE,
+                50_000,
             )
             .await
             .expect("create market")
@@ -512,7 +558,7 @@ mod tests {
             let market = ledger.market(&market_id).await.unwrap().unwrap();
             let position = ledger.position(&position_id).await.unwrap().unwrap();
             assert_eq!(position.owner, alice);
-            assert_eq!(position.entry_price, 50_000 * PRICE_SCALE);
+            assert_eq!(position.entry_price, 50_000);
             assert_eq!(market.open_interest, position.quantity);
         });
     }
@@ -553,7 +599,7 @@ mod tests {
                 .await
                 .expect("open position");
             ledger
-                .update_mark_price(market_id, 60_000 * PRICE_SCALE)
+                .update_mark_price(market_id, 60_000)
                 .await
                 .expect("update price");
             let settled = ledger
@@ -597,12 +643,229 @@ mod tests {
                 .expect("open position");
 
             ledger
-                .update_mark_price(market_id, 48_000 * PRICE_SCALE)
+                .update_mark_price(market_id, 40_000)
                 .await
                 .expect("update price");
             ledger.liquidate(position_id).await.expect("liquidate");
 
             assert!(ledger.position(&position_id).await.unwrap().is_none());
+        });
+    }
+
+    #[test]
+    fn cannot_liquidate_healthy_position() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut ledger = ledger(context).await;
+            let market_id = create_market(&mut ledger).await;
+            let alice = address(5);
+            let position_id = ledger
+                .open_position(alice, market_id, Side::Long, 1_000, 10_000)
+                .await
+                .expect("open position");
+            let err = ledger.liquidate(position_id).await.unwrap_err();
+            assert_eq!(err, LedgerError::PositionNotLiquidatable);
+        });
+    }
+
+    #[test]
+    fn short_position_profits_on_price_drop() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut ledger = ledger(context).await;
+            let market_id = create_market(&mut ledger).await;
+            let alice = address(6);
+            let position_id = ledger
+                .open_position(alice.clone(), market_id, Side::Short, 1_000, 20_000)
+                .await
+                .expect("open short");
+            ledger
+                .update_mark_price(market_id, 40_000)
+                .await
+                .expect("update price");
+            let settled = ledger
+                .close_position(&alice, position_id)
+                .await
+                .expect("close position");
+            assert!(settled > 1_000);
+        });
+    }
+
+    #[test]
+    fn add_and_reduce_collateral() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut ledger = ledger(context).await;
+            let market_id = create_market(&mut ledger).await;
+            let alice = address(7);
+            let position_id = ledger
+                .open_position(alice.clone(), market_id, Side::Long, 1_000, 10_000)
+                .await
+                .expect("open position");
+
+            ledger
+                .add_collateral(&alice, position_id, 500)
+                .await
+                .expect("add collateral");
+            let pos = ledger.position(&position_id).await.unwrap().unwrap();
+            assert_eq!(pos.collateral, 1_500);
+
+            ledger
+                .reduce_collateral(&alice, position_id, 200)
+                .await
+                .expect("reduce collateral");
+            let pos = ledger.position(&position_id).await.unwrap().unwrap();
+            assert_eq!(pos.collateral, 1_300);
+        });
+    }
+
+    #[test]
+    fn reduce_collateral_blocked_when_would_trigger_liquidation() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut ledger = ledger(context).await;
+            let market_id = create_market(&mut ledger).await;
+            let alice = address(8);
+            // Open at max leverage so almost any collateral reduction triggers liquidation.
+            let position_id = ledger
+                .open_position(alice.clone(), market_id, Side::Long, 1_000, 50_000)
+                .await
+                .expect("open position");
+            // Drop price close to liquidation threshold.
+            ledger
+                .update_mark_price(market_id, 43_000)
+                .await
+                .expect("update price");
+            // Removing most collateral should fail because the reduced position would
+            // fall below maintenance margin at the current mark price.
+            let err = ledger
+                .reduce_collateral(&alice, position_id, 900)
+                .await
+                .unwrap_err();
+            assert_eq!(err, LedgerError::CollateralReductionWouldCauseLiquidation);
+        });
+    }
+
+    #[test]
+    fn unauthorized_add_collateral_is_rejected() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut ledger = ledger(context).await;
+            let market_id = create_market(&mut ledger).await;
+            let alice = address(9);
+            let eve = address(10);
+            let position_id = ledger
+                .open_position(alice, market_id, Side::Long, 1_000, 10_000)
+                .await
+                .expect("open position");
+            let err = ledger
+                .add_collateral(&eve, position_id, 100)
+                .await
+                .unwrap_err();
+            assert_eq!(err, LedgerError::Unauthorized);
+        });
+    }
+
+    #[test]
+    fn unauthorized_close_position_is_rejected() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut ledger = ledger(context).await;
+            let market_id = create_market(&mut ledger).await;
+            let alice = address(11);
+            let eve = address(12);
+            let position_id = ledger
+                .open_position(alice, market_id, Side::Long, 1_000, 10_000)
+                .await
+                .expect("open position");
+            let err = ledger
+                .close_position(&eve, position_id)
+                .await
+                .unwrap_err();
+            assert_eq!(err, LedgerError::Unauthorized);
+        });
+    }
+
+    #[test]
+    fn nonce_mismatch_is_rejected() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut ledger = ledger(context).await;
+            let market_id = create_market(&mut ledger).await;
+            let alice_key = PrivateKey::ed25519_from_seed(13);
+
+            let tx_wrong_nonce = Transaction::sign(
+                &alice_key,
+                1, // expected 0
+                PerpetualOperation::OpenPosition {
+                    market: market_id,
+                    side: Side::Long,
+                    collateral: 1_000,
+                    leverage_bps: 10_000,
+                },
+            );
+            let err = ledger.apply_transaction(&tx_wrong_nonce).await.unwrap_err();
+            assert!(matches!(
+                err,
+                LedgerError::NonceMismatch {
+                    expected: 0,
+                    actual: 1,
+                    ..
+                }
+            ));
+        });
+    }
+
+    #[test]
+    fn cannot_close_underwater_position() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut ledger = ledger(context).await;
+            let market_id = create_market(&mut ledger).await;
+            let alice = address(14);
+            let position_id = ledger
+                .open_position(alice.clone(), market_id, Side::Long, 1_000, 50_000)
+                .await
+                .expect("open position");
+            // Push price below zero-equity threshold.
+            ledger
+                .update_mark_price(market_id, 39_000)
+                .await
+                .expect("update price");
+            let err = ledger
+                .close_position(&alice, position_id)
+                .await
+                .unwrap_err();
+            assert_eq!(err, LedgerError::PositionUnderwater(position_id));
+        });
+    }
+
+    #[test]
+    fn open_interest_decreases_on_close_and_liquidation() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut ledger = ledger(context).await;
+            let market_id = create_market(&mut ledger).await;
+            let alice = address(15);
+            let bob = address(16);
+
+            let pos_a = ledger
+                .open_position(alice.clone(), market_id, Side::Long, 1_000, 10_000)
+                .await
+                .expect("alice open");
+            let pos_b = ledger
+                .open_position(bob.clone(), market_id, Side::Short, 2_000, 20_000)
+                .await
+                .expect("bob open");
+
+            let market_before = ledger.market(&market_id).await.unwrap().unwrap();
+
+            ledger
+                .close_position(&alice, pos_a)
+                .await
+                .expect("alice close");
+            let market_mid = ledger.market(&market_id).await.unwrap().unwrap();
+            assert!(market_mid.open_interest < market_before.open_interest);
+
+            // Drop price to liquidate bob's short.
+            ledger
+                .update_mark_price(market_id, 90_000)
+                .await
+                .expect("update price");
+            ledger.liquidate(pos_b).await.expect("liquidate bob");
+            let market_after = ledger.market(&market_id).await.unwrap().unwrap();
+            assert_eq!(market_after.open_interest, 0);
         });
     }
 }

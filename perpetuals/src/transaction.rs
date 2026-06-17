@@ -12,6 +12,7 @@ pub enum PerpetualOperationId {
     AddCollateral = 3,
     ClosePosition = 4,
     Liquidate = 5,
+    ReduceCollateral = 6,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -29,6 +30,7 @@ impl TryFrom<u8> for PerpetualOperationId {
             3 => Ok(Self::AddCollateral),
             4 => Ok(Self::ClosePosition),
             5 => Ok(Self::Liquidate),
+            6 => Ok(Self::ReduceCollateral),
             _ => Err(InvalidPerpetualOperationId(value)),
         }
     }
@@ -71,6 +73,10 @@ pub enum PerpetualOperation {
         leverage_bps: u32,
     },
     AddCollateral {
+        position: PositionId,
+        amount: u128,
+    },
+    ReduceCollateral {
         position: PositionId,
         amount: u128,
     },
@@ -123,6 +129,11 @@ impl Write for PerpetualOperation {
                 position.write(buf);
                 amount.write(buf);
             }
+            Self::ReduceCollateral { position, amount } => {
+                PerpetualOperationId::ReduceCollateral.write(buf);
+                position.write(buf);
+                amount.write(buf);
+            }
             Self::ClosePosition { position } => {
                 PerpetualOperationId::ClosePosition.write(buf);
                 position.write(buf);
@@ -159,6 +170,10 @@ impl Read for PerpetualOperation {
                 leverage_bps: u32::read(buf)?,
             }),
             PerpetualOperationId::AddCollateral => Ok(Self::AddCollateral {
+                position: PositionId::read(buf)?,
+                amount: u128::read(buf)?,
+            }),
+            PerpetualOperationId::ReduceCollateral => Ok(Self::ReduceCollateral {
                 position: PositionId::read(buf)?,
                 amount: u128::read(buf)?,
             }),
@@ -207,6 +222,9 @@ impl EncodeSize for PerpetualOperation {
             Self::AddCollateral { position, amount } => {
                 position.encode_size() + amount.encode_size()
             }
+            Self::ReduceCollateral { position, amount } => {
+                position.encode_size() + amount.encode_size()
+            }
             Self::ClosePosition { position } | Self::Liquidate { position } => {
                 position.encode_size()
             }
@@ -220,3 +238,142 @@ impl Operation for PerpetualOperation {
 
 pub type Transaction = nunchi_common::Transaction<PerpetualOperation>;
 pub type TransactionPayload = nunchi_common::TransactionPayload<PerpetualOperation>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{derive_market_id, derive_position_id, CoinId, PRICE_SCALE};
+    use commonware_codec::{DecodeExt, Encode};
+    use commonware_cryptography::{Hasher, Sha256};
+    use nunchi_common::Address;
+    use nunchi_crypto::PrivateKey;
+
+    fn coin(label: &[u8]) -> CoinId {
+        CoinId(Sha256::hash(label))
+    }
+
+    fn sample_market_id() -> crate::MarketId {
+        derive_market_id(coin(b"BTC"), coin(b"USD"), coin(b"USDC"), 0)
+    }
+
+    fn sample_position_id() -> crate::PositionId {
+        let owner = Address::external(&PrivateKey::ed25519_from_seed(1).public_key());
+        derive_position_id(&owner, &sample_market_id(), 0)
+    }
+
+    fn all_operations() -> Vec<PerpetualOperation> {
+        let market = sample_market_id();
+        let position = sample_position_id();
+        vec![
+            PerpetualOperation::CreateMarket {
+                base_asset: coin(b"BTC"),
+                quote_asset: coin(b"USD"),
+                collateral_asset: coin(b"USDC"),
+                max_leverage_bps: 50_000,
+                maintenance_margin_bps: 500,
+                mark_price: 50_000,
+            },
+            PerpetualOperation::UpdateMarketPrice {
+                market,
+                mark_price: 55_000,
+            },
+            PerpetualOperation::OpenPosition {
+                market,
+                side: Side::Long,
+                collateral: 1_000,
+                leverage_bps: 20_000,
+            },
+            PerpetualOperation::OpenPosition {
+                market,
+                side: Side::Short,
+                collateral: 2_000,
+                leverage_bps: 15_000,
+            },
+            PerpetualOperation::AddCollateral {
+                position,
+                amount: 500,
+            },
+            PerpetualOperation::ReduceCollateral {
+                position,
+                amount: 200,
+            },
+            PerpetualOperation::ClosePosition { position },
+            PerpetualOperation::Liquidate { position },
+        ]
+    }
+
+    #[test]
+    fn all_operations_roundtrip_codec() {
+        for op in all_operations() {
+            let encoded = op.encode();
+            let decoded = PerpetualOperation::decode(encoded.as_ref()).expect("decode");
+            assert_eq!(op, decoded, "codec roundtrip failed for {op:?}");
+        }
+    }
+
+    #[test]
+    fn operation_encode_size_matches_encoded_length() {
+        for op in all_operations() {
+            let encoded = op.encode();
+            assert_eq!(
+                op.encode_size(),
+                encoded.len(),
+                "encode_size mismatch for {op:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn operation_discriminants_are_stable() {
+        // Wire tags must never change — breaking them breaks the P2P codec.
+        assert_eq!(PerpetualOperationId::CreateMarket as u8, 0);
+        assert_eq!(PerpetualOperationId::UpdateMarketPrice as u8, 1);
+        assert_eq!(PerpetualOperationId::OpenPosition as u8, 2);
+        assert_eq!(PerpetualOperationId::AddCollateral as u8, 3);
+        assert_eq!(PerpetualOperationId::ClosePosition as u8, 4);
+        assert_eq!(PerpetualOperationId::Liquidate as u8, 5);
+        assert_eq!(PerpetualOperationId::ReduceCollateral as u8, 6);
+    }
+
+    #[test]
+    fn signed_transaction_roundtrips_and_verifies() {
+        let key = PrivateKey::ed25519_from_seed(42);
+        let market = sample_market_id();
+        let op = PerpetualOperation::OpenPosition {
+            market,
+            side: Side::Long,
+            collateral: 1_000,
+            leverage_bps: 20_000,
+        };
+        let tx = Transaction::sign(&key, 0, op);
+        assert!(tx.verify().is_ok());
+
+        let encoded = tx.encode();
+        let decoded = Transaction::decode(encoded.as_ref()).expect("decode transaction");
+        assert_eq!(tx, decoded);
+        assert!(decoded.verify().is_ok());
+    }
+
+    #[test]
+    fn transaction_with_wrong_nonce_still_encodes_correctly() {
+        // Nonce is part of the signed payload; codec must round-trip it faithfully.
+        let key = PrivateKey::ed25519_from_seed(7);
+        let tx = Transaction::sign(
+            &key,
+            999,
+            PerpetualOperation::ClosePosition {
+                position: sample_position_id(),
+            },
+        );
+        assert_eq!(tx.payload.nonce, 999);
+        let decoded = Transaction::decode(tx.encode().as_ref()).unwrap();
+        assert_eq!(decoded.payload.nonce, 999);
+    }
+
+    #[test]
+    fn price_scale_constant_is_stable() {
+        // PRICE_SCALE is baked into state (quantities stored in DB depend on it).
+        assert_eq!(PRICE_SCALE, 1_000_000_000);
+    }
+}
+

@@ -233,7 +233,7 @@ mod tests {
     use commonware_runtime::Runner as _;
 
     use super::*;
-    use crate::{derive_market_id, derive_position_id, CoinId, Side, PRICE_SCALE};
+    use crate::{derive_market_id, derive_position_id, CoinId, Side};
 
     #[derive(Clone)]
     struct MockQuery {
@@ -261,7 +261,7 @@ mod tests {
                 collateral_asset,
                 max_leverage_bps: 25_000,
                 maintenance_margin_bps: 500,
-                mark_price: 50_000 * PRICE_SCALE,
+                mark_price: 50_000,
                 open_interest: 1_000,
             };
             let position = Position {
@@ -270,7 +270,7 @@ mod tests {
                 owner: account.clone(),
                 side: Side::Long,
                 quantity: 1_000,
-                entry_price: 49_000 * PRICE_SCALE,
+                entry_price: 49_000,
                 collateral: 2_500,
             };
             Self {

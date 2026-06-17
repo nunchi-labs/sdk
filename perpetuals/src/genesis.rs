@@ -86,3 +86,99 @@ where
     let bytes = from_hex(value).ok_or_else(|| LedgerError::Storage(format!("invalid {what}")))?;
     T::decode(bytes.as_ref()).map_err(|err| LedgerError::Storage(err.to_string()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_codec::Encode;
+    use commonware_formatting::hex;
+    use commonware_runtime::{deterministic, Runner as _};
+    use nunchi_common::QmdbState;
+
+    fn coin_hex(label: &[u8]) -> String {
+        use commonware_cryptography::{Hasher, Sha256};
+        hex(&CoinId(Sha256::hash(label)).encode())
+    }
+
+    fn sample_genesis() -> PerpetualsGenesis {
+        PerpetualsGenesis {
+            markets: vec![
+                MarketGenesis {
+                    base_asset: coin_hex(b"BTC"),
+                    quote_asset: coin_hex(b"USD"),
+                    collateral_asset: coin_hex(b"USDC"),
+                    max_leverage_bps: 50_000,
+                    maintenance_margin_bps: 500,
+                    mark_price: 50_000,
+                },
+                MarketGenesis {
+                    base_asset: coin_hex(b"ETH"),
+                    quote_asset: coin_hex(b"USD"),
+                    collateral_asset: coin_hex(b"USDC"),
+                    max_leverage_bps: 25_000,
+                    maintenance_margin_bps: 1_000,
+                    mark_price: 3_000,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn genesis_json_roundtrips() {
+        let genesis = sample_genesis();
+        let raw = serde_json::to_vec(&genesis).unwrap();
+        let decoded: PerpetualsGenesis = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(genesis, decoded);
+    }
+
+    #[test]
+    fn apply_genesis_creates_markets() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = QmdbState::init(context, "perpetuals-genesis-test")
+                .await
+                .expect("init state db");
+            let mut ledger = PerpetualLedger::new(db);
+            let genesis = sample_genesis();
+            ledger.apply_genesis(&genesis).await.expect("apply genesis");
+
+            // Both markets were created; market nonce advanced to 2.
+            let btc_id = genesis.markets[0].derived_market_id(0).unwrap();
+            let eth_id = genesis.markets[1].derived_market_id(1).unwrap();
+
+            let btc = ledger.market(&btc_id).await.unwrap().unwrap();
+            assert_eq!(btc.mark_price, 50_000);
+            assert_eq!(btc.max_leverage_bps, 50_000);
+
+            let eth = ledger.market(&eth_id).await.unwrap().unwrap();
+            assert_eq!(eth.mark_price, 3_000);
+            assert_eq!(eth.maintenance_margin_bps, 1_000);
+        });
+    }
+
+    #[test]
+    fn genesis_rejects_zero_mark_price() {
+        let bad = MarketGenesis {
+            base_asset: coin_hex(b"BTC"),
+            quote_asset: coin_hex(b"USD"),
+            collateral_asset: coin_hex(b"USDC"),
+            max_leverage_bps: 10_000,
+            maintenance_margin_bps: 500,
+            mark_price: 0,
+        };
+        assert!(matches!(bad.market(0), Err(LedgerError::InvalidPrice)));
+    }
+
+    #[test]
+    fn genesis_rejects_invalid_hex_asset() {
+        let bad = MarketGenesis {
+            base_asset: "not-valid-hex".to_string(),
+            quote_asset: coin_hex(b"USD"),
+            collateral_asset: coin_hex(b"USDC"),
+            max_leverage_bps: 10_000,
+            maintenance_margin_bps: 500,
+            mark_price: 1_000,
+        };
+        assert!(matches!(bad.market(0), Err(LedgerError::Storage(_))));
+    }
+}
+
