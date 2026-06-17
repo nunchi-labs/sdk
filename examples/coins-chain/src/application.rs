@@ -409,8 +409,8 @@ mod tests {
         PrivateKey, Transaction as CoinTransaction,
     };
     use nunchi_common::{QmdbBackend, QmdbState};
-    use nunchi_mempool::{Mempool, PoolConfig};
     use nunchi_common::{QmdbBatch, QmdbDatabaseSet};
+    use nunchi_mempool::{Mempool, PoolConfig};
     use std::sync::Arc;
 
     fn spec() -> CoinSpec {
@@ -433,8 +433,13 @@ mod tests {
                 range: genesis_target.range,
             };
             let applied_height = Arc::new(AsyncMutex::new(Height::zero()));
-            let app: BasicApplication =
-                BasicApplication::new(submitter, 16, applied_height, genesis_state, genesis_payload());
+            let app: BasicApplication = BasicApplication::new(
+                submitter,
+                16,
+                applied_height,
+                genesis_state,
+                genesis_payload(),
+            );
 
             let alice_a = PrivateKey::ed25519_from_seed(1);
             let alice_b = PrivateKey::secp256r1_from_seed(2);

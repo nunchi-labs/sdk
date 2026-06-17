@@ -81,7 +81,10 @@ fn rpc_serves_status_and_filters_submissions_over_http() {
             .await
             .expect("submit valid transaction");
         assert_eq!(accepted.hash, encode_hex(&transaction.digest()));
-        assert_eq!(submitter.pending(usize::MAX).await, vec![transaction.clone().into()]);
+        assert_eq!(
+            submitter.pending(usize::MAX).await,
+            vec![transaction.clone().into()]
+        );
 
         // The pool reports the admitted transaction as pending.
         let mut status_params = ObjectParams::new();
@@ -127,7 +130,10 @@ fn rpc_serves_status_and_filters_submissions_over_http() {
             other => panic!("expected invalid-params call error, got {other:?}"),
         }
         // The pool still only holds the valid submission.
-        assert_eq!(submitter.pending(usize::MAX).await, vec![transaction.into()]);
+        assert_eq!(
+            submitter.pending(usize::MAX).await,
+            vec![transaction.into()]
+        );
 
         server.stop().expect("stop RPC server");
     });
