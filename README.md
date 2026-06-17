@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.png" alt="Nunchi" width="480" />
+  <img src="image.png" alt="Nunchi" width="480" />
 </p>
 
 <h3 align="center">Nunchi SDK</h3>
