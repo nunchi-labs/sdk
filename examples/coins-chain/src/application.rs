@@ -21,7 +21,7 @@ use nunchi_mempool::MempoolHandle;
 use rand::Rng;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
-use tracing::debug;
+use tracing::{debug, error};
 
 /// Genesis message to use during initialization.
 const GENESIS: &[u8] = b"nunchi coins chain";
@@ -136,7 +136,7 @@ impl Application {
         batches: <QmdbDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
         authority_epoch: u64,
         candidates: Vec<Transaction>,
-    ) -> (Vec<Transaction>, QmdbMerkleized<E>) {
+    ) -> Option<(Vec<Transaction>, QmdbMerkleized<E>)> {
         let mut batch = QmdbBatch::new(batches);
         let mut included = Vec::new();
 
@@ -155,7 +155,8 @@ impl Application {
                     included.push(transaction);
                 }
                 Err(error) if error.is_storage() => {
-                    panic!("storage failure while building block: {error:?}");
+                    error!(?error, "storage failure while building block");
+                    return None;
                 }
                 Err(error) => {
                     debug!(?error, "skipping non-executable txpool transaction");
@@ -163,11 +164,14 @@ impl Application {
             }
         }
 
-        let merkleized = batch
-            .merkleize()
-            .await
-            .expect("merkleization failed while building block");
-        (included, merkleized)
+        let merkleized = match batch.merkleize().await {
+            Ok(m) => m,
+            Err(e) => {
+                error!(error = ?e, "merkleization failed while building block");
+                return None;
+            }
+        };
+        Some((included, merkleized))
     }
 
     /// Execute a block's transactions against fresh batches.
@@ -283,7 +287,7 @@ where
         let authority_epoch = context.round.epoch().get();
         let (transactions, merkleized) = self
             .build_valid_transactions(batches, authority_epoch, candidates)
-            .await;
+            .await?;
         let state_range = Self::state_range(&merkleized);
         let reshare_log = match &mut self.dkg {
             Some(dkg) => dkg.act().await,
@@ -463,7 +467,8 @@ mod tests {
             let batches = databases.new_batches().await;
             let (included, _) = app
                 .build_valid_transactions(batches, 0, vec![tx.clone().into()])
-                .await;
+                .await
+                .expect("build_valid_transactions should succeed");
             assert!(included.is_empty());
 
             let batches = databases.new_batches().await;
@@ -482,7 +487,8 @@ mod tests {
             let batches = databases.new_batches().await;
             let (included, _) = app
                 .build_valid_transactions(batches, 0, vec![tx.clone().into()])
-                .await;
+                .await
+                .expect("build_valid_transactions should succeed");
             assert_eq!(included, vec![tx.into()]);
         });
     }
