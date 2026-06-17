@@ -9,6 +9,7 @@ members = [
     "narae",
     "mempool",
     "rpc",
+    "mcp",
     "examples/template",
     "examples/coins-chain",
 ]
