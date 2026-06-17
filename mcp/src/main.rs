@@ -51,7 +51,17 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let repo_path = cli.repo_path.canonicalize().unwrap_or(cli.repo_path);
+    let repo_path = match cli.repo_path.canonicalize() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                path = %cli.repo_path.display(),
+                error = %e,
+                "could not canonicalize --repo-path; using as-is"
+            );
+            cli.repo_path
+        }
+    };
     let rpc_client = client::RpcClient::new(cli.rpc_url);
     let mcp_server = server::NunchiServer::new(rpc_client, repo_path);
 

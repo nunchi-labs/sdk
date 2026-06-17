@@ -826,10 +826,9 @@ fn search_repo_code(
             continue;
         }
         // Skip large files and binary-looking files (no UTF-8 extension check).
-        let meta = entry.metadata().unwrap_or_else(|_| {
-            // If we can't get metadata, skip.
-            entry.metadata().unwrap()
-        });
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
         if meta.len() > MAX_FILE_BYTES {
             continue;
         }
