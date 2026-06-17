@@ -84,6 +84,7 @@ where
 
 impl<Tx> ConsensusExtension for DkgExtension<Tx>
 where
+    DkgBlock<Tx>: ReshareBlock,
     Tx: Clone + EncodeSize + Read<Cfg = ()> + Send + Sync + Write + 'static,
 {
     fn propose(&mut self) -> impl Future<Output = Self::Payload> + Send {
