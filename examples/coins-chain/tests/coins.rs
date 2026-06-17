@@ -179,51 +179,76 @@ async fn submit_scenario(
     let node1 = network.submitter(1);
 
     // Alice: create GOLD, send some to Bob, mint a bit more, burn a bit.
-    node0.submit(Transaction::sign(
-        &alice,
-        0,
-        CoinOperation::CreateToken { spec: gold_spec() },
-    ));
-    node0.submit(Transaction::sign(
-        &alice,
-        1,
-        CoinOperation::Transfer {
-            coin,
-            from: alice_id.clone(),
-            to: bob_id.clone(),
-            amount: 300_000,
-        },
-    ));
-    node0.submit(Transaction::sign(
-        &alice,
-        2,
-        CoinOperation::Mint {
-            coin,
-            to: alice_id.clone(),
-            amount: 50_000,
-        },
-    ));
-    node0.submit(Transaction::sign(
-        &alice,
-        3,
-        CoinOperation::Burn {
-            coin,
-            from: alice_id.clone(),
-            amount: 100_000,
-        },
-    ));
+    node0
+        .submit(
+            Transaction::sign(&alice, 0, CoinOperation::CreateToken { spec: gold_spec() }).into(),
+        )
+        .await
+        .expect("admit create token");
+    node0
+        .submit(
+            Transaction::sign(
+                &alice,
+                1,
+                CoinOperation::Transfer {
+                    coin,
+                    from: alice_id.clone(),
+                    to: bob_id.clone(),
+                    amount: 300_000,
+                },
+            )
+            .into(),
+        )
+        .await
+        .expect("admit transfer");
+    node0
+        .submit(
+            Transaction::sign(
+                &alice,
+                2,
+                CoinOperation::Mint {
+                    coin,
+                    to: alice_id.clone(),
+                    amount: 50_000,
+                },
+            )
+            .into(),
+        )
+        .await
+        .expect("admit mint");
+    node0
+        .submit(
+            Transaction::sign(
+                &alice,
+                3,
+                CoinOperation::Burn {
+                    coin,
+                    from: alice_id.clone(),
+                    amount: 100_000,
+                },
+            )
+            .into(),
+        )
+        .await
+        .expect("admit burn");
 
     // Bob: forward some of what he received to Carol.
-    node1.submit(Transaction::sign(
-        &bob,
-        0,
-        CoinOperation::Transfer {
-            coin,
-            from: bob_id.clone(),
-            to: carol_id.clone(),
-            amount: 120_000,
-        },
-    ));
+    node1
+        .submit(
+            Transaction::sign(
+                &bob,
+                0,
+                CoinOperation::Transfer {
+                    coin,
+                    from: bob_id.clone(),
+                    to: carol_id.clone(),
+                    amount: 120_000,
+                },
+            )
+            .into(),
+        )
+        .await
+        .expect("admit bob transfer");
 
     (alice_id, bob_id, carol_id)
 }
@@ -330,36 +355,52 @@ fn authority_registry_updates_onchain() {
         let proposal = proposal_id(&change, 3);
         let submitter = network.submitter(0);
 
-        submitter.submit(AuthorityTransaction::sign(
-            &owners[0],
-            0,
-            AuthorityOperation::Configure {
-                policy: MultisigPolicy {
-                    owners: owner_ids,
-                    threshold: 2,
-                },
-                initial_validators: initial.clone(),
-                epoch: 0,
-            },
-        ));
-        submitter.submit(AuthorityTransaction::sign(
-            &owners[0],
-            1,
-            AuthorityOperation::Propose {
-                change,
-                effective_epoch: 3,
-            },
-        ));
-        submitter.submit(AuthorityTransaction::sign(
-            &owners[1],
-            0,
-            AuthorityOperation::Approve { proposal },
-        ));
-        submitter.submit(AuthorityTransaction::sign(
-            &owners[2],
-            0,
-            AuthorityOperation::Execute { proposal },
-        ));
+        submitter
+            .submit(
+                AuthorityTransaction::sign(
+                    &owners[0],
+                    0,
+                    AuthorityOperation::Configure {
+                        policy: MultisigPolicy {
+                            owners: owner_ids,
+                            threshold: 2,
+                        },
+                        initial_validators: initial.clone(),
+                        epoch: 0,
+                    },
+                )
+                .into(),
+            )
+            .await
+            .expect("admit configure");
+        submitter
+            .submit(
+                AuthorityTransaction::sign(
+                    &owners[0],
+                    1,
+                    AuthorityOperation::Propose {
+                        change,
+                        effective_epoch: 3,
+                    },
+                )
+                .into(),
+            )
+            .await
+            .expect("admit propose");
+        submitter
+            .submit(
+                AuthorityTransaction::sign(&owners[1], 0, AuthorityOperation::Approve { proposal })
+                    .into(),
+            )
+            .await
+            .expect("admit approve");
+        submitter
+            .submit(
+                AuthorityTransaction::sign(&owners[2], 0, AuthorityOperation::Execute { proposal })
+                    .into(),
+            )
+            .await
+            .expect("admit execute");
 
         network.run_until_height(12).await;
 
@@ -374,5 +415,154 @@ fn authority_registry_updates_onchain() {
             assert!(epoch_5.players.contains(&added));
             assert!(epoch_5.dealers.contains(&added));
         }
+    });
+}
+
+/// The mempool reports each submission's lifecycle: executable transactions finalize, while a
+/// nonce-gapped transaction is admitted but never proposed and stays pending.
+#[test_traced]
+fn mempool_tracks_status_through_finalization() {
+    let executor = deterministic::Runner::timed(Duration::from_secs(120));
+    executor.start(|mut context| async move {
+        let mut network = TestNetworkBuilder::new(VALIDATORS)
+            .build(&mut context)
+            .await;
+        network.start_all().await;
+
+        let alice = key(ALICE);
+        let alice_id = Address::from(alice.public_key());
+        let coin = gold_coin();
+        let node0 = network.submitter(0);
+
+        let mut digests = Vec::new();
+        digests.push(
+            node0
+                .submit(
+                    Transaction::sign(&alice, 0, CoinOperation::CreateToken { spec: gold_spec() })
+                        .into(),
+                )
+                .await
+                .expect("admit create token"),
+        );
+        for nonce in 1..3 {
+            digests.push(
+                node0
+                    .submit(
+                        Transaction::sign(
+                            &alice,
+                            nonce,
+                            CoinOperation::Mint {
+                                coin,
+                                to: alice_id.clone(),
+                                amount: 1_000,
+                            },
+                        )
+                        .into(),
+                    )
+                    .await
+                    .expect("admit mint"),
+            );
+        }
+        // Nonce 5 leaves a gap at 3 and 4: admitted, but never proposable.
+        let gapped = node0
+            .submit(
+                Transaction::sign(
+                    &alice,
+                    5,
+                    CoinOperation::Mint {
+                        coin,
+                        to: alice_id.clone(),
+                        amount: 1_000,
+                    },
+                )
+                .into(),
+            )
+            .await
+            .expect("admit gapped mint");
+
+        network.run_until_nonces(&[(alice_id, 3)]).await;
+
+        // The pool learns of finalization via a fire-and-forget report, so poll briefly.
+        for digest in digests {
+            loop {
+                match node0.status(digest).await {
+                    Some(nunchi_mempool::TxStatus::Finalized { .. }) => break,
+                    Some(nunchi_mempool::TxStatus::Pending) => {
+                        network.context().sleep(Duration::from_millis(100)).await;
+                    }
+                    other => panic!("expected finalization, got {other:?}"),
+                }
+            }
+        }
+        assert_eq!(
+            node0.status(gapped).await,
+            Some(nunchi_mempool::TxStatus::Pending),
+            "gapped transaction must stay pending"
+        );
+    });
+}
+
+/// Resubmitting the same nonce replaces the earlier transaction: only the replacement finalizes.
+#[test_traced]
+fn mempool_replaces_same_nonce_resubmission() {
+    let executor = deterministic::Runner::timed(Duration::from_secs(120));
+    executor.start(|mut context| async move {
+        let mut network = TestNetworkBuilder::new(VALIDATORS)
+            .build(&mut context)
+            .await;
+        network.start_all().await;
+
+        let alice = key(ALICE);
+        let alice_id = Address::from(alice.public_key());
+        let node0 = network.submitter(0);
+
+        let original = node0
+            .submit(
+                Transaction::sign(&alice, 0, CoinOperation::CreateToken { spec: gold_spec() })
+                    .into(),
+            )
+            .await
+            .expect("admit original");
+        let replacement = node0
+            .submit(
+                Transaction::sign(
+                    &alice,
+                    0,
+                    CoinOperation::CreateToken {
+                        spec: CoinSpec::new("SILV", "Silver", 9, 500_000, None),
+                    },
+                )
+                .into(),
+            )
+            .await
+            .expect("admit replacement");
+
+        assert_eq!(
+            node0.status(original).await,
+            Some(nunchi_mempool::TxStatus::Dropped {
+                reason: nunchi_mempool::DropReason::Replaced
+            })
+        );
+
+        network.run_until_nonces(&[(alice_id.clone(), 1)]).await;
+        loop {
+            match node0.status(replacement).await {
+                Some(nunchi_mempool::TxStatus::Finalized { .. }) => break,
+                Some(nunchi_mempool::TxStatus::Pending) => {
+                    network.context().sleep(Duration::from_millis(100)).await;
+                }
+                other => panic!("expected finalization, got {other:?}"),
+            }
+        }
+
+        // The chain holds Silver, not Gold: the replacement is what executed.
+        let ledger = network.ledgers().await.into_iter().next().expect("ledger");
+        let silver = TokenFactory::derive_coin_id(
+            &alice_id,
+            0,
+            &CoinSpec::new("SILV", "Silver", 9, 500_000, None),
+        );
+        assert!(ledger.token(&silver).await.unwrap().is_some());
+        assert!(ledger.token(&gold_coin()).await.unwrap().is_none());
     });
 }

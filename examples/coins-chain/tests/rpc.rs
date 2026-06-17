@@ -7,23 +7,35 @@ use commonware_consensus::types::Height;
 use commonware_runtime::{tokio, Runner as _, Supervisor as _};
 use futures::lock::Mutex as AsyncMutex;
 use jsonrpsee::{
-    core::client::ClientT, http_client::HttpClient, rpc_params, types::error::INVALID_PARAMS_CODE,
+    core::client::ClientT, core::params::ObjectParams, http_client::HttpClient, rpc_params,
+    types::error::INVALID_PARAMS_CODE,
 };
-use nunchi_coins::{rpc::SharedLedger, CoinOperation, CoinSpec, Ledger, PrivateKey, Transaction};
-use nunchi_coins_chain::{
-    rpc::{self, StatusResponse, SubmitTransactionParams, SubmitTransactionResponse},
-    RuntimeTransaction, TxPool,
+use nunchi_coins::{
+    rpc::SharedLedger, CoinOperation, CoinSpec, Ledger, PrivateKey, Transaction as CoinTransaction,
 };
+use nunchi_coins_chain::rpc::{
+    self, StatusResponse, SubmitTransactionResponse, TransactionStatusResponse,
+};
+use nunchi_coins_chain::Transaction;
 use nunchi_common::QmdbState;
+use nunchi_mempool::{Mempool, PoolConfig};
 use nunchi_rpc::{encode_hex, ServerBuilder};
 use std::sync::Arc;
+
+fn submit_params(transaction: &str) -> ObjectParams {
+    let mut params = ObjectParams::new();
+    params
+        .insert("transaction", transaction)
+        .expect("serialize transaction param");
+    params
+}
 
 #[test]
 fn rpc_serves_status_and_filters_submissions_over_http() {
     tokio::Runner::default().start(|context| async move {
-        // An RPC backend without the full engine: a transaction pool plus a fresh ledger.
-        let (txpool, submitter) = TxPool::new();
-        let _txpool = txpool.start(context.child("txpool"));
+        // An RPC backend without the full engine: a mempool plus a fresh ledger.
+        let (mempool, submitter) = Mempool::<Transaction>::new(PoolConfig::default());
+        let _mempool = mempool.start(context.child("mempool"));
         let db = QmdbState::init(context.child("coins_state"), "rpc-test-coins")
             .await
             .expect("init coin state");
@@ -54,7 +66,7 @@ fn rpc_serves_status_and_filters_submissions_over_http() {
 
         // A well-signed transaction is accepted and lands in the pool.
         let alice = PrivateKey::from_seed(100);
-        let transaction = Transaction::sign(
+        let transaction = CoinTransaction::sign(
             &alice,
             0,
             CoinOperation::CreateToken {
@@ -64,17 +76,41 @@ fn rpc_serves_status_and_filters_submissions_over_http() {
         let accepted: SubmitTransactionResponse = client
             .request(
                 "coins.submit_transaction",
-                rpc_params![SubmitTransactionParams {
-                    transaction: encode_hex(&transaction),
-                }],
+                submit_params(&encode_hex(&transaction)),
             )
             .await
             .expect("submit valid transaction");
         assert_eq!(accepted.hash, encode_hex(&transaction.digest()));
         assert_eq!(
             submitter.pending(usize::MAX).await,
-            vec![RuntimeTransaction::from(transaction.clone())]
+            vec![transaction.clone().into()]
         );
+
+        // The pool reports the admitted transaction as pending.
+        let mut status_params = ObjectParams::new();
+        status_params
+            .insert("hash", accepted.hash.clone())
+            .expect("serialize hash param");
+        let tx_status: TransactionStatusResponse = client
+            .request("coins.transaction_status", status_params)
+            .await
+            .expect("transaction status");
+        assert_eq!(tx_status.status, "pending");
+
+        // Resubmitting the identical transaction is rejected as a duplicate.
+        let duplicate = client
+            .request::<SubmitTransactionResponse, _>(
+                "coins.submit_transaction",
+                submit_params(&encode_hex(&transaction)),
+            )
+            .await
+            .expect_err("duplicate transaction must be rejected");
+        match duplicate {
+            jsonrpsee::core::client::Error::Call(err) => {
+                assert_eq!(err.code(), INVALID_PARAMS_CODE);
+            }
+            other => panic!("expected invalid-params call error, got {other:?}"),
+        }
 
         // Corrupting the signature is rejected at ingress instead of being dropped silently.
         let mut tampered = encode_hex(&transaction);
@@ -83,9 +119,7 @@ fn rpc_serves_status_and_filters_submissions_over_http() {
         let rejection = client
             .request::<SubmitTransactionResponse, _>(
                 "coins.submit_transaction",
-                rpc_params![SubmitTransactionParams {
-                    transaction: tampered,
-                }],
+                submit_params(&tampered),
             )
             .await
             .expect_err("tampered transaction must be rejected");
@@ -98,7 +132,7 @@ fn rpc_serves_status_and_filters_submissions_over_http() {
         // The pool still only holds the valid submission.
         assert_eq!(
             submitter.pending(usize::MAX).await,
-            vec![RuntimeTransaction::from(transaction)]
+            vec![transaction.into()]
         );
 
         server.stop().expect("stop RPC server");
