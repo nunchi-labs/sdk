@@ -1,26 +1,18 @@
-//! Node-facing handles for submitting transactions and observing stateful execution.
+//! Coins-chain node-facing handles and query adapter.
 
 use crate::{application::Application, Transaction};
-use commonware_consensus::types::Height;
 use commonware_cryptography::sha256::Digest;
 use commonware_glue::stateful::Mailbox as StatefulMailbox;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_storage::Context;
-use futures::lock::Mutex as AsyncMutex;
 use jsonrpsee::core::async_trait;
 use nunchi_coins::{rpc::CoinQuery, Address, CoinId, Ledger, LedgerError, TokenDefinition};
 use nunchi_common::QmdbReader;
 use nunchi_mempool::MempoolHandle;
-use std::sync::Arc;
 
-/// The height of the last finalized block applied to a node's ledger.
-pub type SharedAppliedHeight = Arc<AsyncMutex<Height>>;
+pub use nunchi_chain::SharedAppliedHeight;
 
-/// A node's externally reachable handles, returned by [`Engine::new`](crate::engine::Engine::new):
-/// submit transactions to this node, and subscribe to its stateful databases.
-///
-/// In production a node has exactly one of these. An in-process multi-node harness collects them
-/// (e.g. into a map keyed by public key) to drive and observe multiple validators.
+/// A coins-chain node's externally reachable handles.
 #[derive(Clone)]
 pub struct NodeHandle<E>
 where

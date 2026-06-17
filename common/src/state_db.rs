@@ -109,6 +109,30 @@ pub trait StateDb: StateStore + CommitState {}
 
 impl<T: StateStore + CommitState> StateDb for T {}
 
+impl<T: StateStore + Send + Sync + ?Sized> StateStore for &mut T {
+    async fn get(&self, key: &Digest) -> Result<Option<Vec<u8>>, StateError> {
+        (**self).get(key).await
+    }
+
+    fn set(&mut self, key: Digest, value: Vec<u8>) {
+        (**self).set(key, value);
+    }
+
+    fn remove(&mut self, key: Digest) {
+        (**self).remove(key);
+    }
+}
+
+impl<T: CommitState + Send + ?Sized> CommitState for &mut T {
+    async fn commit(&mut self) -> Result<Digest, StateError> {
+        (**self).commit().await
+    }
+
+    fn root(&self) -> Digest {
+        (**self).root()
+    }
+}
+
 /// The concrete authenticated backend: an unordered, variable-value QMDB keyed by SHA-256 digests.
 pub type QmdbBackend<E> = AnyDb<Family, E, Digest, Vec<u8>, Sha256, TwoCap, Sequential>;
 pub type QmdbOperation = AnyOperation<Family, Digest, Vec<u8>>;

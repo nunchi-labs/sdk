@@ -29,6 +29,10 @@ const GENESIS: &[u8] = b"nunchi coins chain";
 /// Fixed consensus cutoff for block timestamps: 2200-01-01T00:00:00Z.
 const MAX_BLOCK_TIMESTAMP_MS: u64 = 7_258_118_400_000;
 
+pub fn genesis_payload() -> sha256::Digest {
+    Sha256::hash(GENESIS)
+}
+
 /// A module-level execution failure for a single transaction.
 ///
 /// Failed writes never reach the underlying batch (proposal runs each candidate in an
@@ -57,7 +61,10 @@ pub struct Application {
     dkg: Option<dkg::Mailbox<Block>>,
     applied_height: SharedAppliedHeight,
     genesis_state: StateCommitment,
+    genesis_payload: sha256::Digest,
 }
+
+pub type BasicApplication = Application;
 
 impl Application {
     /// The genesis block, committing to `genesis_state` (the root of an empty state database,
@@ -70,7 +77,7 @@ impl Application {
         };
         Block::new(
             genesis_context,
-            Sha256::hash(GENESIS),
+            self.genesis_payload,
             Height::zero(),
             0,
             Vec::new(),
@@ -84,6 +91,7 @@ impl Application {
         max_block_transactions: usize,
         applied_height: SharedAppliedHeight,
         genesis_state: StateCommitment,
+        genesis_payload: sha256::Digest,
     ) -> Self {
         Self {
             submitter,
@@ -91,6 +99,7 @@ impl Application {
             dkg: None,
             applied_height,
             genesis_state,
+            genesis_payload,
         }
     }
 
@@ -100,6 +109,7 @@ impl Application {
         dkg: dkg::Mailbox<Block>,
         applied_height: SharedAppliedHeight,
         genesis_state: StateCommitment,
+        genesis_payload: sha256::Digest,
     ) -> Self {
         Self {
             submitter,
@@ -107,6 +117,7 @@ impl Application {
             dkg: Some(dkg),
             applied_height,
             genesis_state,
+            genesis_payload,
         }
     }
 
@@ -374,7 +385,7 @@ where
             height = %block.height(),
             digest = ?block.digest(),
             transactions = block.transactions.len(),
-            has_reshare_log = block.reshare_log.is_some(),
+            has_reshare_log = block.extension.is_some(),
             "finalized block"
         );
         *self.applied_height.lock().await = block.height();
@@ -389,15 +400,17 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_consensus::types::Height;
     use commonware_runtime::{deterministic, Runner as _};
     use commonware_utils::sync::AsyncRwLock;
     use futures::lock::Mutex as AsyncMutex;
     use nunchi_coins::{
-        multisig_account_id, AccountPolicy, CoinOperation, CoinSpec, MultisigPolicy, PrivateKey,
-        Transaction as CoinTransaction,
+        multisig_account_id, AccountPolicy, CoinOperation, CoinSpec, Ledger, MultisigPolicy,
+        PrivateKey, Transaction as CoinTransaction,
     };
     use nunchi_common::{QmdbBackend, QmdbState};
     use nunchi_mempool::{Mempool, PoolConfig};
+    use nunchi_common::{QmdbBatch, QmdbDatabaseSet};
     use std::sync::Arc;
 
     fn spec() -> CoinSpec {
@@ -420,7 +433,8 @@ mod tests {
                 range: genesis_target.range,
             };
             let applied_height = Arc::new(AsyncMutex::new(Height::zero()));
-            let app = Application::new(submitter, 16, applied_height, genesis_state);
+            let app: BasicApplication =
+                BasicApplication::new(submitter, 16, applied_height, genesis_state, genesis_payload());
 
             let alice_a = PrivateKey::ed25519_from_seed(1);
             let alice_b = PrivateKey::secp256r1_from_seed(2);
@@ -435,14 +449,12 @@ mod tests {
                 CoinOperation::CreateToken { spec: spec() },
             );
 
-            // The multisig policy is unregistered, so the candidate is excluded at proposal time.
             let batches = databases.new_batches().await;
             let (included, _) = app
                 .build_valid_transactions(batches, 0, vec![tx.clone().into()])
                 .await;
             assert!(included.is_empty());
 
-            // Register the policy and finalize it into committed state.
             let batches = databases.new_batches().await;
             let mut ledger = Ledger::new(QmdbBatch::new(batches));
             ledger
