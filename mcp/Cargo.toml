@@ -1,0 +1,27 @@
+[package]
+name = "nunchi-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MCP server exposing the Nunchi SDK's JSON-RPC surface as AI-readable tools."
+
+[[bin]]
+name = "nunchi-mcp"
+path = "src/main.rs"
+
+[dependencies]
+rmcp = { version = "1.7.0", features = ["server", "transport-io"] }
+tokio = { version = "1", features = ["full"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = "1.0"
+clap = { workspace = true, features = ["derive"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+reqwest = { version = "0.12", features = ["json"] }
+anyhow = "1"
+walkdir = "2.5"
+nunchi-coins = { workspace = true }
+nunchi-crypto = { workspace = true }
+commonware-codec = { workspace = true }
+commonware-formatting = { workspace = true }
