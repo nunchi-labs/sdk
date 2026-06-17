@@ -1,8 +1,8 @@
+use crate::asset::TokenError;
 use crate::{
     multisig_account_id, AccountPolicy, Address, CoinId, CoinSpec, Ledger, LedgerError,
     MultisigPolicy, TokenName, TokenSymbol,
 };
-use crate::asset::TokenError;
 use commonware_codec::DecodeExt;
 use commonware_formatting::from_hex;
 use nunchi_crypto::PublicKey;
@@ -111,7 +111,9 @@ impl<D: crate::CoinDB> Ledger<D> {
 
         for token in &genesis.tokens {
             let issuer = decode_hex::<Address>(&token.issuer, "token issuer")?;
-            let coin = self.create_token(issuer.clone(), token.spec.spec()?).await?;
+            let coin = self
+                .create_token(issuer.clone(), token.spec.spec()?)
+                .await?;
             self.apply_allocations(issuer, coin, token.spec.initial_supply, &token.allocations)
                 .await?;
         }
