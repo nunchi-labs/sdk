@@ -1,7 +1,7 @@
 use super::Address;
 use commonware_codec::{EncodeSize, Error, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::sha256::Digest;
-use std::ops::Deref;
+use thiserror::Error;
 
 pub const MAX_SYMBOL_BYTES: usize = 32;
 pub const MAX_NAME_BYTES: usize = 128;
@@ -40,30 +40,47 @@ impl FixedSize for CoinId {
     const SIZE: usize = Digest::SIZE;
 }
 
+#[derive(Debug, Error, Clone, Eq, PartialEq)]
+pub enum TokenError {
+    #[error("invalid token spec: {0}")]
+    InvalidTokenSpec(&'static str),
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct TokenSymbol(pub String);
+pub struct TokenSymbol(String);
 
 impl TokenSymbol {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-}
+    pub fn new(value: impl Into<String>) -> Result<Self, TokenError> {
+        let symbol = value.into();
 
-impl From<String> for TokenSymbol {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
+        if symbol.is_empty() {
+            return Err(TokenError::InvalidTokenSpec("token symbol cannot be empty"));
+        }
+        if symbol.len() > MAX_SYMBOL_BYTES {
+            return Err(TokenError::InvalidTokenSpec("token symbol is too long"));
+        }
 
-impl From<&str> for TokenSymbol {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
+        Ok(Self(symbol))
     }
-}
 
-impl AsRef<str> for TokenSymbol {
-    fn as_ref(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl TryFrom<String> for TokenSymbol {
+    type Error = TokenError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<&str> for TokenSymbol {
+    type Error = TokenError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::new(value)
     }
 }
 
@@ -80,7 +97,8 @@ impl Read for TokenSymbol {
         let bytes = Vec::<u8>::read_cfg(buf, &(RangeCfg::new(0..=MAX_SYMBOL_BYTES), ()))?;
         let value = String::from_utf8(bytes)
             .map_err(|error| Error::Wrapped("TokenSymbol", error.into()))?;
-        Ok(Self(value))
+
+        Self::new(value).map_err(|error| Error::Wrapped("TokenSymbol", error.into()))
     }
 }
 
@@ -96,38 +114,32 @@ impl From<TokenSymbol> for String {
     }
 }
 
-impl Deref for TokenSymbol {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct TokenName(pub String);
 
 impl TokenName {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-}
+    pub fn new(value: impl Into<String>) -> Result<Self, TokenError> {
+        let name = value.into();
 
-impl From<String> for TokenName {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
+        if name.is_empty() {
+            return Err(TokenError::InvalidTokenSpec("token name cannot be empty"));
+        }
+        if name.len() > MAX_NAME_BYTES {
+            return Err(TokenError::InvalidTokenSpec("token name is too long"));
+        }
 
-impl From<&str> for TokenName {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
+        Ok(Self(name))
     }
-}
 
-impl AsRef<str> for TokenName {
-    fn as_ref(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl TryFrom<String> for TokenName {
+    type Error = TokenError;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
     }
 }
 
@@ -144,7 +156,7 @@ impl Read for TokenName {
         let bytes = Vec::<u8>::read_cfg(buf, &(RangeCfg::new(0..=MAX_NAME_BYTES), ()))?;
         let value =
             String::from_utf8(bytes).map_err(|error| Error::Wrapped("TokenName", error.into()))?;
-        Ok(Self(value))
+        Self::new(value).map_err(|error| Error::Wrapped("TokenName", error.into()))
     }
 }
 
@@ -160,14 +172,6 @@ impl From<TokenName> for String {
     }
 }
 
-impl Deref for TokenName {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
 /// Metadata and supply policy requested when creating a token.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CoinSpec {
@@ -180,15 +184,15 @@ pub struct CoinSpec {
 
 impl CoinSpec {
     pub fn new(
-        symbol: impl Into<TokenSymbol>,
-        name: impl Into<TokenName>,
+        symbol: TokenSymbol,
+        name: TokenName,
         decimals: u8,
         initial_supply: u128,
         max_supply: Option<u128>,
     ) -> Self {
         Self {
-            symbol: symbol.into(),
-            name: name.into(),
+            symbol,
+            name,
             decimals,
             initial_supply,
             max_supply,

@@ -45,18 +45,6 @@ impl TokenFactory {
 }
 
 fn validate_spec(spec: &CoinSpec) -> Result<(), LedgerError> {
-    if spec.symbol.is_empty() {
-        return Err(LedgerError::InvalidTokenSpec("symbol cannot be empty"));
-    }
-    if spec.symbol.len() > super::MAX_SYMBOL_BYTES {
-        return Err(LedgerError::InvalidTokenSpec("symbol is too long"));
-    }
-    if spec.name.is_empty() {
-        return Err(LedgerError::InvalidTokenSpec("name cannot be empty"));
-    }
-    if spec.name.len() > super::MAX_NAME_BYTES {
-        return Err(LedgerError::InvalidTokenSpec("name is too long"));
-    }
     if let Some(max_supply) = spec.max_supply {
         if spec.initial_supply > max_supply {
             return Err(LedgerError::MaxSupplyExceeded {

@@ -382,6 +382,7 @@ fn ensure_positive(amount: u128) -> Result<(), LedgerError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::asset::{TokenError, TokenName, TokenSymbol};
     use crate::{CoinSpec, MultisigPolicy, PrivateKey};
     use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
     use nunchi_common::QmdbState;
@@ -393,8 +394,14 @@ mod tests {
         Ledger::new(db)
     }
 
-    fn spec(supply: u128, max: Option<u128>) -> CoinSpec {
-        CoinSpec::new("NCH", "Nunchi", 9, supply, max)
+    fn spec(supply: u128, max: Option<u128>) -> Result<CoinSpec, TokenError> {
+        Ok(CoinSpec::new(
+            TokenSymbol::new("NCH")?,
+            TokenName::new("Nunchi")?,
+            9,
+            supply,
+            max,
+        ))
     }
 
     fn address(key: &PrivateKey) -> Address {
@@ -420,7 +427,7 @@ mod tests {
 
             let empty_root = ledger.root();
             let coin = ledger
-                .create_token(alice.clone(), spec(1_000, None))
+                .create_token(alice.clone(), spec(1_000, None).expect("valid coin spec"))
                 .await
                 .expect("create token");
 
@@ -445,7 +452,7 @@ mod tests {
             let bob = address(&PrivateKey::ed25519_from_seed(2));
 
             let coin = ledger
-                .create_token(alice.clone(), spec(1_000, None))
+                .create_token(alice.clone(), spec(1_000, None).expect("valid coin spec"))
                 .await
                 .expect("create token");
 
@@ -477,7 +484,7 @@ mod tests {
             let bob = address(&PrivateKey::ed25519_from_seed(2));
 
             let coin = ledger
-                .create_token(alice.clone(), spec(1_000, None))
+                .create_token(alice.clone(), spec(1_000, None).expect("valid coin spec"))
                 .await
                 .expect("create token");
 
@@ -514,7 +521,7 @@ mod tests {
             let bob = address(&PrivateKey::ed25519_from_seed(2));
 
             let coin = ledger
-                .create_token(alice.clone(), spec(1_000, None))
+                .create_token(alice.clone(), spec(1_000, None).expect("valid coin spec"))
                 .await
                 .expect("create token");
 
@@ -552,7 +559,7 @@ mod tests {
             let coin = {
                 let mut ledger = ledger(context.child("open")).await;
                 let coin = ledger
-                    .create_token(alice.clone(), spec(1_000, None))
+                    .create_token(alice.clone(), spec(1_000, None).expect("valid coin spec"))
                     .await
                     .expect("create token");
                 ledger.commit().await.expect("commit");
@@ -590,7 +597,7 @@ mod tests {
                 .expect("register multisig");
 
             let coin = ledger
-                .create_token(alice.clone(), spec(1_000, None))
+                .create_token(alice.clone(), spec(1_000, None).expect("valid coin spec"))
                 .await
                 .expect("create token");
 
@@ -632,7 +639,7 @@ mod tests {
                 .await
                 .expect("register multisig");
             let coin = ledger
-                .create_token(alice.clone(), spec(1_000, None))
+                .create_token(alice.clone(), spec(1_000, None).expect("valid coin spec"))
                 .await
                 .expect("create token");
 
@@ -673,7 +680,7 @@ mod tests {
                 &[&alice_a, &alice_b],
                 0,
                 CoinOperation::CreateToken {
-                    spec: spec(1_000, None),
+                    spec: spec(1_000, None).expect("valid coin spec"),
                 },
             );
 
@@ -743,7 +750,7 @@ mod tests {
             );
 
             let coin = ledger
-                .create_token(alice.clone(), spec(1_000, None))
+                .create_token(alice.clone(), spec(1_000, None).expect("valid coin spec"))
                 .await
                 .expect("create token");
             let tx = Transaction::sign_multisig(
@@ -804,7 +811,7 @@ mod tests {
             let attacker = PrivateKey::ed25519_from_seed(2);
             let policy = MultisigPolicy::new(1, vec![attacker.public_key()]).unwrap();
             let coin = ledger
-                .create_token(alice.clone(), spec(1_000, None))
+                .create_token(alice.clone(), spec(1_000, None).expect("valid coin spec"))
                 .await
                 .expect("fund alice");
 
@@ -895,7 +902,7 @@ mod tests {
                 &[&alice_a, &alice_b],
                 0,
                 CoinOperation::CreateToken {
-                    spec: spec(1_000, None),
+                    spec: spec(1_000, None).expect("valid coin spec"),
                 },
             );
             tx.account_id = account_b;

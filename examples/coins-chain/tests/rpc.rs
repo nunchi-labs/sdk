@@ -9,7 +9,10 @@ use futures::lock::Mutex as AsyncMutex;
 use jsonrpsee::{
     core::client::ClientT, http_client::HttpClient, rpc_params, types::error::INVALID_PARAMS_CODE,
 };
-use nunchi_coins::{rpc::SharedLedger, CoinOperation, CoinSpec, Ledger, PrivateKey, Transaction};
+use nunchi_coins::{
+    rpc::SharedLedger, CoinOperation, CoinSpec, Ledger, PrivateKey, TokenName, TokenSymbol,
+    Transaction,
+};
 use nunchi_coins_chain::{
     rpc::{self, StatusResponse, SubmitTransactionParams, SubmitTransactionResponse},
     txpool::TxPool,
@@ -58,7 +61,13 @@ fn rpc_serves_status_and_filters_submissions_over_http() {
             &alice,
             0,
             CoinOperation::CreateToken {
-                spec: CoinSpec::new("GOLD", "Gold", 9, 1_000_000, None),
+                spec: CoinSpec::new(
+                    TokenSymbol::new("GOLD").expect("valid token symbol"),
+                    TokenName::new("Gold").expect("valid token name"),
+                    9,
+                    1_000_000,
+                    None,
+                ),
             },
         );
         let accepted: SubmitTransactionResponse = client
