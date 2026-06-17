@@ -11,6 +11,7 @@ members = [
     "rpc",
     "examples/template",
     "examples/coins-chain",
+    "perpetuals",
 ]
 resolver = "2"
 
@@ -28,6 +29,7 @@ nunchi-crypto = { version = "2026.5.0", path = "crypto" }
 nunchi-dkg = { version = "2026.5.0", path = "dkg" }
 nunchi-mempool = { version = "2026.5.0", path = "mempool" }
 nunchi-rpc = { version = "2026.5.0", path = "rpc" }
+nunchi-perpetuals = { version = "2026.5.0", path = "perpetuals" }
 nunchi-template = { version = "2026.5.0", path = "examples/template" }
 nunchi-coins-chain = { version = "2026.5.0", path = "examples/coins-chain" }
 commonware-actor = "2026.5.0"

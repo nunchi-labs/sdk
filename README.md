@@ -44,10 +44,10 @@ This repository will contain modules for building public and private blockchains
 
 ### Financial Primitives
 
+* [`perpetuals`](perpetuals/) - defines perpetual swap markets, leveraged positions, liquidation checks, and RPC queries
 * `margin` - user has BTC + nunchi and doesn't want to sell, and deposits BTC+nunchi and gets a stablecoin.  Could be backed by other coins, not just btc and nunchi. 
 * `securities` - Non-synthetic perps contracts (delivery of tokenized stock)
 * `vaults` - a module for running vaults composed of many types of capital, traded by an authorised offchain party
 * `clob` - used on the global chain, provides liquidity between local chain tokens
 * `derivatives` - ingests a price feed and creates derivatives products
 * `stablecoin` - a wrapper of coins special for the needs of stablecoins
-
