@@ -3,7 +3,7 @@
 //! A single physical [`commonware_storage::qmdb`] authenticated database holds the state for *all*
 //! modules. Each module is handed a [`Namespace`] that deterministically maps its logical keys into
 //! a disjoint region of the shared digest keyspace, so modules can extend the same backend without
-//! colliding. Because the backend is authenticated, [`StateDb::root`] is a succinct commitment to
+//! colliding. Because the backend is authenticated, [`CommitState::root`] is a succinct commitment to
 //! the entire cross-module state.
 //!
 //! Modules never touch the raw backend directly. They program against the [`StateDb`] trait and
@@ -16,7 +16,7 @@ use commonware_codec::Read;
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_glue::stateful::db::{
     any::{AnyMerkleized, AnyUnmerkleized},
-    Unmerkleized as _,
+    ManagedDb as _, Unmerkleized as _,
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::paged::CacheRef, BufferPooler};
@@ -31,6 +31,7 @@ use commonware_storage::{
             unordered::variable::{Db as AnyDb, Operation as AnyOperation, Update as AnyUpdate},
             VariableConfig,
         },
+        sync::Target,
         Error as QmdbError,
     },
     translator::TwoCap,
@@ -108,6 +109,30 @@ pub trait StateDb: StateStore + CommitState {}
 
 impl<T: StateStore + CommitState> StateDb for T {}
 
+impl<T: StateStore + Send + Sync + ?Sized> StateStore for &mut T {
+    async fn get(&self, key: &Digest) -> Result<Option<Vec<u8>>, StateError> {
+        (**self).get(key).await
+    }
+
+    fn set(&mut self, key: Digest, value: Vec<u8>) {
+        (**self).set(key, value);
+    }
+
+    fn remove(&mut self, key: Digest) {
+        (**self).remove(key);
+    }
+}
+
+impl<T: CommitState + Send + ?Sized> CommitState for &mut T {
+    async fn commit(&mut self) -> Result<Digest, StateError> {
+        (**self).commit().await
+    }
+
+    fn root(&self) -> Digest {
+        (**self).root()
+    }
+}
+
 /// The concrete authenticated backend: an unordered, variable-value QMDB keyed by SHA-256 digests.
 pub type QmdbBackend<E> = AnyDb<Family, E, Digest, Vec<u8>, Sha256, TwoCap, Sequential>;
 pub type QmdbOperation = AnyOperation<Family, Digest, Vec<u8>>;
@@ -168,6 +193,11 @@ impl<E: Context + BufferPooler> QmdbState<E> {
     /// multiple independent stores can coexist within one runtime (e.g. across tests).
     pub async fn init(context: E, partition: &str) -> Result<Self, StateError> {
         let cfg = Self::config(&context, partition);
+        Self::init_with_config(context, cfg).await
+    }
+
+    /// Open (or recover) the shared store with a caller-provided QMDB config.
+    pub async fn init_with_config(context: E, cfg: QmdbConfig) -> Result<Self, StateError> {
         let db = QmdbBackend::init(context, cfg).await.map_err(backend_err)?;
         let root = db.root();
         Ok(Self {
@@ -175,6 +205,11 @@ impl<E: Context + BufferPooler> QmdbState<E> {
             overlay: BTreeMap::new(),
             root,
         })
+    }
+
+    /// Return the committed sync target for the underlying authenticated database.
+    pub async fn sync_target(&self) -> Target<Family, Digest> {
+        self.db.sync_target().await
     }
 }
 

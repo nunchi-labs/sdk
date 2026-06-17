@@ -8,6 +8,7 @@ description = "A demo blockchain that executes the Nunchi coins module, used for
 [dependencies]
 nunchi-coins = { workspace = true }
 nunchi-authority = { workspace = true }
+nunchi-chain = { workspace = true }
 nunchi-common = { workspace = true }
 nunchi-crypto = { workspace = true }
 nunchi-dkg = { workspace = true }
@@ -35,6 +36,7 @@ tracing = { workspace = true }
 governor = { workspace = true }
 jsonrpsee = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 toml = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }

@@ -34,6 +34,8 @@ pub enum LedgerError {
     DuplicateToken(CoinId),
     #[error("unauthorized coin operation")]
     Unauthorized,
+    #[error("invalid account policy: {0}")]
+    InvalidAccountPolicy(#[from] super::AccountPolicyError),
     #[error("insufficient balance for {account:?} in {coin:?}: available {available}, required {required}")]
     InsufficientBalance {
         account: Box<Address>,
@@ -45,6 +47,8 @@ pub enum LedgerError {
     BalanceOverflow,
     #[error("supply overflow")]
     SupplyOverflow,
+    #[error("allocation sum mismatch: expected {expected}, got {actual}")]
+    AllocationSumMismatch { expected: u128, actual: u128 },
     #[error("max supply exceeded: max {max}, attempted {attempted}")]
     MaxSupplyExceeded { max: u128, attempted: u128 },
     #[error("state storage error: {0}")]
@@ -316,7 +320,7 @@ impl<D: CoinDB> Ledger<D> {
         Ok(())
     }
 
-    async fn credit(
+    pub(crate) async fn credit(
         &mut self,
         account: &Address,
         coin: CoinId,
@@ -333,7 +337,7 @@ impl<D: CoinDB> Ledger<D> {
         Ok(())
     }
 
-    async fn debit(
+    pub(crate) async fn debit(
         &mut self,
         account: &Address,
         coin: CoinId,

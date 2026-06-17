@@ -176,7 +176,7 @@ pub struct RootResponse {
 ///
 /// TODO(@distractedm1nd): Transaction submission is intentionally not registered here while the example chain owns the
 /// transaction ingress. Once mempool ownership moves into the coin module, `coins.submit_transaction`
-/// can be added to [`Coins`] and implemented on [`CoinsRpc`].
+/// can be added to `Coins` and implemented on [`CoinsRpc`].
 pub fn register<Context, Q>(
     router: &mut RpcRouter<Context>,
     rpc: CoinsRpc<Q>,

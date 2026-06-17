@@ -1,5 +1,3 @@
-use crate::consensus::{Context, Finalization, Notarization, Scheme};
-use crate::Transaction;
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_consensus::{types::Height, CertifiableBlock, Heightable};
@@ -7,11 +5,12 @@ use commonware_cryptography::{sha256::Digest, Committable, Digestible, Hasher, S
 use commonware_parallel::Strategy;
 use commonware_storage::mmr::Location;
 use commonware_utils::range::NonEmptyRange;
-use nunchi_dkg::{DealerLog, ReshareBlock};
+use nunchi_dkg::{Context, Finalization, Notarization, Scheme};
 use rand::rngs::OsRng;
-use std::num::NonZeroU32;
 
-/// Upper bound on the number of coin transactions a single block may carry.
+use crate::{BlockExtension, NoConsensusExtension};
+
+/// Upper bound on the number of runtime transactions a single block may carry.
 ///
 /// Bounds the work a peer can force us to do when decoding an untrusted block.
 pub const MAX_TRANSACTIONS: u64 = 4_096;
@@ -25,8 +24,11 @@ pub struct StateCommitment {
     pub range: NonEmptyRange<Location>,
 }
 
-#[derive(Clone, Debug)]
-pub struct Block {
+#[derive(Debug)]
+pub struct Block<Tx, Ext = NoConsensusExtension>
+where
+    Ext: BlockExtension,
+{
     /// The consensus context when this block was proposed.
     pub context: Context,
 
@@ -39,11 +41,11 @@ pub struct Block {
     /// The timestamp of the block (in milliseconds since the Unix epoch).
     pub timestamp: u64,
 
-    /// The coin transactions to execute when this block is finalized.
-    pub transactions: Vec<Transaction>,
+    /// Runtime transactions to execute when this block is finalized.
+    pub transactions: Vec<Tx>,
 
-    /// Optional DKG/reshare dealer log included for epoch transitions.
-    pub reshare_log: Option<DealerLog>,
+    /// Consensus-side payload included outside ordinary runtime transactions.
+    pub extension: Ext::Payload,
 
     /// Authenticated state root after executing `transactions`.
     pub state_root: Digest,
@@ -55,30 +57,63 @@ pub struct Block {
     digest: Digest,
 }
 
-impl PartialEq for Block {
+impl<Tx, Ext> Clone for Block<Tx, Ext>
+where
+    Tx: Clone,
+    Ext: BlockExtension,
+{
+    fn clone(&self) -> Self {
+        Self {
+            context: self.context.clone(),
+            parent: self.parent,
+            height: self.height,
+            timestamp: self.timestamp,
+            transactions: self.transactions.clone(),
+            extension: self.extension.clone(),
+            state_root: self.state_root,
+            state_range: self.state_range.clone(),
+            digest: self.digest,
+        }
+    }
+}
+
+impl<Tx, Ext> PartialEq for Block<Tx, Ext>
+where
+    Tx: PartialEq,
+    Ext: BlockExtension,
+{
     fn eq(&self, other: &Self) -> bool {
         self.context == other.context
             && self.parent == other.parent
             && self.height == other.height
             && self.timestamp == other.timestamp
             && self.transactions == other.transactions
-            && self.reshare_log.encode() == other.reshare_log.encode()
+            && self.extension.encode() == other.extension.encode()
             && self.state_root == other.state_root
             && self.state_range == other.state_range
             && self.digest == other.digest
     }
 }
 
-impl Eq for Block {}
+impl<Tx, Ext> Eq for Block<Tx, Ext>
+where
+    Tx: Eq,
+    Ext: BlockExtension,
+{
+}
 
-impl Block {
+impl<Tx, Ext> Block<Tx, Ext>
+where
+    Tx: EncodeSize + Write,
+    Ext: BlockExtension,
+{
     fn compute_digest(
         context: &Context,
         parent: &Digest,
         height: Height,
         timestamp: u64,
-        transactions: &[Transaction],
-        reshare_log: &Option<DealerLog>,
+        transactions: &[Tx],
+        extension: &Ext::Payload,
         state: &StateCommitment,
     ) -> Digest {
         let mut hasher = Sha256::new();
@@ -90,7 +125,7 @@ impl Block {
         for transaction in transactions {
             hasher.update(&transaction.encode());
         }
-        hasher.update(&reshare_log.encode());
+        hasher.update(&extension.encode());
         hasher.update(&state.root);
         hasher.update(&state.range.encode());
         hasher.finalize()
@@ -101,8 +136,8 @@ impl Block {
         parent: Digest,
         height: Height,
         timestamp: u64,
-        transactions: Vec<Transaction>,
-        reshare_log: Option<DealerLog>,
+        transactions: Vec<Tx>,
+        extension: Ext::Payload,
         state: StateCommitment,
     ) -> Self {
         let digest = Self::compute_digest(
@@ -111,7 +146,7 @@ impl Block {
             height,
             timestamp,
             &transactions,
-            &reshare_log,
+            &extension,
             &state,
         );
         Self {
@@ -120,7 +155,7 @@ impl Block {
             height,
             timestamp,
             transactions,
-            reshare_log,
+            extension,
             state_root: state.root,
             state_range: state.range,
             digest,
@@ -128,7 +163,11 @@ impl Block {
     }
 }
 
-impl Write for Block {
+impl<Tx, Ext> Write for Block<Tx, Ext>
+where
+    Tx: Write,
+    Ext: BlockExtension,
+{
     fn write(&self, writer: &mut impl BufMut) {
         self.context.write(writer);
         self.parent.write(writer);
@@ -138,14 +177,18 @@ impl Write for Block {
         for transaction in &self.transactions {
             transaction.write(writer);
         }
-        self.reshare_log.write(writer);
+        self.extension.write(writer);
         self.state_root.write(writer);
         self.state_range.write(writer);
     }
 }
 
-impl Read for Block {
-    type Cfg = NonZeroU32;
+impl<Tx, Ext> Read for Block<Tx, Ext>
+where
+    Tx: EncodeSize + Read<Cfg = ()> + Write,
+    Ext: BlockExtension,
+{
+    type Cfg = Ext::ReadCfg;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let context = Context::read(reader)?;
@@ -155,15 +198,15 @@ impl Read for Block {
         let count = UInt::read(reader)?.0;
         if count > MAX_TRANSACTIONS {
             return Err(Error::Invalid(
-                "coins_chain::Block",
+                "nunchi_chain::Block",
                 "transaction count exceeds maximum",
             ));
         }
         let mut transactions = Vec::with_capacity(count as usize);
         for _ in 0..count {
-            transactions.push(Transaction::read(reader)?);
+            transactions.push(Tx::read(reader)?);
         }
-        let reshare_log = Read::read_cfg(reader, cfg)?;
+        let extension = Ext::Payload::read_cfg(reader, cfg)?;
         let state_root = Digest::read(reader)?;
         let state_range = NonEmptyRange::read(reader)?;
         let state = StateCommitment {
@@ -177,7 +220,7 @@ impl Read for Block {
             height,
             timestamp,
             &transactions,
-            &reshare_log,
+            &extension,
             &state,
         );
         Ok(Self {
@@ -186,7 +229,7 @@ impl Read for Block {
             height,
             timestamp,
             transactions,
-            reshare_log,
+            extension,
             state_root: state.root,
             state_range: state.range,
             digest,
@@ -194,7 +237,11 @@ impl Read for Block {
     }
 }
 
-impl EncodeSize for Block {
+impl<Tx, Ext> EncodeSize for Block<Tx, Ext>
+where
+    Tx: EncodeSize,
+    Ext: BlockExtension,
+{
     fn encode_size(&self) -> usize {
         self.context.encode_size()
             + self.parent.encode_size()
@@ -206,13 +253,17 @@ impl EncodeSize for Block {
                 .iter()
                 .map(EncodeSize::encode_size)
                 .sum::<usize>()
-            + self.reshare_log.encode_size()
+            + self.extension.encode_size()
             + self.state_root.encode_size()
             + self.state_range.encode_size()
     }
 }
 
-impl Digestible for Block {
+impl<Tx, Ext> Digestible for Block<Tx, Ext>
+where
+    Tx: Clone + Send + Sync + 'static,
+    Ext: BlockExtension,
+{
     type Digest = Digest;
 
     fn digest(&self) -> Digest {
@@ -220,7 +271,11 @@ impl Digestible for Block {
     }
 }
 
-impl Committable for Block {
+impl<Tx, Ext> Committable for Block<Tx, Ext>
+where
+    Tx: Clone + Send + Sync + 'static,
+    Ext: BlockExtension,
+{
     type Commitment = Digest;
 
     fn commitment(&self) -> Digest {
@@ -229,13 +284,19 @@ impl Committable for Block {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Notarized {
+pub struct Notarized<Tx, Ext = NoConsensusExtension>
+where
+    Ext: BlockExtension,
+{
     pub proof: Notarization,
-    pub block: Block,
+    pub block: Block<Tx, Ext>,
 }
 
-impl Notarized {
-    pub fn new(proof: Notarization, block: Block) -> Self {
+impl<Tx, Ext> Notarized<Tx, Ext>
+where
+    Ext: BlockExtension,
+{
+    pub fn new(proof: Notarization, block: Block<Tx, Ext>) -> Self {
         Self { proof, block }
     }
 
@@ -244,45 +305,62 @@ impl Notarized {
     }
 }
 
-impl Write for Notarized {
+impl<Tx, Ext> Write for Notarized<Tx, Ext>
+where
+    Tx: Write,
+    Ext: BlockExtension,
+{
     fn write(&self, buf: &mut impl BufMut) {
         self.proof.write(buf);
         self.block.write(buf);
     }
 }
 
-impl Read for Notarized {
-    type Cfg = NonZeroU32;
+impl<Tx, Ext> Read for Notarized<Tx, Ext>
+where
+    Tx: Clone + EncodeSize + Read<Cfg = ()> + Send + Sync + Write + 'static,
+    Ext: BlockExtension,
+{
+    type Cfg = Ext::ReadCfg;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let proof = Notarization::read(buf)?;
         let block = Block::read_cfg(buf, cfg)?;
 
-        // Ensure the proof is for the block
         if proof.proposal.payload != block.digest() {
             return Err(Error::Invalid(
-                "types::Notarized",
-                "Proof payload does not match block digest",
+                "nunchi_chain::Notarized",
+                "proof payload does not match block digest",
             ));
         }
         Ok(Self { proof, block })
     }
 }
 
-impl EncodeSize for Notarized {
+impl<Tx, Ext> EncodeSize for Notarized<Tx, Ext>
+where
+    Tx: EncodeSize,
+    Ext: BlockExtension,
+{
     fn encode_size(&self) -> usize {
         self.proof.encode_size() + self.block.encode_size()
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Finalized {
+pub struct Finalized<Tx, Ext = NoConsensusExtension>
+where
+    Ext: BlockExtension,
+{
     pub proof: Finalization,
-    pub block: Block,
+    pub block: Block<Tx, Ext>,
 }
 
-impl Finalized {
-    pub fn new(proof: Finalization, block: Block) -> Self {
+impl<Tx, Ext> Finalized<Tx, Ext>
+where
+    Ext: BlockExtension,
+{
+    pub fn new(proof: Finalization, block: Block<Tx, Ext>) -> Self {
         Self { proof, block }
     }
 
@@ -291,59 +369,75 @@ impl Finalized {
     }
 }
 
-impl Write for Finalized {
+impl<Tx, Ext> Write for Finalized<Tx, Ext>
+where
+    Tx: Write,
+    Ext: BlockExtension,
+{
     fn write(&self, buf: &mut impl BufMut) {
         self.proof.write(buf);
         self.block.write(buf);
     }
 }
 
-impl Read for Finalized {
-    type Cfg = NonZeroU32;
+impl<Tx, Ext> Read for Finalized<Tx, Ext>
+where
+    Tx: Clone + EncodeSize + Read<Cfg = ()> + Send + Sync + Write + 'static,
+    Ext: BlockExtension,
+{
+    type Cfg = Ext::ReadCfg;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let proof = Finalization::read(buf)?;
         let block = Block::read_cfg(buf, cfg)?;
 
-        // Ensure the proof is for the block
         if proof.proposal.payload != block.digest() {
             return Err(Error::Invalid(
-                "types::Finalized",
-                "Proof payload does not match block digest",
+                "nunchi_chain::Finalized",
+                "proof payload does not match block digest",
             ));
         }
         Ok(Self { proof, block })
     }
 }
 
-impl EncodeSize for Finalized {
+impl<Tx, Ext> EncodeSize for Finalized<Tx, Ext>
+where
+    Tx: EncodeSize,
+    Ext: BlockExtension,
+{
     fn encode_size(&self) -> usize {
         self.proof.encode_size() + self.block.encode_size()
     }
 }
 
-impl commonware_consensus::Block for Block {
+impl<Tx, Ext> commonware_consensus::Block for Block<Tx, Ext>
+where
+    Tx: Clone + EncodeSize + Read<Cfg = ()> + Send + Sync + Write + 'static,
+    Ext: BlockExtension,
+{
     fn parent(&self) -> Digest {
         self.parent
     }
 }
 
-impl Heightable for Block {
+impl<Tx, Ext> Heightable for Block<Tx, Ext>
+where
+    Ext: BlockExtension,
+{
     fn height(&self) -> Height {
         self.height
     }
 }
 
-impl CertifiableBlock for Block {
+impl<Tx, Ext> CertifiableBlock for Block<Tx, Ext>
+where
+    Tx: Clone + EncodeSize + Read<Cfg = ()> + Send + Sync + Write + 'static,
+    Ext: BlockExtension,
+{
     type Context = Context;
 
     fn context(&self) -> Self::Context {
         self.context.clone()
-    }
-}
-
-impl ReshareBlock for Block {
-    fn reshare_log(&self) -> Option<&DealerLog> {
-        self.reshare_log.as_ref()
     }
 }

@@ -2454,10 +2454,33 @@ dependencies = [
  "bytes",
  "commonware-codec",
  "commonware-cryptography",
+ "commonware-formatting",
  "commonware-runtime",
  "nunchi-common",
  "nunchi-crypto",
+ "serde",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "nunchi-chain"
+version = "2026.5.0"
+dependencies = [
+ "bytes",
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-glue",
+ "commonware-parallel",
+ "commonware-runtime",
+ "commonware-storage",
+ "commonware-utils",
+ "futures",
+ "nunchi-common",
+ "nunchi-dkg",
+ "rand 0.8.6",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -2468,6 +2491,7 @@ dependencies = [
  "bytes",
  "commonware-codec",
  "commonware-cryptography",
+ "commonware-formatting",
  "commonware-runtime",
  "futures",
  "jsonrpsee",
@@ -2503,6 +2527,7 @@ dependencies = [
  "governor",
  "jsonrpsee",
  "nunchi-authority",
+ "nunchi-chain",
  "nunchi-coins",
  "nunchi-common",
  "nunchi-crypto",
@@ -2511,6 +2536,7 @@ dependencies = [
  "rand 0.8.6",
  "rand_core 0.6.4",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "toml",
  "tracing",
@@ -2529,8 +2555,10 @@ dependencies = [
  "commonware-runtime",
  "commonware-storage",
  "commonware-utils",
+ "futures",
  "nunchi-crypto",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -2561,6 +2589,7 @@ dependencies = [
  "commonware-storage",
  "commonware-utils",
  "futures",
+ "prometheus-client",
  "rand 0.8.6",
  "rand_core 0.6.4",
  "serde",

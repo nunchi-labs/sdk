@@ -4,6 +4,7 @@ mod account;
 mod asset;
 mod db;
 mod factory;
+mod genesis;
 mod ledger;
 /// JSON-RPC surface for the coin module (enabled by the default `rpc` feature).
 #[cfg(feature = "rpc")]
@@ -19,6 +20,10 @@ pub use asset::{
 };
 pub use db::CoinDB;
 pub use factory::TokenFactory;
+pub use genesis::{
+    AccountPolicyGenesis, AllocationGenesis, CoinSpecGenesis, CoinsGenesis, MultisigPolicyGenesis,
+    TokenGenesis,
+};
 pub use ledger::{Ledger, LedgerError};
 pub use nunchi_common::{AccountSignature, Authorization};
 pub use transaction::{CoinOperation, Transaction, TransactionPayload};
