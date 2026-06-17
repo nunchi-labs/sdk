@@ -35,7 +35,9 @@ async fn main() -> anyhow::Result<()> {
     // Log to stderr so stdout stays clean for the MCP stdio transport.
     fmt()
         .with_writer(std::io::stderr)
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .init();
 
     let cli = Cli::parse();

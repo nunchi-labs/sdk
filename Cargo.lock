@@ -2740,6 +2740,7 @@ dependencies = [
  "commonware-codec",
  "commonware-formatting",
  "nunchi-coins",
+ "nunchi-crypto",
  "reqwest",
  "rmcp",
  "schemars",

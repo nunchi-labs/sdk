@@ -12,8 +12,9 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_formatting::{from_hex, hex};
 use nunchi_coins::{
     external_account_id, multisig_account_id, CoinId, CoinOperation, CoinSpec, MultisigPolicy,
-    PrivateKey, PublicKey, TokenFactory, TokenName, TokenSymbol, Transaction,
+    PrivateKey, TokenFactory, TokenName, TokenSymbol, Transaction,
 };
+use nunchi_crypto::PublicKey;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     tool, tool_handler, tool_router, ServerHandler,
@@ -30,8 +31,7 @@ fn decode_value<T: commonware_codec::Read<Cfg = ()>>(
     hex_str: &str,
     type_name: &str,
 ) -> anyhow::Result<T> {
-    let bytes = from_hex(hex_str)
-        .ok_or_else(|| anyhow::anyhow!("{type_name} is not valid hex"))?;
+    let bytes = from_hex(hex_str).ok_or_else(|| anyhow::anyhow!("{type_name} is not valid hex"))?;
     T::decode(bytes.as_ref()).map_err(|e| anyhow::anyhow!("invalid {type_name}: {e}"))
 }
 
@@ -255,8 +255,11 @@ impl NunchiServer {
                         Returns the amount as a decimal string (u128)."
     )]
     async fn coins_balance(&self, Parameters(p): Parameters<BalanceParams>) -> String {
-        self.rpc_call("coins.balance", json!({ "account": p.account, "coin": p.coin }))
-            .await
+        self.rpc_call(
+            "coins.balance",
+            json!({ "account": p.account, "coin": p.coin }),
+        )
+        .await
     }
 
     /// Fetch the current authenticated state root of the coin ledger.
@@ -333,10 +336,7 @@ impl NunchiServer {
                         Works offline – no node required. \
                         Returns the 32-byte (64 hex char) account address."
     )]
-    async fn sdk_derive_address(
-        &self,
-        Parameters(p): Parameters<DeriveAddressParams>,
-    ) -> String {
+    async fn sdk_derive_address(&self, Parameters(p): Parameters<DeriveAddressParams>) -> String {
         match decode_value::<PublicKey>(&p.public_key_hex, "public key") {
             Ok(pk) => encode_value(&external_account_id(&pk)),
             Err(e) => format!("Error: {e}"),
@@ -375,11 +375,14 @@ impl NunchiServer {
                         will assign to a new token created by a given issuer at a given nonce. \
                         Works offline – no node required."
     )]
-    async fn sdk_derive_coin_id(
-        &self,
-        Parameters(p): Parameters<DeriveCoinIdParams>,
-    ) -> String {
-        match build_coin_spec_from_params(&p.symbol, &p.name, p.decimals, &p.initial_supply, p.max_supply.as_deref()) {
+    async fn sdk_derive_coin_id(&self, Parameters(p): Parameters<DeriveCoinIdParams>) -> String {
+        match build_coin_spec_from_params(
+            &p.symbol,
+            &p.name,
+            p.decimals,
+            &p.initial_supply,
+            p.max_supply.as_deref(),
+        ) {
             Ok(spec) => match decode_value::<nunchi_coins::Address>(&p.issuer, "issuer address") {
                 Ok(issuer) => encode_value(&TokenFactory::derive_coin_id(&issuer, p.nonce, &spec)),
                 Err(e) => format!("Error: {e}"),
@@ -397,17 +400,26 @@ impl NunchiServer {
         description = "Build and sign a Nunchi coin Transfer transaction offline. \
                         Returns hex-encoded transaction bytes to submit via coins_submit_transaction."
     )]
-    async fn sdk_build_transfer(
-        &self,
-        Parameters(p): Parameters<BuildTransferParams>,
-    ) -> String {
+    async fn sdk_build_transfer(&self, Parameters(p): Parameters<BuildTransferParams>) -> String {
         match (|| -> anyhow::Result<String> {
             let signer = decode_value::<PrivateKey>(&p.private_key_hex, "private key")?;
             let coin = decode_value::<CoinId>(&p.coin, "coin id")?;
             let from = decode_value::<nunchi_coins::Address>(&p.from, "from address")?;
             let to = decode_value::<nunchi_coins::Address>(&p.to, "to address")?;
-            let amount = p.amount.parse::<u128>().map_err(|_| anyhow::anyhow!("amount is not a valid u128"))?;
-            let tx = Transaction::sign(&signer, p.nonce, CoinOperation::Transfer { coin, from, to, amount });
+            let amount = p
+                .amount
+                .parse::<u128>()
+                .map_err(|_| anyhow::anyhow!("amount is not a valid u128"))?;
+            let tx = Transaction::sign(
+                &signer,
+                p.nonce,
+                CoinOperation::Transfer {
+                    coin,
+                    from,
+                    to,
+                    amount,
+                },
+            );
             Ok(encode_value(&tx))
         })() {
             Ok(hex) => hex,
@@ -424,15 +436,15 @@ impl NunchiServer {
         description = "Build and sign a Nunchi coin Mint transaction offline (issuer only). \
                         Returns hex-encoded transaction bytes to submit via coins_submit_transaction."
     )]
-    async fn sdk_build_mint(
-        &self,
-        Parameters(p): Parameters<BuildMintParams>,
-    ) -> String {
+    async fn sdk_build_mint(&self, Parameters(p): Parameters<BuildMintParams>) -> String {
         match (|| -> anyhow::Result<String> {
             let signer = decode_value::<PrivateKey>(&p.private_key_hex, "private key")?;
             let coin = decode_value::<CoinId>(&p.coin, "coin id")?;
             let to = decode_value::<nunchi_coins::Address>(&p.to, "to address")?;
-            let amount = p.amount.parse::<u128>().map_err(|_| anyhow::anyhow!("amount is not a valid u128"))?;
+            let amount = p
+                .amount
+                .parse::<u128>()
+                .map_err(|_| anyhow::anyhow!("amount is not a valid u128"))?;
             let tx = Transaction::sign(&signer, p.nonce, CoinOperation::Mint { coin, to, amount });
             Ok(encode_value(&tx))
         })() {
@@ -450,16 +462,17 @@ impl NunchiServer {
                         Destroys the specified amount of coins from the `from` account. \
                         Returns hex-encoded transaction bytes to submit via coins_submit_transaction."
     )]
-    async fn sdk_build_burn(
-        &self,
-        Parameters(p): Parameters<BuildBurnParams>,
-    ) -> String {
+    async fn sdk_build_burn(&self, Parameters(p): Parameters<BuildBurnParams>) -> String {
         match (|| -> anyhow::Result<String> {
             let signer = decode_value::<PrivateKey>(&p.private_key_hex, "private key")?;
             let coin = decode_value::<CoinId>(&p.coin, "coin id")?;
             let from = decode_value::<nunchi_coins::Address>(&p.from, "from address")?;
-            let amount = p.amount.parse::<u128>().map_err(|_| anyhow::anyhow!("amount is not a valid u128"))?;
-            let tx = Transaction::sign(&signer, p.nonce, CoinOperation::Burn { coin, from, amount });
+            let amount = p
+                .amount
+                .parse::<u128>()
+                .map_err(|_| anyhow::anyhow!("amount is not a valid u128"))?;
+            let tx =
+                Transaction::sign(&signer, p.nonce, CoinOperation::Burn { coin, from, amount });
             Ok(encode_value(&tx))
         })() {
             Ok(hex) => hex,
@@ -485,7 +498,13 @@ impl NunchiServer {
     ) -> String {
         match (|| -> anyhow::Result<String> {
             let signer = decode_value::<PrivateKey>(&p.private_key_hex, "private key")?;
-            let spec = build_coin_spec_from_params(&p.symbol, &p.name, p.decimals, &p.initial_supply, p.max_supply.as_deref())?;
+            let spec = build_coin_spec_from_params(
+                &p.symbol,
+                &p.name,
+                p.decimals,
+                &p.initial_supply,
+                p.max_supply.as_deref(),
+            )?;
             let tx = Transaction::sign(&signer, p.nonce, CoinOperation::CreateToken { spec });
             Ok(encode_value(&tx))
         })() {
@@ -537,7 +556,10 @@ impl NunchiServer {
 
 // ── free helpers ──────────────────────────────────────────────────────────────
 
-fn build_multisig_policy(threshold: u16, public_keys_hex: &[String]) -> anyhow::Result<MultisigPolicy> {
+fn build_multisig_policy(
+    threshold: u16,
+    public_keys_hex: &[String],
+) -> anyhow::Result<MultisigPolicy> {
     let keys: Vec<PublicKey> = public_keys_hex
         .iter()
         .enumerate()
@@ -559,9 +581,18 @@ fn build_coin_spec_from_params(
         .parse::<u128>()
         .map_err(|_| anyhow::anyhow!("initial_supply is not a valid u128"))?;
     let max_supply = max_supply
-        .map(|s| s.parse::<u128>().map_err(|_| anyhow::anyhow!("max_supply is not a valid u128")))
+        .map(|s| {
+            s.parse::<u128>()
+                .map_err(|_| anyhow::anyhow!("max_supply is not a valid u128"))
+        })
         .transpose()?;
-    Ok(CoinSpec::new(symbol, name, decimals, initial_supply, max_supply))
+    Ok(CoinSpec::new(
+        symbol,
+        name,
+        decimals,
+        initial_supply,
+        max_supply,
+    ))
 }
 
 #[tool_handler(

@@ -68,10 +68,7 @@ impl RpcClient {
             .await?;
 
         if let Some(err) = resp.error {
-            let detail = err
-                .data
-                .map(|d| format!(" – {d}"))
-                .unwrap_or_default();
+            let detail = err.data.map(|d| format!(" – {d}")).unwrap_or_default();
             anyhow::bail!("JSON-RPC error {}: {}{}", err.code, err.message, detail);
         }
 
