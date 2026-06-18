@@ -10,6 +10,9 @@ mod ledger;
 #[cfg(feature = "rpc")]
 pub mod rpc;
 mod transaction;
+#[cfg(test)]
+#[path = "tests/mod.rs"]
+mod tests;
 
 pub use account::{
     external_account_id, multisig_account_id, Account, AccountPolicy, AccountPolicyError,
