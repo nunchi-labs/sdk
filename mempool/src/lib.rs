@@ -15,7 +15,6 @@ mod status;
 #[cfg(test)]
 mod testing;
 #[cfg(test)]
-#[path = "tests/mod.rs"]
 mod tests;
 mod tx;
 

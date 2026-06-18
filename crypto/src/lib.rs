@@ -2,7 +2,6 @@ use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use commonware_cryptography::{ed25519, secp256r1, Signer as _, Verifier as _};
 
 #[cfg(test)]
-#[path = "tests/mod.rs"]
 mod tests;
 
 /// A signature verification failure.

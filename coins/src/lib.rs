@@ -10,7 +10,6 @@ mod ledger;
 #[cfg(feature = "rpc")]
 pub mod rpc;
 #[cfg(test)]
-#[path = "tests/mod.rs"]
 mod tests;
 mod transaction;
 
