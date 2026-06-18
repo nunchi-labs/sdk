@@ -3,7 +3,8 @@ use crate::error::AdmissionError;
 use crate::pool::Pool;
 use crate::status::TxStatus;
 use crate::tx::PoolTransaction;
-use commonware_runtime::{Handle, Spawner};
+use commonware_macros::select_loop;
+use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use futures::channel::{mpsc, oneshot};
 use futures::{SinkExt, StreamExt};
 use tracing::warn;
@@ -138,29 +139,60 @@ impl<T: PoolTransaction> Mempool<T> {
 
     /// Spawn the actor's event loop.
     pub fn start<E: Spawner>(self, context: E) -> Handle<()> {
-        context.spawn(|_| self.run())
+        InnerActor {
+            context: ContextCell::new(context),
+            mempool: self,
+        }
+        .start()
+    }
+}
+
+struct InnerActor<E: Spawner, T: PoolTransaction> {
+    context: ContextCell<E>,
+    mempool: Mempool<T>,
+}
+
+impl<E, T> InnerActor<E, T>
+where
+    E: Spawner,
+    T: PoolTransaction,
+{
+    fn start(mut self) -> Handle<()> {
+        spawn_cell!(self.context, self.run())
     }
 
     async fn run(mut self) {
-        while let Some(message) = self.receiver.next().await {
+        select_loop! {
+            self.context,
+            on_stopped => {},
+            message = self.mempool.receiver.next() => {
+                let Some(message) = message else {
+                    warn!("mempool mailbox closed, stopping runtime");
+                    self.context.child("shutdown").spawn(|context| async move {
+                        let _ = context.stop(1, None).await;
+                    });
+                    return;
+                };
+
             match message {
                 Message::Submit { tx, responder } => {
-                    let _ = responder.send(self.pool.admit(tx));
+                    let _ = responder.send(self.mempool.pool.admit(tx));
                 }
                 Message::Pending { limit, responder } => {
-                    let _ = responder.send(self.pool.pending(limit));
+                    let _ = responder.send(self.mempool.pool.pending(limit));
                 }
                 Message::Finalized {
                     digests,
                     account_nonces,
                     height,
                 } => {
-                    self.pool.finalize(digests, account_nonces, height);
+                    self.mempool.pool.finalize(digests, account_nonces, height);
                 }
                 Message::Status { digest, responder } => {
-                    let _ = responder.send(self.pool.status_of(&digest));
+                    let _ = responder.send(self.mempool.pool.status_of(&digest));
                 }
             }
+            },
         }
     }
 }
