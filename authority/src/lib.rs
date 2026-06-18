@@ -3,6 +3,8 @@
 mod db;
 mod genesis;
 mod ledger;
+#[cfg(test)]
+mod tests;
 mod transaction;
 mod types;
 
