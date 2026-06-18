@@ -3,6 +3,9 @@
 mod db;
 mod genesis;
 mod ledger;
+#[cfg(test)]
+#[path = "tests/mod.rs"]
+mod tests;
 mod transaction;
 mod types;
 
