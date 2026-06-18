@@ -14,6 +14,9 @@ mod pool;
 mod status;
 #[cfg(test)]
 mod testing;
+#[cfg(test)]
+#[path = "tests/mod.rs"]
+mod tests;
 mod tx;
 
 pub use actor::{Mempool, MempoolHandle};
