@@ -6,6 +6,9 @@ use nunchi_common::Address;
 use nunchi_crypto::SignatureError;
 use nunchi_mempool::PoolTransaction;
 
+const TX_COIN: u8 = 0;
+const TX_AUTHORITY: u8 = 1;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Transaction {
     Coin(Box<CoinTransaction>),
@@ -91,11 +94,11 @@ impl Write for Transaction {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         match self {
             Self::Coin(tx) => {
-                0u8.write(buf);
+                TX_COIN.write(buf);
                 tx.write(buf);
             }
             Self::Authority(tx) => {
-                1u8.write(buf);
+                TX_AUTHORITY.write(buf);
                 tx.write(buf);
             }
         }
@@ -107,8 +110,8 @@ impl Read for Transaction {
 
     fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         match u8::read(buf)? {
-            0 => Ok(Self::Coin(Box::new(CoinTransaction::read(buf)?))),
-            1 => Ok(Self::Authority(Box::new(AuthorityTransaction::read(buf)?))),
+            TX_COIN => Ok(Self::Coin(Box::new(CoinTransaction::read(buf)?))),
+            TX_AUTHORITY => Ok(Self::Authority(Box::new(AuthorityTransaction::read(buf)?))),
             tag => Err(Error::InvalidEnum(tag)),
         }
     }
@@ -120,5 +123,73 @@ impl EncodeSize for Transaction {
             Self::Coin(tx) => tx.encode_size(),
             Self::Authority(tx) => tx.encode_size(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_codec::{DecodeExt, Encode};
+    use commonware_cryptography::{ed25519, Signer as _};
+    use nunchi_authority::{AuthorityOperation, MultisigPolicy};
+    use nunchi_coins::{CoinOperation, CoinSpec, PrivateKey, TokenName, TokenSymbol};
+
+    fn coin_transaction(seed: u64, nonce: u64) -> CoinTransaction {
+        let signer = PrivateKey::ed25519_from_seed(seed);
+        CoinTransaction::sign(
+            &signer,
+            nonce,
+            CoinOperation::CreateToken {
+                spec: CoinSpec::new(
+                    TokenSymbol::new("NCH").unwrap(),
+                    TokenName::new("Nunchi").unwrap(),
+                    9,
+                    1_000,
+                    None,
+                ),
+            },
+        )
+    }
+
+    fn authority_transaction(seed: u64, nonce: u64) -> AuthorityTransaction {
+        let owner = nunchi_crypto::PrivateKey::ed25519_from_seed(seed);
+        AuthorityTransaction::sign(
+            &owner,
+            nonce,
+            AuthorityOperation::Configure {
+                policy: MultisigPolicy {
+                    owners: vec![owner.public_key()],
+                    threshold: 1,
+                },
+                initial_validators: vec![ed25519::PrivateKey::from_seed(seed).public_key()],
+                epoch: 0,
+            },
+        )
+    }
+
+    #[test]
+    fn transaction_codec_uses_stable_tags() {
+        let coin = Transaction::from(coin_transaction(1, 3));
+        let authority = Transaction::from(authority_transaction(2, 4));
+
+        let coin_encoded = coin.encode();
+        let authority_encoded = authority.encode();
+
+        assert_eq!(coin_encoded[0], TX_COIN);
+        assert_eq!(authority_encoded[0], TX_AUTHORITY);
+        assert_eq!(Transaction::decode(coin_encoded).unwrap(), coin);
+        assert_eq!(Transaction::decode(authority_encoded).unwrap(), authority);
+        assert!(Transaction::decode([99].as_slice()).is_err());
+    }
+
+    #[test]
+    fn pool_transaction_forwards_to_inner_transaction() {
+        let inner = coin_transaction(3, 7);
+        let transaction = Transaction::from(inner.clone());
+
+        assert_eq!(transaction.digest(), inner.digest());
+        assert_eq!(transaction.account_id(), &inner.account_id);
+        assert_eq!(transaction.nonce(), inner.payload.nonce);
+        assert!(PoolTransaction::verify(&transaction).is_ok());
     }
 }

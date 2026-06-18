@@ -11,21 +11,21 @@ use commonware_runtime::{Clock, Metrics, Spawner, Storage};
 use commonware_storage::{mmr::Location, qmdb::sync::Target};
 use commonware_utils::{non_empty_range, range::NonEmptyRange, SystemTimeExt};
 use futures::{lock::Mutex as AsyncMutex, StreamExt};
-use nunchi_common::{
-    Overlay, PoolTransaction, QmdbBatch, QmdbDatabaseSet, QmdbMerkleized, Runtime, RuntimeContext,
-};
+use nunchi_common::{Overlay, QmdbBatch, QmdbDatabaseSet, QmdbMerkleized, Runtime, RuntimeContext};
 use nunchi_dkg::{Context, Scheme};
+use nunchi_mempool::{MempoolHandle, PoolTransaction};
 use rand::Rng;
 use std::{
+    collections::HashMap,
     marker::PhantomData,
     sync::Arc,
     time::{Duration, SystemTime},
 };
-use tracing::debug;
+use tracing::{debug, error};
 
 use crate::{
     Block, ConsensusExtension, DkgBlock, DkgExtension, DkgMailbox, NoConsensusExtension,
-    RuntimeSubmitter, StateCommitment,
+    StateCommitment,
 };
 
 /// The height of the last finalized block applied to a node's ledger.
@@ -39,9 +39,10 @@ const MAX_BLOCK_TIMESTAMP_MS: u64 = 7_258_118_400_000;
 pub struct Application<R, Ext = NoConsensusExtension>
 where
     R: Runtime,
+    R::Transaction: PoolTransaction,
     Ext: ConsensusExtension + Sync,
 {
-    submitter: RuntimeSubmitter<R>,
+    submitter: MempoolHandle<R::Transaction>,
     max_block_transactions: usize,
     consensus: Ext,
     applied_height: SharedAppliedHeight,
@@ -53,6 +54,7 @@ where
 impl<R, Ext> Application<R, Ext>
 where
     R: Runtime,
+    R::Transaction: PoolTransaction,
     Ext: ConsensusExtension + Sync,
 {
     /// The genesis block, committing to `genesis_state`.
@@ -74,7 +76,7 @@ where
     }
 
     pub fn with_consensus(
-        submitter: RuntimeSubmitter<R>,
+        submitter: MempoolHandle<R::Transaction>,
         max_block_transactions: usize,
         consensus: Ext,
         applied_height: SharedAppliedHeight,
@@ -110,7 +112,7 @@ where
         batches: <QmdbDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
         context: RuntimeContext,
         candidates: Vec<R::Transaction>,
-    ) -> (Vec<R::Transaction>, QmdbMerkleized<E>) {
+    ) -> Option<(Vec<R::Transaction>, QmdbMerkleized<E>)> {
         let mut batch = QmdbBatch::new(batches);
         let mut included = Vec::new();
 
@@ -125,7 +127,8 @@ where
                     included.push(transaction);
                 }
                 Err(error) if R::is_storage_error(&error) => {
-                    panic!("storage failure while building block: {error}");
+                    error!(?error, "storage failure while building block");
+                    return None;
                 }
                 Err(error) => {
                     debug!(?error, "skipping non-executable txpool transaction");
@@ -133,11 +136,14 @@ where
             }
         }
 
-        let merkleized = batch
-            .merkleize()
-            .await
-            .expect("merkleization failed while building block");
-        (included, merkleized)
+        let merkleized = match batch.merkleize().await {
+            Ok(merkleized) => merkleized,
+            Err(error) => {
+                error!(?error, "merkleization failed while building block");
+                return None;
+            }
+        };
+        Some((included, merkleized))
     }
 
     async fn execute_block<E: Storage + Clock + Metrics>(
@@ -190,9 +196,10 @@ where
 impl<R> Application<R>
 where
     R: Runtime,
+    R::Transaction: PoolTransaction,
 {
     pub fn new(
-        submitter: RuntimeSubmitter<R>,
+        submitter: MempoolHandle<R::Transaction>,
         max_block_transactions: usize,
         applied_height: SharedAppliedHeight,
         genesis_state: StateCommitment,
@@ -212,10 +219,11 @@ where
 impl<R> Application<R, DkgExtension<R::Transaction>>
 where
     R: Runtime,
+    R::Transaction: PoolTransaction,
     DkgBlock<R::Transaction>: nunchi_dkg::ReshareBlock,
 {
     pub fn with_dkg(
-        submitter: RuntimeSubmitter<R>,
+        submitter: MempoolHandle<R::Transaction>,
         max_block_transactions: usize,
         dkg: DkgMailbox<R::Transaction>,
         applied_height: SharedAppliedHeight,
@@ -237,13 +245,14 @@ impl<E, R, Ext> StatefulApplication<E> for Application<R, Ext>
 where
     E: Rng + Spawner + Metrics + Clock + Storage,
     R: Runtime + Clone + Send + Sync + 'static,
+    R::Transaction: PoolTransaction,
     Ext: ConsensusExtension + Sync,
 {
     type SigningScheme = Scheme;
     type Context = Context;
     type Block = Block<R::Transaction, Ext>;
     type Databases = QmdbDatabaseSet<E>;
-    type InputProvider = RuntimeSubmitter<R>;
+    type InputProvider = MempoolHandle<R::Transaction>;
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
         Target::new(block.state_root, block.state_range.clone())
@@ -269,7 +278,7 @@ where
         };
         let (transactions, merkleized) = self
             .build_valid_transactions(batches, execution_context, candidates)
-            .await;
+            .await?;
         let state_range = Self::state_range(&merkleized);
         let extension = self.consensus.propose().await;
         let block = Block::new(
@@ -305,7 +314,11 @@ where
             return None;
         }
 
-        if block.transactions.iter().any(|tx| tx.verify().is_err()) {
+        if block
+            .transactions
+            .iter()
+            .any(|tx| PoolTransaction::verify(tx).is_err())
+        {
             return None;
         }
 
@@ -352,7 +365,20 @@ where
         block: &Self::Block,
         _databases: &Self::Databases,
     ) {
-        let applied = block.transactions.iter().map(|tx| tx.digest()).collect();
+        let applied = block
+            .transactions
+            .iter()
+            .map(PoolTransaction::digest)
+            .collect();
+        let mut account_nonces: HashMap<<R::Transaction as PoolTransaction>::AccountId, u64> =
+            HashMap::new();
+        for transaction in &block.transactions {
+            let next = transaction.nonce() + 1;
+            account_nonces
+                .entry(transaction.account_id().clone())
+                .and_modify(|nonce| *nonce = (*nonce).max(next))
+                .or_insert(next);
+        }
         debug!(
             height = %block.height(),
             digest = ?block.digest(),
@@ -360,6 +386,10 @@ where
             "finalized block"
         );
         *self.applied_height.lock().await = block.height();
-        self.submitter.prune(applied);
+        self.submitter.finalized(
+            applied,
+            account_nonces.into_iter().collect(),
+            block.height().get(),
+        );
     }
 }

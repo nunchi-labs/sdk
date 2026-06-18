@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 nunchi-common = { workspace = true }
 nunchi-dkg = { workspace = true }
+nunchi-mempool = { workspace = true }
 bytes = { workspace = true }
 commonware-codec = { workspace = true }
 commonware-consensus = { workspace = true }
