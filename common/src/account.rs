@@ -1,4 +1,6 @@
-use commonware_codec::{Encode, EncodeSize, Error, FixedSize, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{
+    Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
+};
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use nunchi_crypto::PublicKey;
 use thiserror::Error;
@@ -49,7 +51,7 @@ impl Write for Address {
 impl Read for Address {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self(Digest::read(buf)?))
     }
 }
@@ -118,11 +120,11 @@ impl Write for MultisigPolicy {
 impl Read for MultisigPolicy {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         let threshold = u16::read(buf)?;
         let signers =
             Vec::<PublicKey>::read_cfg(buf, &(RangeCfg::new(0..=MAX_MULTISIG_SIGNERS), ()))?;
-        Self::new(threshold, signers).map_err(|_| Error::Invalid("multisig policy", "invalid"))
+        Self::new(threshold, signers).map_err(|_| CodecError::Invalid("multisig policy", "invalid"))
     }
 }
 
