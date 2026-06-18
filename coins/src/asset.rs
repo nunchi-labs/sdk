@@ -1,5 +1,7 @@
 use super::Address;
-use commonware_codec::{EncodeSize, Error, FixedSize, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{
+    EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
+};
 use commonware_cryptography::sha256::Digest;
 use thiserror::Error;
 
@@ -31,7 +33,7 @@ impl Write for CoinId {
 impl Read for CoinId {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self(Digest::read(buf)?))
     }
 }
@@ -93,16 +95,16 @@ impl Write for TokenSymbol {
 impl Read for TokenSymbol {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         let bytes = Vec::<u8>::read_cfg(buf, &(RangeCfg::new(0..=MAX_SYMBOL_BYTES), ()))?;
         let value = String::from_utf8(bytes).map_err(|_| {
-            Error::Wrapped(
+            CodecError::Wrapped(
                 "TokenSymbol",
                 TokenError::InvalidTokenSpec("token symbol must be valid utf-8").into(),
             )
         })?;
 
-        Self::new(value).map_err(|error| Error::Wrapped("TokenSymbol", error.into()))
+        Self::new(value).map_err(|error| CodecError::Wrapped("TokenSymbol", error.into()))
     }
 }
 
@@ -164,15 +166,15 @@ impl Write for TokenName {
 impl Read for TokenName {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         let bytes = Vec::<u8>::read_cfg(buf, &(RangeCfg::new(0..=MAX_NAME_BYTES), ()))?;
         let value = String::from_utf8(bytes).map_err(|_| {
-            Error::Wrapped(
+            CodecError::Wrapped(
                 "TokenName",
                 TokenError::InvalidTokenSpec("token name must be valid utf-8").into(),
             )
         })?;
-        Self::new(value).map_err(|error| Error::Wrapped("TokenName", error.into()))
+        Self::new(value).map_err(|error| CodecError::Wrapped("TokenName", error.into()))
     }
 }
 
@@ -229,7 +231,7 @@ impl Write for CoinSpec {
 impl Read for CoinSpec {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             symbol: TokenSymbol::read(buf)?,
             name: TokenName::read(buf)?,
@@ -291,7 +293,7 @@ impl Write for TokenDefinition {
 impl Read for TokenDefinition {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             id: CoinId::read(buf)?,
             issuer: Address::read(buf)?,
