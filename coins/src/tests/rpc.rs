@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::Runner as _;
 use nunchi_rpc::{encode_hex, RpcRouter};
-use async_trait::async_trait;
 
 use crate::{
     external_account_id, CoinId, CoinSpec, LedgerError, PrivateKey, TokenDefinition, TokenFactory,
@@ -111,7 +111,10 @@ fn coin_rpc_queries() {
         assert_eq!(balance.amount, "42");
 
         let root: crate::rpc::RootResponse = module
-            .call("coins.state_root", jsonrpsee::core::EmptyServerParams::new())
+            .call(
+                "coins.state_root",
+                jsonrpsee::core::EmptyServerParams::new(),
+            )
             .await
             .expect("root response");
         assert_eq!(root.root, encode_hex(&Sha256::hash(b"root")));

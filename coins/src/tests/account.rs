@@ -1,9 +1,9 @@
 use commonware_codec::{DecodeExt, Encode};
 use nunchi_common::MAX_MULTISIG_SIGNERS;
 
-use crate::{
-    account::{external_account_id, multisig_account_id, Account, AccountPolicy, AccountPolicyError,
-        AccountType, MultisigPolicy, PrivateKey},
+use crate::account::{
+    external_account_id, multisig_account_id, Account, AccountPolicy, AccountPolicyError,
+    AccountType, MultisigPolicy, PrivateKey,
 };
 
 #[test]

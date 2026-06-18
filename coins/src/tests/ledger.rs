@@ -1,5 +1,7 @@
 use crate::{
-    account::{multisig_account_id, AccountPolicy, AccountType, Address, MultisigPolicy, PrivateKey},
+    account::{
+        multisig_account_id, AccountPolicy, AccountType, Address, MultisigPolicy, PrivateKey,
+    },
     asset::{TokenError, TokenName, TokenSymbol},
     CoinSpec, Ledger, LedgerError, Transaction,
 };
@@ -317,8 +319,7 @@ fn registering_same_multisig_policy_twice_is_idempotent() {
         let alice_a = PrivateKey::ed25519_from_seed(1);
         let alice_b = PrivateKey::secp256r1_from_seed(2);
         let policy =
-            AccountPolicy::multisig(2, vec![alice_a.public_key(), alice_b.public_key()])
-                .unwrap();
+            AccountPolicy::multisig(2, vec![alice_a.public_key(), alice_b.public_key()]).unwrap();
         let alice = policy_account(&policy);
 
         let first = ledger
@@ -362,7 +363,10 @@ fn register_account_policy_operation_initializes_multisig_on_chain() {
             .expect("register policy");
 
         assert_eq!(ledger.nonce(&alice).await.unwrap(), 1);
-        assert_eq!(ledger.account(&alice).await.unwrap().kind, AccountType::Multisig);
+        assert_eq!(
+            ledger.account(&alice).await.unwrap().kind,
+            AccountType::Multisig
+        );
 
         let coin = ledger
             .create_token(alice.clone(), spec(1_000, None).expect("valid coin spec"))
@@ -445,7 +449,10 @@ fn register_account_policy_operation_cannot_hijack_external_account() {
             ledger.apply_transaction(&tx).await,
             Err(LedgerError::AccountPolicyMismatch(Box::new(alice.clone())))
         );
-        assert_eq!(ledger.account(&alice).await.unwrap().kind, AccountType::External);
+        assert_eq!(
+            ledger.account(&alice).await.unwrap().kind,
+            AccountType::External
+        );
         assert_eq!(ledger.balance(&alice, &coin).await.unwrap(), 1_000);
     });
 }

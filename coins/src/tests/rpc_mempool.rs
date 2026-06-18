@@ -1,21 +1,24 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use commonware_runtime::Runner as _;
 use async_trait::async_trait;
+use commonware_runtime::Runner as _;
 use nunchi_mempool::DropReason;
 use nunchi_rpc::{encode_hex, RpcRouter};
 
 use crate::{
-    rpc::{register_mempool, CoinsMempoolRpc, MempoolIngress, SubmitTransactionResponse,
-        TransactionStatusResponse},
-    CoinOperation, CoinSpec, PrivateKey, Transaction, TokenName, TokenSymbol,
+    rpc::{
+        register_mempool, CoinsMempoolRpc, MempoolIngress, SubmitTransactionResponse,
+        TransactionStatusResponse,
+    },
+    CoinOperation, CoinSpec, PrivateKey, TokenName, TokenSymbol, Transaction,
 };
 
 #[derive(Clone, Default)]
 struct MockIngress {
     reject: Option<nunchi_mempool::AdmissionError>,
-    statuses: Arc<Mutex<HashMap<commonware_cryptography::sha256::Digest, nunchi_mempool::TxStatus>>>,
+    statuses:
+        Arc<Mutex<HashMap<commonware_cryptography::sha256::Digest, nunchi_mempool::TxStatus>>>,
 }
 
 #[async_trait]
@@ -75,10 +78,7 @@ fn submit_transaction_returns_hash() {
             .call("coins.submit_transaction", params)
             .await
             .expect("submit response");
-        assert_eq!(
-            response.hash,
-            encode_hex(&transaction.digest())
-        );
+        assert_eq!(response.hash, encode_hex(&transaction.digest()));
     });
 }
 

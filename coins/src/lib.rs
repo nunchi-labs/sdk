@@ -9,10 +9,10 @@ mod ledger;
 /// JSON-RPC surface for the coin module (enabled by the default `rpc` feature).
 #[cfg(feature = "rpc")]
 pub mod rpc;
-mod transaction;
 #[cfg(test)]
 #[path = "tests/mod.rs"]
 mod tests;
+mod transaction;
 
 pub use account::{
     external_account_id, multisig_account_id, Account, AccountPolicy, AccountPolicyError,
