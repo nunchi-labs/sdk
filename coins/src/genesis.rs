@@ -1,10 +1,9 @@
-use crate::asset::TokenError;
 use crate::{
-    multisig_account_id, AccountPolicy, Address, CoinId, CoinSpec, Ledger, LedgerError,
-    MultisigPolicy, TokenName, TokenSymbol,
+    multisig_account_id, AccountPolicy, Address, CoinDB, CoinId, CoinSpec, Ledger, LedgerError,
+    MultisigPolicy,
 };
-use commonware_codec::DecodeExt;
-use commonware_formatting::from_hex;
+use commonware_codec::{DecodeExt, Encode};
+use commonware_formatting::{from_hex, hex};
 use nunchi_crypto::PublicKey;
 use serde::{Deserialize, Serialize};
 
@@ -33,8 +32,9 @@ pub struct AccountPolicyGenesis {
 pub struct MultisigPolicyGenesis {
     /// Number of signers required.
     pub threshold: u16,
-    /// Hex-encoded `nunchi_crypto::PublicKey` signers.
-    pub signers: Vec<String>,
+    /// Multisig signers, encoded as hex in JSON.
+    #[serde(with = "serde_hex_vec")]
+    pub signers: Vec<PublicKey>,
 }
 
 /// JSON-facing token creation request.
@@ -43,20 +43,10 @@ pub struct TokenGenesis {
     /// Hex-encoded issuer [`Address`].
     pub issuer: String,
     /// Token creation spec. This is passed through [`crate::TokenFactory`].
-    pub spec: CoinSpecGenesis,
+    pub spec: CoinSpec,
     /// Optional initial distribution. If present, amounts must sum to `spec.initial_supply`.
     #[serde(default)]
     pub allocations: Vec<AllocationGenesis>,
-}
-
-/// JSON-facing token spec.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct CoinSpecGenesis {
-    pub symbol: String,
-    pub name: String,
-    pub decimals: u8,
-    pub initial_supply: u128,
-    pub max_supply: Option<u128>,
 }
 
 /// JSON-facing balance allocation for a token created in the same genesis entry.
@@ -69,34 +59,12 @@ pub struct AllocationGenesis {
 
 impl MultisigPolicyGenesis {
     pub fn policy(&self) -> Result<MultisigPolicy, LedgerError> {
-        let signers = self
-            .signers
-            .iter()
-            .map(|signer| decode_hex::<PublicKey>(signer, "multisig signer"))
-            .collect::<Result<Vec<_>, _>>()?;
-        MultisigPolicy::new(self.threshold, signers).map_err(LedgerError::InvalidAccountPolicy)
+        MultisigPolicy::new(self.threshold, self.signers.clone())
+            .map_err(LedgerError::InvalidAccountPolicy)
     }
 }
 
-impl CoinSpecGenesis {
-    pub fn spec(&self) -> Result<CoinSpec, LedgerError> {
-        let symbol = TokenSymbol::try_from(self.symbol.clone()).map_err(
-            |TokenError::InvalidTokenSpec(message)| LedgerError::InvalidTokenSpec(message),
-        )?;
-        let name = TokenName::try_from(self.name.clone()).map_err(
-            |TokenError::InvalidTokenSpec(message)| LedgerError::InvalidTokenSpec(message),
-        )?;
-        Ok(CoinSpec::new(
-            symbol,
-            name,
-            self.decimals,
-            self.initial_supply,
-            self.max_supply,
-        ))
-    }
-}
-
-impl<D: crate::CoinDB> Ledger<D> {
+impl<D: CoinDB> Ledger<D> {
     /// Seed coin state from genesis while preserving ledger invariants.
     pub async fn apply_genesis(&mut self, genesis: &CoinsGenesis) -> Result<(), LedgerError> {
         for account in &genesis.account_policies {
@@ -112,7 +80,7 @@ impl<D: crate::CoinDB> Ledger<D> {
         for token in &genesis.tokens {
             let issuer = decode_hex::<Address>(&token.issuer, "token issuer")?;
             let coin = self
-                .create_token(issuer.clone(), token.spec.spec()?)
+                .create_token(issuer.clone(), token.spec.clone())
                 .await?;
             self.apply_allocations(issuer, coin, token.spec.initial_supply, &token.allocations)
                 .await?;
@@ -163,6 +131,37 @@ fn decode_hex<T>(value: &str, what: &'static str) -> Result<T, LedgerError>
 where
     T: DecodeExt<()>,
 {
-    let bytes = from_hex(value).ok_or_else(|| LedgerError::Storage(format!("invalid {what}")))?;
-    T::decode(bytes.as_ref()).map_err(|err| LedgerError::Storage(err.to_string()))
+    let bytes =
+        from_hex(value).ok_or_else(|| LedgerError::InvalidGenesis(format!("invalid {what}")))?;
+    T::decode(bytes.as_ref())
+        .map_err(|err| LedgerError::InvalidGenesis(format!("invalid {what}: {err}")))
+}
+
+mod serde_hex_vec {
+    use super::*;
+    use serde::{de::Error as _, Deserializer, Serializer};
+
+    pub fn serialize<T, S>(value: &[T], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        T: Encode,
+        S: Serializer,
+    {
+        serializer.collect_seq(value.iter().map(|item| hex(&item.encode())))
+    }
+
+    pub fn deserialize<'de, T, D>(deserializer: D) -> Result<Vec<T>, D::Error>
+    where
+        T: DecodeExt<()>,
+        D: Deserializer<'de>,
+    {
+        let values = Vec::<String>::deserialize(deserializer)?;
+        values
+            .into_iter()
+            .map(|value| {
+                let bytes = from_hex(&value)
+                    .ok_or_else(|| D::Error::custom("expected hex-encoded codec bytes"))?;
+                T::decode(bytes.as_ref()).map_err(D::Error::custom)
+            })
+            .collect()
+    }
 }

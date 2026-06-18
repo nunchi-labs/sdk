@@ -51,6 +51,8 @@ pub enum LedgerError {
     AllocationSumMismatch { expected: u128, actual: u128 },
     #[error("max supply exceeded: max {max}, attempted {attempted}")]
     MaxSupplyExceeded { max: u128, attempted: u128 },
+    #[error("invalid coins genesis: {0}")]
+    InvalidGenesis(String),
     #[error("state storage error: {0}")]
     Storage(String),
 }

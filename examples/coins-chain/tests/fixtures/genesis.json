@@ -1,0 +1,42 @@
+{
+  "authority": {
+    "policy": {
+      "owners": [
+        "01478b8e507e0bb2b18c0f9e0824769e8562d10df9abe2e774896f82b4b4405266",
+        "015925ba86e2189444a6c3b437b25d2ef35daecd1abf82c5fb36060f9fc0af428c",
+        "01ec8924090e507c2d8371d2fb0bf965d553e6e5756aeec6c274df3801cf2b49b9"
+      ],
+      "threshold": 2
+    },
+    "validators": [
+      "0632c75dcf681d611e2dfcd21a24f14c49f57b47f5cada3228c5a94de99baa0a",
+      "efb06d203a75962fc76b32cfb3e74d56a78b66383b5159a2e1a585a16f10ce97"
+    ],
+    "epoch": 0
+  },
+  "coins": {
+    "account_policies": [],
+    "tokens": [
+      {
+        "issuer": "9433e731954de5e1f8688bfdd2ce744c39baa18a8867c6b3be551deddf01e297",
+        "spec": {
+          "symbol": "NCH",
+          "name": "Nunchi",
+          "decimals": 9,
+          "initial_supply": 1000,
+          "max_supply": 2000
+        },
+        "allocations": [
+          {
+            "account": "43e912744bc7c5484d03b5c57a9bbcc614e0d969f0042a927164ed3eafcfd072",
+            "amount": 400
+          },
+          {
+            "account": "cfb10975ac5fb4033b902eb2dee02b711384078ba7c7c68d6fe343591f48dbb6",
+            "amount": 600
+          }
+        ]
+      }
+    ]
+  }
+}

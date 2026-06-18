@@ -1,6 +1,8 @@
-use crate::{AuthorityError, AuthorityLedger, EpochNumber, MultisigPolicy, OwnerId, ValidatorId};
-use commonware_codec::DecodeExt;
-use commonware_formatting::from_hex;
+use crate::{
+    AuthorityDB, AuthorityError, AuthorityLedger, EpochNumber, MultisigPolicy, OwnerId, ValidatorId,
+};
+use commonware_codec::{DecodeExt, Encode};
+use commonware_formatting::{from_hex, hex};
 use serde::{Deserialize, Serialize};
 
 /// JSON-facing authority module genesis state.
@@ -8,8 +10,9 @@ use serde::{Deserialize, Serialize};
 pub struct AuthorityGenesis {
     /// Initial authority policy.
     pub policy: AuthorityPolicyGenesis,
-    /// Initial validator set active at `epoch`.
-    pub validators: Vec<String>,
+    /// Initial validator set active at `epoch`, encoded as hex in JSON.
+    #[serde(with = "serde_hex_vec")]
+    pub validators: Vec<ValidatorId>,
     /// First epoch materialized in the authority registry.
     #[serde(default)]
     pub epoch: EpochNumber,
@@ -18,32 +21,25 @@ pub struct AuthorityGenesis {
 /// JSON-facing multisig policy for authority owners.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AuthorityPolicyGenesis {
-    /// Hex-encoded `nunchi_crypto::PublicKey` owners.
-    pub owners: Vec<String>,
+    /// Authority owners, encoded as hex in JSON.
+    #[serde(with = "serde_hex_vec")]
+    pub owners: Vec<OwnerId>,
     /// Number of owners required for governance actions.
     pub threshold: u16,
 }
 
 impl AuthorityGenesis {
     pub fn policy(&self) -> Result<MultisigPolicy, AuthorityError> {
-        let owners = self
-            .policy
-            .owners
-            .iter()
-            .map(|owner| decode_hex::<OwnerId>(owner, "authority owner"))
-            .collect::<Result<Vec<_>, _>>()?;
-        MultisigPolicy::new(self.policy.threshold, owners).ok_or(AuthorityError::InvalidPolicy)
+        MultisigPolicy::new(self.policy.threshold, self.policy.owners.clone())
+            .ok_or(AuthorityError::InvalidPolicy)
     }
 
     pub fn validators(&self) -> Result<Vec<ValidatorId>, AuthorityError> {
-        self.validators
-            .iter()
-            .map(|validator| decode_hex::<ValidatorId>(validator, "authority validator"))
-            .collect()
+        Ok(self.validators.clone())
     }
 }
 
-impl<D: crate::AuthorityDB> AuthorityLedger<D> {
+impl<D: AuthorityDB> AuthorityLedger<D> {
     /// Seed the authority registry from genesis without transaction authorization.
     ///
     /// This is the trusted bootstrap path. Runtime changes still go through authority
@@ -58,11 +54,31 @@ impl<D: crate::AuthorityDB> AuthorityLedger<D> {
     }
 }
 
-fn decode_hex<T>(value: &str, what: &'static str) -> Result<T, AuthorityError>
-where
-    T: DecodeExt<()>,
-{
-    let bytes =
-        from_hex(value).ok_or_else(|| AuthorityError::Storage(format!("invalid {what}")))?;
-    T::decode(bytes.as_ref()).map_err(|err| AuthorityError::Storage(err.to_string()))
+mod serde_hex_vec {
+    use super::*;
+    use serde::{de::Error as _, Deserializer, Serializer};
+
+    pub fn serialize<T, S>(value: &[T], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        T: Encode,
+        S: Serializer,
+    {
+        serializer.collect_seq(value.iter().map(|item| hex(&item.encode())))
+    }
+
+    pub fn deserialize<'de, T, D>(deserializer: D) -> Result<Vec<T>, D::Error>
+    where
+        T: DecodeExt<()>,
+        D: Deserializer<'de>,
+    {
+        let values = Vec::<String>::deserialize(deserializer)?;
+        values
+            .into_iter()
+            .map(|value| {
+                let bytes = from_hex(&value)
+                    .ok_or_else(|| D::Error::custom("expected hex-encoded codec bytes"))?;
+                T::decode(bytes.as_ref()).map_err(D::Error::custom)
+            })
+            .collect()
+    }
 }
