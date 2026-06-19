@@ -1,10 +1,11 @@
 //! Shared Nunchi primitives used across application crates.
 
 pub mod state_db;
-pub mod txpool;
 
 mod account;
 mod runtime;
+#[cfg(test)]
+mod tests;
 mod transaction;
 
 pub use account::{AccountPolicyError, Address, MultisigPolicy, MAX_MULTISIG_SIGNERS};
@@ -17,4 +18,3 @@ pub use state_db::{
 pub use transaction::{
     AccountSignature, Authorization, Operation, Transaction, TransactionPayload,
 };
-pub use txpool::{PoolTransaction, Submitter, TxPool};

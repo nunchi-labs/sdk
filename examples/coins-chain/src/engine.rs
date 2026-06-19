@@ -287,8 +287,8 @@ where
         let db_config =
             QmdbState::<E>::config_with_page_cache(&state_partition, page_cache.clone());
 
-        // The empty target is still derived from QMDB instead of hardcoded so it stays correct
-        // across storage versions. Non-empty genesis uses it as the fresh-state guard.
+        // Derive the empty-state target from QMDB so the genesis commitment stays coupled to the
+        // storage implementation instead of a hardcoded digest.
         let empty_state = {
             let empty = QmdbBackend::init(
                 context.child("empty_genesis_state"),

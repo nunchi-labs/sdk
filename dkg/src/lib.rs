@@ -11,6 +11,8 @@ mod ingress;
 pub mod orchestrator;
 mod setup;
 mod state;
+#[cfg(test)]
+mod tests;
 
 pub use actor::{Actor, Config};
 pub use consensus::{

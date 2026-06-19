@@ -8,7 +8,7 @@
 use crate::{
     channels,
     engine::{Config as EngineConfig, Engine},
-    genesis::ChainGenesis,
+    genesis::{ChainGenesis, GenesisError},
     rpc, PublicKey, NAMESPACE,
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
@@ -183,7 +183,7 @@ pub enum Error {
     #[error("failed to build RPC module: {0}")]
     RpcBuild(#[from] nunchi_rpc::RpcBuildError),
     #[error("genesis error: {0}")]
-    Genesis(#[from] crate::genesis::GenesisError),
+    Genesis(#[from] GenesisError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("failed to serialize toml: {0}")]

@@ -136,7 +136,7 @@ where
 }
 
 fn set_genesis_marker<S: StateStore>(state: &mut S, fingerprint: Digest) {
-    state.set(marker_key(), fingerprint.encode().as_ref().to_vec());
+    state.set(marker_key(), fingerprint.encode().to_vec());
 }
 
 fn marker_key() -> Digest {
@@ -153,6 +153,8 @@ mod tests {
     use nunchi_authority::{AuthorityDB, AuthorityOperation, Transaction as AuthorityTransaction};
     use nunchi_coins::{Address, CoinDB, CoinSpec, TokenFactory, TokenName, TokenSymbol};
     use nunchi_crypto::PrivateKey;
+
+    const GENESIS_FIXTURE: &[u8] = include_bytes!("../tests/fixtures/genesis.json");
 
     fn encode_hex(value: &impl Encode) -> String {
         hex(&value.encode())
@@ -180,15 +182,12 @@ mod tests {
         ChainGenesis {
             authority: Some(AuthorityGenesis {
                 policy: nunchi_authority::AuthorityPolicyGenesis {
-                    owners: owners
-                        .iter()
-                        .map(|owner| encode_hex(&owner.public_key()))
-                        .collect(),
+                    owners: owners.iter().map(|owner| owner.public_key()).collect(),
                     threshold: 2,
                 },
                 validators: validators
                     .iter()
-                    .map(|validator| encode_hex(&validator.public_key()))
+                    .map(|validator| validator.public_key())
                     .collect(),
                 epoch: 0,
             }),
@@ -196,13 +195,13 @@ mod tests {
                 account_policies: Vec::new(),
                 tokens: vec![nunchi_coins::TokenGenesis {
                     issuer: encode_hex(&issuer),
-                    spec: nunchi_coins::CoinSpecGenesis {
-                        symbol: "NCH".to_string(),
-                        name: "Nunchi".to_string(),
-                        decimals: 9,
-                        initial_supply: 1_000,
-                        max_supply: Some(2_000),
-                    },
+                    spec: CoinSpec::new(
+                        TokenSymbol::new("NCH").unwrap(),
+                        TokenName::new("Nunchi").unwrap(),
+                        9,
+                        1_000,
+                        Some(2_000),
+                    ),
                     allocations: vec![
                         nunchi_coins::AllocationGenesis {
                             account: encode_hex(&alice),
@@ -233,14 +232,21 @@ mod tests {
 
     #[test]
     fn genesis_json_loads_from_disk() {
-        let genesis = sample_genesis();
-        let raw = serde_json::to_vec_pretty(&genesis).unwrap();
+        let genesis = ChainGenesis::from_slice(GENESIS_FIXTURE).unwrap();
         let path = std::env::temp_dir().join(format!("nunchi-genesis-{}.json", std::process::id()));
-        std::fs::write(&path, raw).unwrap();
+        std::fs::write(&path, GENESIS_FIXTURE).unwrap();
 
         assert_eq!(ChainGenesis::read(&path).unwrap(), genesis);
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn genesis_json_fixture_roundtrips() {
+        let genesis = ChainGenesis::from_slice(GENESIS_FIXTURE).unwrap();
+        let raw = serde_json::to_vec_pretty(&genesis).unwrap();
+
+        assert_eq!(ChainGenesis::from_slice(&raw).unwrap(), genesis);
     }
 
     #[test]
