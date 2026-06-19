@@ -80,10 +80,11 @@ fn mint_respects_max_supply() {
             )
             .await
             .expect("create token");
+        let nonce = ledger.nonce(&alice).await.expect("read nonce");
 
         let mint = Transaction::sign(
             &alice_key,
-            0,
+            nonce,
             crate::CoinOperation::Mint {
                 coin,
                 to: bob.clone(),
@@ -99,7 +100,7 @@ fn mint_respects_max_supply() {
 
         let mint = Transaction::sign(
             &alice_key,
-            1,
+            nonce.checked_add(1).expect("nonce overflow"),
             crate::CoinOperation::Mint {
                 coin,
                 to: bob,
