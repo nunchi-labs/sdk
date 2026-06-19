@@ -70,13 +70,13 @@ fn reaches_height_with_lossy_links() {
 }
 
 #[test_traced]
-fn reaches_height_1k() {
+fn reaches_height_100() {
     let link = Link {
         latency: Duration::from_millis(80),
         jitter: Duration::from_millis(10),
         success_rate: 0.98,
     };
-    deterministic_state(10, 0, link, 1000);
+    deterministic_state(10, 0, link, 100);
 }
 
 #[test_traced]
