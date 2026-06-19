@@ -4,10 +4,9 @@ use commonware_glue::stateful::Mailbox as StatefulMailbox;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_storage::Context as StorageContext;
 use nunchi_common::{QmdbDatabaseSet, QmdbReader, Runtime};
+use nunchi_mempool::{MempoolHandle, PoolTransaction};
 
-use crate::{
-    Application, ConsensusExtension, NoConsensusExtension, RuntimeSubmitter, SharedAppliedHeight,
-};
+use crate::{Application, ConsensusExtension, NoConsensusExtension, SharedAppliedHeight};
 
 /// A node's externally reachable handles.
 ///
@@ -18,9 +17,10 @@ pub struct NodeHandle<E, R, Ext = NoConsensusExtension>
 where
     E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
     R: Runtime + Clone + Send + Sync + 'static,
+    R::Transaction: PoolTransaction,
     Ext: ConsensusExtension + Sync,
 {
-    pub submitter: RuntimeSubmitter<R>,
+    pub submitter: MempoolHandle<R::Transaction>,
     pub stateful: StatefulMailbox<E, Application<R, Ext>>,
     pub applied_height: SharedAppliedHeight,
 }
@@ -29,10 +29,11 @@ impl<E, R, Ext> NodeHandle<E, R, Ext>
 where
     E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
     R: Runtime + Clone + Send + Sync + 'static,
+    R::Transaction: PoolTransaction,
     Ext: ConsensusExtension + Sync,
 {
     pub fn new(
-        submitter: RuntimeSubmitter<R>,
+        submitter: MempoolHandle<R::Transaction>,
         stateful: StatefulMailbox<E, Application<R, Ext>>,
         applied_height: SharedAppliedHeight,
     ) -> Self {
@@ -54,6 +55,7 @@ pub struct StatefulQuery<E, R, Ext = NoConsensusExtension>
 where
     E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
     R: Runtime + Clone + Send + Sync + 'static,
+    R::Transaction: PoolTransaction,
     Ext: ConsensusExtension + Sync,
 {
     stateful: StatefulMailbox<E, Application<R, Ext>>,
@@ -63,6 +65,7 @@ impl<E, R, Ext> Clone for StatefulQuery<E, R, Ext>
 where
     E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
     R: Runtime + Clone + Send + Sync + 'static,
+    R::Transaction: PoolTransaction,
     Ext: ConsensusExtension + Sync,
 {
     fn clone(&self) -> Self {
@@ -76,6 +79,7 @@ impl<E, R, Ext> StatefulQuery<E, R, Ext>
 where
     E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
     R: Runtime + Clone + Send + Sync + 'static,
+    R::Transaction: PoolTransaction,
     Ext: ConsensusExtension + Sync,
 {
     pub fn new(stateful: StatefulMailbox<E, Application<R, Ext>>) -> Self {

@@ -12,12 +12,12 @@ struct Entry<T> {
 
 /// Nonce-aware pool state. All mutation happens on the actor task.
 pub(crate) struct Pool<T: PoolTransaction> {
-    /// Per-account pending transactions, ordered by nonce.
-    queues: BTreeMap<T::AccountId, BTreeMap<u64, Entry<T>>>,
+    /// Per-lane pending transactions, ordered by nonce.
+    queues: BTreeMap<T::NonceKey, BTreeMap<u64, Entry<T>>>,
     /// Digest -> queue position, for O(1) dedup and removal.
-    index: HashMap<T::Digest, (T::AccountId, u64)>,
-    /// Snapshot of committed account nonces, fed exclusively by finalization.
-    committed_nonces: HashMap<T::AccountId, u64>,
+    index: HashMap<T::Digest, (T::NonceKey, u64)>,
+    /// Snapshot of committed lane nonces, fed exclusively by finalization.
+    committed_nonces: HashMap<T::NonceKey, u64>,
     /// Highest finalized height reported so far.
     last_height: u64,
     total_count: usize,
@@ -54,9 +54,9 @@ impl<T: PoolTransaction> Pool<T> {
         if self.index.contains_key(&digest) {
             return Err(AdmissionError::Duplicate);
         }
-        let account = tx.account_id().clone();
+        let lane = tx.nonce_key();
         let nonce = tx.nonce();
-        let committed = self.committed_nonce(&account);
+        let committed = self.committed_nonce(&lane);
         if nonce < committed {
             return Err(AdmissionError::StaleNonce { nonce, committed });
         }
@@ -67,15 +67,14 @@ impl<T: PoolTransaction> Pool<T> {
         // Replacements bypass the capacity checks since pool size is unchanged.
         let replacing = self
             .queues
-            .get(&account)
+            .get(&lane)
             .is_some_and(|queue| queue.contains_key(&nonce));
         if !replacing {
-            if self.queues.get(&account).map_or(0, BTreeMap::len) >= self.config.max_per_account_txs
-            {
+            if self.queues.get(&lane).map_or(0, BTreeMap::len) >= self.config.max_per_account_txs {
                 return Err(AdmissionError::AccountQueueFull);
             }
             if self.total_count >= self.config.max_total_txs {
-                self.evict_for(&account, nonce)?;
+                self.evict_for(&lane, nonce)?;
             }
         }
 
@@ -85,7 +84,7 @@ impl<T: PoolTransaction> Pool<T> {
         };
         let previous = self
             .queues
-            .entry(account.clone())
+            .entry(lane.clone())
             .or_default()
             .insert(nonce, entry);
         match previous {
@@ -101,13 +100,13 @@ impl<T: PoolTransaction> Pool<T> {
             }
             None => self.total_count += 1,
         }
-        self.index.insert(digest, (account, nonce));
+        self.index.insert(digest, (lane, nonce));
         self.status.insert(digest, TxStatus::Pending);
         // TODO(@distractedm1nd): gossip broadcast, forward to a commonware_broadcast handler from here.
         Ok(digest)
     }
 
-    /// Up to `limit` executable transactions: for each account (in id order),
+    /// Up to `limit` executable transactions: for each nonce lane (in id order),
     /// the contiguous nonce run starting at its committed nonce. Never
     /// includes a nonce gap, so every returned transaction can apply in order.
     pub fn pending(&self, limit: usize) -> Vec<T> {
@@ -133,7 +132,7 @@ impl<T: PoolTransaction> Pool<T> {
     pub fn finalize(
         &mut self,
         digests: Vec<T::Digest>,
-        account_nonces: Vec<(T::AccountId, u64)>,
+        lane_nonces: Vec<(T::NonceKey, u64)>,
         height: u64,
     ) {
         for digest in digests {
@@ -151,7 +150,7 @@ impl<T: PoolTransaction> Pool<T> {
             self.status.insert(digest, TxStatus::Finalized { height });
         }
 
-        for (account, new_nonce) in account_nonces {
+        for (account, new_nonce) in lane_nonces {
             let committed = self.committed_nonces.entry(account.clone()).or_insert(0);
             if new_nonce <= *committed {
                 continue;
@@ -172,7 +171,7 @@ impl<T: PoolTransaction> Pool<T> {
             self.last_height = height;
         }
         let ttl = self.config.ttl_blocks;
-        let expired: Vec<(T::AccountId, u64)> = self
+        let expired: Vec<(T::NonceKey, u64)> = self
             .queues
             .iter()
             .flat_map(|(account, queue)| {
@@ -191,15 +190,15 @@ impl<T: PoolTransaction> Pool<T> {
         self.status.get(digest)
     }
 
-    fn committed_nonce(&self, account: &T::AccountId) -> u64 {
+    fn committed_nonce(&self, account: &T::NonceKey) -> u64 {
         self.committed_nonces.get(account).copied().unwrap_or(0)
     }
 
     /// Make room for an incoming transaction by evicting the highest-nonce
-    /// entry from the largest account queue
+    /// entry from the largest lane queue
     fn evict_for(
         &mut self,
-        incoming_account: &T::AccountId,
+        incoming_account: &T::NonceKey,
         incoming_nonce: u64,
     ) -> Result<(), AdmissionError> {
         let victim = self
@@ -223,7 +222,7 @@ impl<T: PoolTransaction> Pool<T> {
         Ok(())
     }
 
-    fn remove_entry(&mut self, account: &T::AccountId, nonce: u64, reason: DropReason) {
+    fn remove_entry(&mut self, account: &T::NonceKey, nonce: u64, reason: DropReason) {
         let Some(queue) = self.queues.get_mut(account) else {
             return;
         };

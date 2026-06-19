@@ -7,7 +7,7 @@ use std::future::Future;
 
 use commonware_codec::{EncodeSize, Read, Write};
 
-use crate::{PoolTransaction, StateStore};
+use crate::StateStore;
 
 /// Deterministic execution context supplied by the chain application.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -19,7 +19,7 @@ pub struct RuntimeContext {
 /// A complete chain runtime assembled from one or more module ledgers.
 pub trait Runtime {
     /// Top-level transaction type accepted by the chain.
-    type Transaction: PoolTransaction + EncodeSize + Read<Cfg = ()> + Write + Send + Sync + 'static;
+    type Transaction: Clone + EncodeSize + Read<Cfg = ()> + Write + Send + Sync + 'static;
 
     /// Runtime-level deterministic execution error.
     type Error: std::error::Error + Send + Sync + 'static;

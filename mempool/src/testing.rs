@@ -18,15 +18,15 @@ pub struct BadSignature;
 
 impl PoolTransaction for TestTx {
     type Digest = u64;
-    type AccountId = u8;
+    type NonceKey = u8;
     type VerifyError = BadSignature;
 
     fn digest(&self) -> u64 {
         self.id
     }
 
-    fn account_id(&self) -> &u8 {
-        &self.account
+    fn nonce_key(&self) -> u8 {
+        self.account
     }
 
     fn nonce(&self) -> u64 {
