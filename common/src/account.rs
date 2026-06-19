@@ -1,4 +1,6 @@
-use commonware_codec::{Encode, EncodeSize, Error, FixedSize, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{
+    Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
+};
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use nunchi_crypto::PublicKey;
 use thiserror::Error;
@@ -49,7 +51,7 @@ impl Write for Address {
 impl Read for Address {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self(Digest::read(buf)?))
     }
 }
@@ -118,11 +120,11 @@ impl Write for MultisigPolicy {
 impl Read for MultisigPolicy {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         let threshold = u16::read(buf)?;
         let signers =
             Vec::<PublicKey>::read_cfg(buf, &(RangeCfg::new(0..=MAX_MULTISIG_SIGNERS), ()))?;
-        Self::new(threshold, signers).map_err(|_| Error::Invalid("multisig policy", "invalid"))
+        Self::new(threshold, signers).map_err(|_| CodecError::Invalid("multisig policy", "invalid"))
     }
 }
 
@@ -143,35 +145,4 @@ pub enum AccountPolicyError {
     DuplicateSigner,
     #[error("multisig has {actual} signers, but the maximum is {max}")]
     TooManySigners { max: usize, actual: usize },
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use commonware_codec::{DecodeExt, Encode};
-    use nunchi_crypto::PrivateKey;
-
-    #[test]
-    fn addresses_share_a_fixed_width_space_and_roundtrip() {
-        let ed = PrivateKey::ed25519_from_seed(1).public_key();
-        let secp = PrivateKey::secp256r1_from_seed(1).public_key();
-        let ed_address = Address::external(&ed);
-        let secp_address = Address::external(&secp);
-
-        assert_eq!(ed_address.encode().len(), Digest::SIZE);
-        assert_eq!(secp_address.encode().len(), Digest::SIZE);
-        assert_ne!(ed_address, secp_address);
-        assert_eq!(
-            Address::decode(ed_address.encode().as_ref()).unwrap(),
-            ed_address
-        );
-    }
-
-    #[test]
-    fn address_derivation_separates_external_and_multisig_accounts() {
-        let signer = PrivateKey::ed25519_from_seed(1).public_key();
-        let policy = MultisigPolicy::new(1, vec![signer.clone()]).unwrap();
-
-        assert_ne!(Address::external(&signer), Address::multisig(&policy));
-    }
 }

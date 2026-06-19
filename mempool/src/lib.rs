@@ -14,6 +14,8 @@ mod pool;
 mod status;
 #[cfg(test)]
 mod testing;
+#[cfg(test)]
+mod tests;
 mod tx;
 
 pub use actor::{Mempool, MempoolHandle};

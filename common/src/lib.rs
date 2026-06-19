@@ -5,6 +5,8 @@ pub mod txpool;
 
 mod account;
 mod runtime;
+#[cfg(test)]
+mod tests;
 mod transaction;
 
 pub use account::{AccountPolicyError, Address, MultisigPolicy, MAX_MULTISIG_SIGNERS};
