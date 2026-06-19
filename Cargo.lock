@@ -2650,6 +2650,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "nunchi-bridge"
+version = "2026.5.0"
+dependencies = [
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-parallel",
+ "commonware-storage",
+ "commonware-utils",
+ "nunchi-chain",
+ "nunchi-dkg",
+ "rand 0.8.6",
+]
+
+[[package]]
+name = "nunchi-bridge-chain"
+version = "2026.5.0"
+dependencies = [
+ "bytes",
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-glue",
+ "commonware-parallel",
+ "commonware-runtime",
+ "commonware-storage",
+ "commonware-utils",
+ "futures",
+ "nunchi-bridge",
+ "nunchi-chain",
+ "nunchi-common",
+ "nunchi-dkg",
+ "nunchi-mempool",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "nunchi-chain"
 version = "2026.5.0"
 dependencies = [
