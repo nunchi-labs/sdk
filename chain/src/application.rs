@@ -370,12 +370,12 @@ where
             .iter()
             .map(PoolTransaction::digest)
             .collect();
-        let mut account_nonces: HashMap<<R::Transaction as PoolTransaction>::AccountId, u64> =
+        let mut lane_nonces: HashMap<<R::Transaction as PoolTransaction>::NonceKey, u64> =
             HashMap::new();
         for transaction in &block.transactions {
             let next = transaction.nonce() + 1;
-            account_nonces
-                .entry(transaction.account_id().clone())
+            lane_nonces
+                .entry(transaction.nonce_key())
                 .and_modify(|nonce| *nonce = (*nonce).max(next))
                 .or_insert(next);
         }
@@ -388,7 +388,7 @@ where
         *self.applied_height.lock().await = block.height();
         self.submitter.finalized(
             applied,
-            account_nonces.into_iter().collect(),
+            lane_nonces.into_iter().collect(),
             block.height().get(),
         );
     }

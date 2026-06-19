@@ -1,10 +1,10 @@
 use commonware_codec::{Encode, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_cryptography::sha256::Digest;
-use nunchi_authority::Transaction as AuthorityTransaction;
-use nunchi_coins::Transaction as CoinTransaction;
-use nunchi_common::Address;
+use nunchi_authority::{AuthorityOperation, Transaction as AuthorityTransaction};
+use nunchi_coins::{CoinOperation, Transaction as CoinTransaction};
+use nunchi_common::{Address, Operation};
 use nunchi_crypto::SignatureError;
-use nunchi_mempool::PoolTransaction;
+use nunchi_mempool::{NonceKey, PoolTransaction};
 
 const TX_COIN: u8 = 0;
 const TX_AUTHORITY: u8 = 1;
@@ -51,15 +51,20 @@ impl Transaction {
 
 impl PoolTransaction for Transaction {
     type Digest = Digest;
-    type AccountId = Address;
+    type NonceKey = NonceKey;
     type VerifyError = SignatureError;
 
     fn digest(&self) -> Self::Digest {
         Self::digest(self)
     }
 
-    fn account_id(&self) -> &Self::AccountId {
-        self.account_id()
+    fn nonce_key(&self) -> Self::NonceKey {
+        match self {
+            Self::Coin(tx) => NonceKey::new(CoinOperation::NAMESPACE, tx.account_id.clone()),
+            Self::Authority(tx) => {
+                NonceKey::new(AuthorityOperation::NAMESPACE, tx.account_id.clone())
+            }
+        }
     }
 
     fn nonce(&self) -> u64 {
