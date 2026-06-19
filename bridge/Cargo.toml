@@ -1,0 +1,19 @@
+[package]
+name = "nunchi-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nunchi-chain = { workspace = true }
+nunchi-dkg = { workspace = true }
+commonware-consensus = { workspace = true }
+commonware-parallel = { workspace = true }
+commonware-utils = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+commonware-codec = { workspace = true }
+commonware-consensus = { workspace = true, features = ["mocks"] }
+commonware-cryptography = { workspace = true, features = ["mocks"] }
+commonware-storage = { workspace = true }

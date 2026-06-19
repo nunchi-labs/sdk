@@ -29,6 +29,11 @@ pub trait BlockExtension: 'static {
 pub trait ConsensusExtension: BlockExtension + Clone + Send + 'static {
     /// Produce the extension payload for the next proposal.
     fn propose(&mut self) -> impl Future<Output = Self::Payload> + Send;
+
+    /// Verify an extension payload included in a proposed block.
+    fn verify_payload(&mut self, _payload: &Self::Payload) -> impl Future<Output = bool> + Send {
+        std::future::ready(true)
+    }
 }
 
 /// Pair of extra consensus extensions carried in one block extension slot.
@@ -63,6 +68,10 @@ where
         let left = self.0.propose().await;
         let right = self.1.propose().await;
         (left, right)
+    }
+
+    async fn verify_payload(&mut self, payload: &Self::Payload) -> bool {
+        self.0.verify_payload(&payload.0).await && self.1.verify_payload(&payload.1).await
     }
 }
 
