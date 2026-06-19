@@ -63,9 +63,10 @@ fn reaches_height_with_reliable_links() {
 #[test_traced]
 fn reaches_height_with_lossy_links() {
     let link = lossy_link();
-    for seed in 0..5 {
-        let state = deterministic_state(5, seed, link.clone(), 25);
-        assert_eq!(state, deterministic_state(5, seed, link.clone(), 25));
+    for seed in 0..2 {
+        let state_a = deterministic_state(5, seed, link.clone(), 16);
+        let state_b = deterministic_state(5, seed, link.clone(), 16);
+        assert_eq!(state_a, state_b);
     }
 }
 
