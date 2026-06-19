@@ -23,10 +23,7 @@ use std::{
 };
 use tracing::{debug, error};
 
-use crate::{
-    Block, ConsensusExtension, DkgBlock, DkgExtension, DkgMailbox, NoConsensusExtension,
-    StateCommitment,
-};
+use crate::{Block, ConsensusExtension, DkgMailbox, NoConsensusExtension, StateCommitment};
 
 /// The height of the last finalized block applied to a node's ledger.
 pub type SharedAppliedHeight = Arc<AsyncMutex<Height>>;
@@ -44,6 +41,7 @@ where
 {
     submitter: MempoolHandle<R::Transaction>,
     max_block_transactions: usize,
+    dkg: Option<DkgMailbox<R::Transaction, Ext>>,
     consensus: Ext,
     applied_height: SharedAppliedHeight,
     genesis_state: StateCommitment,
@@ -70,6 +68,7 @@ where
             Height::zero(),
             0,
             Vec::new(),
+            None,
             Ext::genesis_payload(),
             self.genesis_state.clone(),
         )
@@ -79,6 +78,7 @@ where
         submitter: MempoolHandle<R::Transaction>,
         max_block_transactions: usize,
         consensus: Ext,
+        dkg: Option<DkgMailbox<R::Transaction, Ext>>,
         applied_height: SharedAppliedHeight,
         genesis_state: StateCommitment,
         genesis_payload: sha256::Digest,
@@ -86,6 +86,7 @@ where
         Self {
             submitter,
             max_block_transactions,
+            dkg,
             consensus,
             applied_height,
             genesis_state,
@@ -209,6 +210,7 @@ where
             submitter,
             max_block_transactions,
             NoConsensusExtension,
+            None,
             applied_height,
             genesis_state,
             genesis_payload,
@@ -216,11 +218,11 @@ where
     }
 }
 
-impl<R> Application<R, DkgExtension<R::Transaction>>
+impl<R> Application<R>
 where
     R: Runtime,
     R::Transaction: PoolTransaction,
-    DkgBlock<R::Transaction>: nunchi_dkg::ReshareBlock,
+    Block<R::Transaction>: nunchi_dkg::ReshareBlock,
 {
     pub fn with_dkg(
         submitter: MempoolHandle<R::Transaction>,
@@ -233,7 +235,8 @@ where
         Self::with_consensus(
             submitter,
             max_block_transactions,
-            DkgExtension::new(dkg),
+            NoConsensusExtension,
+            Some(dkg),
             applied_height,
             genesis_state,
             genesis_payload,
@@ -280,6 +283,10 @@ where
             .build_valid_transactions(batches, execution_context, candidates)
             .await?;
         let state_range = Self::state_range(&merkleized);
+        let reshare_log = match &mut self.dkg {
+            Some(dkg) => dkg.act().await,
+            None => None,
+        };
         let extension = self.consensus.propose().await;
         let block = Block::new(
             context,
@@ -287,6 +294,7 @@ where
             parent.height.next(),
             timestamp,
             transactions,
+            reshare_log,
             extension,
             StateCommitment {
                 root: merkleized.root(),
