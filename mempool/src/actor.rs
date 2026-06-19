@@ -19,7 +19,7 @@ enum Message<T: PoolTransaction> {
     },
     Finalized {
         digests: Vec<T::Digest>,
-        account_nonces: Vec<(T::AccountId, u64)>,
+        lane_nonces: Vec<(T::NonceKey, u64)>,
         height: u64,
     },
     Status {
@@ -58,7 +58,7 @@ impl<T: PoolTransaction> MempoolHandle<T> {
     }
 
     /// Fetch up to `limit` executable transactions, gap-free and ordered by
-    /// (account, nonce). Returns an empty list if the pool has shut down.
+    /// (nonce lane, nonce). Returns an empty list if the pool has shut down.
     pub async fn pending(&self, limit: usize) -> Vec<T> {
         let (responder, receiver) = oneshot::channel();
         let mut sender = self.sender.clone();
@@ -73,21 +73,21 @@ impl<T: PoolTransaction> MempoolHandle<T> {
     }
 
     /// Report a finalized block: the digests it included and each touched
-    /// account's new committed nonce. Fire-and-forget so the consensus
+    /// lane's new committed nonce. Fire-and-forget so the consensus
     /// finalize hook never blocks on the pool; a dropped report self-heals on
     /// the next one (re-proposed finalized transactions fail the ledger nonce
     /// gate and are pruned then).
     pub fn finalized(
         &self,
         digests: Vec<T::Digest>,
-        account_nonces: Vec<(T::AccountId, u64)>,
+        lane_nonces: Vec<(T::NonceKey, u64)>,
         height: u64,
     ) {
         let mut sender = self.sender.clone();
         if sender
             .try_send(Message::Finalized {
                 digests,
-                account_nonces,
+                lane_nonces,
                 height,
             })
             .is_err()
@@ -152,10 +152,10 @@ impl<T: PoolTransaction> Mempool<T> {
                 }
                 Message::Finalized {
                     digests,
-                    account_nonces,
+                    lane_nonces,
                     height,
                 } => {
-                    self.pool.finalize(digests, account_nonces, height);
+                    self.pool.finalize(digests, lane_nonces, height);
                 }
                 Message::Status { digest, responder } => {
                     let _ = responder.send(self.pool.status_of(&digest));
