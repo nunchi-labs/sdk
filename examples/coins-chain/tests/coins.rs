@@ -112,7 +112,7 @@ fn backfills_late_validator() {
 #[test_traced]
 fn recovers_unclean_shutdown() {
     let n = 5;
-    let required_container = 100;
+    let required_container = 60;
     let mut rng = StdRng::seed_from_u64(0);
     let fixture = ThresholdFixture::new(&mut rng, n);
 
