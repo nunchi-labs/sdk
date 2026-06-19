@@ -22,6 +22,7 @@ bytes = { workspace = true }
 futures = { workspace = true }
 rand = { workspace = true }
 rand_core = { workspace = true }
+# `EncodeStruct` metrics derives expand to paths under `prometheus_client`.
 prometheus-client = { workspace = true }
 serde = { version = "1.0.219", features = ["derive"] }
 tracing = { workspace = true }
