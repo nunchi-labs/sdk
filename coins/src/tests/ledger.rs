@@ -74,7 +74,10 @@ fn mint_respects_max_supply() {
         let bob = address(&PrivateKey::ed25519_from_seed(2));
 
         let coin = ledger
-            .create_token(alice.clone(), spec(1_000, Some(1_200)).expect("valid coin spec"))
+            .create_token(
+                alice.clone(),
+                spec(1_000, Some(1_200)).expect("valid coin spec"),
+            )
             .await
             .expect("create token");
 
@@ -89,7 +92,10 @@ fn mint_respects_max_supply() {
         );
         ledger.apply_transaction(&mint).await.expect("mint to cap");
         assert_eq!(ledger.balance(&bob, &coin).await.unwrap(), 200);
-        assert_eq!(ledger.token(&coin).await.unwrap().unwrap().total_supply, 1_200);
+        assert_eq!(
+            ledger.token(&coin).await.unwrap().unwrap().total_supply,
+            1_200
+        );
 
         let mint = Transaction::sign(
             &alice_key,
