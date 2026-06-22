@@ -5,6 +5,8 @@ use nunchi_coins_chain::testnet::{
 };
 use std::path::{Path, PathBuf};
 
+const DEFAULT_BASE_METRICS_PORT: u16 = 9_090;
+
 #[derive(Debug, Parser)]
 #[command(about = "Generate and run local testnets in a ratatui dashboard")]
 struct Cli {
@@ -81,6 +83,8 @@ enum ChainCommand {
         base_port: u16,
         #[arg(long, default_value_t = 8_545)]
         base_rpc_port: u16,
+        #[arg(long, default_value_t = DEFAULT_BASE_METRICS_PORT)]
+        base_metrics_port: u16,
         #[arg(long, default_value_t = 0)]
         seed: u64,
     },
@@ -93,6 +97,7 @@ fn generate(chain: ChainCommand) -> Result<PathBuf, Box<dyn std::error::Error>> 
             out,
             base_port,
             base_rpc_port,
+            base_metrics_port,
             seed,
         } => {
             let manifest_path = manifest_path(&out);
@@ -100,6 +105,7 @@ fn generate(chain: ChainCommand) -> Result<PathBuf, Box<dyn std::error::Error>> 
                 validators,
                 base_port,
                 base_rpc_port,
+                base_metrics_port,
                 base_data_dir: out,
                 seed,
             })?;

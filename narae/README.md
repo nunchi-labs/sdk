@@ -20,13 +20,16 @@ cargo run -p narae -- run testnet
 ```
 
 `generate` writes one `validator-N.toml` per node plus a `narae.toml` manifest into the output
-directory. Each node listens for peers on `--base-port + N` (default 30000) and serves the
-aggregated JSON-RPC on `--base-rpc-port + N` (default 8545), e.g.:
+directory. Each node listens for peers on `--base-port + N` (default 30000), serves the
+aggregated JSON-RPC on `--base-rpc-port + N` (default 8545), and exposes Prometheus metrics on
+`--base-metrics-port + N` (default 9090), e.g.:
 
 ```sh
 curl -s -X POST -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"chain.status","params":[]}' \
   http://127.0.0.1:8545
+
+curl -s http://127.0.0.1:9090/metrics
 ```
 
 Inside the dashboard: `↑`/`↓` (or `j`/`k`) select a node, `PgUp`/`PgDn` scroll its logs, `/`

@@ -38,9 +38,10 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::{NonZeroU32, TryFromIntError},
     path::{Path, PathBuf},
+    str::FromStr,
     time::Duration,
 };
-use tracing::info;
+use tracing::{info, Level};
 
 const FREEZER_TABLE_INITIAL_SIZE: u32 = 2u32.pow(14);
 const DEFAULT_MAX_BLOCK_TRANSACTIONS: usize = 256;
@@ -52,6 +53,7 @@ pub struct LocalTestnetConfig {
     pub validators: u32,
     pub base_port: u16,
     pub base_rpc_port: u16,
+    pub base_metrics_port: u16,
     pub base_data_dir: PathBuf,
     pub seed: u64,
 }
@@ -85,6 +87,7 @@ pub struct ManifestNode {
     pub config_path: PathBuf,
     pub port: u16,
     pub rpc_port: u16,
+    pub metrics_port: u16,
     pub data_dir: PathBuf,
 }
 
@@ -102,6 +105,7 @@ pub struct NodeConfig {
     pub listen_address: SocketAddr,
     pub dialable_address: SocketAddr,
     pub rpc_address: SocketAddr,
+    pub metrics_address: SocketAddr,
     pub bootstrappers: Vec<BootstrapperConfig>,
     pub storage_dir: PathBuf,
     pub genesis_path: Option<PathBuf>,
@@ -209,6 +213,7 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
     let node_count = usize::try_from(config.validators)?;
     check_port_range(config.base_port, config.validators)?;
     check_port_range(config.base_rpc_port, config.validators)?;
+    check_port_range(config.base_metrics_port, config.validators)?;
 
     let private_keys = (0..config.validators)
         .map(|index| ed25519::PrivateKey::from_seed(config.seed.wrapping_add(index as u64)))
@@ -233,6 +238,7 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
         let name = format!("validator-{index}");
         let port = config.base_port + u16::try_from(index)?;
         let rpc_port = config.base_rpc_port + u16::try_from(index)?;
+        let metrics_port = config.base_metrics_port + u16::try_from(index)?;
         let storage_dir = config.base_data_dir.join(&name);
         fs::create_dir_all(&storage_dir)?;
         let config_path = config.base_data_dir.join(format!("{name}.toml"));
@@ -263,6 +269,7 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
             listen_address,
             dialable_address: listen_address,
             rpc_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), rpc_port),
+            metrics_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), metrics_port),
             bootstrappers,
             storage_dir: storage_dir.clone(),
             genesis_path: None,
@@ -276,6 +283,7 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
             config_path,
             port,
             rpc_port,
+            metrics_port,
             data_dir: storage_dir,
         });
     }
@@ -310,9 +318,25 @@ pub fn run_node(config_path: impl AsRef<Path>) -> Result<(), Error> {
     let runtime =
         tokio::Runner::new(tokio::Config::new().with_storage_directory(config.storage_dir.clone()));
     runtime.start(|context| async move {
+        tokio::telemetry::init(
+            context.child("telemetry"),
+            tokio::telemetry::Logging {
+                level: log_level_from_env(),
+                json: false,
+            },
+            Some(config.metrics_address),
+            None,
+        );
         let (rpc_server, engine_handle) = start_node(&context, config).await?;
         wait_for_shutdown(context, rpc_server, engine_handle).await
     })
+}
+
+fn log_level_from_env() -> Level {
+    std::env::var("RUST_LOG")
+        .ok()
+        .and_then(|value| Level::from_str(&value).ok())
+        .unwrap_or(Level::INFO)
 }
 
 /// Block until a shutdown signal is received or the engine handle resolves.
@@ -401,6 +425,7 @@ async fn start_node(
         public_key = %public_key,
         listen = %config.listen_address,
         rpc = %config.rpc_address,
+        metrics = %config.metrics_address,
         "starting coins-chain validator"
     );
 
@@ -534,6 +559,7 @@ mod tests {
             validators: 4,
             base_port: 40_000,
             base_rpc_port: 41_000,
+            base_metrics_port: 42_000,
             base_data_dir: dir.clone(),
             seed: 7,
         })
@@ -546,6 +572,18 @@ mod tests {
             .map(|node| node.port)
             .collect::<HashSet<_>>();
         assert_eq!(ports.len(), 4);
+        let rpc_ports = manifest
+            .nodes
+            .iter()
+            .map(|node| node.rpc_port)
+            .collect::<HashSet<_>>();
+        assert_eq!(rpc_ports.len(), 4);
+        let metrics_ports = manifest
+            .nodes
+            .iter()
+            .map(|node| node.metrics_port)
+            .collect::<HashSet<_>>();
+        assert_eq!(metrics_ports.len(), 4);
         let dirs = manifest
             .nodes
             .iter()
@@ -561,6 +599,8 @@ mod tests {
                 .bootstrappers
                 .iter()
                 .any(|bootstrapper| bootstrapper.address.port() == node.port));
+            assert_eq!(config.rpc_address.port(), node.rpc_port);
+            assert_eq!(config.metrics_address.port(), node.metrics_port);
 
             // The threshold material must round-trip from the written config.
             let max_participants =
