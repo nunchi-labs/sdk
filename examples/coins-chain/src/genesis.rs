@@ -7,6 +7,7 @@ use nunchi_coins::{CoinsGenesis, Ledger};
 use nunchi_common::{
     CommitState, Namespace, Overlay, QmdbConfig, QmdbState, StateError, StateStore,
 };
+use nunchi_oracle::{OracleGenesis, OracleLedger};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
 use thiserror::Error;
@@ -31,6 +32,8 @@ pub struct ChainGenesis {
     pub authority: Option<AuthorityGenesis>,
     #[serde(default)]
     pub coins: Option<CoinsGenesis>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle: Option<OracleGenesis>,
 }
 
 #[derive(Debug, Error)]
@@ -43,6 +46,8 @@ pub enum GenesisError {
     Authority(#[from] nunchi_authority::AuthorityError),
     #[error("coins genesis error: {0}")]
     Coins(#[from] nunchi_coins::LedgerError),
+    #[error("oracle genesis error: {0}")]
+    Oracle(#[from] nunchi_oracle::OracleError),
     #[error("state error: {0}")]
     State(#[from] StateError),
     #[error("existing chain state was initialized with a different genesis")]
@@ -93,6 +98,11 @@ impl ChainGenesis {
         if let Some(coins) = &self.coins {
             let mut ledger = Ledger::new(overlay);
             ledger.apply_genesis(coins).await?;
+            overlay = ledger.into_inner();
+        }
+        if let Some(oracle) = &self.oracle {
+            let mut ledger = OracleLedger::new(overlay);
+            ledger.apply_genesis(oracle).await?;
             overlay = ledger.into_inner();
         }
         set_genesis_marker(&mut overlay, fingerprint);

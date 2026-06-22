@@ -3,11 +3,15 @@ use nunchi_authority::{AuthorityGenesis, AuthorityLedger};
 use nunchi_coins::{CoinsGenesis, Ledger};
 use nunchi_common::{CommitState, QmdbState};
 
-use commonware_cryptography::{ed25519, Signer as _};
+use commonware_cryptography::{ed25519, Hasher, Sha256, Signer as _};
 use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
 use nunchi_authority::{AuthorityDB, AuthorityOperation, Transaction as AuthorityTransaction};
 use nunchi_coins::{Address, CoinDB, CoinSpec, TokenFactory, TokenName, TokenSymbol};
 use nunchi_crypto::PrivateKey;
+use nunchi_oracle::{
+    MarketId, OracleConfigGenesis, OracleGenesis, OracleLedger, OracleMarketGenesis,
+    OracleUpdaterGenesis, SourceId,
+};
 
 use crate::genesis::*;
 
@@ -25,12 +29,22 @@ fn external(seed: u64) -> Address {
     Address::external(&owner(seed).public_key())
 }
 
+fn oracle_market() -> MarketId {
+    MarketId(Sha256::hash(b"coins-chain-oracle-market"))
+}
+
+fn oracle_source() -> SourceId {
+    SourceId(Sha256::hash(b"coins-chain-oracle-source"))
+}
+
 fn sample_genesis() -> ChainGenesis {
     let owners = [owner(1), owner(2), owner(3)];
     let validators = [validator(10), validator(11)];
     let issuer = external(100);
     let alice = external(101);
     let bob = external(102);
+    let oracle_admin = external(200);
+    let oracle_updater = external(201);
 
     ChainGenesis {
         authority: Some(AuthorityGenesis {
@@ -65,6 +79,27 @@ fn sample_genesis() -> ChainGenesis {
                         amount: 600,
                     },
                 ],
+            }],
+        }),
+        oracle: Some(OracleGenesis {
+            markets: vec![OracleMarketGenesis {
+                market: oracle_market(),
+                config: OracleConfigGenesis {
+                    admin: oracle_admin,
+                    price_decimals: 6,
+                    max_staleness_ms: 60_000,
+                    max_confidence_bps: 500,
+                    high_volatility_bps: 1_000,
+                    divergence_warn_bps: 500,
+                    divergence_halt_bps: 2_000,
+                    source_priority: vec![oracle_source()],
+                    allow_negative: false,
+                },
+                updaters: vec![OracleUpdaterGenesis {
+                    source: oracle_source(),
+                    updater: oracle_updater,
+                    enabled: true,
+                }],
             }],
         }),
     }
@@ -279,5 +314,22 @@ fn coins_genesis_creates_token_and_initial_balances() {
         assert_eq!(ledger.balance(&issuer, &coin).await.unwrap(), 0);
         assert_eq!(ledger.balance(&alice, &coin).await.unwrap(), 400);
         assert_eq!(ledger.balance(&bob, &coin).await.unwrap(), 600);
+    });
+}
+
+#[test]
+fn oracle_genesis_configures_market_and_updater() {
+    deterministic::Runner::default().start(|context| async move {
+        let genesis = sample_genesis();
+        let empty = empty_commitment(context.child("empty"), "genesis-oracle-empty").await;
+        let mut state = QmdbState::init(context.child("state"), "genesis-oracle")
+            .await
+            .unwrap();
+        genesis.apply_to_state(&mut state, &empty).await.unwrap();
+
+        let oracle = OracleLedger::new(state);
+        let config = oracle.config(&oracle_market()).await.unwrap().unwrap();
+        assert_eq!(config.price_decimals, 6);
+        assert_eq!(config.source_priority, vec![oracle_source()]);
     });
 }
