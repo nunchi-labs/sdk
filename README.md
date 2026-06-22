@@ -28,7 +28,7 @@ Genesis is split across two layers:
 
 * [`coins/src/genesis.rs`](coins/src/genesis.rs) defines the coin-module genesis state:
   * `CoinsGenesis` collects `account_policies` and `tokens`
-  * `TokenGenesis` defines a token plus its initial `allocations`
+  * `TokenGenesis` defines a token plus its initial `allocations` and optional `max_supply`
   * allocations are validated against the token's `initial_supply`
 * [`examples/coins-chain/src/genesis.rs`](examples/coins-chain/src/genesis.rs) defines the chain-level wrapper:
   * `ChainGenesis` composes `authority` genesis with optional `coins` genesis
