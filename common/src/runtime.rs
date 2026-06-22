@@ -14,6 +14,10 @@ use crate::StateStore;
 pub struct RuntimeContext {
     /// Consensus epoch for the block being proposed, verified, or applied.
     pub epoch: u64,
+    /// Consensus block height for the transaction execution context.
+    pub height: u64,
+    /// Consensus block timestamp in milliseconds since the Unix epoch.
+    pub timestamp_ms: u64,
 }
 
 /// A complete chain runtime assembled from one or more module ledgers.
