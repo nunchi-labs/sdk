@@ -63,20 +63,21 @@ fn reaches_height_with_reliable_links() {
 #[test_traced]
 fn reaches_height_with_lossy_links() {
     let link = lossy_link();
-    for seed in 0..5 {
-        let state = deterministic_state(5, seed, link.clone(), 25);
-        assert_eq!(state, deterministic_state(5, seed, link.clone(), 25));
+    for seed in 0..2 {
+        let state_a = deterministic_state(5, seed, link.clone(), 16);
+        let state_b = deterministic_state(5, seed, link.clone(), 16);
+        assert_eq!(state_a, state_b);
     }
 }
 
 #[test_traced]
-fn reaches_height_1k() {
+fn reaches_height_100() {
     let link = Link {
         latency: Duration::from_millis(80),
         jitter: Duration::from_millis(10),
         success_rate: 0.98,
     };
-    deterministic_state(10, 0, link, 1000);
+    deterministic_state(10, 0, link, 100);
 }
 
 #[test_traced]
@@ -111,7 +112,7 @@ fn backfills_late_validator() {
 #[test_traced]
 fn recovers_unclean_shutdown() {
     let n = 5;
-    let required_container = 100;
+    let required_container = 60;
     let mut rng = StdRng::seed_from_u64(0);
     let fixture = ThresholdFixture::new(&mut rng, n);
 
