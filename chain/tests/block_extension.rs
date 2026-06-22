@@ -1,10 +1,10 @@
 use bytes::{Buf, BufMut};
-use commonware_codec::{DecodeExt, Encode, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{Decode, Encode, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_consensus::types::{Epoch, Height, Round, View};
 use commonware_cryptography::{ed25519, sha256, Digest as _, Digestible as _, Signer};
 use commonware_storage::mmr::Location;
-use commonware_utils::non_empty_range;
-use nunchi_chain::{Block, BlockExtension, DkgBlock, StateCommitment};
+use commonware_utils::{non_empty_range, NZU32};
+use nunchi_chain::{Block, BlockExtension, StateCommitment};
 use nunchi_dkg::{Context, ReshareBlock};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -57,6 +57,10 @@ fn state() -> StateCommitment {
     }
 }
 
+fn block_cfg() -> (std::num::NonZeroU32, ()) {
+    (NZU32!(1), ())
+}
+
 #[test]
 fn default_block_extension_is_empty_payload() {
     let block: Block<u8> = Block::new(
@@ -65,12 +69,16 @@ fn default_block_extension_is_empty_payload() {
         Height::zero(),
         1,
         vec![7],
+        None,
         (),
         state(),
     );
 
     assert_eq!(block.extension, ());
-    assert_eq!(Block::<u8>::decode(block.encode().as_ref()).unwrap(), block);
+    assert_eq!(
+        Block::<u8>::decode_cfg(block.encode().as_ref(), &block_cfg()).unwrap(),
+        block
+    );
 }
 
 #[test]
@@ -81,6 +89,7 @@ fn custom_extension_payload_is_encoded_and_committed() {
         Height::zero(),
         1,
         vec![7],
+        None,
         TestPayload(1),
         state(),
     );
@@ -90,6 +99,7 @@ fn custom_extension_payload_is_encoded_and_committed() {
         Height::zero(),
         1,
         vec![7],
+        None,
         TestPayload(2),
         state(),
     );
@@ -97,23 +107,25 @@ fn custom_extension_payload_is_encoded_and_committed() {
     assert_ne!(left.encode(), right.encode());
     assert_ne!(left.digest(), right.digest());
     assert_eq!(
-        Block::<u8, TestExtension>::decode(left.encode().as_ref()).unwrap(),
+        Block::<u8, TestExtension>::decode_cfg(left.encode().as_ref(), &block_cfg()).unwrap(),
         left,
     );
 }
 
 #[test]
-fn dkg_reshare_log_is_extension_payload_not_block_field() {
-    let block = DkgBlock::<u8>::new(
+fn dkg_reshare_log_is_core_block_field() {
+    let block = Block::<u8>::new(
         context(),
         sha256::Digest::EMPTY,
         Height::zero(),
         1,
         vec![7],
         None,
+        (),
         state(),
     );
 
-    assert!(block.extension.is_none());
+    assert!(block.reshare_log.is_none());
+    assert_eq!(block.extension, ());
     assert!(ReshareBlock::reshare_log(&block).is_none());
 }

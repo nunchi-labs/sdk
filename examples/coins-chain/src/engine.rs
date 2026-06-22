@@ -166,6 +166,7 @@ where
         let consensus_namespace = union(NAMESPACE, b"_CONSENSUS");
         let num_participants =
             commonware_utils::NZU32!(config.peer_config.max_participants_per_round());
+        let block_codec_config = (num_participants, ());
 
         let (dkg, dkg_mailbox) = dkg::Actor::new(
             context.child("dkg"),
@@ -188,7 +189,7 @@ where
                 mailbox_size: MAILBOX_SIZE,
                 deque_size: DEQUE_SIZE,
                 priority: true,
-                codec_config: num_participants,
+                codec_config: block_codec_config,
                 peer_provider: config.manager.clone(),
             },
         );
@@ -266,7 +267,7 @@ where
                 ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
                 ordinal_write_buffer: WRITE_BUFFER,
                 items_per_section: IMMUTABLE_ITEMS_PER_SECTION,
-                codec_config: num_participants,
+                codec_config: block_codec_config,
                 replay_buffer: REPLAY_BUFFER,
             },
         )
@@ -373,7 +374,7 @@ where
                 replay_buffer: REPLAY_BUFFER,
                 key_write_buffer: WRITE_BUFFER,
                 value_write_buffer: WRITE_BUFFER,
-                block_codec_config: num_participants,
+                block_codec_config,
                 max_repair: MAX_REPAIR,
                 max_pending_acks: MAX_PENDING_ACKS,
                 strategy: config.strategy.clone(),

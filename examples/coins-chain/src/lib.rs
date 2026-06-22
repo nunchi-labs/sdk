@@ -31,9 +31,9 @@ pub use nunchi_dkg::{
 pub use runtime::{CoinsRuntime, RuntimeError};
 pub use transaction::Transaction;
 
-pub type Block<Tx = Transaction> = nunchi_chain::DkgBlock<Tx>;
-pub type Notarized<Tx = Transaction> = nunchi_chain::DkgNotarized<Tx>;
-pub type Finalized<Tx = Transaction> = nunchi_chain::DkgFinalized<Tx>;
+pub type Block<Tx = Transaction> = nunchi_chain::Block<Tx>;
+pub type Notarized<Tx = Transaction> = nunchi_chain::Notarized<Tx>;
+pub type Finalized<Tx = Transaction> = nunchi_chain::Finalized<Tx>;
 
 /// Namespace prefix used in all consensus signing operations to prevent signature replay attacks.
 pub const NAMESPACE: &[u8] = b"_NUNCHI_COINS_CHAIN";

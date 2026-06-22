@@ -31,7 +31,7 @@ pub trait ConsensusExtension: BlockExtension + Clone + Send + 'static {
     fn propose(&mut self) -> impl Future<Output = Self::Payload> + Send;
 }
 
-/// Empty consensus extension for chains without DKG/authority payloads.
+/// Empty extra consensus extension for chains without additional non-DKG payloads.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoConsensusExtension;
 

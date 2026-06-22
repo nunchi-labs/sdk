@@ -1,3 +1,5 @@
+use std::num::NonZeroU32;
+
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_consensus::{types::Height, CertifiableBlock, Heightable};
@@ -5,7 +7,7 @@ use commonware_cryptography::{sha256::Digest, Committable, Digestible, Hasher, S
 use commonware_parallel::Strategy;
 use commonware_storage::mmr::Location;
 use commonware_utils::range::NonEmptyRange;
-use nunchi_dkg::{Context, Finalization, Notarization, Scheme};
+use nunchi_dkg::{Context, DealerLog, Finalization, Notarization, ReshareBlock, Scheme};
 use rand::rngs::OsRng;
 
 use crate::{BlockExtension, NoConsensusExtension};
@@ -44,7 +46,10 @@ where
     /// Runtime transactions to execute when this block is finalized.
     pub transactions: Vec<Tx>,
 
-    /// Consensus-side payload included outside ordinary runtime transactions.
+    /// Optional DKG resharing payload included outside ordinary runtime transactions.
+    pub reshare_log: Option<DealerLog>,
+
+    /// Additional consensus-side payload included outside ordinary runtime transactions.
     pub extension: Ext::Payload,
 
     /// Authenticated state root after executing `transactions`.
@@ -55,6 +60,17 @@ where
 
     /// Pre-computed digest of the block.
     digest: Digest,
+}
+
+struct DigestInput<'a, Tx, Payload> {
+    context: &'a Context,
+    parent: &'a Digest,
+    height: Height,
+    timestamp: u64,
+    transactions: &'a [Tx],
+    reshare_log: &'a Option<DealerLog>,
+    extension: &'a Payload,
+    state: &'a StateCommitment,
 }
 
 impl<Tx, Ext> Clone for Block<Tx, Ext>
@@ -69,6 +85,7 @@ where
             height: self.height,
             timestamp: self.timestamp,
             transactions: self.transactions.clone(),
+            reshare_log: self.reshare_log.clone(),
             extension: self.extension.clone(),
             state_root: self.state_root,
             state_range: self.state_range.clone(),
@@ -88,6 +105,7 @@ where
             && self.height == other.height
             && self.timestamp == other.timestamp
             && self.transactions == other.transactions
+            && self.reshare_log.encode() == other.reshare_log.encode()
             && self.extension.encode() == other.extension.encode()
             && self.state_root == other.state_root
             && self.state_range == other.state_range
@@ -107,54 +125,51 @@ where
     Tx: EncodeSize + Write,
     Ext: BlockExtension,
 {
-    fn compute_digest(
-        context: &Context,
-        parent: &Digest,
-        height: Height,
-        timestamp: u64,
-        transactions: &[Tx],
-        extension: &Ext::Payload,
-        state: &StateCommitment,
-    ) -> Digest {
+    fn compute_digest(input: DigestInput<'_, Tx, Ext::Payload>) -> Digest {
         let mut hasher = Sha256::new();
-        hasher.update(&context.encode());
-        hasher.update(parent);
-        hasher.update(&height.get().to_be_bytes());
-        hasher.update(&timestamp.to_be_bytes());
-        hasher.update(&(transactions.len() as u64).to_be_bytes());
-        for transaction in transactions {
+        hasher.update(&input.context.encode());
+        hasher.update(input.parent);
+        hasher.update(&input.height.get().to_be_bytes());
+        hasher.update(&input.timestamp.to_be_bytes());
+        hasher.update(&(input.transactions.len() as u64).to_be_bytes());
+        for transaction in input.transactions {
             hasher.update(&transaction.encode());
         }
-        hasher.update(&extension.encode());
-        hasher.update(&state.root);
-        hasher.update(&state.range.encode());
+        hasher.update(&input.reshare_log.encode());
+        hasher.update(&input.extension.encode());
+        hasher.update(&input.state.root);
+        hasher.update(&input.state.range.encode());
         hasher.finalize()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         context: Context,
         parent: Digest,
         height: Height,
         timestamp: u64,
         transactions: Vec<Tx>,
+        reshare_log: Option<DealerLog>,
         extension: Ext::Payload,
         state: StateCommitment,
     ) -> Self {
-        let digest = Self::compute_digest(
-            &context,
-            &parent,
+        let digest = Self::compute_digest(DigestInput {
+            context: &context,
+            parent: &parent,
             height,
             timestamp,
-            &transactions,
-            &extension,
-            &state,
-        );
+            transactions: &transactions,
+            reshare_log: &reshare_log,
+            extension: &extension,
+            state: &state,
+        });
         Self {
             context,
             parent,
             height,
             timestamp,
             transactions,
+            reshare_log,
             extension,
             state_root: state.root,
             state_range: state.range,
@@ -177,6 +192,7 @@ where
         for transaction in &self.transactions {
             transaction.write(writer);
         }
+        self.reshare_log.write(writer);
         self.extension.write(writer);
         self.state_root.write(writer);
         self.state_range.write(writer);
@@ -188,7 +204,7 @@ where
     Tx: EncodeSize + Read<Cfg = ()> + Write,
     Ext: BlockExtension,
 {
-    type Cfg = Ext::ReadCfg;
+    type Cfg = (NonZeroU32, Ext::ReadCfg);
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let context = Context::read(reader)?;
@@ -206,7 +222,8 @@ where
         for _ in 0..count {
             transactions.push(Tx::read(reader)?);
         }
-        let extension = Ext::Payload::read_cfg(reader, cfg)?;
+        let reshare_log = Option::<DealerLog>::read_cfg(reader, &cfg.0)?;
+        let extension = Ext::Payload::read_cfg(reader, &cfg.1)?;
         let state_root = Digest::read(reader)?;
         let state_range = NonEmptyRange::read(reader)?;
         let state = StateCommitment {
@@ -214,21 +231,23 @@ where
             range: state_range,
         };
 
-        let digest = Self::compute_digest(
-            &context,
-            &parent,
+        let digest = Self::compute_digest(DigestInput {
+            context: &context,
+            parent: &parent,
             height,
             timestamp,
-            &transactions,
-            &extension,
-            &state,
-        );
+            transactions: &transactions,
+            reshare_log: &reshare_log,
+            extension: &extension,
+            state: &state,
+        });
         Ok(Self {
             context,
             parent,
             height,
             timestamp,
             transactions,
+            reshare_log,
             extension,
             state_root: state.root,
             state_range: state.range,
@@ -253,6 +272,7 @@ where
                 .iter()
                 .map(EncodeSize::encode_size)
                 .sum::<usize>()
+            + self.reshare_log.encode_size()
             + self.extension.encode_size()
             + self.state_root.encode_size()
             + self.state_range.encode_size()
@@ -321,7 +341,7 @@ where
     Tx: Clone + EncodeSize + Read<Cfg = ()> + Send + Sync + Write + 'static,
     Ext: BlockExtension,
 {
-    type Cfg = Ext::ReadCfg;
+    type Cfg = (NonZeroU32, Ext::ReadCfg);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let proof = Notarization::read(buf)?;
@@ -385,7 +405,7 @@ where
     Tx: Clone + EncodeSize + Read<Cfg = ()> + Send + Sync + Write + 'static,
     Ext: BlockExtension,
 {
-    type Cfg = Ext::ReadCfg;
+    type Cfg = (NonZeroU32, Ext::ReadCfg);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let proof = Finalization::read(buf)?;
@@ -439,5 +459,15 @@ where
 
     fn context(&self) -> Self::Context {
         self.context.clone()
+    }
+}
+
+impl<Tx, Ext> ReshareBlock for Block<Tx, Ext>
+where
+    Tx: Clone + EncodeSize + Read<Cfg = ()> + Send + Sync + Write + 'static,
+    Ext: BlockExtension,
+{
+    fn reshare_log(&self) -> Option<&DealerLog> {
+        self.reshare_log.as_ref()
     }
 }
