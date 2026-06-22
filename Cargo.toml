@@ -12,6 +12,7 @@ members = [
     "mcp",
     "examples/template",
     "examples/coins-chain",
+    "examples/custom-module",
 ]
 resolver = "2"
 
