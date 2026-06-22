@@ -1,6 +1,7 @@
 //! Oracle state, normalization, and status primitives for Nunchi chains.
 
 mod db;
+mod genesis;
 mod ledger;
 #[cfg(test)]
 mod tests;
@@ -8,6 +9,7 @@ mod transaction;
 mod types;
 
 pub use db::OracleDB;
+pub use genesis::{OracleConfigGenesis, OracleGenesis, OracleMarketGenesis, OracleUpdaterGenesis};
 pub use ledger::{OracleError, OracleLedger};
 pub use nunchi_common::{AccountSignature, Authorization};
 pub use transaction::{OracleOperation, Transaction, TransactionPayload};

@@ -2775,9 +2775,12 @@ dependencies = [
  "bytes",
  "commonware-codec",
  "commonware-cryptography",
+ "commonware-formatting",
  "futures",
  "nunchi-common",
  "nunchi-crypto",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 
