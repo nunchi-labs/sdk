@@ -7,8 +7,9 @@ use nunchi_common::{Address, RuntimeContext, StateError, StateStore};
 use nunchi_crypto::PrivateKey;
 
 use crate::{
-    DivergenceLevel, FeedId, MarkInputs, MarketId, OracleConfig, OracleError, OracleLedger,
-    OracleOperation, OracleStatus, Price, SourceId, Transaction, UpdaterPolicy,
+    DivergenceLevel, FeedId, MarkInputs, MarketId, OracleConfig, OracleConfigGenesis, OracleError,
+    OracleGenesis, OracleLedger, OracleMarketGenesis, OracleOperation, OracleStatus,
+    OracleUpdaterGenesis, Price, SourceId, Transaction, UpdaterPolicy,
 };
 
 #[derive(Default)]
@@ -65,6 +66,30 @@ fn config(admin: &Address) -> OracleConfig {
         divergence_halt_bps: 2_000,
         source_priority: vec![source()],
         allow_negative: false,
+    }
+}
+
+fn genesis(admin: &PrivateKey, updater: &PrivateKey) -> OracleGenesis {
+    OracleGenesis {
+        markets: vec![OracleMarketGenesis {
+            market: market(),
+            config: OracleConfigGenesis {
+                admin: Address::external(&admin.public_key()),
+                price_decimals: 6,
+                max_staleness_ms: 1_000,
+                max_confidence_bps: 500,
+                high_volatility_bps: 1_000,
+                divergence_warn_bps: 500,
+                divergence_halt_bps: 2_000,
+                source_priority: vec![source()],
+                allow_negative: false,
+            },
+            updaters: vec![OracleUpdaterGenesis {
+                source: source(),
+                updater: Address::external(&updater.public_key()),
+                enabled: true,
+            }],
+        }],
     }
 }
 
@@ -221,4 +246,33 @@ fn transaction_codec_round_trips() {
     let encoded = tx.encode();
 
     assert_eq!(Transaction::decode(encoded).unwrap(), tx);
+}
+
+#[test]
+fn genesis_seeds_config_and_updater_policy() {
+    let admin = PrivateKey::from_seed(1);
+    let updater = PrivateKey::from_seed(2);
+    let mut ledger = OracleLedger::new(MemoryStore::default());
+
+    block_on(ledger.apply_genesis(&genesis(&admin, &updater))).unwrap();
+    let tx = feed_update_tx(&updater, 0, 100_000_000, 8, 900, 0);
+    block_on(ledger.apply_transaction(&tx, context(1_000))).unwrap();
+
+    let oracle = block_on(ledger.oracle(&market())).unwrap().unwrap();
+    assert_eq!(oracle.status, OracleStatus::Fresh);
+    assert_eq!(oracle.oracle_price, Some(Price::new(1_000_000, 6)));
+}
+
+#[test]
+fn genesis_rejects_updater_for_unknown_source() {
+    let admin = PrivateKey::from_seed(1);
+    let updater = PrivateKey::from_seed(2);
+    let mut genesis = genesis(&admin, &updater);
+    genesis.markets[0].updaters[0].source = SourceId(id(b"unknown-source"));
+    let mut ledger = OracleLedger::new(MemoryStore::default());
+
+    assert_eq!(
+        block_on(ledger.apply_genesis(&genesis)).unwrap_err(),
+        OracleError::UnknownSource
+    );
 }
