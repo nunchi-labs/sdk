@@ -28,6 +28,8 @@ pub enum OracleError {
     MarketNotConfigured,
     #[error("invalid oracle config: {0}")]
     InvalidConfig(&'static str),
+    #[error("invalid oracle genesis: {0}")]
+    InvalidGenesis(String),
     #[error("unauthorized oracle operation")]
     Unauthorized,
     #[error("unknown oracle source")]
@@ -69,6 +71,10 @@ impl<D: OracleDB> OracleLedger<D> {
     /// Borrow the underlying database.
     pub fn db(&self) -> &D {
         &self.db
+    }
+
+    pub(crate) fn db_mut(&mut self) -> &mut D {
+        &mut self.db
     }
 
     /// Consume the ledger, returning the underlying database.
@@ -411,7 +417,7 @@ struct FeedUpdate<'a> {
     confidence: u128,
 }
 
-fn validate_config(config: &OracleConfig) -> Result<(), OracleError> {
+pub(crate) fn validate_config(config: &OracleConfig) -> Result<(), OracleError> {
     if config.price_decimals > MAX_DECIMALS {
         return Err(OracleError::InvalidConfig("precision exceeds maximum"));
     }

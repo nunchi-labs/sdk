@@ -12,6 +12,9 @@ nunchi-common = { workspace = true }
 nunchi-crypto = { workspace = true }
 commonware-codec = { workspace = true }
 commonware-cryptography = { workspace = true }
+commonware-formatting = { workspace = true }
+serde = { workspace = true }
 
 [dev-dependencies]
 futures = { workspace = true }
+serde_json = { workspace = true }
