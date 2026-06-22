@@ -41,7 +41,6 @@ serde_json = { workspace = true }
 toml = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 tokio = { version = "1", features = ["signal"] }
-tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 
 [dev-dependencies]
 commonware-math = { workspace = true }
