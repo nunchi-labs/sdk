@@ -2657,11 +2657,18 @@ dependencies = [
  "commonware-consensus",
  "commonware-cryptography",
  "commonware-parallel",
+ "commonware-runtime",
  "commonware-storage",
  "commonware-utils",
+ "futures",
+ "jsonrpsee",
  "nunchi-chain",
  "nunchi-dkg",
+ "nunchi-rpc",
  "rand 0.8.6",
+ "rand_core 0.6.4",
+ "serde",
+ "tracing",
 ]
 
 [[package]]

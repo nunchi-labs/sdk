@@ -11,12 +11,13 @@ use commonware_cryptography::{
     Sha256, Signer,
 };
 use commonware_parallel::Sequential;
+use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
 use commonware_storage::mmr::Location;
 use commonware_utils::{non_empty_range, test_rng_seeded};
 use nunchi_chain::StateCommitment;
 use nunchi_dkg::{Context, Finalization, Scheme};
 
-use crate::{BridgeBlock, BridgeExtension, BridgePayload, SubmitResult};
+use crate::{BridgeActor, BridgeBlock, BridgePayload, SubmitResult};
 
 const NAMESPACE: &[u8] = b"_NUNCHI_BRIDGE_TEST";
 
@@ -71,37 +72,52 @@ fn payload_codec_round_trips() {
 
 #[test]
 fn submit_accepts_valid_foreign_finalization() {
-    let schemes = schemes(2);
-    let handle = BridgeExtension::new(schemes[0].clone()).handle();
-    let finalization = finalization(&schemes, 3, b"foreign");
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let schemes = schemes(2);
+        let (actor, mailbox) = BridgeActor::new(schemes[0].clone(), 16);
+        let _actor = actor.start(context.child("bridge"));
+        let finalization = finalization(&schemes, 3, b"foreign");
 
-    assert_eq!(handle.submit(finalization.clone()), SubmitResult::Updated);
-    assert_eq!(handle.latest(), Some(finalization));
-    assert!(handle.verify_payload(&handle.latest()));
+        assert_eq!(
+            mailbox.submit(finalization.clone()).await,
+            SubmitResult::Updated
+        );
+        assert_eq!(mailbox.latest().await, Some(finalization.clone()));
+        assert!(mailbox.verify_payload(Some(finalization)).await);
+    });
 }
 
 #[test]
 fn submit_rejects_wrong_network_finalization() {
-    let verifier = schemes(3);
-    let other = schemes(4);
-    let handle = BridgeExtension::new(verifier[0].clone()).handle();
-    let finalization = finalization(&other, 3, b"foreign");
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let verifier = schemes(3);
+        let other = schemes(4);
+        let (actor, mailbox) = BridgeActor::new(verifier[0].clone(), 16);
+        let _actor = actor.start(context.child("bridge"));
+        let finalization = finalization(&other, 3, b"foreign");
 
-    assert_eq!(handle.submit(finalization), SubmitResult::Rejected);
-    assert_eq!(handle.latest(), None);
+        assert_eq!(mailbox.submit(finalization).await, SubmitResult::Rejected);
+        assert_eq!(mailbox.latest().await, None);
+    });
 }
 
 #[test]
 fn submit_keeps_latest_view() {
-    let schemes = schemes(5);
-    let handle = BridgeExtension::new(schemes[0].clone()).handle();
-    let older = finalization(&schemes, 2, b"older");
-    let newer = finalization(&schemes, 4, b"newer");
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let schemes = schemes(5);
+        let (actor, mailbox) = BridgeActor::new(schemes[0].clone(), 16);
+        let _actor = actor.start(context.child("bridge"));
+        let older = finalization(&schemes, 2, b"older");
+        let newer = finalization(&schemes, 4, b"newer");
 
-    assert_eq!(handle.submit(newer.clone()), SubmitResult::Updated);
-    assert_eq!(handle.submit(older), SubmitResult::Stale);
+        assert_eq!(mailbox.submit(newer.clone()).await, SubmitResult::Updated);
+        assert_eq!(mailbox.submit(older).await, SubmitResult::Stale);
 
-    assert_eq!(handle.latest(), Some(newer));
+        assert_eq!(mailbox.latest().await, Some(newer));
+    });
 }
 
 #[test]
