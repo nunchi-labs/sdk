@@ -5,6 +5,7 @@ use common::network::{
     ValidatorConfig,
 };
 use commonware_cryptography::Signer as _;
+use commonware_cryptography::{Hasher, Sha256};
 use commonware_macros::{select, test_traced};
 use commonware_p2p::simulated::Link;
 use commonware_runtime::{deterministic, Clock, Runner as _};
@@ -15,6 +16,10 @@ use nunchi_authority::{
 use nunchi_coins::{
     Address, CoinId, CoinOperation, CoinSpec, PrivateKey, TokenFactory, TokenName, TokenSymbol,
     Transaction,
+};
+use nunchi_oracle::{
+    FeedId, MarketId, OracleConfig, OracleOperation, OracleStatus, Price, SourceId,
+    Transaction as OracleTransaction, UpdaterPolicy,
 };
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::time::Duration;
@@ -49,6 +54,18 @@ fn gold_spec() -> CoinSpec {
 /// factory derives it with nonce 0.
 fn gold_coin() -> CoinId {
     TokenFactory::derive_coin_id(&Address::from(key(ALICE).public_key()), 0, &gold_spec())
+}
+
+fn oracle_market() -> MarketId {
+    MarketId(Sha256::hash(b"coins-chain-integration-oracle-market"))
+}
+
+fn oracle_source() -> SourceId {
+    SourceId(Sha256::hash(b"coins-chain-integration-oracle-source"))
+}
+
+fn oracle_feed() -> FeedId {
+    FeedId(Sha256::hash(b"coins-chain-integration-oracle-feed"))
 }
 
 #[test_traced]
@@ -422,6 +439,105 @@ fn authority_registry_updates_onchain() {
             assert!(!epoch_4.dealers.contains(&added));
             assert!(epoch_5.players.contains(&added));
             assert!(epoch_5.dealers.contains(&added));
+        }
+    });
+}
+
+#[test_traced]
+fn oracle_updates_finalize_across_validators() {
+    let executor = deterministic::Runner::timed(Duration::from_secs(120));
+    executor.start(|mut context| async move {
+        let mut network = TestNetworkBuilder::new(VALIDATORS)
+            .build(&mut context)
+            .await;
+        network.start_all().await;
+
+        let admin = authority_key(700);
+        let updater = authority_key(701);
+        let admin_id = Address::from(admin.public_key());
+        let updater_id = Address::from(updater.public_key());
+        let submitter = network.submitter(0);
+        submitter
+            .submit(
+                OracleTransaction::sign(
+                    &admin,
+                    0,
+                    OracleOperation::ConfigureMarket {
+                        market: oracle_market(),
+                        config: OracleConfig {
+                            admin: admin_id.clone(),
+                            price_decimals: 6,
+                            max_staleness_ms: 1_000_000,
+                            max_confidence_bps: 500,
+                            high_volatility_bps: 1_000,
+                            divergence_warn_bps: 500,
+                            divergence_halt_bps: 2_000,
+                            source_priority: vec![oracle_source()],
+                            allow_negative: false,
+                        },
+                    },
+                )
+                .into(),
+            )
+            .await
+            .expect("admit oracle configure");
+        submitter
+            .submit(
+                OracleTransaction::sign(
+                    &admin,
+                    1,
+                    OracleOperation::SetUpdater {
+                        market: oracle_market(),
+                        source: oracle_source(),
+                        updater: updater_id,
+                        policy: UpdaterPolicy { enabled: true },
+                    },
+                )
+                .into(),
+            )
+            .await
+            .expect("admit oracle updater");
+        submitter
+            .submit(
+                OracleTransaction::sign(
+                    &updater,
+                    0,
+                    OracleOperation::SubmitFeedUpdate {
+                        market: oracle_market(),
+                        source: oracle_source(),
+                        feed: oracle_feed(),
+                        raw_value: 123_456_789,
+                        raw_decimals: 8,
+                        publish_time_ms: 0,
+                        confidence: 1_000,
+                    },
+                )
+                .into(),
+            )
+            .await
+            .expect("admit oracle update");
+
+        loop {
+            let ledgers = network.oracle_ledgers().await;
+            if ledgers.len() == VALIDATORS as usize {
+                let mut all_updated = true;
+                for ledger in ledgers {
+                    let state = ledger.oracle(&oracle_market()).await.unwrap();
+                    if !matches!(
+                        state,
+                        Some(state)
+                            if state.status == OracleStatus::Fresh
+                                && state.oracle_price == Some(Price::new(1_234_567, 6))
+                    ) {
+                        all_updated = false;
+                        break;
+                    }
+                }
+                if all_updated {
+                    break;
+                }
+            }
+            network.context().sleep(Duration::from_secs(1)).await;
         }
     });
 }
