@@ -1,17 +1,26 @@
 //! Bridge consensus extension for carrying foreign finalization certificates.
 //!
-//! A caller submits verified foreign finalizations through [`BridgeHandle`],
+//! A caller submits verified foreign finalizations through [`BridgeMailbox`],
 //! and [`BridgeExtension`] embeds the latest accepted certificate into proposed
 //! blocks.
 
-use std::{future::Future, sync::Arc};
+#[cfg(feature = "rpc")]
+pub mod rpc;
+
+use std::future::Future;
 
 use commonware_consensus::Viewable;
 use commonware_parallel::Sequential;
-use commonware_utils::sync::Mutex;
+use commonware_runtime::{Handle, Spawner};
+use futures::{
+    channel::{mpsc, oneshot},
+    SinkExt, StreamExt,
+};
 use nunchi_chain::{Block, BlockExtension, ConsensusExtension, Finalized, Notarized};
 use nunchi_dkg::{Finalization, Scheme};
-use rand::rngs::OsRng;
+use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
+use tracing::warn;
 
 /// Consensus-side bridge payload committed into a block.
 pub type BridgePayload = Option<Finalization>;
@@ -41,56 +50,159 @@ struct State {
     latest: BridgePayload,
 }
 
-/// Shared handle used to submit and inspect foreign finalization certificates.
-#[derive(Clone, Debug)]
-pub struct BridgeHandle {
-    foreign_network: Arc<Scheme>,
-    state: Arc<Mutex<State>>,
+enum Message {
+    Latest {
+        responder: oneshot::Sender<BridgePayload>,
+    },
+    Clear,
+    VerifyPayload {
+        payload: BridgePayload,
+        responder: oneshot::Sender<bool>,
+    },
+    Submit {
+        finalization: Finalization,
+        responder: oneshot::Sender<SubmitResult>,
+    },
 }
 
-impl BridgeHandle {
-    /// Create a bridge handle that verifies certificates from `foreign_network`.
-    pub fn new(foreign_network: Scheme) -> Self {
-        Self {
-            foreign_network: Arc::new(foreign_network),
-            state: Arc::new(Mutex::new(State { latest: None })),
-        }
-    }
+/// Cloneable ingress mailbox for a running [`BridgeActor`].
+#[derive(Clone, Debug)]
+pub struct BridgeMailbox {
+    sender: mpsc::Sender<Message>,
+}
 
+impl BridgeMailbox {
     /// Return the latest accepted foreign finalization certificate, if any.
-    pub fn latest(&self) -> BridgePayload {
-        self.state.lock().latest.clone()
+    pub async fn latest(&self) -> BridgePayload {
+        let (responder, receiver) = oneshot::channel();
+        let mut sender = self.sender.clone();
+        if sender.send(Message::Latest { responder }).await.is_err() {
+            return None;
+        }
+        receiver.await.unwrap_or_default()
     }
 
     /// Clear the currently cached foreign finalization certificate.
     pub fn clear(&self) {
-        self.state.lock().latest = None;
+        let mut sender = self.sender.clone();
+        if sender.try_send(Message::Clear).is_err() {
+            warn!("bridge mailbox unavailable; dropping clear request");
+        }
     }
 
     /// Verify a bridge payload against the configured foreign network.
-    pub fn verify_payload(&self, payload: &BridgePayload) -> bool {
-        let Some(finalization) = payload else {
-            return true;
-        };
-        finalization.verify(&mut OsRng, &self.foreign_network, &Sequential)
+    pub async fn verify_payload(&self, payload: BridgePayload) -> bool {
+        let (responder, receiver) = oneshot::channel();
+        let mut sender = self.sender.clone();
+        if sender
+            .send(Message::VerifyPayload { payload, responder })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        receiver.await.unwrap_or_default()
     }
 
     /// Submit a foreign finalization certificate.
     ///
     /// Invalid certificates are rejected. Valid stale certificates do not replace the cached latest
     /// certificate.
-    pub fn submit(&self, finalization: Finalization) -> SubmitResult {
-        if !self.verify_payload(&Some(finalization.clone())) {
+    pub async fn submit(&self, finalization: Finalization) -> SubmitResult {
+        let (responder, receiver) = oneshot::channel();
+        let mut sender = self.sender.clone();
+        if sender
+            .send(Message::Submit {
+                finalization,
+                responder,
+            })
+            .await
+            .is_err()
+        {
+            return SubmitResult::Rejected;
+        }
+        receiver.await.unwrap_or(SubmitResult::Rejected)
+    }
+}
+
+/// Actor that owns accepted foreign finalization state for a bridge.
+pub struct BridgeActor {
+    foreign_network: Scheme,
+    receiver: mpsc::Receiver<Message>,
+    state: State,
+}
+
+impl BridgeActor {
+    /// Create a bridge actor and its mailbox.
+    pub fn new(foreign_network: Scheme, mailbox_size: usize) -> (Self, BridgeMailbox) {
+        let (sender, receiver) = mpsc::channel(mailbox_size);
+        (
+            Self {
+                foreign_network,
+                receiver,
+                state: State { latest: None },
+            },
+            BridgeMailbox { sender },
+        )
+    }
+
+    /// Spawn the actor's event loop.
+    pub fn start<E>(self, context: E) -> Handle<()>
+    where
+        E: Spawner + CryptoRngCore + CryptoRng + Rng + Send + 'static,
+    {
+        context.spawn(|context| self.run(context))
+    }
+
+    async fn run<E>(mut self, mut context: E)
+    where
+        E: CryptoRngCore + CryptoRng + Rng,
+    {
+        while let Some(message) = self.receiver.next().await {
+            match message {
+                Message::Latest { responder } => {
+                    let _ = responder.send(self.state.latest.clone());
+                }
+                Message::Clear => {
+                    self.state.latest = None;
+                }
+                Message::VerifyPayload { payload, responder } => {
+                    let _ = responder.send(self.verify_payload(&mut context, &payload));
+                }
+                Message::Submit {
+                    finalization,
+                    responder,
+                } => {
+                    let _ = responder.send(self.submit(&mut context, finalization));
+                }
+            }
+        }
+    }
+
+    fn verify_payload<R>(&self, rng: &mut R, payload: &BridgePayload) -> bool
+    where
+        R: CryptoRngCore + CryptoRng + Rng,
+    {
+        let Some(finalization) = payload else {
+            return true;
+        };
+        finalization.verify(rng, &self.foreign_network, &Sequential)
+    }
+
+    fn submit<R>(&mut self, rng: &mut R, finalization: Finalization) -> SubmitResult
+    where
+        R: CryptoRngCore + CryptoRng + Rng,
+    {
+        if !self.verify_payload(rng, &Some(finalization.clone())) {
             return SubmitResult::Rejected;
         }
 
-        let mut state = self.state.lock();
-        let replace = match &state.latest {
+        let replace = match &self.state.latest {
             Some(current) => finalization.view() > current.view(),
             None => true,
         };
         if replace {
-            state.latest = Some(finalization);
+            self.state.latest = Some(finalization);
             SubmitResult::Updated
         } else {
             SubmitResult::Stale
@@ -101,25 +213,18 @@ impl BridgeHandle {
 /// Consensus extension that proposes and verifies foreign finalization certificates.
 #[derive(Clone, Debug)]
 pub struct BridgeExtension {
-    handle: BridgeHandle,
+    mailbox: BridgeMailbox,
 }
 
 impl BridgeExtension {
-    /// Create a bridge extension and its shared handle.
-    pub fn new(foreign_network: Scheme) -> Self {
-        Self {
-            handle: BridgeHandle::new(foreign_network),
-        }
+    /// Create a bridge extension from an existing mailbox.
+    pub const fn new(mailbox: BridgeMailbox) -> Self {
+        Self { mailbox }
     }
 
-    /// Create a bridge extension from an existing shared handle.
-    pub const fn from_handle(handle: BridgeHandle) -> Self {
-        Self { handle }
-    }
-
-    /// Return a handle for submitting foreign finalization certificates.
-    pub fn handle(&self) -> BridgeHandle {
-        self.handle.clone()
+    /// Return the mailbox used to submit and inspect foreign finalization certificates.
+    pub fn mailbox(&self) -> BridgeMailbox {
+        self.mailbox.clone()
     }
 }
 
@@ -133,12 +238,12 @@ impl BlockExtension for BridgeExtension {
 }
 
 impl ConsensusExtension for BridgeExtension {
-    fn propose(&mut self) -> impl Future<Output = Self::Payload> + Send {
-        std::future::ready(self.handle.latest())
+    async fn propose(&mut self) -> Self::Payload {
+        self.mailbox.latest().await
     }
 
     fn verify_payload(&mut self, payload: &Self::Payload) -> impl Future<Output = bool> + Send {
-        std::future::ready(self.handle.verify_payload(payload))
+        self.mailbox.verify_payload(payload.clone())
     }
 }
 

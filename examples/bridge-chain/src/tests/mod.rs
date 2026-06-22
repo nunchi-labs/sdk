@@ -14,7 +14,7 @@ use commonware_glue::stateful::{db::DatabaseSet, Application as StatefulApplicat
 use commonware_parallel::Sequential;
 use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
 use commonware_utils::{sync::AsyncRwLock, test_rng_seeded};
-use nunchi_bridge::{BridgeExtension, BridgePayload, SubmitResult};
+use nunchi_bridge::{BridgeActor, BridgeExtension, BridgePayload, SubmitResult};
 use nunchi_chain::StateCommitment;
 use nunchi_common::{QmdbBackend, QmdbDatabaseSet, QmdbMerkleized, QmdbState};
 use nunchi_dkg::{Context, Finalization, Scheme};
@@ -60,20 +60,27 @@ fn chain_application_proposes_and_verifies_bridge_payload() {
     runner.start(|context| async move {
         let foreign = schemes(FOREIGN_NAMESPACE, 1);
         let wrong = schemes(WRONG_NAMESPACE, 2);
-        let bridge = BridgeExtension::new(foreign[0].clone());
-        let handle = bridge.handle();
+        let (bridge_actor, bridge_mailbox) = BridgeActor::new(foreign[0].clone(), 16);
+        let _bridge_actor = bridge_actor.start(context.child("bridge"));
+        let bridge = BridgeExtension::new(bridge_mailbox.clone());
 
         let foreign_finalization = finalization(&foreign, 7, b"foreign block digest");
         let wrong_finalization = finalization(&wrong, 8, b"wrong block digest");
 
-        assert_eq!(handle.submit(wrong_finalization), SubmitResult::Rejected);
-        assert_eq!(handle.latest(), None);
+        assert_eq!(
+            bridge_mailbox.submit(wrong_finalization).await,
+            SubmitResult::Rejected
+        );
+        assert_eq!(bridge_mailbox.latest().await, None);
 
         assert_eq!(
-            handle.submit(foreign_finalization.clone()),
+            bridge_mailbox.submit(foreign_finalization.clone()).await,
             SubmitResult::Updated
         );
-        assert_eq!(handle.latest(), Some(foreign_finalization.clone()));
+        assert_eq!(
+            bridge_mailbox.latest().await,
+            Some(foreign_finalization.clone())
+        );
 
         let (txpool, submitter) = TxPool::new(PoolConfig::default());
         let _txpool = txpool.start(context.child("txpool"));
@@ -165,7 +172,7 @@ fn chain_application_proposes_and_verifies_bridge_payload() {
             .await;
         assert!(verified.is_none());
 
-        handle.clear();
+        bridge_mailbox.clear();
         let proposed = <Application as StatefulApplication<deterministic::Context>>::propose(
             &mut app,
             (context.child("propose_empty"), consensus_context(2)),
