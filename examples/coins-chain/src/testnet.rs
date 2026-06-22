@@ -26,7 +26,7 @@ use commonware_p2p::{
     Ingress, Manager,
 };
 use commonware_parallel::Sequential;
-use commonware_runtime::{tokio, Handle, Runner as _, Supervisor as _};
+use commonware_runtime::{tokio, Handle, Runner as _, Spawner as _, Supervisor as _};
 use commonware_utils::{ordered::Set, N3f1, NZUsize, NZU32};
 use governor::Quota;
 use nunchi_dkg::{ContinueOnUpdate, PeerConfig, MAX_SUPPORTED_MODE};
@@ -191,7 +191,11 @@ pub enum Error {
     #[error("failed to parse toml: {0}")]
     TomlDeserialize(#[from] toml::de::Error),
     #[error("engine stopped unexpectedly: {0}")]
-    Engine(commonware_runtime::Error),
+    Engine(#[from] crate::engine::EngineError),
+    #[error("engine task failed: {0}")]
+    EngineTask(commonware_runtime::Error),
+    #[error("runtime shutdown failed: {0}")]
+    Shutdown(commonware_runtime::Error),
 }
 
 /// Generate node keys, run the trusted initial deal, and write per-node configs plus the
@@ -306,13 +310,17 @@ pub fn run_node(config_path: impl AsRef<Path>) -> Result<(), Error> {
     let runtime =
         tokio::Runner::new(tokio::Config::new().with_storage_directory(config.storage_dir.clone()));
     runtime.start(|context| async move {
-        let (_rpc_server, engine_handle) = start_node(context, config).await?;
-        wait_for_shutdown(engine_handle).await
+        let (rpc_server, engine_handle) = start_node(&context, config).await?;
+        wait_for_shutdown(context, rpc_server, engine_handle).await
     })
 }
 
 /// Block until a shutdown signal is received or the engine handle resolves.
-async fn wait_for_shutdown(engine_handle: Handle<()>) -> Result<(), Error> {
+async fn wait_for_shutdown(
+    context: tokio::Context,
+    rpc_server: nunchi_rpc::ServerHandle,
+    engine_handle: Handle<Result<(), crate::engine::EngineError>>,
+) -> Result<(), Error> {
     #[cfg(unix)]
     {
         use ::tokio::signal::unix::{signal, SignalKind};
@@ -321,14 +329,15 @@ async fn wait_for_shutdown(engine_handle: Handle<()>) -> Result<(), Error> {
         ::tokio::select! {
             _ = sigint.recv() => {
                 info!("received SIGINT, shutting down");
-                Ok(())
+                shutdown(context, rpc_server).await
             }
             _ = sigterm.recv() => {
                 info!("received SIGTERM, shutting down");
-                Ok(())
+                shutdown(context, rpc_server).await
             }
             result = engine_handle => {
-                result.map_err(Error::Engine)
+                result.map_err(Error::EngineTask)??;
+                Ok(())
             }
         }
     }
@@ -338,19 +347,38 @@ async fn wait_for_shutdown(engine_handle: Handle<()>) -> Result<(), Error> {
             result = ::tokio::signal::ctrl_c() => {
                 result.map_err(Error::Io)?;
                 info!("received Ctrl-C, shutting down");
-                Ok(())
+                shutdown(context, rpc_server).await
             }
             result = engine_handle => {
-                result.map_err(Error::Engine)
+                result.map_err(Error::EngineTask)??;
+                Ok(())
             }
         }
     }
 }
 
-async fn start_node(
+async fn shutdown(
     context: tokio::Context,
+    rpc_server: nunchi_rpc::ServerHandle,
+) -> Result<(), Error> {
+    let _ = rpc_server.stop();
+    context
+        .child("shutdown")
+        .stop(0, None)
+        .await
+        .map_err(Error::Shutdown)
+}
+
+async fn start_node(
+    context: &tokio::Context,
     config: NodeConfig,
-) -> Result<(nunchi_rpc::ServerHandle, Handle<()>), Error> {
+) -> Result<
+    (
+        nunchi_rpc::ServerHandle,
+        Handle<Result<(), crate::engine::EngineError>>,
+    ),
+    Error,
+> {
     let private_key = decode_unit::<ed25519::PrivateKey>(&config.private_key, "private_key")?;
     let public_key = private_key.public_key();
     let max_participants = NonZeroU32::new(config.peer_config.max_participants_per_round())

@@ -38,7 +38,7 @@ use commonware_runtime::{
 };
 use commonware_storage::archive::immutable;
 use commonware_utils::union;
-use futures::{future::try_join_all, lock::Mutex as AsyncMutex};
+use futures::lock::Mutex as AsyncMutex;
 use governor::clock::Clock as GClock;
 use nunchi_chain::engine::*;
 use nunchi_common::{QmdbBackend, QmdbState};
@@ -52,6 +52,18 @@ use std::{
     time::{Duration, Instant},
 };
 use tracing::{info, warn};
+
+#[derive(Debug, thiserror::Error)]
+pub enum EngineError {
+    #[error("{0}")]
+    Runtime(#[from] commonware_runtime::Error),
+    #[error("runtime stopped with code {0}")]
+    Stopped(i32),
+    #[error("shutdown signal closed unexpectedly")]
+    ShutdownSignalClosed,
+    #[error("{0} stopped unexpectedly")]
+    UnexpectedExit(&'static str),
+}
 
 /// Configuration for the [Engine].
 pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = PublicKey>, S: Strategy>
@@ -456,7 +468,7 @@ where
             resolver::p2p::Mailbox<Digest, PublicKey>,
         ),
         callback: Box<dyn UpdateCallBack<MinSig, PublicKey>>,
-    ) -> Handle<()> {
+    ) -> Handle<Result<(), EngineError>> {
         spawn_cell!(
             self.context,
             self.run(
@@ -499,7 +511,7 @@ where
             resolver::p2p::Mailbox<Digest, PublicKey>,
         ),
         callback: Box<dyn UpdateCallBack<MinSig, PublicKey>>,
-    ) {
+    ) -> Result<(), EngineError> {
         let dkg_handle = self.dkg.start(
             Some(self.config.output),
             self.config.share,
@@ -515,18 +527,32 @@ where
         let stateful_handle = self.stateful.start();
         let orchestrator_handle = self.orchestrator.start(votes, certificates, resolver);
 
-        match try_join_all(vec![
-            dkg_handle,
-            buffer_handle,
-            marshal_handle,
-            stateful_handle,
-            orchestrator_handle,
-            self.mempool,
-        ])
-        .await
-        {
-            Err(e) => panic!("engine failed: {e:?}"),
-            Ok(_) => warn!("engine stopped"),
+        let mut shutdown = self.context.stopped();
+        commonware_macros::select! {
+            stopped = &mut shutdown => match stopped {
+                Ok(0) => {
+                    warn!("engine stopped");
+                    Ok(())
+                }
+                Ok(code) => Err(EngineError::Stopped(code)),
+                Err(_) => Err(EngineError::ShutdownSignalClosed),
+            },
+            result = dkg_handle => unexpected_exit("dkg", result),
+            result = buffer_handle => unexpected_exit("buffer", result),
+            result = marshal_handle => unexpected_exit("marshal", result),
+            result = stateful_handle => unexpected_exit("stateful", result),
+            result = orchestrator_handle => unexpected_exit("orchestrator", result),
+            result = self.mempool => unexpected_exit("mempool", result),
         }
+    }
+}
+
+fn unexpected_exit(
+    component: &'static str,
+    result: Result<(), commonware_runtime::Error>,
+) -> Result<(), EngineError> {
+    match result {
+        Ok(()) => Err(EngineError::UnexpectedExit(component)),
+        Err(error) => Err(error.into()),
     }
 }
