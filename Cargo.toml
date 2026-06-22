@@ -8,6 +8,7 @@ members = [
     "dkg",
     "narae",
     "mempool",
+    "oracle",
     "rpc",
     "mcp",
     "examples/template",
@@ -28,6 +29,7 @@ nunchi-common = { version = "2026.5.0", path = "common" }
 nunchi-crypto = { version = "2026.5.0", path = "crypto" }
 nunchi-dkg = { version = "2026.5.0", path = "dkg" }
 nunchi-mempool = { version = "2026.5.0", path = "mempool" }
+nunchi-oracle = { version = "2026.5.0", path = "oracle" }
 nunchi-rpc = { version = "2026.5.0", path = "rpc" }
 nunchi-template = { version = "2026.5.0", path = "examples/template" }
 nunchi-coins-chain = { version = "2026.5.0", path = "examples/coins-chain" }

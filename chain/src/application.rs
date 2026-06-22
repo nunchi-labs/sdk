@@ -278,6 +278,8 @@ where
         let candidates = input.pending(usize::MAX).await;
         let execution_context = RuntimeContext {
             epoch: context.round.epoch().get(),
+            height: parent.height.next().get(),
+            timestamp_ms: timestamp,
         };
         let (transactions, merkleized) = self
             .build_valid_transactions(batches, execution_context, candidates)
@@ -332,6 +334,8 @@ where
 
         let execution_context = RuntimeContext {
             epoch: block.context.round.epoch().get(),
+            height: block.height.get(),
+            timestamp_ms: block.timestamp,
         };
         let merkleized =
             Self::execute_block(batches, execution_context, &block.transactions).await?;
@@ -350,6 +354,8 @@ where
     ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
         let execution_context = RuntimeContext {
             epoch: block.context.round.epoch().get(),
+            height: block.height.get(),
+            timestamp_ms: block.timestamp,
         };
         let merkleized = Self::execute_block(batches, execution_context, &block.transactions)
             .await
