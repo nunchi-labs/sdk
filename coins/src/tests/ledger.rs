@@ -65,6 +65,60 @@ fn create_token_credits_issuer_and_commits_root() {
 }
 
 #[test]
+fn mint_respects_max_supply() {
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let mut ledger = ledger(context).await;
+        let alice_key = PrivateKey::ed25519_from_seed(1);
+        let alice = address(&alice_key);
+        let bob = address(&PrivateKey::ed25519_from_seed(2));
+
+        let coin = ledger
+            .create_token(
+                alice.clone(),
+                spec(1_000, Some(1_200)).expect("valid coin spec"),
+            )
+            .await
+            .expect("create token");
+        let nonce = ledger.nonce(&alice).await.expect("read nonce");
+
+        let mint = Transaction::sign(
+            &alice_key,
+            nonce,
+            crate::CoinOperation::Mint {
+                coin,
+                to: bob.clone(),
+                amount: 200,
+            },
+        );
+        ledger.apply_transaction(&mint).await.expect("mint to cap");
+        assert_eq!(ledger.balance(&bob, &coin).await.unwrap(), 200);
+        assert_eq!(
+            ledger.token(&coin).await.unwrap().unwrap().total_supply,
+            1_200
+        );
+
+        let mint = Transaction::sign(
+            &alice_key,
+            nonce.checked_add(1).expect("nonce overflow"),
+            crate::CoinOperation::Mint {
+                coin,
+                to: bob,
+                amount: 1,
+            },
+        );
+        let err = ledger.apply_transaction(&mint).await.unwrap_err();
+        assert_eq!(
+            err,
+            LedgerError::MaxSupplyExceeded {
+                max: 1_200,
+                attempted: 1_201,
+            }
+        );
+    });
+}
+
+#[test]
 fn transfer_via_signed_transaction_moves_balance_and_bumps_nonce() {
     let runner = deterministic::Runner::default();
     runner.start(|context| async move {
