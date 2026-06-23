@@ -4,7 +4,7 @@ use super::{
 };
 use crate::db::CoinDB;
 use commonware_cryptography::sha256::Digest;
-use nunchi_common::CommitState;
+use nunchi_common::{CommitState, EventError, EventSink, NoopEventSink};
 use nunchi_crypto::SignatureError;
 use thiserror::Error;
 
@@ -36,6 +36,8 @@ pub enum LedgerError {
     Unauthorized,
     #[error("invalid account policy: {0}")]
     InvalidAccountPolicy(#[from] super::AccountPolicyError),
+    #[error("event emission failed: {0}")]
+    Event(#[from] EventError),
     #[error("insufficient balance for {account:?} in {coin:?}: available {available}, required {required}")]
     InsufficientBalance {
         account: Box<Address>,
@@ -104,6 +106,18 @@ impl<D: CoinDB> Ledger<D> {
     }
 
     pub async fn apply_transaction(&mut self, tx: &Transaction) -> Result<(), LedgerError> {
+        let mut events = NoopEventSink;
+        self.apply_transaction_with_events(tx, &mut events).await
+    }
+
+    pub async fn apply_transaction_with_events<Events>(
+        &mut self,
+        tx: &Transaction,
+        _events: &mut Events,
+    ) -> Result<(), LedgerError>
+    where
+        Events: EventSink + Send,
+    {
         self.ensure_authorized(tx).await?;
 
         let expected = self.db.nonce(&tx.account_id).await?;

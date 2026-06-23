@@ -2,7 +2,7 @@
 
 use nunchi_authority::{AuthorityError, AuthorityLedger};
 use nunchi_coins::{Ledger, LedgerError};
-use nunchi_common::{Runtime, RuntimeContext, StateStore};
+use nunchi_common::{EventSink, Runtime, RuntimeContext, StateStore};
 
 use crate::Transaction;
 
@@ -30,26 +30,30 @@ impl Runtime for CoinsRuntime {
     type Transaction = Transaction;
     type Error = RuntimeError;
 
-    async fn validate<S>(
+    async fn validate<S, Events>(
         state: &mut S,
+        events: &mut Events,
         context: RuntimeContext,
         transaction: &Self::Transaction,
     ) -> Result<(), Self::Error>
     where
         S: StateStore + Send + Sync,
+        Events: EventSink + Send,
     {
-        apply_transaction(state, context, transaction).await
+        apply_transaction(state, events, context, transaction).await
     }
 
-    async fn apply<S>(
+    async fn apply<S, Events>(
         state: &mut S,
+        events: &mut Events,
         context: RuntimeContext,
         transaction: &Self::Transaction,
     ) -> Result<(), Self::Error>
     where
         S: StateStore + Send + Sync,
+        Events: EventSink + Send,
     {
-        apply_transaction(state, context, transaction).await
+        apply_transaction(state, events, context, transaction).await
     }
 
     fn is_storage_error(error: &Self::Error) -> bool {
@@ -57,22 +61,28 @@ impl Runtime for CoinsRuntime {
     }
 }
 
-async fn apply_transaction<S>(
+async fn apply_transaction<S, Events>(
     state: &mut S,
+    events: &mut Events,
     context: RuntimeContext,
     transaction: &Transaction,
 ) -> Result<(), RuntimeError>
 where
     S: StateStore + Send + Sync,
+    Events: EventSink + Send,
 {
     match transaction {
         Transaction::Coin(transaction) => {
             let mut ledger = Ledger::new(state);
-            ledger.apply_transaction(transaction).await?;
+            ledger
+                .apply_transaction_with_events(transaction, events)
+                .await?;
         }
         Transaction::Authority(transaction) => {
             let mut ledger = AuthorityLedger::new(state);
-            ledger.apply_transaction(transaction, context.epoch).await?;
+            ledger
+                .apply_transaction_with_events(transaction, context.epoch, events)
+                .await?;
         }
     }
     Ok(())
@@ -81,6 +91,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nunchi_common::EventError;
 
     #[test]
     fn runtime_error_classifies_storage_errors() {
@@ -89,5 +100,19 @@ mod tests {
 
         assert!(!RuntimeError::Authority(AuthorityError::NotConfigured).is_storage());
         assert!(!RuntimeError::Coins(LedgerError::InvalidTokenSpec("bad")).is_storage());
+        assert!(
+            !RuntimeError::Coins(LedgerError::Event(EventError::TooManyEvents {
+                max: 0,
+                actual: 1
+            }))
+            .is_storage()
+        );
+        assert!(
+            !RuntimeError::Authority(AuthorityError::Event(EventError::TooManyEvents {
+                max: 0,
+                actual: 1
+            }))
+            .is_storage()
+        );
     }
 }

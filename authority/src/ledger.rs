@@ -5,7 +5,7 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{Hasher, Sha256};
-use nunchi_common::Authorization;
+use nunchi_common::{Authorization, EventError, EventSink, NoopEventSink};
 use nunchi_crypto::SignatureError;
 use thiserror::Error;
 
@@ -19,6 +19,8 @@ pub const MAX_EPOCH_LOOKAHEAD: u64 = 100;
 pub enum AuthorityError {
     #[error("bad authority transaction signature: {0}")]
     BadSignature(#[from] SignatureError),
+    #[error("event emission failed: {0}")]
+    Event(#[from] EventError),
     #[error("nonce mismatch for {owner:?}: expected {expected}, got {actual}")]
     NonceMismatch {
         owner: Box<OwnerId>,
@@ -82,6 +84,20 @@ impl<D: AuthorityDB> AuthorityLedger<D> {
         tx: &Transaction,
         current_epoch: EpochNumber,
     ) -> Result<(), AuthorityError> {
+        let mut events = NoopEventSink;
+        self.apply_transaction_with_events(tx, current_epoch, &mut events)
+            .await
+    }
+
+    pub async fn apply_transaction_with_events<Events>(
+        &mut self,
+        tx: &Transaction,
+        current_epoch: EpochNumber,
+        _events: &mut Events,
+    ) -> Result<(), AuthorityError>
+    where
+        Events: EventSink + Send,
+    {
         tx.verify()?;
 
         // Authority approvals are collected on-chain through Propose/Approve/Execute, so each

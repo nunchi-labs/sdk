@@ -11,7 +11,9 @@ use commonware_runtime::{Clock, Metrics, Spawner, Storage};
 use commonware_storage::{mmr::Location, qmdb::sync::Target};
 use commonware_utils::{non_empty_range, range::NonEmptyRange, SystemTimeExt};
 use futures::{lock::Mutex as AsyncMutex, StreamExt};
-use nunchi_common::{Overlay, QmdbBatch, QmdbDatabaseSet, QmdbMerkleized, Runtime, RuntimeContext};
+use nunchi_common::{
+    NoopEventSink, Overlay, QmdbBatch, QmdbDatabaseSet, QmdbMerkleized, Runtime, RuntimeContext,
+};
 use nunchi_dkg::{Context, Scheme};
 use nunchi_mempool::{MempoolHandle, PoolTransaction};
 use rand::Rng;
@@ -122,7 +124,8 @@ where
                 break;
             }
             let mut overlay = Overlay::new(&mut batch);
-            match R::validate(&mut overlay, context, &transaction).await {
+            let mut events = NoopEventSink;
+            match R::validate(&mut overlay, &mut events, context, &transaction).await {
                 Ok(()) => {
                     overlay.commit();
                     included.push(transaction);
@@ -154,7 +157,8 @@ where
     ) -> Option<QmdbMerkleized<E>> {
         let mut batch = QmdbBatch::new(batches);
         for transaction in transactions {
-            match R::apply(&mut batch, context, transaction).await {
+            let mut events = NoopEventSink;
+            match R::apply(&mut batch, &mut events, context, transaction).await {
                 Ok(()) => {}
                 Err(error) if R::is_storage_error(&error) => {
                     panic!("storage failure while executing block: {error}");

@@ -7,7 +7,7 @@ use std::future::Future;
 
 use commonware_codec::{EncodeSize, Read, Write};
 
-use crate::StateStore;
+use crate::{EventSink, StateStore};
 
 /// Deterministic execution context supplied by the chain application.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -24,23 +24,28 @@ pub trait Runtime {
     /// Runtime-level deterministic execution error.
     type Error: std::error::Error + Send + Sync + 'static;
 
-    /// Validate a transaction against scratch state.
-    fn validate<S>(
+    /// Validate a transaction against scratch state, emitting deterministic events to `events`.
+    fn validate<S, Events>(
         state: &mut S,
+        events: &mut Events,
         context: RuntimeContext,
         transaction: &Self::Transaction,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send
     where
-        S: StateStore + Send + Sync;
+        S: StateStore + Send + Sync,
+        Events: EventSink + Send;
 
-    /// Apply a transaction to real proposal/execution state.
-    fn apply<S>(
+    /// Apply a transaction to real proposal/execution state, emitting deterministic events to
+    /// `events`.
+    fn apply<S, Events>(
         state: &mut S,
+        events: &mut Events,
         context: RuntimeContext,
         transaction: &Self::Transaction,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send
     where
-        S: StateStore + Send + Sync;
+        S: StateStore + Send + Sync,
+        Events: EventSink + Send;
 
     /// Whether an execution error indicates local storage failure instead of deterministic
     /// transaction invalidity.
