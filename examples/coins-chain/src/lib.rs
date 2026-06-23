@@ -49,6 +49,7 @@ pub mod channels {
     pub const BROADCAST: u64 = 3;
     pub const DKG: u64 = 4;
     pub const BACKFILL: u64 = 5;
+    pub const MEMPOOL: u64 = 6;
 }
 
 /// The consensus epoch. The demo chain never reconfigures, so the epoch is hardcoded to 0.
