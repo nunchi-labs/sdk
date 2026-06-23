@@ -4,6 +4,7 @@
 //! connection tasks, exercising the same server path an operator would run.
 
 use commonware_consensus::types::Height;
+use commonware_cryptography::Hasher;
 use commonware_runtime::{tokio, Runner as _, Supervisor as _};
 use futures::lock::Mutex as AsyncMutex;
 use jsonrpsee::{
@@ -20,6 +21,7 @@ use nunchi_coins_chain::rpc::{
 use nunchi_coins_chain::Transaction;
 use nunchi_common::QmdbState;
 use nunchi_mempool::{Mempool, PoolConfig};
+use nunchi_oracle::{OracleConfig, OracleOperation, Transaction as OracleTransaction};
 use nunchi_rpc::{encode_hex, ServerBuilder};
 use std::sync::Arc;
 
@@ -93,6 +95,39 @@ fn rpc_serves_status_and_filters_submissions_over_http() {
             vec![transaction.clone().into()]
         );
 
+        // The aggregate chain RPC accepts non-coin transactions, including oracle updates.
+        let oracle_admin = nunchi_crypto::PrivateKey::from_seed(200);
+        let oracle = OracleTransaction::sign(
+            &oracle_admin,
+            0,
+            OracleOperation::ConfigureMarket {
+                market: nunchi_oracle::MarketId(commonware_cryptography::Sha256::hash(
+                    b"rpc-oracle-market",
+                )),
+                config: OracleConfig {
+                    admin: nunchi_coins::Address::from(oracle_admin.public_key()),
+                    price_decimals: 6,
+                    max_staleness_ms: 1_000,
+                    max_confidence_bps: 500,
+                    high_volatility_bps: 1_000,
+                    divergence_warn_bps: 500,
+                    divergence_halt_bps: 2_000,
+                    source_priority: vec![nunchi_oracle::SourceId(
+                        commonware_cryptography::Sha256::hash(b"rpc-oracle-source"),
+                    )],
+                    allow_negative: false,
+                },
+            },
+        );
+        let accepted_oracle: SubmitTransactionResponse = client
+            .request(
+                "chain.submit_transaction",
+                submit_params(&encode_hex(&Transaction::from(oracle.clone()))),
+            )
+            .await
+            .expect("submit oracle chain transaction");
+        assert_eq!(accepted_oracle.hash, encode_hex(&oracle.digest()));
+
         // The pool reports the admitted transaction as pending.
         let mut status_params = ObjectParams::new();
         status_params
@@ -103,6 +138,15 @@ fn rpc_serves_status_and_filters_submissions_over_http() {
             .await
             .expect("transaction status");
         assert_eq!(tx_status.status, "pending");
+        let mut oracle_status_params = ObjectParams::new();
+        oracle_status_params
+            .insert("hash", accepted_oracle.hash.clone())
+            .expect("serialize hash param");
+        let oracle_status: TransactionStatusResponse = client
+            .request("chain.transaction_status", oracle_status_params)
+            .await
+            .expect("oracle transaction status");
+        assert_eq!(oracle_status.status, "pending");
 
         // Resubmitting the identical transaction is rejected as a duplicate.
         let duplicate = client
@@ -136,10 +180,10 @@ fn rpc_serves_status_and_filters_submissions_over_http() {
             }
             other => panic!("expected invalid-params call error, got {other:?}"),
         }
-        // The pool still only holds the valid submission.
+        // The pool still only holds the valid submissions.
         assert_eq!(
             submitter.pending(usize::MAX).await,
-            vec![transaction.into()]
+            vec![transaction.into(), oracle.into()]
         );
 
         server.stop().expect("stop RPC server");

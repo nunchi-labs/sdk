@@ -14,6 +14,7 @@ members = [
     "examples/template",
     "examples/coins-chain",
     "examples/custom-module",
+    "examples/hermes-oracle",
 ]
 resolver = "2"
 

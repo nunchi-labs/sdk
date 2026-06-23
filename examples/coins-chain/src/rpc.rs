@@ -3,12 +3,13 @@
 use commonware_cryptography::sha256::Digest;
 use jsonrpsee::{
     core::{RegisterMethodError, RpcResult},
+    types::ErrorObjectOwned,
     RpcModule,
 };
 use nunchi_coins::rpc::{CoinQuery, CoinsMempoolRpc, CoinsRpc, MempoolIngress};
 use nunchi_coins::Transaction as CoinTransaction;
 use nunchi_mempool::{AdmissionError, MempoolHandle, TxStatus};
-use nunchi_rpc::{encode_hex, module_error, RpcBuildError, RpcRouter};
+use nunchi_rpc::{decode_hex, encode_hex, invalid_params, module_error, RpcBuildError, RpcRouter};
 use serde::{Deserialize, Serialize};
 
 use crate::{execution::SharedAppliedHeight, Transaction};
@@ -86,10 +87,79 @@ where
     nunchi_coins::rpc::register(&mut router, CoinsRpc::new(query))?;
     nunchi_coins::rpc::register_mempool(
         &mut router,
-        CoinsMempoolRpc::new(ChainMempoolIngress::new(mempool)),
+        CoinsMempoolRpc::new(ChainMempoolIngress::new(mempool.clone())),
     )?;
+    router.merge(chain_mempool_module(router.context(), mempool)?)?;
     router.merge(chain_module(router.context())?)?;
     Ok(router.into_module())
+}
+
+/// Build the aggregate chain transaction mempool RPC fragment.
+///
+/// Unlike `coins.submit_transaction`, this accepts [`crate::Transaction`], so callers can submit
+/// authority and oracle transactions through the same node RPC ingress used by block production.
+pub fn chain_mempool_module<Q>(
+    context: std::sync::Arc<RpcContext<Q>>,
+    mempool: MempoolHandle<Transaction>,
+) -> Result<RpcModule<RpcContext<Q>>, RegisterMethodError>
+where
+    Q: CoinQuery,
+{
+    let mut module = RpcModule::from_arc(context);
+    register_chain_mempool_methods(&mut module, mempool)?;
+    Ok(module)
+}
+
+/// Build only the aggregate chain transaction mempool RPC fragment.
+pub fn standalone_chain_mempool_module(
+    mempool: MempoolHandle<Transaction>,
+) -> Result<RpcModule<()>, RegisterMethodError> {
+    let mut module = RpcModule::new(());
+    register_chain_mempool_methods(&mut module, mempool)?;
+    Ok(module)
+}
+
+fn register_chain_mempool_methods<Context>(
+    module: &mut RpcModule<Context>,
+    mempool: MempoolHandle<Transaction>,
+) -> Result<(), RegisterMethodError>
+where
+    Context: Send + Sync + 'static,
+{
+    let submit_mempool = mempool.clone();
+    module.register_async_method("chain.submit_transaction", move |raw, _, _| {
+        let mempool = submit_mempool.clone();
+        async move {
+            let params: SubmitTransactionParams = nunchi_rpc::params(&raw)?;
+            let transaction: Transaction = decode_hex(&params.transaction, "chain transaction")?;
+            let hash = mempool.submit(transaction).await.map_err(admission_error)?;
+            RpcResult::Ok(SubmitTransactionResponse {
+                hash: encode_hex(&hash),
+            })
+        }
+    })?;
+    let status_mempool = mempool;
+    module.register_async_method("chain.transaction_status", move |raw, _, _| {
+        let mempool = status_mempool.clone();
+        async move {
+            let params: TransactionStatusParams = nunchi_rpc::params(&raw)?;
+            let digest: Digest = decode_hex(&params.hash, "transaction hash")?;
+            let status = mempool.status(digest).await;
+            let (status, height, drop_reason) = match status {
+                Some(TxStatus::Pending) => ("pending", None, None),
+                Some(TxStatus::Finalized { height }) => ("finalized", Some(height), None),
+                Some(TxStatus::Dropped { reason }) => ("dropped", None, Some(reason.as_str())),
+                None => ("unknown", None, None),
+            };
+            RpcResult::Ok(TransactionStatusResponse {
+                hash: encode_hex(&digest),
+                status: status.to_string(),
+                height,
+                drop_reason: drop_reason.map(str::to_string),
+            })
+        }
+    })?;
+    Ok(())
 }
 
 fn chain_module<Q>(
@@ -112,4 +182,21 @@ where
         })
     })?;
     Ok(module)
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TransactionStatusParams {
+    pub hash: String,
+}
+
+fn admission_error(error: AdmissionError) -> ErrorObjectOwned {
+    match error {
+        AdmissionError::InvalidSignature(_)
+        | AdmissionError::TxTooLarge { .. }
+        | AdmissionError::Duplicate
+        | AdmissionError::StaleNonce { .. } => invalid_params(error.to_string()),
+        AdmissionError::AccountQueueFull | AdmissionError::PoolFull | AdmissionError::Shutdown => {
+            module_error(error.to_string())
+        }
+    }
 }

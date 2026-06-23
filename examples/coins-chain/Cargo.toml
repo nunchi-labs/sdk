@@ -46,4 +46,6 @@ tokio = { version = "1", features = ["signal"] }
 [dev-dependencies]
 commonware-math = { workspace = true }
 jsonrpsee = { workspace = true, features = ["http-client"] }
+nunchi-hermes-oracle = { path = "../hermes-oracle" }
+reqwest = { version = "0.12", features = ["blocking", "json"] }
 tracing-subscriber = { workspace = true, features = ["fmt", "json"] }

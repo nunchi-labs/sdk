@@ -1,0 +1,22 @@
+[package]
+name = "nunchi-hermes-oracle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hermes price feed adapter that submits real-time updates to nunchi-oracle."
+
+[dependencies]
+async-trait = { workspace = true }
+bytes = { workspace = true }
+commonware-cryptography = { workspace = true }
+commonware-formatting = { workspace = true }
+commonware-runtime = { workspace = true }
+futures = { workspace = true }
+nunchi-crypto = { workspace = true }
+nunchi-mempool = { workspace = true }
+nunchi-oracle = { workspace = true }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
