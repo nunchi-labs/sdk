@@ -1,0 +1,66 @@
+#!/bin/sh
+set -eu
+
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+  apt-transport-https \
+  ca-certificates \
+  gnupg \
+  prometheus \
+  wget
+
+mkdir -p /etc/apt/keyrings
+wget -O /etc/apt/keyrings/grafana.asc https://apt.grafana.com/gpg-full.key
+chmod 644 /etc/apt/keyrings/grafana.asc
+echo "deb [signed-by=/etc/apt/keyrings/grafana.asc] https://apt.grafana.com stable main" >/etc/apt/sources.list.d/grafana.list
+
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends grafana
+
+cat >/tmp/prometheus.yml <<'EOF'
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - 127.0.0.1:9090
+EOF
+
+mkdir -p /etc/grafana/provisioning/datasources
+cat >/etc/grafana/provisioning/datasources/prometheus.yml <<'EOF'
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://127.0.0.1:9090
+    isDefault: true
+EOF
+
+prometheus_pid=
+if wget -q --spider http://127.0.0.1:9090/-/ready; then
+  echo "Using existing Prometheus at 127.0.0.1:9090"
+else
+  prometheus \
+    --config.file=/tmp/prometheus.yml \
+    --storage.tsdb.path=/tmp/prometheus-data \
+    --web.listen-address=0.0.0.0:9090 &
+  prometheus_pid=$!
+fi
+
+trap 'if [ -n "$prometheus_pid" ]; then kill "$prometheus_pid" 2>/dev/null || true; fi' INT TERM EXIT
+
+if command -v grafana-server >/dev/null 2>&1; then
+  grafana-server \
+    --homepath=/usr/share/grafana \
+    --config=/etc/grafana/grafana.ini \
+    --packaging=deb
+else
+  grafana server \
+    --homepath=/usr/share/grafana \
+    --config=/etc/grafana/grafana.ini \
+    --packaging=deb
+fi
