@@ -1,13 +1,17 @@
 use commonware_codec::{
-    Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
+    DecodeExt, Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
 };
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use nunchi_crypto::PublicKey;
+use std::{fmt, str::FromStr};
 use thiserror::Error;
 
 const ADDRESS_DOMAIN: &[u8] = b"nunchi/account/v1";
 const ADDRESS_EXTERNAL: u8 = 0;
 const ADDRESS_MULTISIG: u8 = 1;
+
+/// Bech32 human-readable prefix for account addresses.
+pub const ADDRESS_HRP: &str = "nch";
 
 /// A unified Nunchi account address.
 ///
@@ -27,12 +31,51 @@ impl Address {
         Self::derive(ADDRESS_MULTISIG, &policy.encode())
     }
 
+    /// Encode this address using Nunchi's Bech32 human-facing format.
+    pub fn to_bech32(&self) -> String {
+        let hrp = bech32::Hrp::parse(ADDRESS_HRP).expect("static address HRP is valid");
+        bech32::encode::<bech32::Bech32>(hrp, self.encode().as_ref())
+            .expect("fixed-width address always encodes")
+    }
+
+    /// Decode a Nunchi Bech32 address.
+    pub fn from_bech32(value: &str) -> Result<Self, Bech32Error> {
+        let (hrp, bytes) = bech32::decode(value).map_err(Bech32Error::Decode)?;
+        if hrp.as_str() != ADDRESS_HRP {
+            return Err(Bech32Error::WrongHrp {
+                expected: ADDRESS_HRP,
+                actual: hrp.to_string(),
+            });
+        }
+        if bytes.len() != Self::SIZE {
+            return Err(Bech32Error::WrongLength {
+                expected: Self::SIZE,
+                actual: bytes.len(),
+            });
+        }
+        Self::decode(bytes.as_ref()).map_err(Bech32Error::Codec)
+    }
+
     fn derive(kind: u8, material: &[u8]) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(ADDRESS_DOMAIN);
         hasher.update(&[kind]);
         hasher.update(material);
         Self(hasher.finalize())
+    }
+}
+
+impl fmt::Display for Address {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.to_bech32())
+    }
+}
+
+impl FromStr for Address {
+    type Err = Bech32Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_bech32(s)
     }
 }
 
@@ -58,6 +101,22 @@ impl Read for Address {
 
 impl FixedSize for Address {
     const SIZE: usize = Digest::SIZE;
+}
+
+/// Invalid Bech32 address encoding.
+#[derive(Debug, Error)]
+pub enum Bech32Error {
+    #[error("invalid bech32 address: {0}")]
+    Decode(#[from] bech32::DecodeError),
+    #[error("invalid address HRP: expected {expected}, got {actual}")]
+    WrongHrp {
+        expected: &'static str,
+        actual: String,
+    },
+    #[error("invalid address length: expected {expected} bytes, got {actual}")]
+    WrongLength { expected: usize, actual: usize },
+    #[error("invalid address bytes: {0}")]
+    Codec(CodecError),
 }
 
 /// Maximum number of signers a threshold multisig policy can carry.
