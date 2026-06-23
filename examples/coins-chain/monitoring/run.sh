@@ -34,10 +34,26 @@ apiVersion: 1
 
 datasources:
   - name: Prometheus
+    uid: prometheus
     type: prometheus
     access: proxy
     url: http://127.0.0.1:9000
     isDefault: true
+EOF
+
+mkdir -p /etc/grafana/provisioning/dashboards
+cat >/etc/grafana/provisioning/dashboards/coins-chain.yml <<'EOF'
+apiVersion: 1
+
+providers:
+  - name: Coins Chain
+    orgId: 1
+    folder: ""
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /workspace/dashboard.json
 EOF
 
 prometheus_pid=
@@ -54,11 +70,13 @@ fi
 trap 'if [ -n "$prometheus_pid" ]; then kill "$prometheus_pid" 2>/dev/null || true; fi' INT TERM EXIT
 
 if command -v grafana-server >/dev/null 2>&1; then
+  GF_PATHS_PROVISIONING=/etc/grafana/provisioning \
   grafana-server \
     --homepath=/usr/share/grafana \
     --config=/etc/grafana/grafana.ini \
     --packaging=deb
 else
+  GF_PATHS_PROVISIONING=/etc/grafana/provisioning \
   grafana server \
     --homepath=/usr/share/grafana \
     --config=/etc/grafana/grafana.ini \
