@@ -451,6 +451,7 @@ async fn start_node(
     let broadcast = register(channels::BROADCAST);
     let dkg = register(channels::DKG);
     let backfill = register(channels::BACKFILL);
+    let mempool = register(channels::MEMPOOL);
     network.start();
 
     let engine_config: EngineConfig<_, _, _> = EngineConfig {
@@ -492,6 +493,7 @@ async fn start_node(
         resolver,
         broadcast,
         dkg,
+        mempool,
         marshal_resolver,
         ContinueOnUpdate::boxed(),
     );
