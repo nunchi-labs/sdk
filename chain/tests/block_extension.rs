@@ -4,7 +4,7 @@ use commonware_consensus::types::{Epoch, Height, Round, View};
 use commonware_cryptography::{ed25519, sha256, Digest as _, Digestible as _, Signer};
 use commonware_storage::mmr::Location;
 use commonware_utils::{non_empty_range, NZU32};
-use nunchi_chain::{Block, BlockExtension, StateCommitment};
+use nunchi_chain::{Block, BlockExtension, Composite, ConsensusExtension, StateCommitment};
 use nunchi_dkg::{Context, ReshareBlock};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -42,6 +42,24 @@ impl BlockExtension for TestExtension {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TestConsensusExtension(u8);
+
+impl BlockExtension for TestConsensusExtension {
+    type Payload = TestPayload;
+    type ReadCfg = ();
+
+    fn genesis_payload() -> Self::Payload {
+        TestPayload(0)
+    }
+}
+
+impl ConsensusExtension for TestConsensusExtension {
+    fn propose(&mut self) -> impl std::future::Future<Output = Self::Payload> + Send {
+        std::future::ready(TestPayload(self.0))
+    }
+}
+
 fn context() -> Context {
     Context {
         round: Round::new(Epoch::zero(), View::zero()),
@@ -59,6 +77,10 @@ fn state() -> StateCommitment {
 
 fn block_cfg() -> (std::num::NonZeroU32, ()) {
     (NZU32!(1), ())
+}
+
+fn composite_block_cfg() -> (std::num::NonZeroU32, ((), ())) {
+    (NZU32!(1), ((), ()))
 }
 
 #[test]
@@ -109,6 +131,55 @@ fn custom_extension_payload_is_encoded_and_committed() {
     assert_eq!(
         Block::<u8, TestExtension>::decode_cfg(left.encode().as_ref(), &block_cfg()).unwrap(),
         left,
+    );
+}
+
+#[test]
+fn composite_extension_payloads_are_encoded_and_committed() {
+    type TestComposite = Composite<TestExtension, TestExtension>;
+
+    assert_eq!(
+        <TestComposite as BlockExtension>::genesis_payload(),
+        (TestPayload(0), TestPayload(0))
+    );
+
+    let left = Block::<u8, TestComposite>::new(
+        context(),
+        sha256::Digest::EMPTY,
+        Height::zero(),
+        1,
+        vec![7],
+        None,
+        (TestPayload(1), TestPayload(2)),
+        state(),
+    );
+    let right = Block::<u8, TestComposite>::new(
+        context(),
+        sha256::Digest::EMPTY,
+        Height::zero(),
+        1,
+        vec![7],
+        None,
+        (TestPayload(1), TestPayload(3)),
+        state(),
+    );
+
+    assert_ne!(left.encode(), right.encode());
+    assert_ne!(left.digest(), right.digest());
+    assert_eq!(
+        Block::<u8, TestComposite>::decode_cfg(left.encode().as_ref(), &composite_block_cfg())
+            .unwrap(),
+        left,
+    );
+}
+
+#[test]
+fn composite_consensus_extension_proposes_both_payloads() {
+    let mut extension = Composite::new(TestConsensusExtension(1), TestConsensusExtension(2));
+
+    assert_eq!(
+        futures::executor::block_on(extension.propose()),
+        (TestPayload(1), TestPayload(2))
     );
 }
 
