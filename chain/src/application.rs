@@ -12,7 +12,8 @@ use commonware_storage::{mmr::Location, qmdb::sync::Target};
 use commonware_utils::{non_empty_range, range::NonEmptyRange, SystemTimeExt};
 use futures::{lock::Mutex as AsyncMutex, StreamExt};
 use nunchi_common::{
-    NoopEventSink, Overlay, QmdbBatch, QmdbDatabaseSet, QmdbMerkleized, Runtime, RuntimeContext,
+    empty_receipts_root, BlockExecutionOutput, EventBuffer, Overlay, QmdbBatch, QmdbDatabaseSet,
+    QmdbMerkleized, Runtime, RuntimeContext,
 };
 use nunchi_dkg::{Context, Scheme};
 use nunchi_mempool::{MempoolHandle, PoolTransaction};
@@ -38,7 +39,7 @@ const MAX_BLOCK_TIMESTAMP_MS: u64 = 7_258_118_400_000;
 pub struct Application<R, Ext = NoConsensusExtension>
 where
     R: Runtime,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
     Ext: ConsensusExtension + Sync,
 {
     submitter: MempoolHandle<R::Transaction>,
@@ -48,13 +49,14 @@ where
     applied_height: SharedAppliedHeight,
     genesis_state: StateCommitment,
     genesis_payload: sha256::Digest,
+    execution_outputs: Arc<AsyncMutex<HashMap<sha256::Digest, BlockExecutionOutput>>>,
     _runtime: PhantomData<R>,
 }
 
 impl<R, Ext> Application<R, Ext>
 where
     R: Runtime,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
     Ext: ConsensusExtension + Sync,
 {
     /// The genesis block, committing to `genesis_state`.
@@ -73,6 +75,7 @@ where
             None,
             Ext::genesis_payload(),
             self.genesis_state.clone(),
+            empty_receipts_root(),
         )
     }
 
@@ -93,8 +96,20 @@ where
             applied_height,
             genesis_state,
             genesis_payload,
+            execution_outputs: Arc::new(AsyncMutex::new(HashMap::new())),
             _runtime: PhantomData,
         }
+    }
+
+    async fn cache_execution_output(&self, digest: sha256::Digest, output: BlockExecutionOutput) {
+        self.execution_outputs.lock().await.insert(digest, output);
+    }
+
+    pub async fn cached_execution_output(
+        &self,
+        digest: sha256::Digest,
+    ) -> Option<BlockExecutionOutput> {
+        self.execution_outputs.lock().await.get(&digest).cloned()
     }
 
     fn timestamp<E: Clock>(
@@ -115,19 +130,30 @@ where
         batches: <QmdbDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
         context: RuntimeContext,
         candidates: Vec<R::Transaction>,
-    ) -> Option<(Vec<R::Transaction>, QmdbMerkleized<E>)> {
+    ) -> Option<(Vec<R::Transaction>, QmdbMerkleized<E>, BlockExecutionOutput)> {
         let mut batch = QmdbBatch::new(batches);
         let mut included = Vec::new();
+        let mut outputs = Vec::new();
 
         for transaction in candidates {
             if included.len() == self.max_block_transactions {
                 break;
             }
             let mut overlay = Overlay::new(&mut batch);
-            let mut events = NoopEventSink;
+            let mut events = EventBuffer::default();
             match R::validate(&mut overlay, &mut events, context, &transaction).await {
                 Ok(()) => {
+                    let tx_index = included.len() as u32;
+                    let tx_digest = transaction.digest();
+                    let output = match events.finish(tx_index, tx_digest) {
+                        Ok(output) => output,
+                        Err(error) => {
+                            error!(?error, "event output invalid while building block");
+                            return None;
+                        }
+                    };
                     overlay.commit();
+                    outputs.push(output);
                     included.push(transaction);
                 }
                 Err(error) if R::is_storage_error(&error) => {
@@ -139,6 +165,7 @@ where
                 }
             }
         }
+        let execution_output = BlockExecutionOutput::new(outputs);
 
         let merkleized = match batch.merkleize().await {
             Ok(merkleized) => merkleized,
@@ -147,31 +174,42 @@ where
                 return None;
             }
         };
-        Some((included, merkleized))
+        Some((included, merkleized, execution_output))
     }
 
     async fn execute_block<E: Storage + Clock + Metrics>(
         batches: <QmdbDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
         context: RuntimeContext,
         transactions: &[R::Transaction],
-    ) -> Option<QmdbMerkleized<E>> {
+    ) -> Option<(QmdbMerkleized<E>, BlockExecutionOutput)> {
         let mut batch = QmdbBatch::new(batches);
-        for transaction in transactions {
-            let mut events = NoopEventSink;
+        let mut outputs = Vec::with_capacity(transactions.len());
+        for (tx_index, transaction) in transactions.iter().enumerate() {
+            let mut events = EventBuffer::default();
             match R::apply(&mut batch, &mut events, context, transaction).await {
-                Ok(()) => {}
+                Ok(()) => {
+                    let output = match events
+                        .finish(tx_index as u32, PoolTransaction::digest(transaction))
+                    {
+                        Ok(output) => output,
+                        Err(error) => {
+                            error!(?error, "event output invalid while executing block");
+                            return None;
+                        }
+                    };
+                    outputs.push(output);
+                }
                 Err(error) if R::is_storage_error(&error) => {
                     panic!("storage failure while executing block: {error}");
                 }
                 Err(_) => return None,
             }
         }
-        Some(
-            batch
-                .merkleize()
-                .await
-                .expect("merkleization failed while executing block"),
-        )
+        let merkleized = batch
+            .merkleize()
+            .await
+            .expect("merkleization failed while executing block");
+        Some((merkleized, BlockExecutionOutput::new(outputs)))
     }
 
     fn state_range<E: Storage + Clock + Metrics>(
@@ -201,7 +239,7 @@ where
 impl<R> Application<R>
 where
     R: Runtime,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
 {
     pub fn new(
         submitter: MempoolHandle<R::Transaction>,
@@ -225,7 +263,7 @@ where
 impl<R> Application<R>
 where
     R: Runtime,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
     Block<R::Transaction>: nunchi_dkg::ReshareBlock,
 {
     pub fn with_dkg(
@@ -252,7 +290,7 @@ impl<E, R, Ext> StatefulApplication<E> for Application<R, Ext>
 where
     E: Rng + Spawner + Metrics + Clock + Storage,
     R: Runtime + Clone + Send + Sync + 'static,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
     Ext: ConsensusExtension + Sync,
 {
     type SigningScheme = Scheme;
@@ -266,7 +304,10 @@ where
     }
 
     async fn genesis(&mut self) -> Self::Block {
-        self.genesis_block()
+        let block = self.genesis_block();
+        self.cache_execution_output(block.digest(), BlockExecutionOutput::new(Vec::new()))
+            .await;
+        block
     }
 
     async fn propose(
@@ -283,7 +324,7 @@ where
         let execution_context = RuntimeContext {
             epoch: context.round.epoch().get(),
         };
-        let (transactions, merkleized) = self
+        let (transactions, merkleized, execution_output) = self
             .build_valid_transactions(batches, execution_context, candidates)
             .await?;
         let state_range = Self::state_range(&merkleized);
@@ -304,7 +345,10 @@ where
                 root: merkleized.root(),
                 range: state_range,
             },
+            execution_output.receipts_root,
         );
+        self.cache_execution_output(block.digest(), execution_output)
+            .await;
         Some(Proposed { block, merkleized })
     }
 
@@ -337,12 +381,17 @@ where
         let execution_context = RuntimeContext {
             epoch: block.context.round.epoch().get(),
         };
-        let merkleized =
+        let (merkleized, execution_output) =
             Self::execute_block(batches, execution_context, &block.transactions).await?;
         let state_range = Self::state_range(&merkleized);
         if merkleized.root() != block.state_root || state_range != block.state_range {
             return None;
         }
+        if execution_output.receipts_root != block.receipts_root {
+            return None;
+        }
+        self.cache_execution_output(block.digest(), execution_output)
+            .await;
         Some(merkleized)
     }
 
@@ -355,9 +404,10 @@ where
         let execution_context = RuntimeContext {
             epoch: block.context.round.epoch().get(),
         };
-        let merkleized = Self::execute_block(batches, execution_context, &block.transactions)
-            .await
-            .expect("certified block failed deterministic execution");
+        let (merkleized, execution_output) =
+            Self::execute_block(batches, execution_context, &block.transactions)
+                .await
+                .expect("certified block failed deterministic execution");
         let state_range = Self::state_range(&merkleized);
         assert_eq!(
             merkleized.root(),
@@ -368,6 +418,12 @@ where
             state_range, block.state_range,
             "certified block state range mismatch"
         );
+        assert_eq!(
+            execution_output.receipts_root, block.receipts_root,
+            "certified block receipts root mismatch"
+        );
+        self.cache_execution_output(block.digest(), execution_output)
+            .await;
         merkleized
     }
 
@@ -397,6 +453,18 @@ where
             transactions = block.transactions.len(),
             "finalized block"
         );
+        let cached = self.execution_outputs.lock().await.remove(&block.digest());
+        if cached.is_none() {
+            error!(
+                height = %block.height(),
+                digest = ?block.digest(),
+                "finalized block missing cached execution output"
+            );
+            debug_assert!(
+                cached.is_some(),
+                "finalized block missing cached execution output"
+            );
+        }
         *self.applied_height.lock().await = block.height();
         self.submitter.finalized(
             applied,

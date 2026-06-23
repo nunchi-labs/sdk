@@ -30,7 +30,9 @@ mod tests {
         multisig_account_id, AccountPolicy, CoinOperation, CoinSpec, Ledger, MultisigPolicy,
         PrivateKey, TokenName, TokenSymbol, Transaction as CoinTransaction,
     };
-    use nunchi_common::{QmdbBackend, QmdbBatch, QmdbDatabaseSet, QmdbState};
+    use nunchi_common::{
+        empty_events_root, empty_receipts_root, QmdbBackend, QmdbBatch, QmdbDatabaseSet, QmdbState,
+    };
     use nunchi_mempool::{Mempool, PoolConfig};
     use std::sync::Arc;
 
@@ -82,11 +84,13 @@ mod tests {
             );
 
             let batches = databases.new_batches().await;
-            let (included, _) = app
+            let (included, _, output) = app
                 .build_valid_transactions(batches, Default::default(), vec![tx.clone().into()])
                 .await
                 .expect("build_valid_transactions should succeed");
             assert!(included.is_empty());
+            assert!(output.transactions.is_empty());
+            assert_eq!(output.receipts_root, empty_receipts_root());
 
             let batches = databases.new_batches().await;
             let mut ledger = Ledger::new(QmdbBatch::new(batches));
@@ -102,11 +106,17 @@ mod tests {
             databases.finalize(merkleized).await;
 
             let batches = databases.new_batches().await;
-            let (included, _) = app
+            let (included, _, output) = app
                 .build_valid_transactions(batches, Default::default(), vec![tx.clone().into()])
                 .await
                 .expect("build_valid_transactions should succeed");
             assert_eq!(included, vec![tx.into()]);
+            assert_eq!(output.transactions.len(), 1);
+            assert_eq!(output.transactions[0].receipt.event_count, 0);
+            assert_eq!(
+                output.transactions[0].receipt.events_root,
+                empty_events_root()
+            );
         });
     }
 }

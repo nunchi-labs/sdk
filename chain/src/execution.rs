@@ -1,5 +1,6 @@
 //! Node-facing handles for submitting transactions and observing stateful execution.
 
+use commonware_cryptography::sha256;
 use commonware_glue::stateful::Mailbox as StatefulMailbox;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_storage::Context as StorageContext;
@@ -17,7 +18,7 @@ pub struct NodeHandle<E, R, Ext = NoConsensusExtension>
 where
     E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
     R: Runtime + Clone + Send + Sync + 'static,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
     Ext: ConsensusExtension + Sync,
 {
     pub submitter: MempoolHandle<R::Transaction>,
@@ -29,7 +30,7 @@ impl<E, R, Ext> NodeHandle<E, R, Ext>
 where
     E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
     R: Runtime + Clone + Send + Sync + 'static,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
     Ext: ConsensusExtension + Sync,
 {
     pub fn new(
@@ -55,7 +56,7 @@ pub struct StatefulQuery<E, R, Ext = NoConsensusExtension>
 where
     E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
     R: Runtime + Clone + Send + Sync + 'static,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
     Ext: ConsensusExtension + Sync,
 {
     stateful: StatefulMailbox<E, Application<R, Ext>>,
@@ -65,7 +66,7 @@ impl<E, R, Ext> Clone for StatefulQuery<E, R, Ext>
 where
     E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
     R: Runtime + Clone + Send + Sync + 'static,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
     Ext: ConsensusExtension + Sync,
 {
     fn clone(&self) -> Self {
@@ -79,7 +80,7 @@ impl<E, R, Ext> StatefulQuery<E, R, Ext>
 where
     E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
     R: Runtime + Clone + Send + Sync + 'static,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
     Ext: ConsensusExtension + Sync,
 {
     pub fn new(stateful: StatefulMailbox<E, Application<R, Ext>>) -> Self {

@@ -1,7 +1,9 @@
 use bytes::{Buf, BufMut};
 use commonware_codec::{Decode, Encode, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_consensus::types::{Epoch, Height, Round, View};
-use commonware_cryptography::{ed25519, sha256, Digest as _, Digestible as _, Signer};
+use commonware_cryptography::{
+    ed25519, sha256, Digest as _, Digestible as _, Hasher, Sha256, Signer,
+};
 use commonware_storage::mmr::Location;
 use commonware_utils::{non_empty_range, NZU32};
 use nunchi_chain::{Block, BlockExtension, Composite, ConsensusExtension, StateCommitment};
@@ -75,6 +77,10 @@ fn state() -> StateCommitment {
     }
 }
 
+fn receipts_root(value: u8) -> sha256::Digest {
+    Sha256::hash(&[value])
+}
+
 fn block_cfg() -> (std::num::NonZeroU32, ()) {
     (NZU32!(1), ())
 }
@@ -94,6 +100,7 @@ fn default_block_extension_is_empty_payload() {
         None,
         (),
         state(),
+        receipts_root(1),
     );
 
     assert_eq!(block.extension, ());
@@ -114,6 +121,7 @@ fn custom_extension_payload_is_encoded_and_committed() {
         None,
         TestPayload(1),
         state(),
+        receipts_root(1),
     );
     let right = Block::<u8, TestExtension>::new(
         context(),
@@ -124,6 +132,7 @@ fn custom_extension_payload_is_encoded_and_committed() {
         None,
         TestPayload(2),
         state(),
+        receipts_root(1),
     );
 
     assert_ne!(left.encode(), right.encode());
@@ -152,6 +161,7 @@ fn composite_extension_payloads_are_encoded_and_committed() {
         None,
         (TestPayload(1), TestPayload(2)),
         state(),
+        receipts_root(1),
     );
     let right = Block::<u8, TestComposite>::new(
         context(),
@@ -162,6 +172,7 @@ fn composite_extension_payloads_are_encoded_and_committed() {
         None,
         (TestPayload(1), TestPayload(3)),
         state(),
+        receipts_root(1),
     );
 
     assert_ne!(left.encode(), right.encode());
@@ -194,9 +205,43 @@ fn dkg_reshare_log_is_core_block_field() {
         None,
         (),
         state(),
+        receipts_root(1),
     );
 
     assert!(block.reshare_log.is_none());
     assert_eq!(block.extension, ());
     assert!(ReshareBlock::reshare_log(&block).is_none());
+}
+
+#[test]
+fn receipts_root_is_encoded_and_committed() {
+    let left = Block::<u8>::new(
+        context(),
+        sha256::Digest::EMPTY,
+        Height::zero(),
+        1,
+        vec![7],
+        None,
+        (),
+        state(),
+        receipts_root(1),
+    );
+    let right = Block::<u8>::new(
+        context(),
+        sha256::Digest::EMPTY,
+        Height::zero(),
+        1,
+        vec![7],
+        None,
+        (),
+        state(),
+        receipts_root(2),
+    );
+
+    assert_ne!(left.encode(), right.encode());
+    assert_ne!(left.digest(), right.digest());
+    assert_eq!(
+        Block::<u8>::decode_cfg(left.encode().as_ref(), &block_cfg()).unwrap(),
+        left
+    );
 }

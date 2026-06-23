@@ -58,6 +58,9 @@ where
     /// QMDB operation range that supports state sync to `state_root`.
     pub state_range: NonEmptyRange<Location>,
 
+    /// Authenticated receipt root after executing `transactions`.
+    pub receipts_root: Digest,
+
     /// Pre-computed digest of the block.
     digest: Digest,
 }
@@ -71,6 +74,7 @@ struct DigestInput<'a, Tx, Payload> {
     reshare_log: &'a Option<DealerLog>,
     extension: &'a Payload,
     state: &'a StateCommitment,
+    receipts_root: &'a Digest,
 }
 
 impl<Tx, Ext> Clone for Block<Tx, Ext>
@@ -89,6 +93,7 @@ where
             extension: self.extension.clone(),
             state_root: self.state_root,
             state_range: self.state_range.clone(),
+            receipts_root: self.receipts_root,
             digest: self.digest,
         }
     }
@@ -109,6 +114,7 @@ where
             && self.extension.encode() == other.extension.encode()
             && self.state_root == other.state_root
             && self.state_range == other.state_range
+            && self.receipts_root == other.receipts_root
             && self.digest == other.digest
     }
 }
@@ -139,6 +145,7 @@ where
         hasher.update(&input.extension.encode());
         hasher.update(&input.state.root);
         hasher.update(&input.state.range.encode());
+        hasher.update(input.receipts_root);
         hasher.finalize()
     }
 
@@ -152,6 +159,7 @@ where
         reshare_log: Option<DealerLog>,
         extension: Ext::Payload,
         state: StateCommitment,
+        receipts_root: Digest,
     ) -> Self {
         let digest = Self::compute_digest(DigestInput {
             context: &context,
@@ -162,6 +170,7 @@ where
             reshare_log: &reshare_log,
             extension: &extension,
             state: &state,
+            receipts_root: &receipts_root,
         });
         Self {
             context,
@@ -173,6 +182,7 @@ where
             extension,
             state_root: state.root,
             state_range: state.range,
+            receipts_root,
             digest,
         }
     }
@@ -196,6 +206,7 @@ where
         self.extension.write(writer);
         self.state_root.write(writer);
         self.state_range.write(writer);
+        self.receipts_root.write(writer);
     }
 }
 
@@ -226,6 +237,7 @@ where
         let extension = Ext::Payload::read_cfg(reader, &cfg.1)?;
         let state_root = Digest::read(reader)?;
         let state_range = NonEmptyRange::read(reader)?;
+        let receipts_root = Digest::read(reader)?;
         let state = StateCommitment {
             root: state_root,
             range: state_range,
@@ -240,6 +252,7 @@ where
             reshare_log: &reshare_log,
             extension: &extension,
             state: &state,
+            receipts_root: &receipts_root,
         });
         Ok(Self {
             context,
@@ -251,6 +264,7 @@ where
             extension,
             state_root: state.root,
             state_range: state.range,
+            receipts_root,
             digest,
         })
     }
@@ -276,6 +290,7 @@ where
             + self.extension.encode_size()
             + self.state_root.encode_size()
             + self.state_range.encode_size()
+            + self.receipts_root.encode_size()
     }
 }
 
