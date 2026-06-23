@@ -18,7 +18,7 @@
     "account_policies": [],
     "tokens": [
       {
-        "issuer": "9433e731954de5e1f8688bfdd2ce744c39baa18a8867c6b3be551deddf01e297",
+        "issuer": "nch1jse7wvv4fhj7r7rg307a9nn5fsum4gv23pnudva725w7mhcpu2tsk096jm",
         "spec": {
           "symbol": "NCH",
           "name": "Nunchi",
@@ -28,11 +28,11 @@
         },
         "allocations": [
           {
-            "account": "43e912744bc7c5484d03b5c57a9bbcc614e0d969f0042a927164ed3eafcfd072",
+            "account": "nch1g053yaztclz5sngrkhzh4xaucc2wpktf7qzz4yn3vnknat706peq075klx",
             "amount": 400
           },
           {
-            "account": "cfb10975ac5fb4033b902eb2dee02b711384078ba7c7c68d6fe343591f48dbb6",
+            "account": "nch1e7csjadvt76qxwus96edacptwyfcgput5lrudrt0udp4j86gmwmqnhgh8w",
             "amount": 600
           }
         ]

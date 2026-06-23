@@ -146,9 +146,7 @@ fn marker_key() -> Digest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::Encode;
     use commonware_cryptography::{ed25519, Signer as _};
-    use commonware_formatting::hex;
     use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
     use nunchi_authority::{AuthorityDB, AuthorityOperation, Transaction as AuthorityTransaction};
     use nunchi_coins::{Address, CoinDB, CoinSpec, TokenFactory, TokenName, TokenSymbol};
@@ -156,8 +154,8 @@ mod tests {
 
     const GENESIS_FIXTURE: &[u8] = include_bytes!("../tests/fixtures/genesis.json");
 
-    fn encode_hex(value: &impl Encode) -> String {
-        hex(&value.encode())
+    fn encode_address(value: &Address) -> String {
+        value.to_bech32()
     }
 
     fn owner(seed: u64) -> PrivateKey {
@@ -194,7 +192,7 @@ mod tests {
             coins: Some(CoinsGenesis {
                 account_policies: Vec::new(),
                 tokens: vec![nunchi_coins::TokenGenesis {
-                    issuer: encode_hex(&issuer),
+                    issuer: encode_address(&issuer),
                     spec: CoinSpec::new(
                         TokenSymbol::new("NCH").unwrap(),
                         TokenName::new("Nunchi").unwrap(),
@@ -204,11 +202,11 @@ mod tests {
                     ),
                     allocations: vec![
                         nunchi_coins::AllocationGenesis {
-                            account: encode_hex(&alice),
+                            account: encode_address(&alice),
                             amount: 400,
                         },
                         nunchi_coins::AllocationGenesis {
-                            account: encode_hex(&bob),
+                            account: encode_address(&bob),
                             amount: 600,
                         },
                     ],

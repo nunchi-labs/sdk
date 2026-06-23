@@ -21,7 +21,7 @@ pub struct CoinsGenesis {
 /// JSON-facing account policy registration.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AccountPolicyGenesis {
-    /// Hex-encoded [`Address`]. Must equal `Address::multisig(policy)`.
+    /// Bech32-encoded [`Address`]. Must equal `Address::multisig(policy)`.
     pub account_id: String,
     /// Multisig policy registered at `account_id`.
     pub policy: MultisigPolicyGenesis,
@@ -40,7 +40,7 @@ pub struct MultisigPolicyGenesis {
 /// JSON-facing token creation request.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TokenGenesis {
-    /// Hex-encoded issuer [`Address`].
+    /// Bech32-encoded issuer [`Address`].
     pub issuer: String,
     /// Token creation spec. This is passed through [`crate::TokenFactory`].
     pub spec: CoinSpec,
@@ -52,7 +52,7 @@ pub struct TokenGenesis {
 /// JSON-facing balance allocation for a token created in the same genesis entry.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AllocationGenesis {
-    /// Hex-encoded recipient [`Address`].
+    /// Bech32-encoded recipient [`Address`].
     pub account: String,
     pub amount: u128,
 }
@@ -68,7 +68,7 @@ impl<D: CoinDB> Ledger<D> {
     /// Seed coin state from genesis while preserving ledger invariants.
     pub async fn apply_genesis(&mut self, genesis: &CoinsGenesis) -> Result<(), LedgerError> {
         for account in &genesis.account_policies {
-            let account_id = decode_hex::<Address>(&account.account_id, "account id")?;
+            let account_id = decode_address(&account.account_id, "account id")?;
             let policy = account.policy.policy()?;
             if account_id != multisig_account_id(&policy) {
                 return Err(LedgerError::AccountPolicyMismatch(Box::new(account_id)));
@@ -78,7 +78,7 @@ impl<D: CoinDB> Ledger<D> {
         }
 
         for token in &genesis.tokens {
-            let issuer = decode_hex::<Address>(&token.issuer, "token issuer")?;
+            let issuer = decode_address(&token.issuer, "token issuer")?;
             let coin = self
                 .create_token(issuer.clone(), token.spec.clone())
                 .await?;
@@ -120,20 +120,15 @@ impl<D: CoinDB> Ledger<D> {
             self.debit(&issuer, coin, initial_supply).await?;
         }
         for allocation in allocations {
-            let account = decode_hex::<Address>(&allocation.account, "allocation account")?;
+            let account = decode_address(&allocation.account, "allocation account")?;
             self.credit(&account, coin, allocation.amount).await?;
         }
         Ok(())
     }
 }
 
-fn decode_hex<T>(value: &str, what: &'static str) -> Result<T, LedgerError>
-where
-    T: DecodeExt<()>,
-{
-    let bytes =
-        from_hex(value).ok_or_else(|| LedgerError::InvalidGenesis(format!("invalid {what}")))?;
-    T::decode(bytes.as_ref())
+fn decode_address(value: &str, what: &'static str) -> Result<Address, LedgerError> {
+    Address::from_bech32(value)
         .map_err(|err| LedgerError::InvalidGenesis(format!("invalid {what}: {err}")))
 }
 

@@ -16,7 +16,7 @@ use jsonrpsee::{
     core::{async_trait, RegisterMethodError, RpcResult},
     proc_macros::rpc,
 };
-use nunchi_rpc::{decode_hex, encode_hex, module_error, RpcRouter};
+use nunchi_rpc::{decode_hex, encode_hex, invalid_params, module_error, RpcRouter};
 use serde::{Deserialize, Serialize};
 
 use crate::{Address, CoinDB, CoinId, Ledger, LedgerError, TokenDefinition};
@@ -117,7 +117,7 @@ where
         let account = decode_account(&account)?;
         let nonce = self.query.nonce(account.clone()).await.map_err(rpc_error)?;
         Ok(NonceResponse {
-            account: encode_hex(&account),
+            account: account.to_bech32(),
             nonce,
         })
     }
@@ -137,7 +137,7 @@ where
             .await
             .map_err(rpc_error)?;
         Ok(BalanceResponse {
-            account: encode_hex(&account),
+            account: account.to_bech32(),
             coin: encode_hex(&coin),
             amount: amount.to_string(),
         })
@@ -195,7 +195,8 @@ where
 }
 
 fn decode_account(value: &str) -> RpcResult<Address> {
-    decode_hex(value, "account")
+    Address::from_bech32(value)
+        .map_err(|err| invalid_params(format!("invalid account address: {err}")))
 }
 
 fn decode_coin(value: &str) -> RpcResult<CoinId> {
@@ -210,7 +211,7 @@ impl From<TokenDefinition> for TokenResponse {
     fn from(token: TokenDefinition) -> Self {
         Self {
             id: encode_hex(&token.id),
-            issuer: encode_hex(&token.issuer),
+            issuer: token.issuer.to_bech32(),
             symbol: token.symbol.into(),
             name: token.name.into(),
             decimals: token.decimals,
