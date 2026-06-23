@@ -36,18 +36,18 @@ datasources:
   - name: Prometheus
     type: prometheus
     access: proxy
-    url: http://127.0.0.1:9090
+    url: http://127.0.0.1:9000
     isDefault: true
 EOF
 
 prometheus_pid=
-if wget -q --spider http://127.0.0.1:9090/-/ready; then
-  echo "Using existing Prometheus at 127.0.0.1:9090"
+if wget -q --spider http://127.0.0.1:9000/-/ready; then
+  echo "Using existing Prometheus at 127.0.0.1:9000"
 else
   prometheus \
     --config.file=/tmp/prometheus.yml \
     --storage.tsdb.path=/tmp/prometheus-data \
-    --web.listen-address=0.0.0.0:9090 &
+    --web.listen-address=0.0.0.0:9000 &
   prometheus_pid=$!
 fi
 
