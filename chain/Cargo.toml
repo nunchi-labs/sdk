@@ -12,12 +12,16 @@ bytes = { workspace = true }
 commonware-codec = { workspace = true }
 commonware-consensus = { workspace = true }
 commonware-cryptography = { workspace = true }
+commonware-formatting = { workspace = true }
 commonware-glue = { workspace = true }
 commonware-parallel = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-storage = { workspace = true }
 commonware-utils = { workspace = true }
 futures = { workspace = true }
+jsonrpsee = { workspace = true }
+nunchi-rpc = { workspace = true }
 rand = { workspace = true }
+serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

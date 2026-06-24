@@ -7,7 +7,10 @@ use commonware_storage::Context as StorageContext;
 use nunchi_common::{QmdbDatabaseSet, QmdbReader, Runtime};
 use nunchi_mempool::{MempoolHandle, PoolTransaction};
 
-use crate::{Application, ConsensusExtension, NoConsensusExtension, SharedAppliedHeight};
+use crate::{
+    Application, ConsensusExtension, FinalizedEventArchive, NoConsensusExtension,
+    SharedAppliedHeight,
+};
 
 /// A node's externally reachable handles.
 ///
@@ -24,6 +27,7 @@ where
     pub submitter: MempoolHandle<R::Transaction>,
     pub stateful: StatefulMailbox<E, Application<R, Ext>>,
     pub applied_height: SharedAppliedHeight,
+    pub event_archive: FinalizedEventArchive,
 }
 
 impl<E, R, Ext> NodeHandle<E, R, Ext>
@@ -37,11 +41,13 @@ where
         submitter: MempoolHandle<R::Transaction>,
         stateful: StatefulMailbox<E, Application<R, Ext>>,
         applied_height: SharedAppliedHeight,
+        event_archive: FinalizedEventArchive,
     ) -> Self {
         Self {
             submitter,
             stateful,
             applied_height,
+            event_archive,
         }
     }
 

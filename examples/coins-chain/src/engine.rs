@@ -275,6 +275,45 @@ where
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
+        let start = Instant::now();
+        let finalized_events = nunchi_chain::PersistentFinalizedEventArchive::init(
+            context.child("finalized_events"),
+            immutable::Config {
+                metadata_partition: format!(
+                    "{}-finalized_events-metadata",
+                    config.partition_prefix
+                ),
+                freezer_table_partition: format!(
+                    "{}-finalized_events-freezer-table",
+                    config.partition_prefix
+                ),
+                freezer_table_initial_size: config.finalized_freezer_table_initial_size,
+                freezer_table_resize_frequency: FREEZER_TABLE_RESIZE_FREQUENCY,
+                freezer_table_resize_chunk_size: FREEZER_TABLE_RESIZE_CHUNK_SIZE,
+                freezer_key_partition: format!(
+                    "{}-finalized_events-freezer-key",
+                    config.partition_prefix
+                ),
+                freezer_key_page_cache: page_cache.clone(),
+                freezer_key_write_buffer: WRITE_BUFFER,
+                freezer_value_partition: format!(
+                    "{}-finalized_events-freezer-value",
+                    config.partition_prefix
+                ),
+                freezer_value_write_buffer: WRITE_BUFFER,
+                freezer_value_target_size: FREEZER_VALUE_TARGET_SIZE,
+                freezer_value_compression: FREEZER_VALUE_COMPRESSION,
+                ordinal_partition: format!("{}-finalized_events-ordinal", config.partition_prefix),
+                ordinal_write_buffer: WRITE_BUFFER,
+                items_per_section: IMMUTABLE_ITEMS_PER_SECTION,
+                codec_config: nunchi_common::EventLimits::default(),
+                replay_buffer: REPLAY_BUFFER,
+            },
+        )
+        .await
+        .expect("failed to initialize finalized events archive");
+        info!(elapsed = ?start.elapsed(), "restored finalized events archive");
+
         let certificate_verifier = <SchemeProvider as EpochProvider>::certificate_verifier(
             &consensus_namespace,
             &config.output,
@@ -338,13 +377,15 @@ where
             empty_state
         };
         let applied_height = Arc::new(AsyncMutex::new(Height::zero()));
-        let app = Application::with_dkg(
+        let event_archive = finalized_events.query_archive();
+        let app = Application::with_dkg_and_event_reporter(
             submitter.clone(),
             config.max_block_transactions,
             dkg_mailbox.clone(),
             applied_height.clone(),
             genesis_state,
             application::genesis_payload(),
+            nunchi_chain::FinalizedEventReporterHandle::new(finalized_events),
         );
         let genesis = app.genesis_block();
         let genesis_digest = genesis.digest();
@@ -396,7 +437,12 @@ where
                 sync_config: state_sync_config(),
             },
         );
-        let node_handle = NodeHandle::new(submitter, stateful_mailbox.clone(), applied_height);
+        let node_handle = NodeHandle::new(
+            submitter,
+            stateful_mailbox.clone(),
+            applied_height,
+            event_archive,
+        );
 
         let application = Deferred::new(
             context.child("application"),

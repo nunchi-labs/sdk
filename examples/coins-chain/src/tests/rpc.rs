@@ -45,8 +45,13 @@ fn rpc_serves_status_and_filters_submissions_over_http() {
         let applied_height = Arc::new(AsyncMutex::new(Height::zero()));
         let expected_root = encode_hex(&ledger.lock().await.root());
 
-        let module = rpc::module(ledger.clone(), submitter.clone(), applied_height)
-            .expect("build RPC module");
+        let module = rpc::module(
+            ledger.clone(),
+            submitter.clone(),
+            applied_height,
+            nunchi_chain::FinalizedEventArchive::new(),
+        )
+        .expect("build RPC module");
         let server = ServerBuilder::default()
             .build("127.0.0.1:0")
             .await

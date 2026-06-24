@@ -1,7 +1,9 @@
+use bytes::{Buf, BufMut};
+use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
 use commonware_consensus::types::Height;
 use commonware_cryptography::sha256;
 use futures::future::BoxFuture;
-use nunchi_common::TransactionEvents;
+use nunchi_common::{EventLimits, TransactionEvents};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -13,6 +15,46 @@ pub struct FinalizedEvents {
     pub block_timestamp: u64,
     pub receipts_root: sha256::Digest,
     pub transactions: Vec<TransactionEvents>,
+}
+
+impl Write for FinalizedEvents {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.height.write(buf);
+        self.block_digest.write(buf);
+        self.block_timestamp.write(buf);
+        self.receipts_root.write(buf);
+        self.transactions.write(buf);
+    }
+}
+
+impl Read for FinalizedEvents {
+    type Cfg = EventLimits;
+
+    fn read_cfg(buf: &mut impl Buf, limits: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            height: Height::read(buf)?,
+            block_digest: sha256::Digest::read(buf)?,
+            block_timestamp: u64::read(buf)?,
+            receipts_root: sha256::Digest::read(buf)?,
+            transactions: Vec::<TransactionEvents>::read_cfg(
+                buf,
+                &(
+                    RangeCfg::new(0..=limits.max_transactions_per_block),
+                    *limits,
+                ),
+            )?,
+        })
+    }
+}
+
+impl EncodeSize for FinalizedEvents {
+    fn encode_size(&self) -> usize {
+        self.height.encode_size()
+            + self.block_digest.encode_size()
+            + self.block_timestamp.encode_size()
+            + self.receipts_root.encode_size()
+            + self.transactions.encode_size()
+    }
 }
 
 /// Error returned by finalized event reporters.

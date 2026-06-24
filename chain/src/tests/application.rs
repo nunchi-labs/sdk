@@ -568,6 +568,12 @@ fn finalized_reports_cached_event_batch_once_after_finalization() {
         assert_eq!(batches[0].block_timestamp, block.timestamp);
         assert_eq!(batches[0].receipts_root, block.receipts_root);
         assert_eq!(batches[0].transactions, output.transactions);
+        assert_eq!(
+            app.event_archive()
+                .batch_by_height(block.height)
+                .expect("archive height query"),
+            Some(batches[0].clone())
+        );
         assert!(app.cached_execution_output(block.digest()).await.is_none());
     });
 }

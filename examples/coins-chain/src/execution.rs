@@ -10,6 +10,7 @@ use nunchi_coins::{rpc::CoinQuery, Address, CoinId, Ledger, LedgerError, TokenDe
 use nunchi_common::QmdbReader;
 use nunchi_mempool::MempoolHandle;
 
+pub use nunchi_chain::FinalizedEventArchive;
 pub use nunchi_chain::SharedAppliedHeight;
 
 /// A coins-chain node's externally reachable handles.
@@ -21,6 +22,7 @@ where
     pub submitter: MempoolHandle<Transaction>,
     pub stateful: StatefulMailbox<E, Application>,
     pub applied_height: SharedAppliedHeight,
+    pub event_archive: FinalizedEventArchive,
 }
 
 impl<E> NodeHandle<E>
@@ -31,11 +33,13 @@ where
         submitter: MempoolHandle<Transaction>,
         stateful: StatefulMailbox<E, Application>,
         applied_height: SharedAppliedHeight,
+        event_archive: FinalizedEventArchive,
     ) -> Self {
         Self {
             submitter,
             stateful,
             applied_height,
+            event_archive,
         }
     }
 

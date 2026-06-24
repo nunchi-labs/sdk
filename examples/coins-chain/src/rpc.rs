@@ -11,7 +11,10 @@ use nunchi_mempool::{AdmissionError, MempoolHandle, TxStatus};
 use nunchi_rpc::{encode_hex, module_error, RpcBuildError, RpcRouter};
 use serde::{Deserialize, Serialize};
 
-use crate::{execution::SharedAppliedHeight, Transaction};
+use crate::{
+    execution::{FinalizedEventArchive, SharedAppliedHeight},
+    Transaction,
+};
 
 pub use nunchi_coins::rpc::{
     SubmitTransactionParams, SubmitTransactionResponse, TransactionStatusResponse,
@@ -78,6 +81,7 @@ pub fn module<Q>(
     query: Q,
     mempool: MempoolHandle<Transaction>,
     applied_height: SharedAppliedHeight,
+    event_archive: FinalizedEventArchive,
 ) -> Result<RpcModule<RpcContext<Q>>, RpcBuildError>
 where
     Q: CoinQuery,
@@ -87,6 +91,10 @@ where
     nunchi_coins::rpc::register_mempool(
         &mut router,
         CoinsMempoolRpc::new(ChainMempoolIngress::new(mempool)),
+    )?;
+    nunchi_chain::rpc::register(
+        &mut router,
+        nunchi_chain::rpc::EventsRpc::new(event_archive),
     )?;
     router.merge(chain_module(router.context())?)?;
     Ok(router.into_module())

@@ -26,7 +26,10 @@ use std::{
 };
 use tracing::{debug, error};
 
-use crate::events::{FinalizedEventReporterHandle, FinalizedEvents};
+use crate::{
+    archive::FinalizedEventArchive,
+    events::{FinalizedEventReporterHandle, FinalizedEvents},
+};
 use crate::{Block, ConsensusExtension, DkgMailbox, NoConsensusExtension, StateCommitment};
 
 /// The height of the last finalized block applied to a node's ledger.
@@ -51,6 +54,7 @@ where
     genesis_state: StateCommitment,
     genesis_payload: sha256::Digest,
     execution_outputs: Arc<AsyncMutex<HashMap<sha256::Digest, BlockExecutionOutput>>>,
+    event_archive: FinalizedEventArchive,
     finalized_event_reporter: FinalizedEventReporterHandle,
     _runtime: PhantomData<R>,
 }
@@ -99,9 +103,15 @@ where
             genesis_state,
             genesis_payload,
             execution_outputs: Arc::new(AsyncMutex::new(HashMap::new())),
+            event_archive: FinalizedEventArchive::new(),
             finalized_event_reporter: FinalizedEventReporterHandle::default(),
             _runtime: PhantomData,
         }
+    }
+
+    /// Return this application's finalized event archive.
+    pub fn event_archive(&self) -> FinalizedEventArchive {
+        self.event_archive.clone()
     }
 
     /// Use a custom reporter for finalized event batches.
@@ -555,6 +565,14 @@ where
             block.height().get(),
         );
         if let Some(finalized_events) = finalized_events {
+            if let Err(error) = self.event_archive.insert(finalized_events.clone()) {
+                error!(
+                    ?error,
+                    height = %block.height(),
+                    digest = ?digest,
+                    "failed to archive finalized events"
+                );
+            }
             if let Err(error) = self.finalized_event_reporter.report(finalized_events).await {
                 error!(
                     ?error,

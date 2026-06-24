@@ -500,6 +500,7 @@ async fn start_node(
         node_handle.query(),
         node_handle.submitter.clone(),
         node_handle.applied_height.clone(),
+        node_handle.event_archive.clone(),
     )?;
     let rpc_server = nunchi_rpc::ServerBuilder::default()
         .build(config.rpc_address)
