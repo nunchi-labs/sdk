@@ -14,7 +14,7 @@ nunchi-crypto = { workspace = true }
 nunchi-dkg = { workspace = true }
 nunchi-mempool = { workspace = true }
 nunchi-oracle = { workspace = true }
-nunchi-perpetuals = { workspace = true }
+nunchi-perpetuals = { workspace = true, features = ["mempool"] }
 nunchi-rpc = { workspace = true }
 commonware-actor = { workspace = true }
 commonware-broadcast = { workspace = true }

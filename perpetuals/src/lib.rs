@@ -3,6 +3,9 @@
 mod db;
 mod genesis;
 mod ledger;
+/// JSON-RPC surface for the perpetuals module.
+#[cfg(feature = "rpc")]
+pub mod rpc;
 #[cfg(test)]
 mod tests;
 mod transaction;
