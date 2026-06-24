@@ -60,6 +60,7 @@ This repository will contain modules for building public and private blockchains
 
 * `margin` - user has BTC + nunchi and doesn't want to sell, and deposits BTC+nunchi and gets a stablecoin.  Could be backed by other coins, not just btc and nunchi. 
 * `securities` - Non-synthetic perps contracts (delivery of tokenized stock)
+* [`perpetuals`](perpetuals/) - generic perpetual futures with Oracle-backed mark prices, isolated collateral, funding, and liquidation
 * `vaults` - a module for running vaults composed of many types of capital, traded by an authorised offchain party
 * `clob` - used on the global chain, provides liquidity between local chain tokens
 * `derivatives` - ingests a price feed and creates derivatives products
