@@ -22,11 +22,6 @@ use commonware_utils::{
 use governor::Quota;
 use nunchi_authority::AuthorityLedger;
 use nunchi_coins::{Address, Ledger};
-use nunchi_coins_chain::{
-    engine::{Config, Engine},
-    execution::NodeHandle,
-    PublicKey, Transaction,
-};
 use nunchi_common::QmdbReader;
 use nunchi_dkg::{ContinueOnUpdate, PeerConfig};
 use nunchi_mempool::{MempoolHandle, PoolConfig};
@@ -35,16 +30,22 @@ use std::{
     time::Duration,
 };
 
+use crate::{
+    engine::{Config, Engine},
+    execution::NodeHandle,
+    PublicKey, Transaction,
+};
+
 const FREEZER_TABLE_INITIAL_SIZE: u32 = 2u32.pow(14); // 1MB
 const TEST_QUOTA: Quota = Quota::per_second(NZU32!(u32::MAX));
 const MAX_BLOCK_TRANSACTIONS: usize = 256;
 
-const PENDING_CHANNEL: u64 = nunchi_coins_chain::channels::PENDING;
-const RECOVERED_CHANNEL: u64 = nunchi_coins_chain::channels::RECOVERED;
-const RESOLVER_CHANNEL: u64 = nunchi_coins_chain::channels::RESOLVER;
-const BROADCAST_CHANNEL: u64 = nunchi_coins_chain::channels::BROADCAST;
-const DKG_CHANNEL: u64 = nunchi_coins_chain::channels::DKG;
-const BACKFILL_CHANNEL: u64 = nunchi_coins_chain::channels::BACKFILL;
+const PENDING_CHANNEL: u64 = crate::channels::PENDING;
+const RECOVERED_CHANNEL: u64 = crate::channels::RECOVERED;
+const RESOLVER_CHANNEL: u64 = crate::channels::RESOLVER;
+const BROADCAST_CHANNEL: u64 = crate::channels::BROADCAST;
+const DKG_CHANNEL: u64 = crate::channels::DKG;
+const BACKFILL_CHANNEL: u64 = crate::channels::BACKFILL;
 
 type Channel = (
     Sender<PublicKey, deterministic::Context>,

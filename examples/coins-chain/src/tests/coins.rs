@@ -1,6 +1,4 @@
-mod common;
-
-use common::network::{
+use super::network::{
     deterministic_state, lossy_link, reliable_link, TestNetworkBuilder, ThresholdFixture,
     ValidatorConfig,
 };
@@ -173,9 +171,7 @@ fn recovers_unclean_shutdown() {
 ///
 /// Alice's operations go to node 0, Bob's to node 1 — demonstrating that each node only proposes
 /// the transactions submitted to it, yet the whole network converges on the result.
-async fn submit_scenario(
-    network: &common::network::TestNetwork<'_>,
-) -> (Address, Address, Address) {
+async fn submit_scenario(network: &super::network::TestNetwork<'_>) -> (Address, Address, Address) {
     let alice = key(ALICE);
     let bob = key(BOB);
     let alice_id = Address::from(alice.public_key());

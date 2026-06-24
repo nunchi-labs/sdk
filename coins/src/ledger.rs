@@ -2,7 +2,7 @@ use super::{
     multisig_account_id, Account, AccountPolicy, AccountType, Address, Authorization, CoinId,
     CoinOperation, TokenDefinition, TokenFactory, Transaction,
 };
-use crate::db::CoinDB;
+use crate::{db::CoinDB, events as module_events};
 use commonware_cryptography::sha256::Digest;
 use nunchi_common::{CommitState, EventError, EventSink, NoopEventSink};
 use nunchi_crypto::SignatureError;
@@ -113,7 +113,7 @@ impl<D: CoinDB> Ledger<D> {
     pub async fn apply_transaction_with_events<Events>(
         &mut self,
         tx: &Transaction,
-        _events: &mut Events,
+        events: &mut Events,
     ) -> Result<(), LedgerError>
     where
         Events: EventSink + Send,
@@ -129,7 +129,7 @@ impl<D: CoinDB> Ledger<D> {
             });
         }
 
-        self.apply_operation(&tx.account_id, &tx.payload.operation)
+        self.apply_operation(&tx.account_id, &tx.payload.operation, events)
             .await?;
         let next_nonce = expected.checked_add(1).ok_or(LedgerError::NonceOverflow)?;
         self.db.set_nonce(&tx.account_id, next_nonce);
@@ -243,26 +243,30 @@ impl<D: CoinDB> Ledger<D> {
         &mut self,
         signer: &Address,
         operation: &CoinOperation,
+        events: &mut impl EventSink,
     ) -> Result<(), LedgerError> {
         match operation {
             CoinOperation::RegisterAccountPolicy { account_id, policy } => {
                 if signer != account_id {
                     return Err(LedgerError::Unauthorized);
                 }
-                self.register_account_policy(
-                    account_id.clone(),
-                    AccountPolicy::Multisig(policy.clone()),
-                )
-                .await?;
+                let policy = AccountPolicy::Multisig(policy.clone());
+                self.register_account_policy(account_id.clone(), policy.clone())
+                    .await?;
+                events.emit(module_events::account_policy_registered(
+                    account_id, &policy,
+                ))?;
             }
             CoinOperation::CreateToken { spec } => {
-                self.create_token(signer.clone(), spec.clone()).await?;
+                let coin = self.create_token(signer.clone(), spec.clone()).await?;
+                events.emit(module_events::token_created(&coin, signer, spec))?;
             }
             CoinOperation::Mint { coin, to, amount } => {
                 ensure_positive(*amount)?;
                 self.ensure_issuer(signer, coin).await?;
                 self.increase_supply(*coin, *amount).await?;
                 self.credit(to, *coin, *amount).await?;
+                events.emit(module_events::minted(coin, to, amount))?;
             }
             CoinOperation::Burn { coin, from, amount } => {
                 ensure_positive(*amount)?;
@@ -271,6 +275,7 @@ impl<D: CoinDB> Ledger<D> {
                 }
                 self.debit(from, *coin, *amount).await?;
                 self.decrease_supply(*coin, *amount).await?;
+                events.emit(module_events::burned(coin, from, amount))?;
             }
             CoinOperation::Transfer {
                 coin,
@@ -284,6 +289,7 @@ impl<D: CoinDB> Ledger<D> {
                 }
                 self.debit(from, *coin, *amount).await?;
                 self.credit(to, *coin, *amount).await?;
+                events.emit(module_events::transferred(coin, from, to, amount))?;
             }
         }
         Ok(())

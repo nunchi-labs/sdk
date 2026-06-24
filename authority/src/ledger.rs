@@ -1,4 +1,5 @@
 use crate::{
+    events as module_events,
     types::{normalize, sorted_unique, OwnerId},
     AuthorityDB, AuthorityOperation, EpochNumber, EpochRegistry, MultisigPolicy, Proposal,
     ProposalId, RegistryChange, Transaction, ValidatorId, ValidatorSchedule,
@@ -93,7 +94,7 @@ impl<D: AuthorityDB> AuthorityLedger<D> {
         &mut self,
         tx: &Transaction,
         current_epoch: EpochNumber,
-        _events: &mut Events,
+        events: &mut Events,
     ) -> Result<(), AuthorityError>
     where
         Events: EventSink + Send,
@@ -117,7 +118,7 @@ impl<D: AuthorityDB> AuthorityLedger<D> {
             });
         }
 
-        self.apply_operation(signer, &tx.payload.operation, current_epoch)
+        self.apply_operation(signer, &tx.payload.operation, current_epoch, events)
             .await?;
         let next_nonce = expected
             .checked_add(1)
@@ -193,6 +194,7 @@ impl<D: AuthorityDB> AuthorityLedger<D> {
         signer: &OwnerId,
         operation: &AuthorityOperation,
         current_epoch: EpochNumber,
+        events: &mut impl EventSink,
     ) -> Result<(), AuthorityError> {
         match operation {
             AuthorityOperation::Configure {
@@ -207,18 +209,78 @@ impl<D: AuthorityDB> AuthorityLedger<D> {
                     *epoch,
                     current_epoch,
                 )
-                .await
+                .await?;
+                let policy = self
+                    .db
+                    .policy()
+                    .await?
+                    .ok_or(AuthorityError::NotConfigured)?;
+                let initial_validators = self.db.validator_index().await?;
+                events.emit(module_events::configured(
+                    signer,
+                    &policy,
+                    &initial_validators,
+                    epoch,
+                ))?;
+                Ok(())
             }
             AuthorityOperation::Propose {
                 change,
                 effective_epoch,
-            } => self
-                .propose_change(signer, change.clone(), *effective_epoch, current_epoch)
-                .await
-                .map(|_| ()),
-            AuthorityOperation::Approve { proposal } => self.approve(signer, proposal).await,
+            } => {
+                let proposal = self
+                    .propose_change(signer, change.clone(), *effective_epoch, current_epoch)
+                    .await?;
+                events.emit(module_events::proposal_created(
+                    &proposal,
+                    signer,
+                    change,
+                    effective_epoch,
+                ))?;
+                Ok(())
+            }
+            AuthorityOperation::Approve { proposal } => {
+                self.approve(signer, proposal).await?;
+                events.emit(module_events::proposal_approved(proposal, signer))?;
+                Ok(())
+            }
             AuthorityOperation::Execute { proposal } => {
-                self.execute(signer, proposal, current_epoch).await
+                let proposal = self.execute(signer, proposal, current_epoch).await?;
+                events.emit(module_events::proposal_executed(
+                    &proposal.id,
+                    signer,
+                    &proposal.proposed_epoch,
+                ))?;
+                match &proposal.change {
+                    RegistryChange::AddValidator { validator } => {
+                        let player_from = proposal
+                            .proposed_epoch
+                            .checked_add(1)
+                            .ok_or(AuthorityError::EpochOverflow)?;
+                        let dealer_from = proposal
+                            .proposed_epoch
+                            .checked_add(2)
+                            .ok_or(AuthorityError::EpochOverflow)?;
+                        events.emit(module_events::validator_added(
+                            validator,
+                            &proposal.proposed_epoch,
+                            &player_from,
+                            &dealer_from,
+                        ))?;
+                    }
+                    RegistryChange::RemoveValidator { validator } => {
+                        let removed_from = proposal
+                            .proposed_epoch
+                            .checked_add(1)
+                            .ok_or(AuthorityError::EpochOverflow)?;
+                        events.emit(module_events::validator_removed(
+                            validator,
+                            &proposal.proposed_epoch,
+                            &removed_from,
+                        ))?;
+                    }
+                }
+                Ok(())
             }
         }
     }
@@ -313,7 +375,7 @@ impl<D: AuthorityDB> AuthorityLedger<D> {
         signer: &OwnerId,
         proposal: &ProposalId,
         current_epoch: EpochNumber,
-    ) -> Result<(), AuthorityError> {
+    ) -> Result<Proposal, AuthorityError> {
         let policy = self.require_owner(signer).await?;
         let mut proposal = self
             .db
@@ -347,7 +409,7 @@ impl<D: AuthorityDB> AuthorityLedger<D> {
         }
         proposal.executed = true;
         self.db.set_proposal(&proposal);
-        Ok(())
+        Ok(proposal)
     }
 
     async fn require_owner(&self, signer: &OwnerId) -> Result<MultisigPolicy, AuthorityError> {

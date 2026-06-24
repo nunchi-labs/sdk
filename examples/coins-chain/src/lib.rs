@@ -9,7 +9,7 @@
 //! gossip; each node only proposes the transactions it received). When that node leads, it includes executable
 //! transactions in its block; once finalized, stateful execution commits them into QMDB. The
 //! [`execution::NodeHandle`] exposes each node's transaction submitter and stateful database
-//! subscription so clients (and the integration tests in `tests/`) can drive and observe the chain.
+//! subscription so clients (and the tests in `src/tests`) can drive and observe the chain.
 
 use commonware_consensus::types::Epoch;
 use std::num::NonZeroU64;
@@ -21,6 +21,8 @@ pub mod genesis;
 pub mod rpc;
 pub mod runtime;
 pub mod testnet;
+#[cfg(test)]
+mod tests;
 pub mod transaction;
 
 pub use nunchi_chain::{StateCommitment, MAX_TRANSACTIONS};

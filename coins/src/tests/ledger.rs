@@ -3,10 +3,12 @@ use crate::{
         multisig_account_id, AccountPolicy, AccountType, Address, MultisigPolicy, PrivateKey,
     },
     asset::{TokenError, TokenName, TokenSymbol},
-    CoinSpec, Ledger, LedgerError, Transaction,
+    CoinOperation, CoinSpec, Ledger, LedgerError, TokenFactory, Transaction,
 };
+use bytes::Bytes;
+use commonware_codec::Encode;
 use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
-use nunchi_common::QmdbState;
+use nunchi_common::{Event, EventBuffer, QmdbState};
 use nunchi_crypto::SignatureError;
 
 async fn ledger(context: deterministic::Context) -> Ledger<QmdbState<deterministic::Context>> {
@@ -38,6 +40,156 @@ fn policy_account(policy: &AccountPolicy) -> Address {
     match policy {
         AccountPolicy::Multisig(policy) => multisig_account(policy),
     }
+}
+
+fn attr(event: &Event, key: &[u8]) -> Bytes {
+    event
+        .attributes
+        .iter()
+        .find(|attribute| attribute.key.as_ref() == key)
+        .unwrap_or_else(|| panic!("missing event attribute: {}", String::from_utf8_lossy(key)))
+        .value
+        .clone()
+}
+
+fn assert_event(event: &Event, kind: &[u8], keys: &[&[u8]]) {
+    assert_eq!(event.module.as_ref(), b"coins");
+    assert_eq!(event.kind.as_ref(), kind);
+    assert_eq!(event.version, 1);
+    assert_eq!(event.attributes.len(), keys.len());
+    for (attribute, expected) in event.attributes.iter().zip(keys.iter()) {
+        assert_eq!(attribute.key.as_ref(), *expected);
+    }
+}
+
+#[test]
+fn transactions_emit_coin_events() {
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let mut ledger = ledger(context).await;
+        let alice_key = PrivateKey::ed25519_from_seed(1);
+        let bob_key = PrivateKey::ed25519_from_seed(2);
+        let alice = address(&alice_key);
+        let bob = address(&bob_key);
+        let coin_spec = spec(1_000, None).expect("valid coin spec");
+        let token = TokenFactory::with_nonce(0)
+            .create(alice.clone(), coin_spec.clone())
+            .expect("token factory should match ledger");
+        let coin = token.id;
+
+        let tx = Transaction::sign(
+            &alice_key,
+            0,
+            CoinOperation::CreateToken {
+                spec: coin_spec.clone(),
+            },
+        );
+        let mut events = EventBuffer::default();
+        ledger
+            .apply_transaction_with_events(&tx, &mut events)
+            .await
+            .expect("create token");
+        assert_eq!(events.len(), 1);
+        let event = &events.events()[0];
+        assert_event(event, b"token_created", &[b"coin", b"issuer", b"spec"]);
+        assert_eq!(attr(event, b"coin"), coin.encode());
+        assert_eq!(attr(event, b"issuer"), alice.encode());
+        assert_eq!(attr(event, b"spec"), coin_spec.encode());
+
+        let tx = Transaction::sign(
+            &alice_key,
+            1,
+            CoinOperation::Mint {
+                coin,
+                to: bob.clone(),
+                amount: 250,
+            },
+        );
+        let mut events = EventBuffer::default();
+        ledger
+            .apply_transaction_with_events(&tx, &mut events)
+            .await
+            .expect("mint");
+        let event = &events.events()[0];
+        assert_event(event, b"minted", &[b"coin", b"to", b"amount"]);
+        assert_eq!(attr(event, b"coin"), coin.encode());
+        assert_eq!(attr(event, b"to"), bob.encode());
+        assert_eq!(attr(event, b"amount"), 250u128.encode());
+
+        let tx = Transaction::sign(
+            &alice_key,
+            2,
+            CoinOperation::Transfer {
+                coin,
+                from: alice.clone(),
+                to: bob.clone(),
+                amount: 100,
+            },
+        );
+        let mut events = EventBuffer::default();
+        ledger
+            .apply_transaction_with_events(&tx, &mut events)
+            .await
+            .expect("transfer");
+        let event = &events.events()[0];
+        assert_event(event, b"transferred", &[b"coin", b"from", b"to", b"amount"]);
+        assert_eq!(attr(event, b"coin"), coin.encode());
+        assert_eq!(attr(event, b"from"), alice.encode());
+        assert_eq!(attr(event, b"to"), bob.encode());
+        assert_eq!(attr(event, b"amount"), 100u128.encode());
+
+        let tx = Transaction::sign(
+            &bob_key,
+            0,
+            CoinOperation::Burn {
+                coin,
+                from: bob.clone(),
+                amount: 50,
+            },
+        );
+        let mut events = EventBuffer::default();
+        ledger
+            .apply_transaction_with_events(&tx, &mut events)
+            .await
+            .expect("burn");
+        let event = &events.events()[0];
+        assert_event(event, b"burned", &[b"coin", b"from", b"amount"]);
+        assert_eq!(attr(event, b"coin"), coin.encode());
+        assert_eq!(attr(event, b"from"), bob.encode());
+        assert_eq!(attr(event, b"amount"), 50u128.encode());
+
+        let alice_a = PrivateKey::ed25519_from_seed(3);
+        let alice_b = PrivateKey::secp256r1_from_seed(4);
+        let policy =
+            MultisigPolicy::new(2, vec![alice_a.public_key(), alice_b.public_key()]).unwrap();
+        let account = multisig_account(&policy);
+        let tx = Transaction::sign_multisig(
+            account.clone(),
+            policy.clone(),
+            &[&alice_a, &alice_b],
+            0,
+            CoinOperation::RegisterAccountPolicy {
+                account_id: account.clone(),
+                policy: policy.clone(),
+            },
+        );
+        let mut events = EventBuffer::default();
+        ledger
+            .apply_transaction_with_events(&tx, &mut events)
+            .await
+            .expect("register account policy");
+        let event = &events.events()[0];
+        assert_event(
+            event,
+            b"account_policy_registered",
+            &[b"account", b"policy"],
+        );
+        assert_eq!(attr(event, b"account"), account.encode());
+        assert_eq!(
+            attr(event, b"policy"),
+            AccountPolicy::Multisig(policy).encode()
+        );
+    });
 }
 
 #[test]

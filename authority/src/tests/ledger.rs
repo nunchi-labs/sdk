@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
 
+use bytes::Bytes;
+use commonware_codec::Encode;
 use commonware_cryptography::{ed25519, sha256::Digest, Signer as _};
 use commonware_runtime::Runner as _;
-use nunchi_common::{state_db::StateStore, StateError};
+use nunchi_common::{state_db::StateStore, Event, EventBuffer, StateError};
 use nunchi_crypto::PrivateKey;
 
 use crate::{
@@ -41,6 +43,26 @@ fn policy(owners: &[PrivateKey], threshold: u16) -> MultisigPolicy {
     MultisigPolicy {
         owners: owners.iter().map(PrivateKey::public_key).collect(),
         threshold,
+    }
+}
+
+fn attr(event: &Event, key: &[u8]) -> Bytes {
+    event
+        .attributes
+        .iter()
+        .find(|attribute| attribute.key.as_ref() == key)
+        .unwrap_or_else(|| panic!("missing event attribute: {}", String::from_utf8_lossy(key)))
+        .value
+        .clone()
+}
+
+fn assert_event(event: &Event, kind: &[u8], keys: &[&[u8]]) {
+    assert_eq!(event.module.as_ref(), b"authority");
+    assert_eq!(event.kind.as_ref(), kind);
+    assert_eq!(event.version, 1);
+    assert_eq!(event.attributes.len(), keys.len());
+    for (attribute, expected) in event.attributes.iter().zip(keys.iter()) {
+        assert_eq!(attribute.key.as_ref(), *expected);
     }
 }
 
@@ -112,6 +134,191 @@ async fn govern(
     )
     .await
     .unwrap();
+}
+
+#[test]
+fn transactions_emit_authority_events() {
+    commonware_runtime::deterministic::Runner::default().start(|_| async move {
+        let owners = vec![owner(1), owner(2), owner(3)];
+        let validators = vec![validator(10), validator(11)];
+        let mut ledger = AuthorityLedger::new(MemoryState::default());
+
+        let configure = Transaction::sign(
+            &owners[0],
+            0,
+            AuthorityOperation::Configure {
+                policy: policy(&owners, 2),
+                initial_validators: validators,
+                epoch: 0,
+            },
+        );
+        let mut events = EventBuffer::default();
+        ledger
+            .apply_transaction_with_events(&configure, 0, &mut events)
+            .await
+            .expect("configure");
+        assert_eq!(events.len(), 1);
+        let event = &events.events()[0];
+        let configured_policy = ledger.policy().await.unwrap().unwrap();
+        let initial_validators = ledger.db().validator_index().await.unwrap();
+        assert_event(
+            event,
+            b"configured",
+            &[b"signer", b"policy", b"initial_validators", b"epoch"],
+        );
+        assert_eq!(attr(event, b"signer"), owners[0].public_key().encode());
+        assert_eq!(attr(event, b"policy"), configured_policy.encode());
+        assert_eq!(
+            attr(event, b"initial_validators"),
+            initial_validators.encode()
+        );
+        assert_eq!(attr(event, b"epoch"), 0u64.encode());
+
+        let added = validator(12);
+        let add = RegistryChange::AddValidator {
+            validator: added.clone(),
+        };
+        let add_proposal = crate::proposal_id(&add, 3);
+        let mut events = EventBuffer::default();
+        let tx = Transaction::sign(
+            &owners[0],
+            1,
+            AuthorityOperation::Propose {
+                change: add.clone(),
+                effective_epoch: 3,
+            },
+        );
+        ledger
+            .apply_transaction_with_events(&tx, 3, &mut events)
+            .await
+            .expect("propose add");
+        assert_eq!(events.len(), 1);
+        let event = &events.events()[0];
+        assert_event(
+            event,
+            b"proposal_created",
+            &[b"proposal", b"proposer", b"change", b"effective_epoch"],
+        );
+        assert_eq!(attr(event, b"proposal"), add_proposal.encode());
+        assert_eq!(attr(event, b"proposer"), owners[0].public_key().encode());
+        assert_eq!(attr(event, b"change"), add.encode());
+        assert_eq!(attr(event, b"effective_epoch"), 3u64.encode());
+
+        let tx = Transaction::sign(
+            &owners[1],
+            0,
+            AuthorityOperation::Approve {
+                proposal: add_proposal,
+            },
+        );
+        let mut events = EventBuffer::default();
+        ledger
+            .apply_transaction_with_events(&tx, 3, &mut events)
+            .await
+            .expect("approve add");
+        assert_eq!(events.len(), 1);
+        let event = &events.events()[0];
+        assert_event(event, b"proposal_approved", &[b"proposal", b"approver"]);
+        assert_eq!(attr(event, b"proposal"), add_proposal.encode());
+        assert_eq!(attr(event, b"approver"), owners[1].public_key().encode());
+
+        let tx = Transaction::sign(
+            &owners[2],
+            0,
+            AuthorityOperation::Execute {
+                proposal: add_proposal,
+            },
+        );
+        let mut events = EventBuffer::default();
+        ledger
+            .apply_transaction_with_events(&tx, 3, &mut events)
+            .await
+            .expect("execute add");
+        assert_eq!(events.len(), 2);
+        let event = &events.events()[0];
+        assert_event(
+            event,
+            b"proposal_executed",
+            &[b"proposal", b"executor", b"effective_epoch"],
+        );
+        assert_eq!(attr(event, b"proposal"), add_proposal.encode());
+        assert_eq!(attr(event, b"executor"), owners[2].public_key().encode());
+        assert_eq!(attr(event, b"effective_epoch"), 3u64.encode());
+        let event = &events.events()[1];
+        assert_event(
+            event,
+            b"validator_added",
+            &[
+                b"validator",
+                b"effective_epoch",
+                b"player_from",
+                b"dealer_from",
+            ],
+        );
+        assert_eq!(attr(event, b"validator"), added.encode());
+        assert_eq!(attr(event, b"effective_epoch"), 3u64.encode());
+        assert_eq!(attr(event, b"player_from"), 4u64.encode());
+        assert_eq!(attr(event, b"dealer_from"), 5u64.encode());
+
+        let remove = RegistryChange::RemoveValidator {
+            validator: added.clone(),
+        };
+        let remove_proposal = crate::proposal_id(&remove, 4);
+        let tx = Transaction::sign(
+            &owners[0],
+            2,
+            AuthorityOperation::Propose {
+                change: remove,
+                effective_epoch: 4,
+            },
+        );
+        ledger
+            .apply_transaction(&tx, 4)
+            .await
+            .expect("propose remove");
+        let tx = Transaction::sign(
+            &owners[1],
+            1,
+            AuthorityOperation::Approve {
+                proposal: remove_proposal,
+            },
+        );
+        ledger
+            .apply_transaction(&tx, 4)
+            .await
+            .expect("approve remove");
+        let tx = Transaction::sign(
+            &owners[2],
+            1,
+            AuthorityOperation::Execute {
+                proposal: remove_proposal,
+            },
+        );
+        let mut events = EventBuffer::default();
+        ledger
+            .apply_transaction_with_events(&tx, 4, &mut events)
+            .await
+            .expect("execute remove");
+        assert_eq!(events.len(), 2);
+        let event = &events.events()[0];
+        assert_event(
+            event,
+            b"proposal_executed",
+            &[b"proposal", b"executor", b"effective_epoch"],
+        );
+        assert_eq!(attr(event, b"proposal"), remove_proposal.encode());
+        assert_eq!(attr(event, b"executor"), owners[2].public_key().encode());
+        assert_eq!(attr(event, b"effective_epoch"), 4u64.encode());
+        let event = &events.events()[1];
+        assert_event(
+            event,
+            b"validator_removed",
+            &[b"validator", b"effective_epoch", b"removed_from"],
+        );
+        assert_eq!(attr(event, b"validator"), added.encode());
+        assert_eq!(attr(event, b"effective_epoch"), 4u64.encode());
+        assert_eq!(attr(event, b"removed_from"), 5u64.encode());
+    });
 }
 
 #[test]

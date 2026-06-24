@@ -3,6 +3,7 @@
 mod account;
 mod asset;
 mod db;
+mod events;
 mod factory;
 mod genesis;
 mod ledger;

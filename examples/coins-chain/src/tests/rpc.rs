@@ -14,14 +14,15 @@ use nunchi_coins::{
     rpc::SharedLedger, CoinOperation, CoinSpec, Ledger, PrivateKey, TokenName, TokenSymbol,
     Transaction as CoinTransaction,
 };
-use nunchi_coins_chain::rpc::{
-    self, StatusResponse, SubmitTransactionResponse, TransactionStatusResponse,
-};
-use nunchi_coins_chain::Transaction;
 use nunchi_common::QmdbState;
 use nunchi_mempool::{Mempool, PoolConfig};
 use nunchi_rpc::{encode_hex, ServerBuilder};
 use std::sync::Arc;
+
+use crate::{
+    rpc::{self, StatusResponse, SubmitTransactionResponse, TransactionStatusResponse},
+    Transaction,
+};
 
 fn submit_params(transaction: &str) -> ObjectParams {
     let mut params = ObjectParams::new();

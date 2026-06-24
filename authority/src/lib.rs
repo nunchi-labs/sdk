@@ -1,6 +1,7 @@
 //! Proof-of-authority validator registry primitives for Nunchi chains.
 
 mod db;
+mod events;
 mod genesis;
 mod ledger;
 #[cfg(test)]

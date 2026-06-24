@@ -154,7 +154,7 @@ mod tests {
     use nunchi_coins::{Address, CoinDB, CoinSpec, TokenFactory, TokenName, TokenSymbol};
     use nunchi_crypto::PrivateKey;
 
-    const GENESIS_FIXTURE: &[u8] = include_bytes!("../tests/fixtures/genesis.json");
+    const GENESIS_FIXTURE: &[u8] = include_bytes!("tests/genesis.json");
 
     fn encode_hex(value: &impl Encode) -> String {
         hex(&value.encode())
