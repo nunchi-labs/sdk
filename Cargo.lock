@@ -2706,6 +2706,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "nunchi-custom-module"
+version = "2026.5.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-formatting",
+ "futures",
+ "jsonrpsee",
+ "nunchi-common",
+ "nunchi-crypto",
+ "nunchi-rpc",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "nunchi-dkg"
 version = "2026.5.0"
 dependencies = [
