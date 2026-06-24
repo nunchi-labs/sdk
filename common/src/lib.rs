@@ -8,7 +8,9 @@ mod runtime;
 mod tests;
 mod transaction;
 
-pub use account::{AccountPolicyError, Address, MultisigPolicy, MAX_MULTISIG_SIGNERS};
+pub use account::{
+    AccountPolicyError, Address, Bech32Error, MultisigPolicy, ADDRESS_HRP, MAX_MULTISIG_SIGNERS,
+};
 pub use runtime::{Runtime, RuntimeContext};
 pub use state_db::{
     CommitState, Namespace, Overlay, QmdbBackend, QmdbBatch, QmdbConfig, QmdbDatabaseSet,

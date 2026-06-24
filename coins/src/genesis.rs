@@ -6,6 +6,7 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_formatting::{from_hex, hex};
 use nunchi_crypto::PublicKey;
 use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DisplayFromStr};
 
 /// JSON-facing coin module genesis state.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -19,10 +20,12 @@ pub struct CoinsGenesis {
 }
 
 /// JSON-facing account policy registration.
+#[serde_as]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AccountPolicyGenesis {
-    /// Hex-encoded [`Address`]. Must equal `Address::multisig(policy)`.
-    pub account_id: String,
+    /// Bech32-encoded [`Address`]. Must equal `Address::multisig(policy)`.
+    #[serde_as(as = "DisplayFromStr")]
+    pub account_id: Address,
     /// Multisig policy registered at `account_id`.
     pub policy: MultisigPolicyGenesis,
 }
@@ -38,10 +41,12 @@ pub struct MultisigPolicyGenesis {
 }
 
 /// JSON-facing token creation request.
+#[serde_as]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TokenGenesis {
-    /// Hex-encoded issuer [`Address`].
-    pub issuer: String,
+    /// Bech32-encoded issuer [`Address`].
+    #[serde_as(as = "DisplayFromStr")]
+    pub issuer: Address,
     /// Token creation spec. This is passed through [`crate::TokenFactory`].
     pub spec: CoinSpec,
     /// Optional initial distribution. If present, amounts must sum to `spec.initial_supply`.
@@ -50,10 +55,12 @@ pub struct TokenGenesis {
 }
 
 /// JSON-facing balance allocation for a token created in the same genesis entry.
+#[serde_as]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AllocationGenesis {
-    /// Hex-encoded recipient [`Address`].
-    pub account: String,
+    /// Bech32-encoded recipient [`Address`].
+    #[serde_as(as = "DisplayFromStr")]
+    pub account: Address,
     pub amount: u128,
 }
 
@@ -68,22 +75,30 @@ impl<D: CoinDB> Ledger<D> {
     /// Seed coin state from genesis while preserving ledger invariants.
     pub async fn apply_genesis(&mut self, genesis: &CoinsGenesis) -> Result<(), LedgerError> {
         for account in &genesis.account_policies {
-            let account_id = decode_hex::<Address>(&account.account_id, "account id")?;
             let policy = account.policy.policy()?;
-            if account_id != multisig_account_id(&policy) {
-                return Err(LedgerError::AccountPolicyMismatch(Box::new(account_id)));
+            if account.account_id != multisig_account_id(&policy) {
+                return Err(LedgerError::AccountPolicyMismatch(Box::new(
+                    account.account_id.clone(),
+                )));
             }
-            self.register_account_policy(account_id, AccountPolicy::Multisig(policy))
-                .await?;
+            self.register_account_policy(
+                account.account_id.clone(),
+                AccountPolicy::Multisig(policy),
+            )
+            .await?;
         }
 
         for token in &genesis.tokens {
-            let issuer = decode_hex::<Address>(&token.issuer, "token issuer")?;
             let coin = self
-                .create_token(issuer.clone(), token.spec.clone())
+                .create_token(token.issuer.clone(), token.spec.clone())
                 .await?;
-            self.apply_allocations(issuer, coin, token.spec.initial_supply, &token.allocations)
-                .await?;
+            self.apply_allocations(
+                token.issuer.clone(),
+                coin,
+                token.spec.initial_supply,
+                &token.allocations,
+            )
+            .await?;
         }
 
         Ok(())
@@ -120,21 +135,11 @@ impl<D: CoinDB> Ledger<D> {
             self.debit(&issuer, coin, initial_supply).await?;
         }
         for allocation in allocations {
-            let account = decode_hex::<Address>(&allocation.account, "allocation account")?;
-            self.credit(&account, coin, allocation.amount).await?;
+            self.credit(&allocation.account, coin, allocation.amount)
+                .await?;
         }
         Ok(())
     }
-}
-
-fn decode_hex<T>(value: &str, what: &'static str) -> Result<T, LedgerError>
-where
-    T: DecodeExt<()>,
-{
-    let bytes =
-        from_hex(value).ok_or_else(|| LedgerError::InvalidGenesis(format!("invalid {what}")))?;
-    T::decode(bytes.as_ref())
-        .map_err(|err| LedgerError::InvalidGenesis(format!("invalid {what}: {err}")))
 }
 
 mod serde_hex_vec {
