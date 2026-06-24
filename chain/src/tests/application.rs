@@ -177,6 +177,18 @@ fn state_range<E: Storage + Clock + Metrics>(
 }
 
 #[test]
+fn genesis_block_uses_empty_receipts_root() {
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let (app, _databases) = test_app(context).await;
+        let block = app.genesis_block();
+
+        assert!(block.transactions.is_empty());
+        assert_eq!(block.receipts_root, empty_receipts_root());
+    });
+}
+
+#[test]
 fn build_valid_transactions_discards_failed_candidate_events() {
     let runner = deterministic::Runner::default();
     runner.start(|context| async move {
