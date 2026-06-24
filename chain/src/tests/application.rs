@@ -9,16 +9,23 @@ use commonware_glue::stateful::{
 use commonware_runtime::{deterministic, Clock, Metrics, Runner as _, Storage, Supervisor as _};
 use commonware_storage::mmr::Location;
 use commonware_utils::{non_empty_range, range::NonEmptyRange, sync::AsyncRwLock};
+use futures::future::BoxFuture;
 use futures::lock::Mutex as AsyncMutex;
 use nunchi_common::{
-    empty_receipts_root, Event, EventAttribute, EventError, EventSink, QmdbBackend,
-    QmdbDatabaseSet, QmdbMerkleized, QmdbState, Runtime, RuntimeContext, StateStore,
+    empty_receipts_root, BlockExecutionOutput, Event, EventAttribute, EventError, EventSink,
+    QmdbBackend, QmdbDatabaseSet, QmdbMerkleized, QmdbState, Runtime, RuntimeContext, StateStore,
 };
 use nunchi_dkg::Context;
 use nunchi_mempool::{Mempool, PoolConfig, PoolTransaction};
-use std::{convert::Infallible, sync::Arc};
+use std::{
+    convert::Infallible,
+    sync::{Arc, Mutex as StdMutex},
+};
 
-use crate::{Application, Block, StateCommitment};
+use crate::{
+    Application, Block, FinalizedEventReportError, FinalizedEventReporter,
+    FinalizedEventReporterHandle, FinalizedEvents, SharedAppliedHeight, StateCommitment,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TestTransaction {
@@ -142,11 +149,60 @@ fn emit_test_event(events: &mut impl EventSink, id: u8) -> Result<(), EventError
     ))
 }
 
+#[derive(Clone, Default)]
+struct RecordingFinalizedEventReporter {
+    batches: Arc<StdMutex<Vec<FinalizedEvents>>>,
+}
+
+impl RecordingFinalizedEventReporter {
+    fn batches(&self) -> Vec<FinalizedEvents> {
+        self.batches.lock().expect("reporter mutex").clone()
+    }
+}
+
+impl FinalizedEventReporter for RecordingFinalizedEventReporter {
+    fn report(
+        &self,
+        events: FinalizedEvents,
+    ) -> BoxFuture<'static, Result<(), FinalizedEventReportError>> {
+        let batches = self.batches.clone();
+        Box::pin(async move {
+            batches.lock().expect("reporter mutex").push(events);
+            Ok(())
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FailingFinalizedEventReporter;
+
+impl FinalizedEventReporter for FailingFinalizedEventReporter {
+    fn report(
+        &self,
+        _events: FinalizedEvents,
+    ) -> BoxFuture<'static, Result<(), FinalizedEventReportError>> {
+        Box::pin(async { Err(FinalizedEventReportError::new("report failed")) })
+    }
+}
+
 async fn test_app(
     context: deterministic::Context,
 ) -> (
     Application<TestRuntime>,
     QmdbDatabaseSet<deterministic::Context>,
+) {
+    let (app, databases, _) =
+        test_app_with_event_reporter(context, FinalizedEventReporterHandle::default()).await;
+    (app, databases)
+}
+
+async fn test_app_with_event_reporter(
+    context: deterministic::Context,
+    finalized_event_reporter: FinalizedEventReporterHandle,
+) -> (
+    Application<TestRuntime>,
+    QmdbDatabaseSet<deterministic::Context>,
+    SharedAppliedHeight,
 ) {
     let (_mempool, submitter) = Mempool::new(PoolConfig::default());
     let config = QmdbState::<deterministic::Context>::config(&context, "chain-application");
@@ -159,14 +215,16 @@ async fn test_app(
         root: genesis_target.root,
         range: genesis_target.range,
     };
-    let app = Application::<TestRuntime>::new(
+    let applied_height = Arc::new(AsyncMutex::new(Height::zero()));
+    let app = Application::<TestRuntime>::new_with_event_reporter(
         submitter,
         16,
-        Arc::new(AsyncMutex::new(Height::zero())),
+        applied_height.clone(),
         genesis_state,
         Sha256::hash(b"test-genesis"),
+        finalized_event_reporter,
     );
-    (app, databases)
+    (app, databases, applied_height)
 }
 
 fn state_range<E: Storage + Clock + Metrics>(
@@ -174,6 +232,57 @@ fn state_range<E: Storage + Clock + Metrics>(
 ) -> NonEmptyRange<Location> {
     let bounds = merkleized.bounds();
     non_empty_range!(bounds.inactivity_floor, Location::new(bounds.total_size))
+}
+
+async fn verified_test_block(
+    app: &mut Application<TestRuntime>,
+    context: deterministic::Context,
+    databases: &QmdbDatabaseSet<deterministic::Context>,
+) -> (Block<TestTransaction>, BlockExecutionOutput) {
+    let parent =
+        <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::genesis(app)
+            .await;
+    let tx = TestTransaction { id: 1, fail: false };
+    let (transactions, merkleized, output) = app
+        .build_valid_transactions(
+            databases.new_batches().await,
+            RuntimeContext::default(),
+            vec![tx],
+        )
+        .await
+        .expect("build transactions");
+    let state_range = state_range(&merkleized);
+    let consensus_context = Context {
+        round: Round::new(Epoch::zero(), View::new(1)),
+        leader: ed25519::PrivateKey::from_seed(1).public_key(),
+        parent: (View::zero(), parent.digest()),
+    };
+    let block = Block::new(
+        consensus_context,
+        parent.digest(),
+        parent.height.next(),
+        parent.timestamp + 1,
+        transactions,
+        None,
+        (),
+        StateCommitment {
+            root: merkleized.root(),
+            range: state_range,
+        },
+        output.receipts_root,
+    );
+
+    let verified =
+        <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::verify(
+            app,
+            (context.child("verify"), block.context.clone()),
+            futures::stream::iter([block.clone(), parent]),
+            databases.new_batches().await,
+        )
+        .await;
+    assert!(verified.is_some());
+
+    (block, output)
 }
 
 #[test]
@@ -297,5 +406,63 @@ fn verify_rejects_receipts_root_mismatch_and_caches_valid_output() {
                 .receipts_root,
             output.receipts_root
         );
+    });
+}
+
+#[test]
+fn finalized_reports_cached_event_batch_once_after_finalization() {
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let reporter = RecordingFinalizedEventReporter::default();
+        let (mut app, databases, _) = test_app_with_event_reporter(
+            context.child("setup"),
+            FinalizedEventReporterHandle::new(reporter.clone()),
+        )
+        .await;
+        let (block, output) =
+            verified_test_block(&mut app, context.child("build"), &databases).await;
+
+        assert!(reporter.batches().is_empty());
+
+        <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::finalized(
+            &mut app,
+            (context.child("finalized"), block.context.clone()),
+            &block,
+            &databases,
+        )
+        .await;
+
+        let batches = reporter.batches();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].height, block.height);
+        assert_eq!(batches[0].block_digest, block.digest());
+        assert_eq!(batches[0].block_timestamp, block.timestamp);
+        assert_eq!(batches[0].receipts_root, block.receipts_root);
+        assert_eq!(batches[0].transactions, output.transactions);
+        assert!(app.cached_execution_output(block.digest()).await.is_none());
+    });
+}
+
+#[test]
+fn finalized_reporter_failure_does_not_stop_finalization_bookkeeping() {
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let (mut app, databases, applied_height) = test_app_with_event_reporter(
+            context.child("setup"),
+            FinalizedEventReporterHandle::new(FailingFinalizedEventReporter),
+        )
+        .await;
+        let (block, _) = verified_test_block(&mut app, context.child("build"), &databases).await;
+
+        <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::finalized(
+            &mut app,
+            (context.child("finalized"), block.context.clone()),
+            &block,
+            &databases,
+        )
+        .await;
+
+        assert_eq!(*applied_height.lock().await, block.height);
+        assert!(app.cached_execution_output(block.digest()).await.is_none());
     });
 }

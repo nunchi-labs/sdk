@@ -26,6 +26,7 @@ use std::{
 };
 use tracing::{debug, error};
 
+use crate::events::{FinalizedEventReporterHandle, FinalizedEvents};
 use crate::{Block, ConsensusExtension, DkgMailbox, NoConsensusExtension, StateCommitment};
 
 /// The height of the last finalized block applied to a node's ledger.
@@ -50,6 +51,7 @@ where
     genesis_state: StateCommitment,
     genesis_payload: sha256::Digest,
     execution_outputs: Arc<AsyncMutex<HashMap<sha256::Digest, BlockExecutionOutput>>>,
+    finalized_event_reporter: FinalizedEventReporterHandle,
     _runtime: PhantomData<R>,
 }
 
@@ -97,8 +99,18 @@ where
             genesis_state,
             genesis_payload,
             execution_outputs: Arc::new(AsyncMutex::new(HashMap::new())),
+            finalized_event_reporter: FinalizedEventReporterHandle::default(),
             _runtime: PhantomData,
         }
+    }
+
+    /// Use a custom reporter for finalized event batches.
+    pub fn with_finalized_event_reporter(
+        mut self,
+        finalized_event_reporter: FinalizedEventReporterHandle,
+    ) -> Self {
+        self.finalized_event_reporter = finalized_event_reporter;
+        self
     }
 
     async fn cache_execution_output(&self, digest: sha256::Digest, output: BlockExecutionOutput) {
@@ -110,6 +122,34 @@ where
         digest: sha256::Digest,
     ) -> Option<BlockExecutionOutput> {
         self.execution_outputs.lock().await.get(&digest).cloned()
+    }
+
+    fn finalized_events(
+        block: &Block<R::Transaction, Ext>,
+        execution_output: BlockExecutionOutput,
+    ) -> Option<FinalizedEvents> {
+        if execution_output.receipts_root != block.receipts_root {
+            error!(
+                height = %block.height(),
+                digest = ?block.digest(),
+                cached_receipts_root = ?execution_output.receipts_root,
+                block_receipts_root = ?block.receipts_root,
+                "finalized block cached execution output receipts root mismatch"
+            );
+            debug_assert_eq!(
+                execution_output.receipts_root, block.receipts_root,
+                "finalized block cached execution output receipts root mismatch"
+            );
+            return None;
+        }
+
+        Some(FinalizedEvents {
+            height: block.height(),
+            block_digest: block.digest(),
+            block_timestamp: block.timestamp,
+            receipts_root: execution_output.receipts_root,
+            transactions: execution_output.transactions,
+        })
     }
 
     fn timestamp<E: Clock>(
@@ -248,6 +288,24 @@ where
         genesis_state: StateCommitment,
         genesis_payload: sha256::Digest,
     ) -> Self {
+        Self::new_with_event_reporter(
+            submitter,
+            max_block_transactions,
+            applied_height,
+            genesis_state,
+            genesis_payload,
+            FinalizedEventReporterHandle::default(),
+        )
+    }
+
+    pub fn new_with_event_reporter(
+        submitter: MempoolHandle<R::Transaction>,
+        max_block_transactions: usize,
+        applied_height: SharedAppliedHeight,
+        genesis_state: StateCommitment,
+        genesis_payload: sha256::Digest,
+        finalized_event_reporter: FinalizedEventReporterHandle,
+    ) -> Self {
         Self::with_consensus(
             submitter,
             max_block_transactions,
@@ -257,6 +315,7 @@ where
             genesis_state,
             genesis_payload,
         )
+        .with_finalized_event_reporter(finalized_event_reporter)
     }
 }
 
@@ -274,6 +333,26 @@ where
         genesis_state: StateCommitment,
         genesis_payload: sha256::Digest,
     ) -> Self {
+        Self::with_dkg_and_event_reporter(
+            submitter,
+            max_block_transactions,
+            dkg,
+            applied_height,
+            genesis_state,
+            genesis_payload,
+            FinalizedEventReporterHandle::default(),
+        )
+    }
+
+    pub fn with_dkg_and_event_reporter(
+        submitter: MempoolHandle<R::Transaction>,
+        max_block_transactions: usize,
+        dkg: DkgMailbox<R::Transaction>,
+        applied_height: SharedAppliedHeight,
+        genesis_state: StateCommitment,
+        genesis_payload: sha256::Digest,
+        finalized_event_reporter: FinalizedEventReporterHandle,
+    ) -> Self {
         Self::with_consensus(
             submitter,
             max_block_transactions,
@@ -283,6 +362,7 @@ where
             genesis_state,
             genesis_payload,
         )
+        .with_finalized_event_reporter(finalized_event_reporter)
     }
 }
 
@@ -453,11 +533,12 @@ where
             transactions = block.transactions.len(),
             "finalized block"
         );
-        let cached = self.execution_outputs.lock().await.remove(&block.digest());
+        let digest = block.digest();
+        let cached = self.execution_outputs.lock().await.remove(&digest);
         if cached.is_none() {
             error!(
                 height = %block.height(),
-                digest = ?block.digest(),
+                digest = ?digest,
                 "finalized block missing cached execution output"
             );
             debug_assert!(
@@ -465,11 +546,23 @@ where
                 "finalized block missing cached execution output"
             );
         }
+        let finalized_events =
+            cached.and_then(|execution_output| Self::finalized_events(block, execution_output));
         *self.applied_height.lock().await = block.height();
         self.submitter.finalized(
             applied,
             lane_nonces.into_iter().collect(),
             block.height().get(),
         );
+        if let Some(finalized_events) = finalized_events {
+            if let Err(error) = self.finalized_event_reporter.report(finalized_events).await {
+                error!(
+                    ?error,
+                    height = %block.height(),
+                    digest = ?digest,
+                    "finalized event reporter failed"
+                );
+            }
+        }
     }
 }
