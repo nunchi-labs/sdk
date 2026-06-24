@@ -8,7 +8,7 @@ use commonware_cryptography::{ed25519, Hasher, Sha256, Signer as _};
 use nunchi_authority::MultisigPolicy;
 use nunchi_coins::{CoinSpec, PrivateKey, TokenName, TokenSymbol};
 use nunchi_common::Address;
-use nunchi_oracle::{OracleConfig, OracleOperation, Transaction as OracleTransaction};
+use nunchi_oracle::{NamespaceId, NamespacePolicy, OracleOperation, Transaction as OracleTransaction};
 
 use crate::transaction::*;
 
@@ -50,18 +50,11 @@ fn oracle_transaction(seed: u64, nonce: u64) -> OracleTransaction {
     OracleTransaction::sign(
         &signer,
         nonce,
-        OracleOperation::ConfigureMarket {
-            market: nunchi_oracle::MarketId(Sha256::hash(b"test-market")),
-            config: OracleConfig {
+        OracleOperation::ConfigureNamespace {
+            namespace: NamespaceId(Sha256::hash(b"test-namespace")),
+            policy: NamespacePolicy {
                 admin: Address::external(&signer.public_key()),
-                price_decimals: 6,
-                max_staleness_ms: 1_000,
-                max_confidence_bps: 500,
-                high_volatility_bps: 1_000,
-                divergence_warn_bps: 500,
-                divergence_halt_bps: 2_000,
-                source_priority: vec![nunchi_oracle::SourceId(Sha256::hash(b"test-source"))],
-                allow_negative: false,
+                max_payload_size: 1024,
             },
         },
     )

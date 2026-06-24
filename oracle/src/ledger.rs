@@ -1,15 +1,12 @@
 use crate::{
-    DivergenceLevel, DivergenceState, FeedId, FeedState, MarkInputs, MarketId, OracleConfig,
-    OracleDB, OracleOperation, OracleState, OracleStatus, Price, SourceId, Transaction,
-    UpdaterPolicy,
+    IntervalKey, NamespaceId, NamespacePolicy, OracleDB, OracleOperation, OracleRecord, RecordId,
+    Transaction, MAX_PAYLOAD_SIZE, MAX_PROOF_SIZE, MAX_QUERY_INTERVALS, MAX_RECORDS_PER_BUCKET,
 };
+use commonware_codec::Encode;
+use commonware_cryptography::{Hasher, Sha256};
 use nunchi_common::{Address, RuntimeContext};
 use nunchi_crypto::SignatureError;
-use std::collections::BTreeSet;
 use thiserror::Error;
-
-const BPS_DENOMINATOR: u128 = 10_000;
-const MAX_DECIMALS: u8 = 38;
 
 /// Deterministic oracle state-machine errors.
 #[derive(Debug, Error, Clone, Eq, PartialEq)]
@@ -24,30 +21,24 @@ pub enum OracleError {
     },
     #[error("nonce overflow")]
     NonceOverflow,
-    #[error("oracle market is not configured")]
-    MarketNotConfigured,
-    #[error("invalid oracle config: {0}")]
-    InvalidConfig(&'static str),
+    #[error("oracle namespace is not configured")]
+    NamespaceNotConfigured,
+    #[error("invalid oracle namespace policy: {0}")]
+    InvalidNamespacePolicy(&'static str),
     #[error("invalid oracle genesis: {0}")]
     InvalidGenesis(String),
     #[error("unauthorized oracle operation")]
     Unauthorized,
-    #[error("unknown oracle source")]
-    UnknownSource,
-    #[error("oracle price precision is invalid")]
-    InvalidPrecision,
-    #[error("oracle price normalization overflow")]
-    NormalizationOverflow,
-    #[error("oracle price cannot be negative")]
-    NegativePrice,
-    #[error("oracle update is stale")]
-    StaleUpdate,
-    #[error("oracle update is from the future")]
-    FutureUpdate,
-    #[error("oracle update is older than the latest source value")]
-    OutOfOrderUpdate,
-    #[error("oracle price is unavailable")]
-    PriceUnavailable,
+    #[error("oracle payload is too large")]
+    PayloadTooLarge,
+    #[error("oracle proof is too large")]
+    ProofTooLarge,
+    #[error("oracle record index is full")]
+    IndexFull,
+    #[error("invalid oracle query: {0}")]
+    InvalidQuery(&'static str),
+    #[error("oracle record index references a missing record")]
+    MissingRecord,
     #[error("state storage error: {0}")]
     Storage(String),
 }
@@ -55,8 +46,8 @@ pub enum OracleError {
 /// Deterministic oracle ledger over a caller-provided database.
 ///
 /// The ledger validates signed oracle transactions, mutates authenticated state through
-/// [`OracleDB`], and derives market-level oracle status from stored source data. It does not fetch
-/// external data and does not enforce trading policy.
+/// [`OracleDB`], and stores opaque interval-addressed data. It does not decode payloads,
+/// normalize values, derive market state, or decide whether data is fresh.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OracleLedger<D> {
     db: D,
@@ -83,9 +74,6 @@ impl<D: OracleDB> OracleLedger<D> {
     }
 
     /// Validate and apply a signed oracle transaction.
-    ///
-    /// Freshness checks use the deterministic block timestamp from [`RuntimeContext`], not local
-    /// wall-clock time.
     pub async fn apply_transaction(
         &mut self,
         tx: &Transaction,
@@ -102,413 +90,271 @@ impl<D: OracleDB> OracleLedger<D> {
             });
         }
 
-        self.apply_operation(&tx.account_id, &tx.payload.operation, context)
-            .await?;
+        self.apply_operation(
+            &tx.account_id,
+            tx.payload.nonce,
+            &tx.payload.operation,
+            context,
+        )
+        .await?;
         let next_nonce = expected.checked_add(1).ok_or(OracleError::NonceOverflow)?;
         self.db.set_nonce(&tx.account_id, next_nonce);
         Ok(())
     }
 
-    /// Load market oracle configuration.
-    pub async fn config(&self, market: &MarketId) -> Result<Option<OracleConfig>, OracleError> {
-        self.db.config(market).await
-    }
-
-    /// Load market-level oracle state.
-    pub async fn oracle(&self, market: &MarketId) -> Result<Option<OracleState>, OracleError> {
-        self.db.oracle(market).await
-    }
-
-    /// Load the latest accepted feed state for a market/source pair.
-    pub async fn feed(
+    /// Load namespace policy.
+    pub async fn namespace(
         &self,
-        market: &MarketId,
-        source: &SourceId,
-    ) -> Result<Option<FeedState>, OracleError> {
-        self.db.feed(market, source).await
+        namespace: &NamespaceId,
+    ) -> Result<Option<NamespacePolicy>, OracleError> {
+        self.db.namespace(namespace).await
     }
 
-    /// Load the latest mark inputs for a market.
-    pub async fn mark(&self, market: &MarketId) -> Result<Option<MarkInputs>, OracleError> {
-        self.db.mark(market).await
-    }
-
-    /// Load current mark/oracle divergence state for a market.
-    pub async fn divergence(
+    /// Load writer policy for one namespace.
+    pub async fn writer(
         &self,
-        market: &MarketId,
-    ) -> Result<Option<DivergenceState>, OracleError> {
-        self.db.divergence(market).await
+        namespace: &NamespaceId,
+        writer: &Address,
+    ) -> Result<Option<bool>, OracleError> {
+        self.db.writer(namespace, writer).await
+    }
+
+    /// Load an oracle record by id.
+    pub async fn record(&self, id: &RecordId) -> Result<Option<OracleRecord>, OracleError> {
+        self.db.record(id).await
+    }
+
+    /// Query records by namespace over an inclusive interval range.
+    pub async fn records_by_namespace(
+        &self,
+        namespace: &NamespaceId,
+        start: IntervalKey,
+        end: IntervalKey,
+    ) -> Result<Vec<OracleRecord>, OracleError> {
+        validate_interval_range(start, end)?;
+
+        let mut records = Vec::new();
+        for bucket in start.bucket..=end.bucket {
+            let index = self
+                .db
+                .namespace_index(namespace, &IntervalKey::new(bucket))
+                .await?;
+            self.load_records(index, &mut records).await?;
+        }
+        Ok(records)
+    }
+
+    /// Query records by writer over an inclusive interval range.
+    pub async fn records_by_writer(
+        &self,
+        writer: &Address,
+        start: IntervalKey,
+        end: IntervalKey,
+    ) -> Result<Vec<OracleRecord>, OracleError> {
+        validate_interval_range(start, end)?;
+
+        let mut records = Vec::new();
+        for bucket in start.bucket..=end.bucket {
+            let index = self
+                .db
+                .writer_index(writer, &IntervalKey::new(bucket))
+                .await?;
+            self.load_records(index, &mut records).await?;
+        }
+        Ok(records)
     }
 
     async fn apply_operation(
         &mut self,
         signer: &Address,
+        nonce: u64,
         operation: &OracleOperation,
         context: RuntimeContext,
     ) -> Result<(), OracleError> {
         match operation {
-            OracleOperation::ConfigureMarket { market, config } => {
-                self.configure_market(signer, market, config.clone()).await
-            }
-            OracleOperation::SetUpdater {
-                market,
-                source,
-                updater,
-                policy,
-            } => {
-                self.set_updater(signer, market, source, updater, policy.clone())
+            OracleOperation::ConfigureNamespace { namespace, policy } => {
+                self.configure_namespace(signer, namespace, policy.clone())
                     .await
             }
-            OracleOperation::SubmitFeedUpdate {
-                market,
-                source,
-                feed,
-                raw_value,
-                raw_decimals,
-                publish_time_ms,
-                confidence,
+            OracleOperation::SetWriter {
+                namespace,
+                writer,
+                enabled,
+            } => self.set_writer(signer, namespace, writer, *enabled).await,
+            OracleOperation::AppendRecord {
+                namespace,
+                interval,
+                payload,
+                proof,
             } => {
-                let update = FeedUpdate {
-                    market,
-                    source,
-                    feed: *feed,
-                    raw_value: *raw_value,
-                    raw_decimals: *raw_decimals,
-                    publish_time_ms: *publish_time_ms,
-                    confidence: *confidence,
-                };
-                self.submit_feed_update(signer, update, context).await
-            }
-            OracleOperation::SubmitMarkInputs { market, inputs } => {
-                self.submit_mark_inputs(signer, market, inputs.clone())
-                    .await
+                self.append_record(
+                    signer,
+                    nonce,
+                    namespace,
+                    *interval,
+                    payload.clone(),
+                    proof.clone(),
+                    context,
+                )
+                .await
             }
         }
     }
 
-    async fn configure_market(
+    async fn configure_namespace(
         &mut self,
         signer: &Address,
-        market: &MarketId,
-        config: OracleConfig,
+        namespace: &NamespaceId,
+        policy: NamespacePolicy,
     ) -> Result<(), OracleError> {
-        validate_config(&config)?;
-        match self.db.config(market).await? {
+        validate_policy(&policy)?;
+        match self.db.namespace(namespace).await? {
             Some(existing) if existing.admin != *signer => return Err(OracleError::Unauthorized),
-            None if config.admin != *signer => return Err(OracleError::Unauthorized),
+            None if policy.admin != *signer => return Err(OracleError::Unauthorized),
             _ => {}
         }
 
-        self.db.set_config(market, &config);
-        if self.db.oracle(market).await?.is_none() {
-            self.db.set_oracle(
-                market,
-                &OracleState {
-                    external_observed_price: None,
-                    external_reference_price: None,
-                    oracle_price: None,
-                    source_id: None,
-                    publish_time_ms: 0,
-                    status: OracleStatus::Unavailable,
-                },
-            );
-        }
+        self.db.set_namespace(namespace, &policy);
         Ok(())
     }
 
-    async fn set_updater(
+    async fn set_writer(
         &mut self,
         signer: &Address,
-        market: &MarketId,
-        source: &SourceId,
-        updater: &Address,
-        policy: UpdaterPolicy,
+        namespace: &NamespaceId,
+        writer: &Address,
+        enabled: bool,
     ) -> Result<(), OracleError> {
-        let config = self
+        let namespace_policy = self
             .db
-            .config(market)
+            .namespace(namespace)
             .await?
-            .ok_or(OracleError::MarketNotConfigured)?;
-        if config.admin != *signer {
+            .ok_or(OracleError::NamespaceNotConfigured)?;
+        if namespace_policy.admin != *signer {
             return Err(OracleError::Unauthorized);
         }
-        require_source(&config, source)?;
-        self.db.set_updater(market, source, updater, &policy);
+        self.db.set_writer(namespace, writer, enabled);
         Ok(())
     }
 
-    async fn submit_feed_update(
+    async fn append_record(
         &mut self,
         signer: &Address,
-        update: FeedUpdate<'_>,
+        nonce: u64,
+        namespace: &NamespaceId,
+        interval: IntervalKey,
+        payload: Vec<u8>,
+        proof: Option<Vec<u8>>,
         context: RuntimeContext,
     ) -> Result<(), OracleError> {
-        let config = self
+        let policy = self
             .db
-            .config(update.market)
+            .namespace(namespace)
             .await?
-            .ok_or(OracleError::MarketNotConfigured)?;
-        require_source(&config, update.source)?;
+            .ok_or(OracleError::NamespaceNotConfigured)?;
         if !self
             .db
-            .updater(update.market, update.source, signer)
+            .writer(namespace, signer)
             .await?
-            .is_some_and(|policy| policy.enabled)
+            .is_some_and(|enabled| enabled)
         {
             return Err(OracleError::Unauthorized);
         }
-        if update.publish_time_ms > context.timestamp_ms {
-            return Err(OracleError::FutureUpdate);
+        if payload.len() > policy.max_payload_size as usize || payload.len() > MAX_PAYLOAD_SIZE {
+            return Err(OracleError::PayloadTooLarge);
         }
-        if update
-            .publish_time_ms
-            .saturating_add(config.max_staleness_ms)
-            < context.timestamp_ms
+        if proof
+            .as_ref()
+            .is_some_and(|proof| proof.len() > MAX_PROOF_SIZE)
         {
-            return Err(OracleError::StaleUpdate);
-        }
-        if let Some(existing) = self.db.feed(update.market, update.source).await? {
-            if update.publish_time_ms <= existing.publish_time_ms {
-                return Err(OracleError::OutOfOrderUpdate);
-            }
+            return Err(OracleError::ProofTooLarge);
         }
 
-        let normalized = normalize_price(
-            update.raw_value,
-            update.raw_decimals,
-            config.price_decimals,
-            config.allow_negative,
-        )?;
-        let feed = FeedState {
-            feed_id: update.feed,
-            raw_value: update.raw_value,
-            raw_decimals: update.raw_decimals,
-            normalized_price: normalized,
-            publish_time_ms: update.publish_time_ms,
-            confidence: update.confidence,
-            updater: signer.clone(),
+        let mut namespace_records = self.db.namespace_index(namespace, &interval).await?;
+        let mut writer_records = self.db.writer_index(signer, &interval).await?;
+        if namespace_records.len() == MAX_RECORDS_PER_BUCKET
+            || writer_records.len() == MAX_RECORDS_PER_BUCKET
+        {
+            return Err(OracleError::IndexFull);
+        }
+
+        let id = record_id(signer, nonce, namespace, &interval);
+        let record = OracleRecord {
+            id,
+            writer: signer.clone(),
+            namespace: *namespace,
+            interval,
+            payload,
+            proof,
+            written_at_height: context.height,
+            written_at_ms: context.timestamp_ms,
         };
-        self.db.set_feed(update.market, update.source, &feed);
+        self.db.set_record(&record);
 
-        let oracle = self
-            .aggregate(update.market, &config, context.timestamp_ms)
-            .await?;
-        self.db.set_oracle(update.market, &oracle);
-        Ok(())
-    }
-
-    async fn submit_mark_inputs(
-        &mut self,
-        signer: &Address,
-        market: &MarketId,
-        inputs: MarkInputs,
-    ) -> Result<(), OracleError> {
-        let config = self
-            .db
-            .config(market)
-            .await?
-            .ok_or(OracleError::MarketNotConfigured)?;
-        if config.admin != *signer {
-            return Err(OracleError::Unauthorized);
-        }
-        let oracle = self
-            .db
-            .oracle(market)
-            .await?
-            .ok_or(OracleError::PriceUnavailable)?;
-        let oracle_price = oracle.oracle_price.ok_or(OracleError::PriceUnavailable)?;
-        if inputs.mark_price.decimals != config.price_decimals {
-            return Err(OracleError::InvalidPrecision);
-        }
-
-        let bps = price_diff_bps(inputs.mark_price.value, oracle_price.value);
-        let level = if bps >= config.divergence_halt_bps {
-            DivergenceLevel::Halt
-        } else if bps >= config.divergence_warn_bps {
-            DivergenceLevel::Warn
-        } else {
-            DivergenceLevel::None
-        };
-        self.db.set_mark(market, &inputs);
+        namespace_records.push(id);
         self.db
-            .set_divergence(market, &DivergenceState { bps, level });
+            .set_namespace_index(namespace, &interval, &namespace_records);
 
-        let mut next = oracle;
-        if level != DivergenceLevel::None {
-            next.status = OracleStatus::Divergent;
-        } else if next.status == OracleStatus::Divergent {
-            next.status = OracleStatus::Fresh;
-        }
-        self.db.set_oracle(market, &next);
+        writer_records.push(id);
+        self.db.set_writer_index(signer, &interval, &writer_records);
         Ok(())
     }
 
-    async fn aggregate(
+    async fn load_records(
         &self,
-        market: &MarketId,
-        config: &OracleConfig,
-        timestamp_ms: u64,
-    ) -> Result<OracleState, OracleError> {
-        let previous = self.db.oracle(market).await?.unwrap_or(OracleState {
-            external_observed_price: None,
-            external_reference_price: None,
-            oracle_price: None,
-            source_id: None,
-            publish_time_ms: 0,
-            status: OracleStatus::Unavailable,
-        });
-        let mut selected: Option<(SourceId, FeedState)> = None;
-        for source in &config.source_priority {
-            let Some(feed) = self.db.feed(market, source).await? else {
-                continue;
-            };
-            if feed.publish_time_ms.saturating_add(config.max_staleness_ms) >= timestamp_ms {
-                selected = Some((*source, feed));
-                break;
-            }
+        ids: Vec<RecordId>,
+        records: &mut Vec<OracleRecord>,
+    ) -> Result<(), OracleError> {
+        for id in ids {
+            let record = self
+                .db
+                .record(&id)
+                .await?
+                .ok_or(OracleError::MissingRecord)?;
+            records.push(record);
         }
-
-        let Some((source, feed)) = selected else {
-            return Ok(OracleState {
-                status: OracleStatus::Unavailable,
-                source_id: None,
-                ..previous
-            });
-        };
-        let previous_price = previous.oracle_price;
-        let confidence_high = confidence_bps(feed.confidence, feed.normalized_price.value)
-            > config.max_confidence_bps;
-        let price_jump_high = previous_price
-            .map(|price| price_diff_bps(feed.normalized_price.value, price.value))
-            .is_some_and(|bps| bps >= config.high_volatility_bps);
-        let mut status = if confidence_high || price_jump_high {
-            OracleStatus::HighVolatility
-        } else {
-            OracleStatus::Fresh
-        };
-        if self
-            .db
-            .divergence(market)
-            .await?
-            .is_some_and(|divergence| divergence.level != DivergenceLevel::None)
-        {
-            status = OracleStatus::Divergent;
-        }
-
-        Ok(OracleState {
-            external_observed_price: Some(feed.normalized_price),
-            external_reference_price: Some(feed.normalized_price),
-            oracle_price: Some(feed.normalized_price),
-            source_id: Some(source),
-            publish_time_ms: feed.publish_time_ms,
-            status,
-        })
+        Ok(())
     }
 }
 
-struct FeedUpdate<'a> {
-    market: &'a MarketId,
-    source: &'a SourceId,
-    feed: FeedId,
-    raw_value: i128,
-    raw_decimals: u8,
-    publish_time_ms: u64,
-    confidence: u128,
-}
-
-pub(crate) fn validate_config(config: &OracleConfig) -> Result<(), OracleError> {
-    if config.price_decimals > MAX_DECIMALS {
-        return Err(OracleError::InvalidConfig("precision exceeds maximum"));
-    }
-    if config.source_priority.is_empty() {
-        return Err(OracleError::InvalidConfig("source priority is empty"));
-    }
-    if config.divergence_warn_bps > config.divergence_halt_bps {
-        return Err(OracleError::InvalidConfig(
-            "divergence thresholds are inverted",
+pub(crate) fn validate_policy(policy: &NamespacePolicy) -> Result<(), OracleError> {
+    if policy.max_payload_size == 0 {
+        return Err(OracleError::InvalidNamespacePolicy(
+            "maximum payload size is zero",
         ));
     }
-    let mut sources = BTreeSet::new();
-    if !config
-        .source_priority
-        .iter()
-        .all(|source| sources.insert(source))
-    {
-        return Err(OracleError::InvalidConfig("duplicate source"));
+    if policy.max_payload_size as usize > MAX_PAYLOAD_SIZE {
+        return Err(OracleError::InvalidNamespacePolicy(
+            "maximum payload size exceeds module limit",
+        ));
     }
     Ok(())
 }
 
-fn require_source(config: &OracleConfig, source: &SourceId) -> Result<(), OracleError> {
-    if config
-        .source_priority
-        .iter()
-        .any(|candidate| candidate == source)
-    {
-        Ok(())
-    } else {
-        Err(OracleError::UnknownSource)
+fn validate_interval_range(start: IntervalKey, end: IntervalKey) -> Result<(), OracleError> {
+    if end.bucket < start.bucket {
+        return Err(OracleError::InvalidQuery("inverted interval range"));
     }
+    let interval_count = end
+        .bucket
+        .checked_sub(start.bucket)
+        .and_then(|count| count.checked_add(1))
+        .ok_or(OracleError::InvalidQuery("interval range overflow"))?;
+    if interval_count > MAX_QUERY_INTERVALS {
+        return Err(OracleError::InvalidQuery("interval range is too large"));
+    }
+    Ok(())
 }
 
-fn normalize_price(
-    raw_value: i128,
-    raw_decimals: u8,
-    price_decimals: u8,
-    allow_negative: bool,
-) -> Result<Price, OracleError> {
-    if raw_decimals > MAX_DECIMALS || price_decimals > MAX_DECIMALS {
-        return Err(OracleError::InvalidPrecision);
-    }
-    if raw_value < 0 && !allow_negative {
-        return Err(OracleError::NegativePrice);
-    }
-    let value = if raw_decimals == price_decimals {
-        raw_value
-    } else if raw_decimals > price_decimals {
-        raw_value / pow10(raw_decimals - price_decimals)?
-    } else {
-        raw_value
-            .checked_mul(pow10(price_decimals - raw_decimals)?)
-            .ok_or(OracleError::NormalizationOverflow)?
-    };
-    Ok(Price::new(value, price_decimals))
-}
-
-fn pow10(exp: u8) -> Result<i128, OracleError> {
-    let mut value = 1i128;
-    for _ in 0..exp {
-        value = value
-            .checked_mul(10)
-            .ok_or(OracleError::NormalizationOverflow)?;
-    }
-    Ok(value)
-}
-
-fn confidence_bps(confidence: u128, price: i128) -> u32 {
-    let denominator = checked_abs(price);
-    if denominator == 0 {
-        return if confidence == 0 { 0 } else { u32::MAX };
-    }
-    let bps = confidence
-        .saturating_mul(BPS_DENOMINATOR)
-        .saturating_div(denominator);
-    bps.min(u32::MAX as u128) as u32
-}
-
-fn price_diff_bps(left: i128, right: i128) -> u32 {
-    let denominator = checked_abs(right);
-    let diff = left.abs_diff(right);
-    if denominator == 0 {
-        return if diff == 0 { 0 } else { u32::MAX };
-    }
-    let bps = diff
-        .saturating_mul(BPS_DENOMINATOR)
-        .saturating_div(denominator);
-    bps.min(u32::MAX as u128) as u32
-}
-
-fn checked_abs(value: i128) -> u128 {
-    value.unsigned_abs()
+fn record_id(
+    writer: &Address,
+    nonce: u64,
+    namespace: &NamespaceId,
+    interval: &IntervalKey,
+) -> RecordId {
+    let mut bytes = writer.encode().as_ref().to_vec();
+    bytes.extend_from_slice(nonce.encode().as_ref());
+    bytes.extend_from_slice(namespace.encode().as_ref());
+    bytes.extend_from_slice(interval.encode().as_ref());
+    RecordId(Sha256::hash(&bytes))
 }

@@ -7,9 +7,8 @@ use nunchi_common::{Address, RuntimeContext, StateError, StateStore};
 use nunchi_crypto::PrivateKey;
 
 use crate::{
-    DivergenceLevel, FeedId, MarkInputs, MarketId, OracleConfig, OracleConfigGenesis, OracleError,
-    OracleGenesis, OracleLedger, OracleMarketGenesis, OracleOperation, OracleStatus,
-    OracleUpdaterGenesis, Price, SourceId, Transaction, UpdaterPolicy,
+    IntervalKey, NamespaceId, NamespacePolicy, NamespacePolicyGenesis, OracleError, OracleGenesis,
+    OracleLedger, OracleNamespaceGenesis, OracleOperation, OracleWriterGenesis, Transaction,
 };
 
 #[derive(Default)]
@@ -35,58 +34,39 @@ fn id(seed: &'static [u8]) -> Digest {
     Sha256::hash(seed)
 }
 
-fn market() -> MarketId {
-    MarketId(id(b"market"))
+fn namespace() -> NamespaceId {
+    NamespaceId(id(b"namespace"))
 }
 
-fn source() -> SourceId {
-    SourceId(id(b"source"))
-}
-
-fn feed() -> FeedId {
-    FeedId(id(b"feed"))
+fn other_namespace() -> NamespaceId {
+    NamespaceId(id(b"other-namespace"))
 }
 
 fn context(timestamp_ms: u64) -> RuntimeContext {
     RuntimeContext {
         epoch: 0,
-        height: 1,
+        height: 7,
         timestamp_ms,
     }
 }
 
-fn config(admin: &Address) -> OracleConfig {
-    OracleConfig {
+fn policy(admin: &Address) -> NamespacePolicy {
+    NamespacePolicy {
         admin: admin.clone(),
-        price_decimals: 6,
-        max_staleness_ms: 1_000,
-        max_confidence_bps: 500,
-        high_volatility_bps: 1_000,
-        divergence_warn_bps: 500,
-        divergence_halt_bps: 2_000,
-        source_priority: vec![source()],
-        allow_negative: false,
+        max_payload_size: 1024,
     }
 }
 
-fn genesis(admin: &PrivateKey, updater: &PrivateKey) -> OracleGenesis {
+fn genesis(admin: &PrivateKey, writer: &PrivateKey) -> OracleGenesis {
     OracleGenesis {
-        markets: vec![OracleMarketGenesis {
-            market: market(),
-            config: OracleConfigGenesis {
+        namespaces: vec![OracleNamespaceGenesis {
+            namespace: namespace(),
+            policy: NamespacePolicyGenesis {
                 admin: Address::external(&admin.public_key()),
-                price_decimals: 6,
-                max_staleness_ms: 1_000,
-                max_confidence_bps: 500,
-                high_volatility_bps: 1_000,
-                divergence_warn_bps: 500,
-                divergence_halt_bps: 2_000,
-                source_priority: vec![source()],
-                allow_negative: false,
+                max_payload_size: 1024,
             },
-            updaters: vec![OracleUpdaterGenesis {
-                source: source(),
-                updater: Address::external(&updater.public_key()),
+            writers: vec![OracleWriterGenesis {
+                writer: Address::external(&writer.public_key()),
                 enabled: true,
             }],
         }],
@@ -101,142 +81,205 @@ fn configure_tx(admin: &PrivateKey, nonce: u64) -> Transaction {
     sign(
         admin,
         nonce,
-        OracleOperation::ConfigureMarket {
-            market: market(),
-            config: config(&Address::external(&admin.public_key())),
+        OracleOperation::ConfigureNamespace {
+            namespace: namespace(),
+            policy: policy(&Address::external(&admin.public_key())),
         },
     )
 }
 
-fn set_updater_tx(admin: &PrivateKey, updater: &PrivateKey, nonce: u64) -> Transaction {
+fn set_writer_tx(admin: &PrivateKey, writer: &PrivateKey, nonce: u64) -> Transaction {
     sign(
         admin,
         nonce,
-        OracleOperation::SetUpdater {
-            market: market(),
-            source: source(),
-            updater: Address::external(&updater.public_key()),
-            policy: UpdaterPolicy { enabled: true },
+        OracleOperation::SetWriter {
+            namespace: namespace(),
+            writer: Address::external(&writer.public_key()),
+            enabled: true,
         },
     )
 }
 
-fn feed_update_tx(
-    updater: &PrivateKey,
+fn unset_writer_tx(admin: &PrivateKey, writer: &PrivateKey, nonce: u64) -> Transaction {
+    sign(
+        admin,
+        nonce,
+        OracleOperation::SetWriter {
+            namespace: namespace(),
+            writer: Address::external(&writer.public_key()),
+            enabled: false,
+        },
+    )
+}
+
+fn append_tx(
+    writer: &PrivateKey,
     nonce: u64,
-    raw_value: i128,
-    raw_decimals: u8,
-    publish_time_ms: u64,
-    confidence: u128,
+    namespace: NamespaceId,
+    interval: u64,
+    payload: Vec<u8>,
 ) -> Transaction {
     sign(
-        updater,
+        writer,
         nonce,
-        OracleOperation::SubmitFeedUpdate {
-            market: market(),
-            source: source(),
-            feed: feed(),
-            raw_value,
-            raw_decimals,
-            publish_time_ms,
-            confidence,
+        OracleOperation::AppendRecord {
+            namespace,
+            interval: IntervalKey::new(interval),
+            payload,
+            proof: None,
         },
     )
 }
 
 fn initialized() -> (OracleLedger<MemoryStore>, PrivateKey, PrivateKey) {
     let admin = PrivateKey::from_seed(1);
-    let updater = PrivateKey::from_seed(2);
+    let writer = PrivateKey::from_seed(2);
     let mut ledger = OracleLedger::new(MemoryStore::default());
     block_on(ledger.apply_transaction(&configure_tx(&admin, 0), context(100))).unwrap();
-    block_on(ledger.apply_transaction(&set_updater_tx(&admin, &updater, 1), context(100))).unwrap();
-    (ledger, admin, updater)
+    block_on(ledger.apply_transaction(&set_writer_tx(&admin, &writer, 1), context(100))).unwrap();
+    (ledger, admin, writer)
 }
 
 #[test]
-fn feed_update_normalizes_and_sets_oracle_price() {
-    let (mut ledger, _, updater) = initialized();
+fn authorized_writer_appends_opaque_payload() {
+    let (mut ledger, _, writer) = initialized();
 
-    let tx = feed_update_tx(&updater, 0, 123_456_789, 8, 900, 1_000);
+    let tx = append_tx(&writer, 0, namespace(), 3, b"\xffprice? no idea".to_vec());
     block_on(ledger.apply_transaction(&tx, context(1_000))).unwrap();
 
-    let oracle = block_on(ledger.oracle(&market())).unwrap().unwrap();
-    assert_eq!(oracle.status, OracleStatus::Fresh);
-    assert_eq!(oracle.oracle_price, Some(Price::new(1_234_567, 6)));
-    assert_eq!(oracle.external_reference_price, oracle.oracle_price);
-    assert_eq!(oracle.external_observed_price, oracle.oracle_price);
+    let records = block_on(ledger.records_by_namespace(
+        &namespace(),
+        IntervalKey::new(3),
+        IntervalKey::new(3),
+    ))
+    .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].writer, Address::external(&writer.public_key()));
+    assert_eq!(records[0].namespace, namespace());
+    assert_eq!(records[0].interval, IntervalKey::new(3));
+    assert_eq!(records[0].payload, b"\xffprice? no idea");
+    assert_eq!(records[0].written_at_height, 7);
+    assert_eq!(records[0].written_at_ms, 1_000);
 }
 
 #[test]
-fn unauthorized_updater_is_rejected() {
+fn unauthorized_writer_is_rejected() {
     let (mut ledger, _, _) = initialized();
     let attacker = PrivateKey::from_seed(3);
 
-    let tx = feed_update_tx(&attacker, 0, 100_000_000, 8, 900, 0);
+    let tx = append_tx(&attacker, 0, namespace(), 3, b"payload".to_vec());
     let err = block_on(ledger.apply_transaction(&tx, context(1_000))).unwrap_err();
 
     assert_eq!(err, OracleError::Unauthorized);
 }
 
 #[test]
-fn stale_and_out_of_order_updates_are_rejected() {
-    let (mut ledger, _, updater) = initialized();
+fn disabled_writer_cannot_append() {
+    let (mut ledger, admin, writer) = initialized();
 
-    let stale = feed_update_tx(&updater, 0, 100_000_000, 8, 1, 0);
-    assert_eq!(
-        block_on(ledger.apply_transaction(&stale, context(2_500))).unwrap_err(),
-        OracleError::StaleUpdate
-    );
+    let first = append_tx(&writer, 0, namespace(), 3, b"first".to_vec());
+    block_on(ledger.apply_transaction(&first, context(1_000))).unwrap();
+    block_on(ledger.apply_transaction(&unset_writer_tx(&admin, &writer, 2), context(1_100)))
+        .unwrap();
 
-    let fresh = feed_update_tx(&updater, 0, 100_000_000, 8, 1_900, 0);
-    block_on(ledger.apply_transaction(&fresh, context(2_000))).unwrap();
-    let old = feed_update_tx(&updater, 1, 101_000_000, 8, 1_800, 0);
-    assert_eq!(
-        block_on(ledger.apply_transaction(&old, context(2_000))).unwrap_err(),
-        OracleError::OutOfOrderUpdate
-    );
+    let second = append_tx(&writer, 1, namespace(), 3, b"second".to_vec());
+    let err = block_on(ledger.apply_transaction(&second, context(1_200))).unwrap_err();
+
+    assert_eq!(err, OracleError::Unauthorized);
+    let records = block_on(ledger.records_by_namespace(
+        &namespace(),
+        IntervalKey::new(3),
+        IntervalKey::new(3),
+    ))
+    .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].payload, b"first");
 }
 
 #[test]
-fn high_confidence_sets_high_volatility_status() {
-    let (mut ledger, _, updater) = initialized();
+fn multiple_payload_formats_coexist_without_decoding() {
+    let (mut ledger, _, writer) = initialized();
 
-    let tx = feed_update_tx(&updater, 0, 100_000_000, 8, 900, 6_000_000);
-    block_on(ledger.apply_transaction(&tx, context(1_000))).unwrap();
+    let signed_price_like = (-123_i128).encode().as_ref().to_vec();
+    let text_like = br#"{"kind":"research","score":42}"#.to_vec();
+    block_on(ledger.apply_transaction(
+        &append_tx(&writer, 0, namespace(), 10, signed_price_like.clone()),
+        context(1_000),
+    ))
+    .unwrap();
+    block_on(ledger.apply_transaction(
+        &append_tx(&writer, 1, namespace(), 10, text_like.clone()),
+        context(1_100),
+    ))
+    .unwrap();
 
-    let oracle = block_on(ledger.oracle(&market())).unwrap().unwrap();
-    assert_eq!(oracle.status, OracleStatus::HighVolatility);
+    let records = block_on(ledger.records_by_namespace(
+        &namespace(),
+        IntervalKey::new(10),
+        IntervalKey::new(10),
+    ))
+    .unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].payload, signed_price_like);
+    assert_eq!(records[1].payload, text_like);
 }
 
 #[test]
-fn mark_inputs_update_divergence_status() {
-    let (mut ledger, admin, updater) = initialized();
+fn query_by_writer_spans_intervals() {
+    let (mut ledger, _, writer) = initialized();
+    block_on(ledger.apply_transaction(
+        &append_tx(&writer, 0, namespace(), 1, b"one".to_vec()),
+        context(1_000),
+    ))
+    .unwrap();
+    block_on(ledger.apply_transaction(
+        &append_tx(&writer, 1, namespace(), 3, b"three".to_vec()),
+        context(3_000),
+    ))
+    .unwrap();
 
-    let update = feed_update_tx(&updater, 0, 100_000_000, 8, 900, 0);
-    block_on(ledger.apply_transaction(&update, context(1_000))).unwrap();
-    let inputs = MarkInputs {
-        impact_bid: None,
-        impact_ask: None,
-        best_bid: None,
-        best_ask: None,
-        mark_price: Price::new(1_100_000, 6),
-        mark_time_ms: 1_000,
-    };
-    let mark = sign(
-        &admin,
-        2,
-        OracleOperation::SubmitMarkInputs {
-            market: market(),
-            inputs,
-        },
-    );
-    block_on(ledger.apply_transaction(&mark, context(1_000))).unwrap();
+    let records = block_on(ledger.records_by_writer(
+        &Address::external(&writer.public_key()),
+        IntervalKey::new(1),
+        IntervalKey::new(3),
+    ))
+    .unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].payload, b"one");
+    assert_eq!(records[1].payload, b"three");
+}
 
-    let oracle = block_on(ledger.oracle(&market())).unwrap().unwrap();
-    let divergence = block_on(ledger.divergence(&market())).unwrap().unwrap();
-    assert_eq!(oracle.status, OracleStatus::Divergent);
-    assert_eq!(divergence.level, DivergenceLevel::Warn);
-    assert_eq!(divergence.bps, 1_000);
+#[test]
+fn namespace_policy_is_independent_per_namespace() {
+    let (mut ledger, admin, writer) = initialized();
+    let other_admin = PrivateKey::from_seed(4);
+    block_on(ledger.apply_transaction(
+        &sign(
+            &other_admin,
+            0,
+            OracleOperation::ConfigureNamespace {
+                namespace: other_namespace(),
+                policy: policy(&Address::external(&other_admin.public_key())),
+            },
+        ),
+        context(100),
+    ))
+    .unwrap();
+
+    let err = block_on(ledger.apply_transaction(
+        &sign(
+            &admin,
+            2,
+            OracleOperation::SetWriter {
+                namespace: other_namespace(),
+                writer: Address::external(&writer.public_key()),
+                enabled: true,
+            },
+        ),
+        context(100),
+    ))
+    .unwrap_err();
+    assert_eq!(err, OracleError::Unauthorized);
 }
 
 #[test]
@@ -249,30 +292,34 @@ fn transaction_codec_round_trips() {
 }
 
 #[test]
-fn genesis_seeds_config_and_updater_policy() {
+fn genesis_seeds_namespace_and_writer_policy() {
     let admin = PrivateKey::from_seed(1);
-    let updater = PrivateKey::from_seed(2);
+    let writer = PrivateKey::from_seed(2);
     let mut ledger = OracleLedger::new(MemoryStore::default());
 
-    block_on(ledger.apply_genesis(&genesis(&admin, &updater))).unwrap();
-    let tx = feed_update_tx(&updater, 0, 100_000_000, 8, 900, 0);
+    block_on(ledger.apply_genesis(&genesis(&admin, &writer))).unwrap();
+    let tx = append_tx(&writer, 0, namespace(), 1, b"from-genesis".to_vec());
     block_on(ledger.apply_transaction(&tx, context(1_000))).unwrap();
 
-    let oracle = block_on(ledger.oracle(&market())).unwrap().unwrap();
-    assert_eq!(oracle.status, OracleStatus::Fresh);
-    assert_eq!(oracle.oracle_price, Some(Price::new(1_000_000, 6)));
+    let records = block_on(ledger.records_by_namespace(
+        &namespace(),
+        IntervalKey::new(1),
+        IntervalKey::new(1),
+    ))
+    .unwrap();
+    assert_eq!(records[0].payload, b"from-genesis");
 }
 
 #[test]
-fn genesis_rejects_updater_for_unknown_source() {
+fn genesis_rejects_duplicate_namespace() {
     let admin = PrivateKey::from_seed(1);
-    let updater = PrivateKey::from_seed(2);
-    let mut genesis = genesis(&admin, &updater);
-    genesis.markets[0].updaters[0].source = SourceId(id(b"unknown-source"));
+    let writer = PrivateKey::from_seed(2);
+    let mut genesis = genesis(&admin, &writer);
+    genesis.namespaces.push(genesis.namespaces[0].clone());
     let mut ledger = OracleLedger::new(MemoryStore::default());
 
-    assert_eq!(
+    assert!(matches!(
         block_on(ledger.apply_genesis(&genesis)).unwrap_err(),
-        OracleError::UnknownSource
-    );
+        OracleError::InvalidGenesis(_)
+    ));
 }

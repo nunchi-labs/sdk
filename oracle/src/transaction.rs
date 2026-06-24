@@ -1,115 +1,91 @@
 use crate::{
-    FeedId, MarkInputs, MarketId, OracleConfig, SourceId, UpdaterPolicy, ORACLE_NAMESPACE,
+    IntervalKey, NamespaceId, NamespacePolicy, MAX_PAYLOAD_SIZE, MAX_PROOF_SIZE, ORACLE_NAMESPACE,
 };
-use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
 use nunchi_common::{Address, Operation as CommonOperation};
 
-const OP_CONFIGURE_MARKET: u8 = 0;
-const OP_SET_UPDATER: u8 = 1;
-const OP_SUBMIT_FEED_UPDATE: u8 = 2;
-const OP_SUBMIT_MARK_INPUTS: u8 = 3;
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OperationTag {
+    ConfigureNamespace = 0,
+    SetWriter = 1,
+    AppendRecord = 2,
+}
+
+impl TryFrom<u8> for OperationTag {
+    type Error = Error;
+
+    fn try_from(tag: u8) -> Result<Self, Self::Error> {
+        match tag {
+            0 => Ok(Self::ConfigureNamespace),
+            1 => Ok(Self::SetWriter),
+            2 => Ok(Self::AppendRecord),
+            tag => Err(Error::InvalidEnum(tag)),
+        }
+    }
+}
 
 /// Oracle state-machine operation carried by a signed Nunchi transaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OracleOperation {
-    /// Create or update temporary v1 oracle config for a market.
-    ///
-    /// The signer must be the configured admin for a new market, or the current admin for an
-    /// existing market. Long-term, market registry should own most of this policy.
-    ConfigureMarket {
-        /// Market whose oracle policy is being configured.
-        market: MarketId,
-        /// Oracle policy to store for the market.
-        config: OracleConfig,
+    /// Create or update generic policy for a namespace.
+    ConfigureNamespace {
+        /// Namespace whose policy is being configured.
+        namespace: NamespaceId,
+        /// Namespace policy to store.
+        policy: NamespacePolicy,
     },
-    /// Enable or disable a feed updater for one market/source pair.
-    ///
-    /// The signer must be the market admin.
-    SetUpdater {
-        /// Market whose updater policy is changing.
-        market: MarketId,
-        /// Source lane the updater may submit on.
-        source: SourceId,
+    /// Enable or disable a writer for one namespace.
+    SetWriter {
+        /// Namespace whose writer policy is changing.
+        namespace: NamespaceId,
         /// Account being enabled or disabled.
-        updater: Address,
-        /// New updater policy.
-        policy: UpdaterPolicy,
+        writer: Address,
+        /// Whether the writer may append records.
+        enabled: bool,
     },
-    /// Submit an external observation for a market/source.
-    ///
-    /// This is the core adapter interface into `nunchi-oracle`: external source-specific code
-    /// fetches data, signs this operation with an authorized updater key, and submits it as a
-    /// normal runtime transaction.
-    SubmitFeedUpdate {
-        /// Market being updated.
-        market: MarketId,
-        /// Configured source that produced the observation.
-        source: SourceId,
-        /// Provider-specific feed identifier.
-        feed: FeedId,
-        /// Raw integer price before normalization.
-        raw_value: i128,
-        /// Decimal precision of `raw_value`.
-        raw_decimals: u8,
-        /// External source publish time in Unix milliseconds.
-        publish_time_ms: u64,
-        /// Confidence band around the submitted price.
-        confidence: u128,
-    },
-    /// Submit book-derived mark inputs for divergence tracking.
-    ///
-    /// This is admin-only in v1. Later CLOB/perps integration should decide whether these inputs
-    /// come from a module hook, ordinary transactions, or a consensus extension.
-    SubmitMarkInputs {
-        /// Market whose mark inputs are being updated.
-        market: MarketId,
-        /// Mark/book data used to compute divergence from oracle price.
-        inputs: MarkInputs,
+    /// Append opaque data to one namespace and interval.
+    AppendRecord {
+        /// Namespace under which the payload is stored.
+        namespace: NamespaceId,
+        /// Consumer-defined interval bucket.
+        interval: IntervalKey,
+        /// Opaque payload bytes. The oracle never decodes this field.
+        payload: Vec<u8>,
+        /// Optional opaque proof bytes. The oracle never decodes this field.
+        proof: Option<Vec<u8>>,
     },
 }
 
 impl Write for OracleOperation {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         match self {
-            Self::ConfigureMarket { market, config } => {
-                OP_CONFIGURE_MARKET.write(buf);
-                market.write(buf);
-                config.write(buf);
-            }
-            Self::SetUpdater {
-                market,
-                source,
-                updater,
-                policy,
-            } => {
-                OP_SET_UPDATER.write(buf);
-                market.write(buf);
-                source.write(buf);
-                updater.write(buf);
+            Self::ConfigureNamespace { namespace, policy } => {
+                (OperationTag::ConfigureNamespace as u8).write(buf);
+                namespace.write(buf);
                 policy.write(buf);
             }
-            Self::SubmitFeedUpdate {
-                market,
-                source,
-                feed,
-                raw_value,
-                raw_decimals,
-                publish_time_ms,
-                confidence,
+            Self::SetWriter {
+                namespace,
+                writer,
+                enabled,
             } => {
-                OP_SUBMIT_FEED_UPDATE.write(buf);
-                market.write(buf);
-                source.write(buf);
-                feed.write(buf);
-                raw_value.write(buf);
-                raw_decimals.write(buf);
-                publish_time_ms.write(buf);
-                confidence.write(buf);
+                (OperationTag::SetWriter as u8).write(buf);
+                namespace.write(buf);
+                writer.write(buf);
+                enabled.write(buf);
             }
-            Self::SubmitMarkInputs { market, inputs } => {
-                OP_SUBMIT_MARK_INPUTS.write(buf);
-                market.write(buf);
-                inputs.write(buf);
+            Self::AppendRecord {
+                namespace,
+                interval,
+                payload,
+                proof,
+            } => {
+                (OperationTag::AppendRecord as u8).write(buf);
+                namespace.write(buf);
+                interval.write(buf);
+                payload.write(buf);
+                proof.write(buf);
             }
         }
     }
@@ -119,31 +95,22 @@ impl Read for OracleOperation {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
-        match u8::read(buf)? {
-            OP_CONFIGURE_MARKET => Ok(Self::ConfigureMarket {
-                market: MarketId::read(buf)?,
-                config: OracleConfig::read(buf)?,
+        match OperationTag::try_from(u8::read(buf)?)? {
+            OperationTag::ConfigureNamespace => Ok(Self::ConfigureNamespace {
+                namespace: NamespaceId::read(buf)?,
+                policy: NamespacePolicy::read(buf)?,
             }),
-            OP_SET_UPDATER => Ok(Self::SetUpdater {
-                market: MarketId::read(buf)?,
-                source: SourceId::read(buf)?,
-                updater: Address::read(buf)?,
-                policy: UpdaterPolicy::read(buf)?,
+            OperationTag::SetWriter => Ok(Self::SetWriter {
+                namespace: NamespaceId::read(buf)?,
+                writer: Address::read(buf)?,
+                enabled: bool::read(buf)?,
             }),
-            OP_SUBMIT_FEED_UPDATE => Ok(Self::SubmitFeedUpdate {
-                market: MarketId::read(buf)?,
-                source: SourceId::read(buf)?,
-                feed: FeedId::read(buf)?,
-                raw_value: i128::read(buf)?,
-                raw_decimals: u8::read(buf)?,
-                publish_time_ms: u64::read(buf)?,
-                confidence: u128::read(buf)?,
+            OperationTag::AppendRecord => Ok(Self::AppendRecord {
+                namespace: NamespaceId::read(buf)?,
+                interval: IntervalKey::read(buf)?,
+                payload: Vec::read_cfg(buf, &(RangeCfg::new(0..=MAX_PAYLOAD_SIZE), ()))?,
+                proof: Option::<Vec<u8>>::read_cfg(buf, &(RangeCfg::new(0..=MAX_PROOF_SIZE), ()))?,
             }),
-            OP_SUBMIT_MARK_INPUTS => Ok(Self::SubmitMarkInputs {
-                market: MarketId::read(buf)?,
-                inputs: MarkInputs::read(buf)?,
-            }),
-            tag => Err(Error::InvalidEnum(tag)),
         }
     }
 }
@@ -151,37 +118,24 @@ impl Read for OracleOperation {
 impl EncodeSize for OracleOperation {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Self::ConfigureMarket { market, config } => market.encode_size() + config.encode_size(),
-            Self::SetUpdater {
-                market,
-                source,
-                updater,
-                policy,
-            } => {
-                market.encode_size()
-                    + source.encode_size()
-                    + updater.encode_size()
-                    + policy.encode_size()
+            Self::ConfigureNamespace { namespace, policy } => {
+                namespace.encode_size() + policy.encode_size()
             }
-            Self::SubmitFeedUpdate {
-                market,
-                source,
-                feed,
-                raw_value,
-                raw_decimals,
-                publish_time_ms,
-                confidence,
+            Self::SetWriter {
+                namespace,
+                writer,
+                enabled,
+            } => namespace.encode_size() + writer.encode_size() + enabled.encode_size(),
+            Self::AppendRecord {
+                namespace,
+                interval,
+                payload,
+                proof,
             } => {
-                market.encode_size()
-                    + source.encode_size()
-                    + feed.encode_size()
-                    + raw_value.encode_size()
-                    + raw_decimals.encode_size()
-                    + publish_time_ms.encode_size()
-                    + confidence.encode_size()
-            }
-            Self::SubmitMarkInputs { market, inputs } => {
-                market.encode_size() + inputs.encode_size()
+                namespace.encode_size()
+                    + interval.encode_size()
+                    + payload.encode_size()
+                    + proof.encode_size()
             }
         }
     }

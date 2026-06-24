@@ -9,8 +9,8 @@ use nunchi_authority::{AuthorityDB, AuthorityOperation, Transaction as Authority
 use nunchi_coins::{Address, CoinDB, CoinSpec, TokenFactory, TokenName, TokenSymbol};
 use nunchi_crypto::PrivateKey;
 use nunchi_oracle::{
-    MarketId, OracleConfigGenesis, OracleGenesis, OracleLedger, OracleMarketGenesis,
-    OracleUpdaterGenesis, SourceId,
+    NamespaceId, NamespacePolicyGenesis, OracleGenesis, OracleLedger, OracleNamespaceGenesis,
+    OracleWriterGenesis,
 };
 
 use crate::genesis::*;
@@ -29,12 +29,8 @@ fn external(seed: u64) -> Address {
     Address::external(&owner(seed).public_key())
 }
 
-fn oracle_market() -> MarketId {
-    MarketId(Sha256::hash(b"coins-chain-oracle-market"))
-}
-
-fn oracle_source() -> SourceId {
-    SourceId(Sha256::hash(b"coins-chain-oracle-source"))
+fn oracle_namespace() -> NamespaceId {
+    NamespaceId(Sha256::hash(b"coins-chain-oracle-namespace"))
 }
 
 fn sample_genesis() -> ChainGenesis {
@@ -82,22 +78,14 @@ fn sample_genesis() -> ChainGenesis {
             }],
         }),
         oracle: Some(OracleGenesis {
-            markets: vec![OracleMarketGenesis {
-                market: oracle_market(),
-                config: OracleConfigGenesis {
+            namespaces: vec![OracleNamespaceGenesis {
+                namespace: oracle_namespace(),
+                policy: NamespacePolicyGenesis {
                     admin: oracle_admin,
-                    price_decimals: 6,
-                    max_staleness_ms: 60_000,
-                    max_confidence_bps: 500,
-                    high_volatility_bps: 1_000,
-                    divergence_warn_bps: 500,
-                    divergence_halt_bps: 2_000,
-                    source_priority: vec![oracle_source()],
-                    allow_negative: false,
+                    max_payload_size: 1024,
                 },
-                updaters: vec![OracleUpdaterGenesis {
-                    source: oracle_source(),
-                    updater: oracle_updater,
+                writers: vec![OracleWriterGenesis {
+                    writer: oracle_updater,
                     enabled: true,
                 }],
             }],
@@ -318,7 +306,7 @@ fn coins_genesis_creates_token_and_initial_balances() {
 }
 
 #[test]
-fn oracle_genesis_configures_market_and_updater() {
+fn oracle_genesis_configures_namespace_and_writer() {
     deterministic::Runner::default().start(|context| async move {
         let genesis = sample_genesis();
         let empty = empty_commitment(context.child("empty"), "genesis-oracle-empty").await;
@@ -328,8 +316,7 @@ fn oracle_genesis_configures_market_and_updater() {
         genesis.apply_to_state(&mut state, &empty).await.unwrap();
 
         let oracle = OracleLedger::new(state);
-        let config = oracle.config(&oracle_market()).await.unwrap().unwrap();
-        assert_eq!(config.price_decimals, 6);
-        assert_eq!(config.source_priority, vec![oracle_source()]);
+        let policy = oracle.namespace(&oracle_namespace()).await.unwrap().unwrap();
+        assert_eq!(policy.max_payload_size, 1024);
     });
 }
