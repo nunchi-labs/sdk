@@ -4,6 +4,7 @@ use common::network::{
     deterministic_state, lossy_link, reliable_link, TestNetworkBuilder, ThresholdFixture,
     ValidatorConfig,
 };
+use commonware_codec::Encode;
 use commonware_cryptography::Signer as _;
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_macros::{select, test_traced};
@@ -20,6 +21,10 @@ use nunchi_coins::{
 use nunchi_oracle::{
     IntervalKey, NamespaceId, NamespacePolicy, OracleOperation, Transaction as OracleTransaction,
 };
+use nunchi_perpetuals::{
+    collateral_escrow_account, derive_market_id, derive_position_id, OraclePricePayload,
+    PerpetualOperation, Side, Transaction as PerpetualTransaction, BPS_DENOMINATOR,
+};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::time::Duration;
 use tracing::info;
@@ -30,6 +35,10 @@ const VALIDATORS: u32 = 5;
 const ALICE: u64 = 100;
 const BOB: u64 = 101;
 const CAROL: u64 = 102;
+const COLLATERAL_ISSUER: u64 = 800;
+const PERPS_TRADER: u64 = 801;
+const PERPS_ORACLE_ADMIN: u64 = 802;
+const PERPS_ORACLE_WRITER: u64 = 803;
 
 fn key(seed: u64) -> PrivateKey {
     PrivateKey::from_seed(seed)
@@ -57,6 +66,36 @@ fn gold_coin() -> CoinId {
 
 fn oracle_namespace() -> NamespaceId {
     NamespaceId(Sha256::hash(b"coins-chain-integration-oracle-namespace"))
+}
+
+fn perps_oracle_namespace() -> NamespaceId {
+    NamespaceId(Sha256::hash(b"coins-chain-perps-oracle-namespace"))
+}
+
+fn usdc_spec() -> CoinSpec {
+    CoinSpec::new(
+        TokenSymbol::new("USDC").expect("valid token symbol"),
+        TokenName::new("USD Coin").expect("valid token name"),
+        6,
+        1_000_000,
+        None,
+    )
+}
+
+fn usdc_coin() -> CoinId {
+    TokenFactory::derive_coin_id(
+        &Address::from(key(COLLATERAL_ISSUER).public_key()),
+        0,
+        &usdc_spec(),
+    )
+}
+
+fn btc_coin() -> CoinId {
+    CoinId(Sha256::hash(b"btc-asset"))
+}
+
+fn usd_coin() -> CoinId {
+    CoinId(Sha256::hash(b"usd-quote"))
 }
 
 #[test_traced]
@@ -521,6 +560,301 @@ fn oracle_updates_finalize_across_validators() {
             }
             network.context().sleep(Duration::from_secs(1)).await;
         }
+    });
+}
+
+#[test_traced]
+fn perps_oracle_flow_finalizes_across_validators() {
+    let executor = deterministic::Runner::timed(Duration::from_secs(120));
+    executor.start(|mut context| async move {
+        let mut network = TestNetworkBuilder::new(VALIDATORS)
+            .build(&mut context)
+            .await;
+        network.start_all().await;
+
+        let issuer = key(COLLATERAL_ISSUER);
+        let trader = key(PERPS_TRADER);
+        let oracle_admin = authority_key(PERPS_ORACLE_ADMIN);
+        let oracle_writer = authority_key(PERPS_ORACLE_WRITER);
+        let issuer_id = Address::from(issuer.public_key());
+        let trader_id = Address::from(trader.public_key());
+        let oracle_admin_id = Address::from(oracle_admin.public_key());
+        let oracle_writer_id = Address::from(oracle_writer.public_key());
+        let collateral = usdc_coin();
+        let market = derive_market_id(btc_coin(), usd_coin(), collateral, 0);
+        let position = derive_position_id(&trader_id, &market, 0);
+        let submitter = network.submitter(0);
+
+        submitter
+            .submit(
+                Transaction::sign(&issuer, 0, CoinOperation::CreateToken { spec: usdc_spec() })
+                    .into(),
+            )
+            .await
+            .expect("admit collateral token creation");
+        submitter
+            .submit(
+                Transaction::sign(
+                    &issuer,
+                    1,
+                    CoinOperation::Transfer {
+                        coin: collateral,
+                        from: issuer_id.clone(),
+                        to: trader_id.clone(),
+                        amount: 10_000,
+                    },
+                )
+                .into(),
+            )
+            .await
+            .expect("admit collateral transfer");
+        submitter
+            .submit(
+                OracleTransaction::sign(
+                    &oracle_admin,
+                    0,
+                    OracleOperation::ConfigureNamespace {
+                        namespace: perps_oracle_namespace(),
+                        policy: NamespacePolicy {
+                            admin: oracle_admin_id,
+                            max_payload_size: 1024,
+                        },
+                    },
+                )
+                .into(),
+            )
+            .await
+            .expect("admit perps oracle namespace");
+        submitter
+            .submit(
+                OracleTransaction::sign(
+                    &oracle_admin,
+                    1,
+                    OracleOperation::SetWriter {
+                        namespace: perps_oracle_namespace(),
+                        writer: oracle_writer_id,
+                        enabled: true,
+                    },
+                )
+                .into(),
+            )
+            .await
+            .expect("admit perps oracle writer");
+        submitter
+            .submit(
+                OracleTransaction::sign(
+                    &oracle_writer,
+                    0,
+                    OracleOperation::AppendRecord {
+                        namespace: perps_oracle_namespace(),
+                        interval: IntervalKey::new(0),
+                        payload: OraclePricePayload {
+                            market,
+                            price: 500_000_000,
+                            price_decimals: 4,
+                            source_timestamp_ms: 0,
+                        }
+                        .encode()
+                        .as_ref()
+                        .to_vec(),
+                        proof: None,
+                    },
+                )
+                .into(),
+            )
+            .await
+            .expect("admit initial perps price");
+
+        network.run_until_nonces(&[(issuer_id.clone(), 2)]).await;
+        loop {
+            let ledgers = network.oracle_ledgers().await;
+            if ledgers.len() == VALIDATORS as usize {
+                let mut all_updated = true;
+                for ledger in ledgers {
+                    let records = ledger
+                        .records_by_namespace(
+                            &perps_oracle_namespace(),
+                            IntervalKey::new(0),
+                            IntervalKey::new(0),
+                        )
+                        .await
+                        .unwrap();
+                    if records.len() != 1 {
+                        all_updated = false;
+                        break;
+                    }
+                }
+                if all_updated {
+                    break;
+                }
+            }
+            network.context().sleep(Duration::from_secs(1)).await;
+        }
+
+        submitter
+            .submit(
+                PerpetualTransaction::sign(
+                    &trader,
+                    0,
+                    PerpetualOperation::CreateMarket {
+                        base_asset: btc_coin(),
+                        quote_asset: usd_coin(),
+                        collateral_asset: collateral,
+                        oracle_namespace: perps_oracle_namespace(),
+                        oracle_interval_ms: 1_000_000_000,
+                        max_oracle_staleness_ms: 1_000_000_000,
+                        price_decimals: 2,
+                        max_leverage_bps: 10 * BPS_DENOMINATOR,
+                        maintenance_margin_bps: 500,
+                        funding_interval_ms: 3_600_000,
+                        max_funding_rate_bps: 100,
+                    },
+                )
+                .into(),
+            )
+            .await
+            .expect("admit perps market creation");
+        submitter
+            .submit(
+                PerpetualTransaction::sign(
+                    &trader,
+                    1,
+                    PerpetualOperation::RefreshMarketFromOracle { market },
+                )
+                .into(),
+            )
+            .await
+            .expect("admit perps market refresh");
+        submitter
+            .submit(
+                PerpetualTransaction::sign(
+                    &trader,
+                    2,
+                    PerpetualOperation::OpenPosition {
+                        market,
+                        side: Side::Long,
+                        collateral: 1_000,
+                        leverage_bps: 5 * BPS_DENOMINATOR,
+                    },
+                )
+                .into(),
+            )
+            .await
+            .expect("admit perps open position");
+
+        network
+            .run_until_perpetual_nonces(&[(trader_id.clone(), 3)])
+            .await;
+        let ledger = network.ledgers().await.into_iter().next().expect("ledger");
+        assert_eq!(
+            ledger.balance(&trader_id, &collateral).await.unwrap(),
+            9_000
+        );
+        assert_eq!(
+            ledger
+                .balance(&collateral_escrow_account(), &collateral)
+                .await
+                .unwrap(),
+            1_000
+        );
+        let perps = network
+            .perpetual_ledgers()
+            .await
+            .into_iter()
+            .next()
+            .expect("perps ledger");
+        assert!(perps.position(&position).await.unwrap().is_some());
+
+        submitter
+            .submit(
+                OracleTransaction::sign(
+                    &oracle_writer,
+                    1,
+                    OracleOperation::AppendRecord {
+                        namespace: perps_oracle_namespace(),
+                        interval: IntervalKey::new(0),
+                        payload: OraclePricePayload {
+                            market,
+                            price: 400_000_000,
+                            price_decimals: 4,
+                            source_timestamp_ms: 0,
+                        }
+                        .encode()
+                        .as_ref()
+                        .to_vec(),
+                        proof: None,
+                    },
+                )
+                .into(),
+            )
+            .await
+            .expect("admit adverse perps price");
+        loop {
+            let ledgers = network.oracle_ledgers().await;
+            if ledgers.len() == VALIDATORS as usize {
+                let mut all_updated = true;
+                for ledger in ledgers {
+                    let records = ledger
+                        .records_by_namespace(
+                            &perps_oracle_namespace(),
+                            IntervalKey::new(0),
+                            IntervalKey::new(0),
+                        )
+                        .await
+                        .unwrap();
+                    if records.len() != 2 {
+                        all_updated = false;
+                        break;
+                    }
+                }
+                if all_updated {
+                    break;
+                }
+            }
+            network.context().sleep(Duration::from_secs(1)).await;
+        }
+
+        submitter
+            .submit(
+                PerpetualTransaction::sign(
+                    &trader,
+                    3,
+                    PerpetualOperation::RefreshMarketFromOracle { market },
+                )
+                .into(),
+            )
+            .await
+            .expect("admit adverse perps refresh");
+        submitter
+            .submit(
+                PerpetualTransaction::sign(&trader, 4, PerpetualOperation::Liquidate { position })
+                    .into(),
+            )
+            .await
+            .expect("admit perps liquidation");
+
+        network
+            .run_until_perpetual_nonces(&[(trader_id.clone(), 5)])
+            .await;
+        let ledger = network.ledgers().await.into_iter().next().expect("ledger");
+        assert_eq!(
+            ledger.balance(&trader_id, &collateral).await.unwrap(),
+            9_000
+        );
+        assert_eq!(
+            ledger
+                .balance(&collateral_escrow_account(), &collateral)
+                .await
+                .unwrap(),
+            1_000
+        );
+        let perps = network
+            .perpetual_ledgers()
+            .await
+            .into_iter()
+            .next()
+            .expect("perps ledger");
+        assert!(perps.position(&position).await.unwrap().is_none());
     });
 }
 
