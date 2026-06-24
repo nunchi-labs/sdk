@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use commonware_codec::Encode;
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use futures::executor::block_on;
+use nunchi_coins::{CoinDB, CoinSpec, TokenDefinition, TokenName, TokenSymbol};
 use nunchi_common::{Address, RuntimeContext, StateError, StateStore};
 use nunchi_crypto::PrivateKey;
 use nunchi_oracle::{
@@ -11,7 +12,8 @@ use nunchi_oracle::{
 };
 
 use crate::{
-    CoinId, OraclePricePayload, PerpetualError, PerpetualLedger, PositionId, Side, BPS_DENOMINATOR,
+    collateral_escrow_account, CoinId, OraclePricePayload, PerpetualError, PerpetualLedger,
+    PositionId, Side, BPS_DENOMINATOR,
 };
 
 #[derive(Default)]
@@ -133,6 +135,31 @@ fn create_market(ledger: &mut PerpetualLedger<MemoryStore>) -> Digest {
     .unwrap()
 }
 
+fn seed_collateral(ledger: &mut PerpetualLedger<MemoryStore>, owner: &Address, amount: u128) {
+    let issuer = address(&PrivateKey::from_seed(999));
+    let token = TokenDefinition::from_spec(
+        coin(b"usdc"),
+        issuer,
+        CoinSpec::new(
+            TokenSymbol::new("USDC").unwrap(),
+            TokenName::new("USD Coin").unwrap(),
+            6,
+            1_000_000_000,
+            None,
+        ),
+    );
+    ledger.db_mut().set_token(&token);
+    ledger.db_mut().set_balance(owner, &coin(b"usdc"), amount);
+}
+
+fn balance(ledger: &PerpetualLedger<MemoryStore>, account: &Address) -> u128 {
+    block_on(CoinDB::balance(ledger.db(), account, &coin(b"usdc"))).unwrap()
+}
+
+fn escrow_balance(ledger: &PerpetualLedger<MemoryStore>) -> u128 {
+    balance(ledger, &collateral_escrow_account())
+}
+
 fn open_long(
     ledger: &mut PerpetualLedger<MemoryStore>,
     owner: &PrivateKey,
@@ -172,13 +199,17 @@ fn long_position_blocks_unsafe_withdrawal_then_liquidates_after_price_drop() {
     let admin = PrivateKey::from_seed(10);
     let writer = PrivateKey::from_seed(11);
     let trader = PrivateKey::from_seed(12);
+    let trader_address = address(&trader);
     let mut ledger = PerpetualLedger::new(MemoryStore::default());
     configure_oracle(&mut ledger, &admin, &writer);
     let market = create_market(&mut ledger);
+    seed_collateral(&mut ledger, &trader_address, 10_000);
 
     append_price(&mut ledger, &writer, 0, market, 500_000_000, 4, 1_000);
     block_on(ledger.refresh_market_from_oracle(market, context(1_500))).unwrap();
     let position = open_long(&mut ledger, &trader, market, 1_600);
+    assert_eq!(balance(&ledger, &trader_address), 9_000);
+    assert_eq!(escrow_balance(&ledger), 1_000);
 
     append_price(&mut ledger, &writer, 1, market, 430_000_000, 4, 2_000);
     block_on(ledger.refresh_market_from_oracle(market, context(2_500))).unwrap();
@@ -188,10 +219,47 @@ fn long_position_blocks_unsafe_withdrawal_then_liquidates_after_price_drop() {
         reduction.unwrap_err(),
         PerpetualError::CollateralReductionWouldCauseLiquidation
     );
+    assert_eq!(balance(&ledger, &trader_address), 9_000);
+    assert_eq!(escrow_balance(&ledger), 1_000);
 
     append_price(&mut ledger, &writer, 2, market, 400_000_000, 4, 3_000);
     block_on(ledger.refresh_market_from_oracle(market, context(3_500))).unwrap();
     block_on(ledger.liquidate(position, context(3_600))).unwrap();
+    assert!(block_on(ledger.position(&position)).unwrap().is_none());
+    assert_eq!(balance(&ledger, &trader_address), 9_000);
+    assert_eq!(escrow_balance(&ledger), 1_000);
+}
+
+#[test]
+fn collateral_moves_through_escrow_on_open_adjust_and_close() {
+    let admin = PrivateKey::from_seed(30);
+    let writer = PrivateKey::from_seed(31);
+    let trader = PrivateKey::from_seed(32);
+    let trader_address = address(&trader);
+    let mut ledger = PerpetualLedger::new(MemoryStore::default());
+    configure_oracle(&mut ledger, &admin, &writer);
+    let market = create_market(&mut ledger);
+    seed_collateral(&mut ledger, &trader_address, 5_000);
+
+    append_price(&mut ledger, &writer, 0, market, 500_000_000, 4, 1_000);
+    block_on(ledger.refresh_market_from_oracle(market, context(1_500))).unwrap();
+    let position = open_long(&mut ledger, &trader, market, 1_600);
+    assert_eq!(balance(&ledger, &trader_address), 4_000);
+    assert_eq!(escrow_balance(&ledger), 1_000);
+
+    block_on(ledger.add_collateral(&trader_address, position, 500)).unwrap();
+    assert_eq!(balance(&ledger, &trader_address), 3_500);
+    assert_eq!(escrow_balance(&ledger), 1_500);
+
+    block_on(ledger.reduce_collateral(&trader_address, position, 250, context(1_700))).unwrap();
+    assert_eq!(balance(&ledger, &trader_address), 3_750);
+    assert_eq!(escrow_balance(&ledger), 1_250);
+
+    let payout =
+        block_on(ledger.close_position(&trader_address, position, context(1_800))).unwrap();
+    assert_eq!(payout, 1_250);
+    assert_eq!(balance(&ledger, &trader_address), 5_000);
+    assert_eq!(escrow_balance(&ledger), 0);
     assert!(block_on(ledger.position(&position)).unwrap().is_none());
 }
 

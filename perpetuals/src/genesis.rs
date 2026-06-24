@@ -32,7 +32,9 @@ pub struct MarketGenesis {
     pub max_funding_rate_bps: u32,
 }
 
-impl<D: PerpetualDB + nunchi_common::StateStore + Send + Sync> PerpetualLedger<D> {
+impl<D: PerpetualDB + nunchi_coins::CoinDB + nunchi_common::StateStore + Send + Sync>
+    PerpetualLedger<D>
+{
     /// Seed perpetuals state from genesis without transaction authorization.
     pub async fn apply_genesis(
         &mut self,

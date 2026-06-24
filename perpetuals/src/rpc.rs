@@ -65,7 +65,13 @@ impl<D> Clone for SharedLedger<D> {
 #[async_trait]
 impl<D> PerpetualQuery for SharedLedger<D>
 where
-    D: PerpetualDB + CommitState + nunchi_common::StateStore + Send + Sync + 'static,
+    D: PerpetualDB
+        + nunchi_coins::CoinDB
+        + CommitState
+        + nunchi_common::StateStore
+        + Send
+        + Sync
+        + 'static,
 {
     async fn nonce(&self, account: Address) -> Result<u64, PerpetualError> {
         self.lock().await.nonce(&account).await

@@ -1,11 +1,11 @@
 use crate::{
     derive_market_id, derive_position_id, Address, Authorization, Market, MarketId,
     OraclePricePayload, PerpetualDB, PerpetualOperation, Position, PositionId, Side, Transaction,
-    BPS_DENOMINATOR, MAX_PRICE_DECIMALS, PRICE_SCALE,
+    BPS_DENOMINATOR, MAX_PRICE_DECIMALS, PERPETUALS_NAMESPACE, PRICE_SCALE,
 };
-use commonware_codec::ReadExt;
-use commonware_cryptography::sha256::Digest;
-use nunchi_coins::CoinId;
+use commonware_codec::{DecodeExt, Encode, ReadExt};
+use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+use nunchi_coins::{CoinDB, CoinId, LedgerError};
 use nunchi_common::{CommitState, RuntimeContext, StateStore};
 use nunchi_crypto::SignatureError;
 use nunchi_oracle::{IntervalKey, NamespaceId, OracleError, OracleLedger, OracleRecord};
@@ -56,6 +56,8 @@ pub enum PerpetualError {
     OraclePayload(String),
     #[error("oracle module error: {0}")]
     Oracle(#[from] OracleError),
+    #[error("coin module error: {0}")]
+    Coin(#[from] LedgerError),
     #[error("unknown market {0:?}")]
     UnknownMarket(MarketId),
     #[error("duplicate market {0:?}")]
@@ -74,6 +76,12 @@ pub enum PerpetualError {
     CollateralUnderflow,
     #[error("collateral reduction would push position into liquidatable territory")]
     CollateralReductionWouldCauseLiquidation,
+    #[error("perpetuals escrow balance too low for {coin:?}: available {available}, required {required}")]
+    InsufficientEscrowBalance {
+        coin: CoinId,
+        available: u128,
+        required: u128,
+    },
     #[error("arithmetic overflow")]
     ArithmeticOverflow,
     #[error("state storage error: {0}")]
@@ -86,7 +94,7 @@ pub struct PerpetualLedger<D> {
     db: D,
 }
 
-impl<D: PerpetualDB + StateStore + Send + Sync> PerpetualLedger<D> {
+impl<D: PerpetualDB + CoinDB + StateStore + Send + Sync> PerpetualLedger<D> {
     /// Wrap a database backend as a perpetuals ledger.
     pub fn new(db: D) -> Self {
         Self { db }
@@ -108,7 +116,7 @@ impl<D: PerpetualDB + StateStore + Send + Sync> PerpetualLedger<D> {
     }
 
     pub async fn nonce(&self, id: &Address) -> Result<u64, PerpetualError> {
-        self.db.nonce(id).await
+        PerpetualDB::nonce(&self.db, id).await
     }
 
     pub async fn market(&self, id: &MarketId) -> Result<Option<Market>, PerpetualError> {
@@ -127,7 +135,7 @@ impl<D: PerpetualDB + StateStore + Send + Sync> PerpetualLedger<D> {
     ) -> Result<(), PerpetualError> {
         self.ensure_authorized(tx)?;
 
-        let expected = self.db.nonce(&tx.account_id).await?;
+        let expected = PerpetualDB::nonce(&self.db, &tx.account_id).await?;
         if tx.payload.nonce != expected {
             return Err(PerpetualError::NonceMismatch {
                 account: Box::new(tx.account_id.clone()),
@@ -141,7 +149,7 @@ impl<D: PerpetualDB + StateStore + Send + Sync> PerpetualLedger<D> {
         let next_nonce = expected
             .checked_add(1)
             .ok_or(PerpetualError::NonceOverflow)?;
-        self.db.set_nonce(&tx.account_id, next_nonce);
+        PerpetualDB::set_nonce(&mut self.db, &tx.account_id, next_nonce);
         Ok(())
     }
 
@@ -284,11 +292,14 @@ impl<D: PerpetualDB + StateStore + Send + Sync> PerpetualLedger<D> {
         }
         let quantity = quantity_from_collateral(collateral, leverage_bps, market.mark_price)?;
         let nonce = self.db.position_nonce().await?;
+        let next_nonce = nonce
+            .checked_add(1)
+            .ok_or(PerpetualError::PositionNonceOverflow)?;
         let position_id = derive_position_id(&owner, &market_id, nonce);
         let position = Position {
             id: position_id,
             market: market_id,
-            owner,
+            owner: owner.clone(),
             side,
             quantity,
             entry_price: market.mark_price,
@@ -299,13 +310,11 @@ impl<D: PerpetualDB + StateStore + Send + Sync> PerpetualLedger<D> {
             .open_interest
             .checked_add(quantity)
             .ok_or(PerpetualError::ArithmeticOverflow)?;
+        self.deposit_collateral(&owner, market.collateral_asset, collateral)
+            .await?;
         self.db.set_market(&market);
         self.db.set_position(&position);
-        self.db.set_position_nonce(
-            nonce
-                .checked_add(1)
-                .ok_or(PerpetualError::PositionNonceOverflow)?,
-        );
+        self.db.set_position_nonce(next_nonce);
         Ok(position_id)
     }
 
@@ -326,10 +335,22 @@ impl<D: PerpetualDB + StateStore + Send + Sync> PerpetualLedger<D> {
         if &position.owner != owner {
             return Err(PerpetualError::Unauthorized);
         }
+        let market = self
+            .db
+            .market(&position.market)
+            .await?
+            .ok_or(PerpetualError::UnknownMarket(position.market))?;
+        let new_collateral = position
+            .collateral
+            .checked_add(amount)
+            .ok_or(PerpetualError::ArithmeticOverflow)?;
+        self.deposit_collateral(owner, market.collateral_asset, amount)
+            .await?;
         position.collateral = position
             .collateral
             .checked_add(amount)
             .ok_or(PerpetualError::ArithmeticOverflow)?;
+        debug_assert_eq!(position.collateral, new_collateral);
         self.db.set_position(&position);
         Ok(())
     }
@@ -370,6 +391,8 @@ impl<D: PerpetualDB + StateStore + Send + Sync> PerpetualLedger<D> {
         if self.is_liquidatable_with_market(&temp, &market)? {
             return Err(PerpetualError::CollateralReductionWouldCauseLiquidation);
         }
+        self.withdraw_collateral(owner, market.collateral_asset, amount)
+            .await?;
         position.collateral = new_collateral;
         self.db.set_market(&market);
         self.db.set_position(&position);
@@ -405,9 +428,12 @@ impl<D: PerpetualDB + StateStore + Send + Sync> PerpetualLedger<D> {
             .open_interest
             .checked_sub(position.quantity)
             .ok_or(PerpetualError::ArithmeticOverflow)?;
+        let payout = u128::try_from(equity).map_err(|_| PerpetualError::ArithmeticOverflow)?;
+        self.withdraw_collateral(owner, market.collateral_asset, payout)
+            .await?;
         self.db.set_market(&market);
         self.db.remove_position(&position_id);
-        u128::try_from(equity).map_err(|_| PerpetualError::ArithmeticOverflow)
+        Ok(payout)
     }
 
     pub async fn liquidate(
@@ -596,6 +622,62 @@ impl<D: PerpetualDB + StateStore + Send + Sync> PerpetualLedger<D> {
         let equity = u128::try_from(equity).map_err(|_| PerpetualError::ArithmeticOverflow)?;
         Ok(equity <= maintenance)
     }
+
+    async fn deposit_collateral(
+        &mut self,
+        owner: &Address,
+        coin: CoinId,
+        amount: u128,
+    ) -> Result<(), PerpetualError> {
+        if CoinDB::token(&self.db, &coin).await?.is_none() {
+            return Err(PerpetualError::Coin(LedgerError::UnknownToken(coin)));
+        }
+        let available = CoinDB::balance(&self.db, owner, &coin).await?;
+        if available < amount {
+            return Err(PerpetualError::Coin(LedgerError::InsufficientBalance {
+                account: Box::new(owner.clone()),
+                coin: Box::new(coin),
+                available,
+                required: amount,
+            }));
+        }
+        let escrow = collateral_escrow_account();
+        let escrow_available = CoinDB::balance(&self.db, &escrow, &coin).await?;
+        let escrow_updated = escrow_available
+            .checked_add(amount)
+            .ok_or(PerpetualError::Coin(LedgerError::BalanceOverflow))?;
+        self.db.set_balance(owner, &coin, available - amount);
+        self.db.set_balance(&escrow, &coin, escrow_updated);
+        Ok(())
+    }
+
+    async fn withdraw_collateral(
+        &mut self,
+        owner: &Address,
+        coin: CoinId,
+        amount: u128,
+    ) -> Result<(), PerpetualError> {
+        if CoinDB::token(&self.db, &coin).await?.is_none() {
+            return Err(PerpetualError::Coin(LedgerError::UnknownToken(coin)));
+        }
+        let escrow = collateral_escrow_account();
+        let escrow_available = CoinDB::balance(&self.db, &escrow, &coin).await?;
+        if escrow_available < amount {
+            return Err(PerpetualError::InsufficientEscrowBalance {
+                coin,
+                available: escrow_available,
+                required: amount,
+            });
+        }
+        let current = CoinDB::balance(&self.db, owner, &coin).await?;
+        let updated = current
+            .checked_add(amount)
+            .ok_or(PerpetualError::Coin(LedgerError::BalanceOverflow))?;
+        self.db
+            .set_balance(&escrow, &coin, escrow_available - amount);
+        self.db.set_balance(owner, &coin, updated);
+        Ok(())
+    }
 }
 
 impl<D: PerpetualDB + StateStore + CommitState + Send + Sync> PerpetualLedger<D> {
@@ -609,6 +691,14 @@ impl<D: PerpetualDB + StateStore + CommitState + Send + Sync> PerpetualLedger<D>
     pub fn root(&self) -> Digest {
         self.db.root()
     }
+}
+
+/// Account that holds collateral escrowed by the perpetuals module.
+pub fn collateral_escrow_account() -> Address {
+    let mut hasher = Sha256::new();
+    hasher.update(PERPETUALS_NAMESPACE);
+    hasher.update(b"/collateral-escrow");
+    Address::decode(hasher.finalize().encode().as_ref()).expect("digest decodes as address")
 }
 
 fn latest_payload_for_market(

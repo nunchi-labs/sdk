@@ -31,6 +31,7 @@ impl RuntimeError {
                 | Self::Authority(AuthorityError::Storage(_))
                 | Self::Oracle(OracleError::Storage(_))
                 | Self::Perpetuals(PerpetualError::Storage(_))
+                | Self::Perpetuals(PerpetualError::Coin(LedgerError::Storage(_)))
         )
     }
 }

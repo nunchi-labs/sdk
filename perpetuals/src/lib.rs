@@ -13,7 +13,7 @@ mod types;
 
 pub use db::PerpetualDB;
 pub use genesis::{MarketGenesis, PerpetualsGenesis};
-pub use ledger::{PerpetualError, PerpetualLedger};
+pub use ledger::{collateral_escrow_account, PerpetualError, PerpetualLedger};
 pub use nunchi_coins::CoinId;
 pub use nunchi_common::{Address, Authorization};
 pub use transaction::{PerpetualOperation, Transaction, TransactionPayload};
