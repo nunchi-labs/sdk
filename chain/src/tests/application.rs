@@ -16,7 +16,7 @@ use nunchi_common::{
     QmdbBackend, QmdbDatabaseSet, QmdbMerkleized, QmdbState, Runtime, RuntimeContext, StateStore,
 };
 use nunchi_dkg::Context;
-use nunchi_mempool::{Mempool, PoolConfig, PoolTransaction};
+use nunchi_mempool::{Mempool, MempoolHandle, PoolConfig, PoolTransaction};
 use std::{
     convert::Infallible,
     sync::{Arc, Mutex as StdMutex},
@@ -205,7 +205,26 @@ async fn test_app_with_event_reporter(
     SharedAppliedHeight,
 ) {
     let (_mempool, submitter) = Mempool::new(PoolConfig::default());
-    let config = QmdbState::<deterministic::Context>::config(&context, "chain-application");
+    test_app_with_submitter(
+        context,
+        "chain-application",
+        submitter,
+        finalized_event_reporter,
+    )
+    .await
+}
+
+async fn test_app_with_submitter(
+    context: deterministic::Context,
+    partition: &str,
+    submitter: MempoolHandle<TestTransaction>,
+    finalized_event_reporter: FinalizedEventReporterHandle,
+) -> (
+    Application<TestRuntime>,
+    QmdbDatabaseSet<deterministic::Context>,
+    SharedAppliedHeight,
+) {
+    let config = QmdbState::<deterministic::Context>::config(&context, partition);
     let db = QmdbBackend::init(context, config)
         .await
         .expect("init state db");
@@ -225,6 +244,19 @@ async fn test_app_with_event_reporter(
         finalized_event_reporter,
     );
     (app, databases, applied_height)
+}
+
+async fn test_app_with_partition(
+    context: deterministic::Context,
+    partition: &str,
+    finalized_event_reporter: FinalizedEventReporterHandle,
+) -> (
+    Application<TestRuntime>,
+    QmdbDatabaseSet<deterministic::Context>,
+    SharedAppliedHeight,
+) {
+    let (_mempool, submitter) = Mempool::new(PoolConfig::default());
+    test_app_with_submitter(context, partition, submitter, finalized_event_reporter).await
 }
 
 fn state_range<E: Storage + Clock + Metrics>(
@@ -294,6 +326,67 @@ fn genesis_block_uses_empty_receipts_root() {
 
         assert!(block.transactions.is_empty());
         assert_eq!(block.receipts_root, empty_receipts_root());
+    });
+}
+
+#[test]
+fn proposed_block_includes_expected_receipts_root() {
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let (mempool, mut submitter) = Mempool::new(PoolConfig::default());
+        mempool.start(context.child("mempool"));
+        let (mut app, databases, _) = test_app_with_submitter(
+            context.child("setup"),
+            "chain-application-propose",
+            submitter.clone(),
+            FinalizedEventReporterHandle::default(),
+        )
+        .await;
+        let parent =
+            <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::genesis(
+                &mut app,
+            )
+            .await;
+        let tx = TestTransaction { id: 0, fail: false };
+        submitter.submit(tx.clone()).await.expect("submit tx");
+
+        let (_transactions, _merkleized, expected_output) = app
+            .build_valid_transactions(
+                databases.new_batches().await,
+                RuntimeContext {
+                    epoch: Epoch::zero().get(),
+                },
+                vec![tx.clone()],
+            )
+            .await
+            .expect("build expected output");
+        let consensus_context = Context {
+            round: Round::new(Epoch::zero(), View::new(1)),
+            leader: ed25519::PrivateKey::from_seed(1).public_key(),
+            parent: (View::zero(), parent.digest()),
+        };
+
+        let proposed =
+            <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::propose(
+                &mut app,
+                (context.child("propose"), consensus_context),
+                futures::stream::iter([parent]),
+                databases.new_batches().await,
+                &mut submitter,
+            )
+            .await
+            .expect("propose block");
+        let block = proposed.block;
+
+        assert_eq!(block.transactions, vec![tx]);
+        assert_eq!(block.receipts_root, expected_output.receipts_root);
+        assert_eq!(
+            app.cached_execution_output(block.digest())
+                .await
+                .expect("cached output")
+                .receipts_root,
+            expected_output.receipts_root
+        );
     });
 }
 
@@ -410,6 +503,42 @@ fn verify_rejects_receipts_root_mismatch_and_caches_valid_output() {
 }
 
 #[test]
+fn apply_reexecution_produces_same_receipts_root() {
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let (mut producer, producer_databases, _) = test_app_with_partition(
+            context.child("producer"),
+            "chain-application-reexecute-producer",
+            FinalizedEventReporterHandle::default(),
+        )
+        .await;
+        let (block, output) =
+            verified_test_block(&mut producer, context.child("build"), &producer_databases).await;
+        let (mut reexecutor, reexecutor_databases, _) = test_app_with_partition(
+            context.child("reexecutor"),
+            "chain-application-reexecute-consumer",
+            FinalizedEventReporterHandle::default(),
+        )
+        .await;
+
+        <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::apply(
+            &mut reexecutor,
+            (context.child("apply"), block.context.clone()),
+            &block,
+            reexecutor_databases.new_batches().await,
+        )
+        .await;
+
+        let cached = reexecutor
+            .cached_execution_output(block.digest())
+            .await
+            .expect("cached output");
+        assert_eq!(cached.receipts_root, output.receipts_root);
+        assert_eq!(cached.transactions, output.transactions);
+    });
+}
+
+#[test]
 fn finalized_reports_cached_event_batch_once_after_finalization() {
     let runner = deterministic::Runner::default();
     runner.start(|context| async move {
@@ -440,6 +569,59 @@ fn finalized_reports_cached_event_batch_once_after_finalization() {
         assert_eq!(batches[0].receipts_root, block.receipts_root);
         assert_eq!(batches[0].transactions, output.transactions);
         assert!(app.cached_execution_output(block.digest()).await.is_none());
+    });
+}
+
+#[test]
+fn recovered_apply_preserves_finalized_event_output() {
+    let ((block, output), checkpoint) =
+        deterministic::Runner::default().start_and_recover(|context| async move {
+            let (mut app, databases, _) = test_app_with_partition(
+                context.child("before_recovery"),
+                "chain-application-recovery",
+                FinalizedEventReporterHandle::default(),
+            )
+            .await;
+            verified_test_block(&mut app, context.child("build"), &databases).await
+        });
+
+    deterministic::Runner::from(checkpoint).start(|context| async move {
+        let reporter = RecordingFinalizedEventReporter::default();
+        let (mut app, databases, _) = test_app_with_partition(
+            context.child("after_recovery"),
+            "chain-application-recovery",
+            FinalizedEventReporterHandle::new(reporter.clone()),
+        )
+        .await;
+
+        <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::apply(
+            &mut app,
+            (context.child("apply"), block.context.clone()),
+            &block,
+            databases.new_batches().await,
+        )
+        .await;
+
+        let cached = app
+            .cached_execution_output(block.digest())
+            .await
+            .expect("cached output");
+        assert_eq!(cached.receipts_root, output.receipts_root);
+        assert_eq!(cached.transactions, output.transactions);
+
+        <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::finalized(
+            &mut app,
+            (context.child("finalized"), block.context.clone()),
+            &block,
+            &databases,
+        )
+        .await;
+
+        let batches = reporter.batches();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].block_digest, block.digest());
+        assert_eq!(batches[0].receipts_root, output.receipts_root);
+        assert_eq!(batches[0].transactions, output.transactions);
     });
 }
 
