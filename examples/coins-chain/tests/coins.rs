@@ -18,8 +18,7 @@ use nunchi_coins::{
     Transaction,
 };
 use nunchi_oracle::{
-    FeedId, MarketId, OracleConfig, OracleOperation, OracleStatus, Price, SourceId,
-    Transaction as OracleTransaction, UpdaterPolicy,
+    IntervalKey, NamespaceId, NamespacePolicy, OracleOperation, Transaction as OracleTransaction,
 };
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::time::Duration;
@@ -56,16 +55,8 @@ fn gold_coin() -> CoinId {
     TokenFactory::derive_coin_id(&Address::from(key(ALICE).public_key()), 0, &gold_spec())
 }
 
-fn oracle_market() -> MarketId {
-    MarketId(Sha256::hash(b"coins-chain-integration-oracle-market"))
-}
-
-fn oracle_source() -> SourceId {
-    SourceId(Sha256::hash(b"coins-chain-integration-oracle-source"))
-}
-
-fn oracle_feed() -> FeedId {
-    FeedId(Sha256::hash(b"coins-chain-integration-oracle-feed"))
+fn oracle_namespace() -> NamespaceId {
+    NamespaceId(Sha256::hash(b"coins-chain-integration-oracle-namespace"))
 }
 
 #[test_traced]
@@ -462,18 +453,11 @@ fn oracle_updates_finalize_across_validators() {
                 OracleTransaction::sign(
                     &admin,
                     0,
-                    OracleOperation::ConfigureMarket {
-                        market: oracle_market(),
-                        config: OracleConfig {
+                    OracleOperation::ConfigureNamespace {
+                        namespace: oracle_namespace(),
+                        policy: NamespacePolicy {
                             admin: admin_id.clone(),
-                            price_decimals: 6,
-                            max_staleness_ms: 1_000_000,
-                            max_confidence_bps: 500,
-                            high_volatility_bps: 1_000,
-                            divergence_warn_bps: 500,
-                            divergence_halt_bps: 2_000,
-                            source_priority: vec![oracle_source()],
-                            allow_negative: false,
+                            max_payload_size: 1024,
                         },
                     },
                 )
@@ -486,11 +470,10 @@ fn oracle_updates_finalize_across_validators() {
                 OracleTransaction::sign(
                     &admin,
                     1,
-                    OracleOperation::SetUpdater {
-                        market: oracle_market(),
-                        source: oracle_source(),
-                        updater: updater_id,
-                        policy: UpdaterPolicy { enabled: true },
+                    OracleOperation::SetWriter {
+                        namespace: oracle_namespace(),
+                        writer: updater_id,
+                        enabled: true,
                     },
                 )
                 .into(),
@@ -502,14 +485,11 @@ fn oracle_updates_finalize_across_validators() {
                 OracleTransaction::sign(
                     &updater,
                     0,
-                    OracleOperation::SubmitFeedUpdate {
-                        market: oracle_market(),
-                        source: oracle_source(),
-                        feed: oracle_feed(),
-                        raw_value: 123_456_789,
-                        raw_decimals: 8,
-                        publish_time_ms: 0,
-                        confidence: 1_000,
+                    OracleOperation::AppendRecord {
+                        namespace: oracle_namespace(),
+                        interval: IntervalKey::new(3),
+                        payload: b"opaque-oracle-payload".to_vec(),
+                        proof: None,
                     },
                 )
                 .into(),
@@ -522,13 +502,15 @@ fn oracle_updates_finalize_across_validators() {
             if ledgers.len() == VALIDATORS as usize {
                 let mut all_updated = true;
                 for ledger in ledgers {
-                    let state = ledger.oracle(&oracle_market()).await.unwrap();
-                    if !matches!(
-                        state,
-                        Some(state)
-                            if state.status == OracleStatus::Fresh
-                                && state.oracle_price == Some(Price::new(1_234_567, 6))
-                    ) {
+                    let records = ledger
+                        .records_by_namespace(
+                            &oracle_namespace(),
+                            IntervalKey::new(3),
+                            IntervalKey::new(3),
+                        )
+                        .await
+                        .unwrap();
+                    if records.len() != 1 || records[0].payload != b"opaque-oracle-payload" {
                         all_updated = false;
                         break;
                     }
