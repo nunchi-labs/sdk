@@ -1,4 +1,4 @@
-use super::network::{
+use crate::tests::network::{
     deterministic_state, lossy_link, reliable_link, TestNetworkBuilder, ThresholdFixture,
     ValidatorConfig,
 };
