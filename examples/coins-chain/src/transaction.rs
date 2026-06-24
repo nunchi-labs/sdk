@@ -6,16 +6,19 @@ use nunchi_common::{Address, Operation};
 use nunchi_crypto::SignatureError;
 use nunchi_mempool::{NonceKey, PoolTransaction};
 use nunchi_oracle::{OracleOperation, Transaction as OracleTransaction};
+use nunchi_perpetuals::{PerpetualOperation, Transaction as PerpetualTransaction};
 
 const TX_COIN: u8 = 0;
 const TX_AUTHORITY: u8 = 1;
 const TX_ORACLE: u8 = 2;
+const TX_PERPETUAL: u8 = 3;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Transaction {
     Coin(Box<CoinTransaction>),
     Authority(Box<AuthorityTransaction>),
     Oracle(Box<OracleTransaction>),
+    Perpetual(Box<PerpetualTransaction>),
 }
 
 impl Transaction {
@@ -24,6 +27,7 @@ impl Transaction {
             Self::Coin(tx) => tx.verify().is_ok(),
             Self::Authority(tx) => tx.verify().is_ok(),
             Self::Oracle(tx) => tx.verify().is_ok(),
+            Self::Perpetual(tx) => tx.verify().is_ok(),
         }
     }
 
@@ -32,6 +36,7 @@ impl Transaction {
             Self::Coin(tx) => tx.digest(),
             Self::Authority(tx) => tx.digest(),
             Self::Oracle(tx) => tx.digest(),
+            Self::Perpetual(tx) => tx.digest(),
         }
     }
 
@@ -40,6 +45,7 @@ impl Transaction {
             Self::Coin(tx) => &tx.account_id,
             Self::Authority(tx) => &tx.account_id,
             Self::Oracle(tx) => &tx.account_id,
+            Self::Perpetual(tx) => &tx.account_id,
         }
     }
 
@@ -52,6 +58,7 @@ impl Transaction {
             Self::Coin(tx) => tx.payload.nonce,
             Self::Authority(tx) => tx.payload.nonce,
             Self::Oracle(tx) => tx.payload.nonce,
+            Self::Perpetual(tx) => tx.payload.nonce,
         }
     }
 }
@@ -72,6 +79,9 @@ impl PoolTransaction for Transaction {
                 NonceKey::new(AuthorityOperation::NAMESPACE, tx.account_id.clone())
             }
             Self::Oracle(tx) => NonceKey::new(OracleOperation::NAMESPACE, tx.account_id.clone()),
+            Self::Perpetual(tx) => {
+                NonceKey::new(PerpetualOperation::NAMESPACE, tx.account_id.clone())
+            }
         }
     }
 
@@ -88,6 +98,7 @@ impl PoolTransaction for Transaction {
             Self::Coin(tx) => tx.verify(),
             Self::Authority(tx) => tx.verify(),
             Self::Oracle(tx) => tx.verify(),
+            Self::Perpetual(tx) => tx.verify(),
         }
     }
 }
@@ -110,6 +121,12 @@ impl From<OracleTransaction> for Transaction {
     }
 }
 
+impl From<PerpetualTransaction> for Transaction {
+    fn from(tx: PerpetualTransaction) -> Self {
+        Self::Perpetual(Box::new(tx))
+    }
+}
+
 impl Write for Transaction {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         match self {
@@ -125,6 +142,10 @@ impl Write for Transaction {
                 TX_ORACLE.write(buf);
                 tx.write(buf);
             }
+            Self::Perpetual(tx) => {
+                TX_PERPETUAL.write(buf);
+                tx.write(buf);
+            }
         }
     }
 }
@@ -137,6 +158,7 @@ impl Read for Transaction {
             TX_COIN => Ok(Self::Coin(Box::new(CoinTransaction::read(buf)?))),
             TX_AUTHORITY => Ok(Self::Authority(Box::new(AuthorityTransaction::read(buf)?))),
             TX_ORACLE => Ok(Self::Oracle(Box::new(OracleTransaction::read(buf)?))),
+            TX_PERPETUAL => Ok(Self::Perpetual(Box::new(PerpetualTransaction::read(buf)?))),
             tag => Err(Error::InvalidEnum(tag)),
         }
     }
@@ -148,6 +170,7 @@ impl EncodeSize for Transaction {
             Self::Coin(tx) => tx.encode_size(),
             Self::Authority(tx) => tx.encode_size(),
             Self::Oracle(tx) => tx.encode_size(),
+            Self::Perpetual(tx) => tx.encode_size(),
         }
     }
 }
@@ -160,6 +183,7 @@ mod tests {
     use nunchi_authority::{AuthorityOperation, MultisigPolicy};
     use nunchi_coins::{CoinOperation, CoinSpec, PrivateKey, TokenName, TokenSymbol};
     use nunchi_oracle::{NamespaceId, NamespacePolicy, OracleOperation};
+    use nunchi_perpetuals::Side;
 
     fn coin_transaction(seed: u64, nonce: u64) -> CoinTransaction {
         let signer = PrivateKey::ed25519_from_seed(seed);
@@ -209,22 +233,40 @@ mod tests {
         )
     }
 
+    fn perpetual_transaction(seed: u64, nonce: u64) -> PerpetualTransaction {
+        let signer = nunchi_crypto::PrivateKey::ed25519_from_seed(seed);
+        PerpetualTransaction::sign(
+            &signer,
+            nonce,
+            PerpetualOperation::OpenPosition {
+                market: commonware_cryptography::Sha256::hash(b"btc-usd-perp"),
+                side: Side::Long,
+                collateral: 1_000,
+                leverage_bps: 50_000,
+            },
+        )
+    }
+
     #[test]
     fn transaction_codec_uses_stable_tags() {
         let coin = Transaction::from(coin_transaction(1, 3));
         let authority = Transaction::from(authority_transaction(2, 4));
         let oracle = Transaction::from(oracle_transaction(3, 5));
+        let perpetual = Transaction::from(perpetual_transaction(4, 6));
 
         let coin_encoded = coin.encode();
         let authority_encoded = authority.encode();
         let oracle_encoded = oracle.encode();
+        let perpetual_encoded = perpetual.encode();
 
         assert_eq!(coin_encoded[0], TX_COIN);
         assert_eq!(authority_encoded[0], TX_AUTHORITY);
         assert_eq!(oracle_encoded[0], TX_ORACLE);
+        assert_eq!(perpetual_encoded[0], TX_PERPETUAL);
         assert_eq!(Transaction::decode(coin_encoded).unwrap(), coin);
         assert_eq!(Transaction::decode(authority_encoded).unwrap(), authority);
         assert_eq!(Transaction::decode(oracle_encoded).unwrap(), oracle);
+        assert_eq!(Transaction::decode(perpetual_encoded).unwrap(), perpetual);
         assert!(Transaction::decode([99].as_slice()).is_err());
     }
 

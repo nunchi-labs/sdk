@@ -4,6 +4,7 @@ use nunchi_authority::{AuthorityError, AuthorityLedger};
 use nunchi_coins::{Ledger, LedgerError};
 use nunchi_common::{Runtime, RuntimeContext, StateStore};
 use nunchi_oracle::{OracleError, OracleLedger};
+use nunchi_perpetuals::{PerpetualError, PerpetualLedger};
 
 use crate::Transaction;
 
@@ -18,6 +19,8 @@ pub enum RuntimeError {
     Authority(#[from] AuthorityError),
     #[error("oracle module error: {0}")]
     Oracle(#[from] OracleError),
+    #[error("perpetuals module error: {0}")]
+    Perpetuals(#[from] PerpetualError),
 }
 
 impl RuntimeError {
@@ -27,6 +30,7 @@ impl RuntimeError {
             Self::Coins(LedgerError::Storage(_))
                 | Self::Authority(AuthorityError::Storage(_))
                 | Self::Oracle(OracleError::Storage(_))
+                | Self::Perpetuals(PerpetualError::Storage(_))
         )
     }
 }
@@ -83,6 +87,10 @@ where
             let mut ledger = OracleLedger::new(state);
             ledger.apply_transaction(transaction, context).await?;
         }
+        Transaction::Perpetual(transaction) => {
+            let mut ledger = PerpetualLedger::new(state);
+            ledger.apply_transaction(transaction, context).await?;
+        }
     }
     Ok(())
 }
@@ -96,9 +104,11 @@ mod tests {
         assert!(RuntimeError::Coins(LedgerError::Storage("disk".into())).is_storage());
         assert!(RuntimeError::Authority(AuthorityError::Storage("disk".into())).is_storage());
         assert!(RuntimeError::Oracle(OracleError::Storage("disk".into())).is_storage());
+        assert!(RuntimeError::Perpetuals(PerpetualError::Storage("disk".into())).is_storage());
 
         assert!(!RuntimeError::Authority(AuthorityError::NotConfigured).is_storage());
         assert!(!RuntimeError::Coins(LedgerError::InvalidTokenSpec("bad")).is_storage());
         assert!(!RuntimeError::Oracle(OracleError::Unauthorized).is_storage());
+        assert!(!RuntimeError::Perpetuals(PerpetualError::Unauthorized).is_storage());
     }
 }

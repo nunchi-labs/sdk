@@ -2668,6 +2668,7 @@ dependencies = [
  "nunchi-dkg",
  "nunchi-mempool",
  "nunchi-oracle",
+ "nunchi-perpetuals",
  "nunchi-rpc",
  "rand 0.8.6",
  "rand_core 0.6.4",
@@ -2780,6 +2781,25 @@ dependencies = [
  "futures",
  "nunchi-common",
  "nunchi-crypto",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "nunchi-perpetuals"
+version = "2026.5.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-formatting",
+ "futures",
+ "nunchi-coins",
+ "nunchi-common",
+ "nunchi-crypto",
+ "nunchi-oracle",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
