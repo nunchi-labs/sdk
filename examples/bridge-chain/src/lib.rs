@@ -8,18 +8,49 @@
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_consensus::types::Epoch;
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use nunchi_bridge::BridgeExtension;
 use nunchi_chain::{SharedAppliedHeight, StateCommitment};
 use nunchi_common::{Address, Runtime, RuntimeContext, StateStore};
 use nunchi_mempool::{Mempool, MempoolHandle, NonceKey, PoolTransaction};
+use std::num::NonZeroU64;
 
 const NOOP_TX_NAMESPACE: &[u8] = b"_NUNCHI_BRIDGE_CHAIN_NOOP_TX";
+
+pub mod engine;
+pub mod execution;
+pub mod rpc;
+pub mod testnet;
 
 pub type Block = nunchi_bridge::BridgeBlock<NoopTransaction>;
 pub type Application = nunchi_chain::Application<NoopRuntime, BridgeExtension>;
 pub type Submitter = MempoolHandle<NoopTransaction>;
 pub type TxPool = Mempool<NoopTransaction>;
+
+pub use nunchi_dkg::{
+    Activity, Context, EdScheme, EpochProvider, Finalization, Identity, Notarization, Provider,
+    PublicKey, Scheme, Seed, Seedable, Signature, ThresholdScheme,
+};
+
+/// Default namespace prefix used by generated bridge chains.
+pub const NAMESPACE: &[u8] = b"_NUNCHI_BRIDGE_CHAIN";
+
+/// P2P channel identifiers shared by every bridge-chain node.
+pub mod channels {
+    pub const PENDING: u64 = 0;
+    pub const RECOVERED: u64 = 1;
+    pub const RESOLVER: u64 = 2;
+    pub const BROADCAST: u64 = 3;
+    pub const DKG: u64 = 4;
+    pub const BACKFILL: u64 = 5;
+}
+
+/// The consensus epoch. The example chain uses one validator set at startup.
+pub const EPOCH: Epoch = Epoch::zero();
+
+/// Blocks per DKG epoch for the local demo.
+pub const BLOCKS_PER_EPOCH: NonZeroU64 = commonware_utils::NZU64!(200);
 
 /// Transaction placeholder for blocks whose only useful payload is the bridge extension.
 #[derive(Clone, Debug, Eq, PartialEq)]
