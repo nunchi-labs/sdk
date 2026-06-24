@@ -22,6 +22,7 @@ commonware-cryptography = { workspace = true }
 commonware-formatting = { workspace = true }
 jsonrpsee = { workspace = true, optional = true }
 serde = { workspace = true }
+serde_with = { workspace = true }
 futures = { workspace = true, optional = true }
 
 [dev-dependencies]

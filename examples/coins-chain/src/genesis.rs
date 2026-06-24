@@ -154,10 +154,6 @@ mod tests {
 
     const GENESIS_FIXTURE: &[u8] = include_bytes!("../tests/fixtures/genesis.json");
 
-    fn encode_address(value: &Address) -> String {
-        value.to_bech32()
-    }
-
     fn owner(seed: u64) -> PrivateKey {
         PrivateKey::from_seed(seed)
     }
@@ -192,7 +188,7 @@ mod tests {
             coins: Some(CoinsGenesis {
                 account_policies: Vec::new(),
                 tokens: vec![nunchi_coins::TokenGenesis {
-                    issuer: encode_address(&issuer),
+                    issuer,
                     spec: CoinSpec::new(
                         TokenSymbol::new("NCH").unwrap(),
                         TokenName::new("Nunchi").unwrap(),
@@ -202,11 +198,11 @@ mod tests {
                     ),
                     allocations: vec![
                         nunchi_coins::AllocationGenesis {
-                            account: encode_address(&alice),
+                            account: alice,
                             amount: 400,
                         },
                         nunchi_coins::AllocationGenesis {
-                            account: encode_address(&bob),
+                            account: bob,
                             amount: 600,
                         },
                     ],
