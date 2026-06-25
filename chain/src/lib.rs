@@ -5,6 +5,8 @@ pub mod block;
 pub mod consensus;
 pub mod engine;
 pub mod execution;
+#[cfg(test)]
+mod tests;
 
 pub use application::{Application, SharedAppliedHeight};
 pub use block::{Block, Finalized, Notarized, StateCommitment, MAX_TRANSACTIONS};
