@@ -7,8 +7,7 @@ use commonware_codec::DecodeExt;
 use commonware_cryptography::{ed25519, Hasher, Sha256, Signer as _};
 use nunchi_authority::MultisigPolicy;
 use nunchi_coins::{CoinSpec, PrivateKey, TokenName, TokenSymbol};
-use nunchi_common::Address;
-use nunchi_oracle::{NamespaceId, NamespacePolicy, OracleOperation, Transaction as OracleTransaction};
+use nunchi_oracle::{IntervalKey, NamespaceId, OracleOperation, Transaction as OracleTransaction};
 
 use crate::transaction::*;
 
@@ -50,12 +49,11 @@ fn oracle_transaction(seed: u64, nonce: u64) -> OracleTransaction {
     OracleTransaction::sign(
         &signer,
         nonce,
-        OracleOperation::ConfigureNamespace {
+        OracleOperation::AppendRecord {
             namespace: NamespaceId(Sha256::hash(b"test-namespace")),
-            policy: NamespacePolicy {
-                admin: Address::external(&signer.public_key()),
-                max_payload_size: 1024,
-            },
+            interval: IntervalKey::new(0),
+            payload: b"payload".to_vec(),
+            proof: None,
         },
     )
 }

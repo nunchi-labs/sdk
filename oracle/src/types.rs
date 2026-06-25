@@ -78,39 +78,6 @@ impl FixedSize for IntervalKey {
     const SIZE: usize = u64::SIZE;
 }
 
-/// Generic namespace-level oracle policy.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NamespacePolicy {
-    /// Account allowed to configure this namespace and writer set.
-    pub admin: Address,
-    /// Maximum payload bytes accepted for records in this namespace.
-    pub max_payload_size: u32,
-}
-
-impl Write for NamespacePolicy {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.admin.write(buf);
-        self.max_payload_size.write(buf);
-    }
-}
-
-impl Read for NamespacePolicy {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
-        Ok(Self {
-            admin: Address::read(buf)?,
-            max_payload_size: u32::read(buf)?,
-        })
-    }
-}
-
-impl EncodeSize for NamespacePolicy {
-    fn encode_size(&self) -> usize {
-        self.admin.encode_size() + self.max_payload_size.encode_size()
-    }
-}
-
 /// Opaque interval-addressed data stored by the oracle.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OracleRecord {

@@ -3,15 +3,12 @@ use nunchi_authority::{AuthorityGenesis, AuthorityLedger};
 use nunchi_coins::{CoinsGenesis, Ledger};
 use nunchi_common::{CommitState, QmdbState};
 
-use commonware_cryptography::{ed25519, Hasher, Sha256, Signer as _};
+use commonware_cryptography::{ed25519, Signer as _};
 use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
 use nunchi_authority::{AuthorityDB, AuthorityOperation, Transaction as AuthorityTransaction};
 use nunchi_coins::{Address, CoinDB, CoinSpec, TokenFactory, TokenName, TokenSymbol};
 use nunchi_crypto::PrivateKey;
-use nunchi_oracle::{
-    NamespaceId, NamespacePolicyGenesis, OracleGenesis, OracleLedger, OracleNamespaceGenesis,
-    OracleWriterGenesis,
-};
+use nunchi_oracle::{IntervalKey, OracleGenesis, OracleLedger};
 
 use crate::genesis::*;
 
@@ -29,18 +26,12 @@ fn external(seed: u64) -> Address {
     Address::external(&owner(seed).public_key())
 }
 
-fn oracle_namespace() -> NamespaceId {
-    NamespaceId(Sha256::hash(b"coins-chain-oracle-namespace"))
-}
-
 fn sample_genesis() -> ChainGenesis {
     let owners = [owner(1), owner(2), owner(3)];
     let validators = [validator(10), validator(11)];
     let issuer = external(100);
     let alice = external(101);
     let bob = external(102);
-    let oracle_admin = external(200);
-    let oracle_updater = external(201);
 
     ChainGenesis {
         authority: Some(AuthorityGenesis {
@@ -77,19 +68,7 @@ fn sample_genesis() -> ChainGenesis {
                 ],
             }],
         }),
-        oracle: Some(OracleGenesis {
-            namespaces: vec![OracleNamespaceGenesis {
-                namespace: oracle_namespace(),
-                policy: NamespacePolicyGenesis {
-                    admin: oracle_admin,
-                    max_payload_size: 1024,
-                },
-                writers: vec![OracleWriterGenesis {
-                    writer: oracle_updater,
-                    enabled: true,
-                }],
-            }],
-        }),
+        oracle: Some(OracleGenesis {}),
     }
 }
 
@@ -306,7 +285,7 @@ fn coins_genesis_creates_token_and_initial_balances() {
 }
 
 #[test]
-fn oracle_genesis_configures_namespace_and_writer() {
+fn oracle_genesis_applies_without_policy_state() {
     deterministic::Runner::default().start(|context| async move {
         let genesis = sample_genesis();
         let empty = empty_commitment(context.child("empty"), "genesis-oracle-empty").await;
@@ -316,7 +295,10 @@ fn oracle_genesis_configures_namespace_and_writer() {
         genesis.apply_to_state(&mut state, &empty).await.unwrap();
 
         let oracle = OracleLedger::new(state);
-        let policy = oracle.namespace(&oracle_namespace()).await.unwrap().unwrap();
-        assert_eq!(policy.max_payload_size, 1024);
+        let records = oracle
+            .records_by_writer(&external(201), IntervalKey::new(0), IntervalKey::new(0))
+            .await
+            .unwrap();
+        assert!(records.is_empty());
     });
 }

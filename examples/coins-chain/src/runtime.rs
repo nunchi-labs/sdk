@@ -101,6 +101,6 @@ mod tests {
 
         assert!(!RuntimeError::Authority(AuthorityError::NotConfigured).is_storage());
         assert!(!RuntimeError::Coins(LedgerError::InvalidTokenSpec("bad")).is_storage());
-        assert!(!RuntimeError::Oracle(OracleError::Unauthorized).is_storage());
+        assert!(!RuntimeError::Oracle(OracleError::PayloadTooLarge).is_storage());
     }
 }

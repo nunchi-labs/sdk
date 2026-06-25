@@ -2935,7 +2935,7 @@ dependencies = [
  "commonware-codec",
  "commonware-cryptography",
  "commonware-formatting",
- "futures",
+ "commonware-runtime",
  "nunchi-common",
  "nunchi-crypto",
  "serde",

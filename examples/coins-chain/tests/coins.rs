@@ -17,9 +17,7 @@ use nunchi_coins::{
     Address, CoinId, CoinOperation, CoinSpec, PrivateKey, TokenFactory, TokenName, TokenSymbol,
     Transaction,
 };
-use nunchi_oracle::{
-    IntervalKey, NamespaceId, NamespacePolicy, OracleOperation, Transaction as OracleTransaction,
-};
+use nunchi_oracle::{IntervalKey, NamespaceId, OracleOperation, Transaction as OracleTransaction};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::time::Duration;
 use tracing::info;
@@ -443,43 +441,8 @@ fn oracle_updates_finalize_across_validators() {
             .await;
         network.start_all().await;
 
-        let admin = authority_key(700);
         let updater = authority_key(701);
-        let admin_id = Address::from(admin.public_key());
-        let updater_id = Address::from(updater.public_key());
         let submitter = network.submitter(0);
-        submitter
-            .submit(
-                OracleTransaction::sign(
-                    &admin,
-                    0,
-                    OracleOperation::ConfigureNamespace {
-                        namespace: oracle_namespace(),
-                        policy: NamespacePolicy {
-                            admin: admin_id.clone(),
-                            max_payload_size: 1024,
-                        },
-                    },
-                )
-                .into(),
-            )
-            .await
-            .expect("admit oracle configure");
-        submitter
-            .submit(
-                OracleTransaction::sign(
-                    &admin,
-                    1,
-                    OracleOperation::SetWriter {
-                        namespace: oracle_namespace(),
-                        writer: updater_id,
-                        enabled: true,
-                    },
-                )
-                .into(),
-            )
-            .await
-            .expect("admit oracle updater");
         submitter
             .submit(
                 OracleTransaction::sign(
