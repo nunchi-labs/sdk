@@ -16,7 +16,7 @@ pub use consensus::{
     DkgReporters, NoConsensusExtension,
 };
 pub use events::{
-    EventReporter, FinalizedEvents, InMemoryEventReporter, IndexedEvent, NoopEventReporter,
-    TransactionEvents,
+    EventConsumer, FinalizedEvents, InMemoryEventConsumer, IndexedEvent, NoopEventConsumer,
+    TransactionEventContext, TransactionEvents,
 };
 pub use execution::{NodeHandle, StatefulQuery};

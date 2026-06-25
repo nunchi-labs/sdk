@@ -1,5 +1,6 @@
 //! Node-facing handles for submitting transactions and observing stateful execution.
 
+use commonware_cryptography::sha256;
 use commonware_glue::stateful::Mailbox as StatefulMailbox;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_storage::Context as StorageContext;
@@ -7,7 +8,7 @@ use nunchi_common::{QmdbDatabaseSet, QmdbReader, Runtime};
 use nunchi_mempool::{MempoolHandle, PoolTransaction};
 
 use crate::{
-    Application, ConsensusExtension, EventReporter, NoConsensusExtension, NoopEventReporter,
+    Application, ConsensusExtension, EventConsumer, NoConsensusExtension, NoopEventConsumer,
     SharedAppliedHeight,
 };
 
@@ -16,30 +17,30 @@ use crate::{
 /// In production a node has exactly one of these. In-process multi-node harnesses can collect them
 /// into a map keyed by public key to drive and observe multiple validators.
 #[derive(Clone)]
-pub struct NodeHandle<E, R, Ext = NoConsensusExtension, Reporter = NoopEventReporter>
+pub struct NodeHandle<E, R, Ext = NoConsensusExtension, Events = NoopEventConsumer>
 where
     E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
     R: Runtime + Clone + Send + Sync + 'static,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
     Ext: ConsensusExtension + Sync,
-    Reporter: EventReporter<<R::Transaction as PoolTransaction>::Digest>,
+    Events: EventConsumer,
 {
     pub submitter: MempoolHandle<R::Transaction>,
-    pub stateful: StatefulMailbox<E, Application<R, Ext, Reporter>>,
+    pub stateful: StatefulMailbox<E, Application<R, Ext, Events>>,
     pub applied_height: SharedAppliedHeight,
 }
 
-impl<E, R, Ext, Reporter> NodeHandle<E, R, Ext, Reporter>
+impl<E, R, Ext, Events> NodeHandle<E, R, Ext, Events>
 where
     E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
     R: Runtime + Clone + Send + Sync + 'static,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
     Ext: ConsensusExtension + Sync,
-    Reporter: EventReporter<<R::Transaction as PoolTransaction>::Digest>,
+    Events: EventConsumer,
 {
     pub fn new(
         submitter: MempoolHandle<R::Transaction>,
-        stateful: StatefulMailbox<E, Application<R, Ext, Reporter>>,
+        stateful: StatefulMailbox<E, Application<R, Ext, Events>>,
         applied_height: SharedAppliedHeight,
     ) -> Self {
         Self {
@@ -50,30 +51,30 @@ where
     }
 
     /// A read-only query backend over this node's committed databases.
-    pub fn query(&self) -> StatefulQuery<E, R, Ext, Reporter> {
+    pub fn query(&self) -> StatefulQuery<E, R, Ext, Events> {
         StatefulQuery::new(self.stateful.clone())
     }
 }
 
 /// Read-only queries answered from the stateful actor's committed databases.
-pub struct StatefulQuery<E, R, Ext = NoConsensusExtension, Reporter = NoopEventReporter>
+pub struct StatefulQuery<E, R, Ext = NoConsensusExtension, Events = NoopEventConsumer>
 where
     E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
     R: Runtime + Clone + Send + Sync + 'static,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
     Ext: ConsensusExtension + Sync,
-    Reporter: EventReporter<<R::Transaction as PoolTransaction>::Digest>,
+    Events: EventConsumer,
 {
-    stateful: StatefulMailbox<E, Application<R, Ext, Reporter>>,
+    stateful: StatefulMailbox<E, Application<R, Ext, Events>>,
 }
 
-impl<E, R, Ext, Reporter> Clone for StatefulQuery<E, R, Ext, Reporter>
+impl<E, R, Ext, Events> Clone for StatefulQuery<E, R, Ext, Events>
 where
     E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
     R: Runtime + Clone + Send + Sync + 'static,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
     Ext: ConsensusExtension + Sync,
-    Reporter: EventReporter<<R::Transaction as PoolTransaction>::Digest>,
+    Events: EventConsumer,
 {
     fn clone(&self) -> Self {
         Self {
@@ -82,15 +83,15 @@ where
     }
 }
 
-impl<E, R, Ext, Reporter> StatefulQuery<E, R, Ext, Reporter>
+impl<E, R, Ext, Events> StatefulQuery<E, R, Ext, Events>
 where
     E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
     R: Runtime + Clone + Send + Sync + 'static,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
     Ext: ConsensusExtension + Sync,
-    Reporter: EventReporter<<R::Transaction as PoolTransaction>::Digest>,
+    Events: EventConsumer,
 {
-    pub fn new(stateful: StatefulMailbox<E, Application<R, Ext, Reporter>>) -> Self {
+    pub fn new(stateful: StatefulMailbox<E, Application<R, Ext, Events>>) -> Self {
         Self { stateful }
     }
 

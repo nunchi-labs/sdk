@@ -11,10 +11,7 @@ use commonware_runtime::{Clock, Metrics, Spawner, Storage};
 use commonware_storage::{mmr::Location, qmdb::sync::Target};
 use commonware_utils::{non_empty_range, range::NonEmptyRange, SystemTimeExt};
 use futures::{lock::Mutex as AsyncMutex, StreamExt};
-use nunchi_common::{
-    NoopEventSink, Overlay, QmdbBatch, QmdbDatabaseSet, QmdbMerkleized, Runtime, RuntimeContext,
-    VecEventSink,
-};
+use nunchi_common::{Overlay, QmdbBatch, QmdbDatabaseSet, QmdbMerkleized, Runtime, RuntimeContext};
 use nunchi_dkg::{Context, Scheme};
 use nunchi_mempool::{MempoolHandle, PoolTransaction};
 use rand::Rng;
@@ -27,30 +24,27 @@ use std::{
 use tracing::{debug, error};
 
 use crate::{
-    Block, ConsensusExtension, DkgMailbox, EventReporter, FinalizedEvents, IndexedEvent,
-    NoConsensusExtension, NoopEventReporter, StateCommitment, TransactionEvents,
+    Block, ConsensusExtension, DkgMailbox, EventConsumer, NoConsensusExtension, NoopEventConsumer,
+    StateCommitment, TransactionEventContext,
 };
 
 /// The height of the last finalized block applied to a node's ledger.
 pub type SharedAppliedHeight = Arc<AsyncMutex<Height>>;
 
-type FinalizedEventCache<TxDigest> =
-    Arc<AsyncMutex<HashMap<sha256::Digest, FinalizedEvents<TxDigest>>>>;
-
 /// Fixed consensus cutoff for block timestamps: 2200-01-01T00:00:00Z.
 const MAX_BLOCK_TIMESTAMP_MS: u64 = 7_258_118_400_000;
 
 /// Configuration for an application with explicit consensus and event reporting.
-pub struct ApplicationConfig<Tx, Ext, Reporter>
+pub struct ApplicationConfig<Tx, Ext, Events>
 where
     Tx: PoolTransaction,
     Ext: ConsensusExtension + Sync,
-    Reporter: EventReporter<Tx::Digest>,
+    Events: EventConsumer,
 {
     pub submitter: MempoolHandle<Tx>,
     pub max_block_transactions: usize,
     pub consensus: Ext,
-    pub event_reporter: Reporter,
+    pub events: Events,
     pub applied_height: SharedAppliedHeight,
     pub genesis_state: StateCommitment,
     pub genesis_payload: sha256::Digest,
@@ -58,31 +52,30 @@ where
 
 /// The stateful consensus application for a generated runtime.
 #[derive(Clone)]
-pub struct Application<R, Ext = NoConsensusExtension, Reporter = NoopEventReporter>
+pub struct Application<R, Ext = NoConsensusExtension, Events = NoopEventConsumer>
 where
     R: Runtime,
     R::Transaction: PoolTransaction,
     Ext: ConsensusExtension + Sync,
-    Reporter: EventReporter<<R::Transaction as PoolTransaction>::Digest>,
+    Events: EventConsumer,
 {
     submitter: MempoolHandle<R::Transaction>,
     max_block_transactions: usize,
     dkg: Option<DkgMailbox<R::Transaction, Ext>>,
     consensus: Ext,
-    event_reporter: Reporter,
-    finalized_events: FinalizedEventCache<<R::Transaction as PoolTransaction>::Digest>,
+    events: Events,
     applied_height: SharedAppliedHeight,
     genesis_state: StateCommitment,
     genesis_payload: sha256::Digest,
     _runtime: PhantomData<R>,
 }
 
-impl<R, Ext, Reporter> Application<R, Ext, Reporter>
+impl<R, Ext, Events> Application<R, Ext, Events>
 where
     R: Runtime,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
     Ext: ConsensusExtension + Sync,
-    Reporter: EventReporter<<R::Transaction as PoolTransaction>::Digest>,
+    Events: EventConsumer,
 {
     /// The genesis block, committing to `genesis_state`.
     pub fn genesis_block(&self) -> Block<R::Transaction, Ext> {
@@ -103,15 +96,15 @@ where
         )
     }
 
-    pub fn with_consensus_and_event_reporter(
-        config: ApplicationConfig<R::Transaction, Ext, Reporter>,
+    pub fn with_consensus_and_events(
+        config: ApplicationConfig<R::Transaction, Ext, Events>,
         dkg: Option<DkgMailbox<R::Transaction, Ext>>,
     ) -> Self {
         let ApplicationConfig {
             submitter,
             max_block_transactions,
             consensus,
-            event_reporter,
+            events,
             applied_height,
             genesis_state,
             genesis_payload,
@@ -122,8 +115,7 @@ where
             max_block_transactions,
             dkg,
             consensus,
-            event_reporter,
-            finalized_events: Arc::new(AsyncMutex::new(HashMap::new())),
+            events,
             applied_height,
             genesis_state,
             genesis_payload,
@@ -183,20 +175,37 @@ where
         Some((included, merkleized))
     }
 
-    async fn execute_block<E: Storage + Clock + Metrics>(
+    async fn execute_block<E, EventHandler>(
         batches: <QmdbDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
         context: RuntimeContext,
         transactions: &[R::Transaction],
-    ) -> Option<QmdbMerkleized<E>> {
+        events: &EventHandler,
+    ) -> Option<QmdbMerkleized<E>>
+    where
+        E: Storage + Clock + Metrics,
+        EventHandler: EventConsumer,
+    {
+        events.begin_block(context).await;
         let mut batch = QmdbBatch::new(batches);
-        for transaction in transactions {
-            let mut events = NoopEventSink;
-            match R::apply(&mut batch, context, transaction, &mut events).await {
-                Ok(()) => {}
+        for (tx_index, transaction) in transactions.iter().enumerate() {
+            let transaction_events = TransactionEventContext {
+                tx_index: u32::try_from(tx_index).expect("block contains more than u32::MAX txs"),
+                tx_digest: transaction.digest(),
+            };
+            let mut sink = events.transaction_sink(context, transaction_events);
+            match R::apply(&mut batch, context, transaction, &mut sink).await {
+                Ok(()) => {
+                    events.transaction_applied(sink).await;
+                }
                 Err(error) if R::is_storage_error(&error) => {
                     panic!("storage failure while executing block: {error}");
                 }
-                Err(_) => return None,
+                Err(_) => {
+                    if let Some(digest) = context.block_digest {
+                        events.discard_block(digest).await;
+                    }
+                    return None;
+                }
             }
         }
         Some(
@@ -207,62 +216,21 @@ where
         )
     }
 
-    async fn execute_block_with_events<E: Storage + Clock + Metrics>(
-        batches: <QmdbDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
-        context: RuntimeContext,
-        block: &Block<R::Transaction, Ext>,
-    ) -> Option<(
-        QmdbMerkleized<E>,
-        FinalizedEvents<<R::Transaction as PoolTransaction>::Digest>,
-    )> {
-        let mut batch = QmdbBatch::new(batches);
-        let mut transactions = Vec::with_capacity(block.transactions.len());
-        for (tx_index, transaction) in block.transactions.iter().enumerate() {
-            let mut events = VecEventSink::new();
-            match R::apply(&mut batch, context, transaction, &mut events).await {
-                Ok(()) => {}
-                Err(error) if R::is_storage_error(&error) => {
-                    panic!("storage failure while executing finalized block: {error}");
-                }
-                Err(_) => return None,
-            }
-            let events = events
-                .into_events()
-                .into_iter()
-                .enumerate()
-                .map(|(event_index, event)| IndexedEvent {
-                    event_index: u32::try_from(event_index)
-                        .expect("transaction emitted more than u32::MAX events"),
-                    event,
-                })
-                .collect();
-            transactions.push(TransactionEvents {
-                tx_index: u32::try_from(tx_index).expect("block contains more than u32::MAX txs"),
-                tx_digest: transaction.digest(),
-                events,
-            });
+    fn proposal_runtime_context(epoch: u64, height: Height, timestamp_ms: u64) -> RuntimeContext {
+        RuntimeContext {
+            epoch,
+            height: height.get(),
+            timestamp_ms,
+            block_digest: None,
         }
-        let merkleized = batch
-            .merkleize()
-            .await
-            .expect("merkleization failed while executing finalized block");
-        let events = FinalizedEvents {
-            height: block.height,
-            block_digest: block.digest(),
-            block_timestamp: block.timestamp,
-            transactions,
-        };
-        Some((merkleized, events))
     }
 
-    fn empty_finalized_events(
-        block: &Block<R::Transaction, Ext>,
-    ) -> FinalizedEvents<<R::Transaction as PoolTransaction>::Digest> {
-        FinalizedEvents {
-            height: block.height,
-            block_digest: block.digest(),
-            block_timestamp: block.timestamp,
-            transactions: Vec::new(),
+    fn block_runtime_context(block: &Block<R::Transaction, Ext>) -> RuntimeContext {
+        RuntimeContext {
+            epoch: block.context.round.epoch().get(),
+            height: block.height.get(),
+            timestamp_ms: block.timestamp,
+            block_digest: Some(block.digest()),
         }
     }
 
@@ -290,10 +258,10 @@ where
     }
 }
 
-impl<R, Ext> Application<R, Ext, NoopEventReporter>
+impl<R, Ext> Application<R, Ext, NoopEventConsumer>
 where
     R: Runtime,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
     Ext: ConsensusExtension + Sync,
 {
     pub fn with_consensus(
@@ -305,12 +273,12 @@ where
         genesis_state: StateCommitment,
         genesis_payload: sha256::Digest,
     ) -> Self {
-        Self::with_consensus_and_event_reporter(
+        Self::with_consensus_and_events(
             ApplicationConfig {
                 submitter,
                 max_block_transactions,
                 consensus,
-                event_reporter: NoopEventReporter,
+                events: NoopEventConsumer,
                 applied_height,
                 genesis_state,
                 genesis_payload,
@@ -323,7 +291,7 @@ where
 impl<R> Application<R>
 where
     R: Runtime,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
 {
     pub fn new(
         submitter: MempoolHandle<R::Transaction>,
@@ -344,26 +312,26 @@ where
     }
 }
 
-impl<R, Reporter> Application<R, NoConsensusExtension, Reporter>
+impl<R, Events> Application<R, NoConsensusExtension, Events>
 where
     R: Runtime,
-    R::Transaction: PoolTransaction,
-    Reporter: EventReporter<<R::Transaction as PoolTransaction>::Digest>,
+    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
+    Events: EventConsumer,
 {
-    pub fn new_with_event_reporter(
+    pub fn new_with_events(
         submitter: MempoolHandle<R::Transaction>,
         max_block_transactions: usize,
-        event_reporter: Reporter,
+        events: Events,
         applied_height: SharedAppliedHeight,
         genesis_state: StateCommitment,
         genesis_payload: sha256::Digest,
     ) -> Self {
-        Self::with_consensus_and_event_reporter(
+        Self::with_consensus_and_events(
             ApplicationConfig {
                 submitter,
                 max_block_transactions,
                 consensus: NoConsensusExtension,
-                event_reporter,
+                events,
                 applied_height,
                 genesis_state,
                 genesis_payload,
@@ -376,7 +344,7 @@ where
 impl<R> Application<R>
 where
     R: Runtime,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
     Block<R::Transaction>: nunchi_dkg::ReshareBlock,
 {
     pub fn with_dkg(
@@ -399,28 +367,28 @@ where
     }
 }
 
-impl<R, Reporter> Application<R, NoConsensusExtension, Reporter>
+impl<R, Events> Application<R, NoConsensusExtension, Events>
 where
     R: Runtime,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
     Block<R::Transaction>: nunchi_dkg::ReshareBlock,
-    Reporter: EventReporter<<R::Transaction as PoolTransaction>::Digest>,
+    Events: EventConsumer,
 {
-    pub fn with_dkg_and_event_reporter(
+    pub fn with_dkg_and_events(
         submitter: MempoolHandle<R::Transaction>,
         max_block_transactions: usize,
         dkg: DkgMailbox<R::Transaction>,
-        event_reporter: Reporter,
+        events: Events,
         applied_height: SharedAppliedHeight,
         genesis_state: StateCommitment,
         genesis_payload: sha256::Digest,
     ) -> Self {
-        Self::with_consensus_and_event_reporter(
+        Self::with_consensus_and_events(
             ApplicationConfig {
                 submitter,
                 max_block_transactions,
                 consensus: NoConsensusExtension,
-                event_reporter,
+                events,
                 applied_height,
                 genesis_state,
                 genesis_payload,
@@ -430,13 +398,13 @@ where
     }
 }
 
-impl<E, R, Ext, Reporter> StatefulApplication<E> for Application<R, Ext, Reporter>
+impl<E, R, Ext, Events> StatefulApplication<E> for Application<R, Ext, Events>
 where
     E: Rng + Spawner + Metrics + Clock + Storage,
     R: Runtime + Clone + Send + Sync + 'static,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
     Ext: ConsensusExtension + Sync,
-    Reporter: EventReporter<<R::Transaction as PoolTransaction>::Digest>,
+    Events: EventConsumer,
 {
     type SigningScheme = Scheme;
     type Context = Context;
@@ -463,9 +431,11 @@ where
         let parent = ancestry.next().await?;
         let timestamp = Self::timestamp(&runtime_context, &parent)?;
         let candidates = input.pending(usize::MAX).await;
-        let execution_context = RuntimeContext {
-            epoch: context.round.epoch().get(),
-        };
+        let execution_context = Self::proposal_runtime_context(
+            context.round.epoch().get(),
+            parent.height.next(),
+            timestamp,
+        );
         let (transactions, merkleized) = self
             .build_valid_transactions(batches, execution_context, candidates)
             .await?;
@@ -521,11 +491,14 @@ where
             return None;
         }
 
-        let execution_context = RuntimeContext {
-            epoch: block.context.round.epoch().get(),
-        };
-        let merkleized =
-            Self::execute_block(batches, execution_context, &block.transactions).await?;
+        let execution_context = Self::block_runtime_context(&block);
+        let merkleized = Self::execute_block(
+            batches,
+            execution_context,
+            &block.transactions,
+            &NoopEventConsumer,
+        )
+        .await?;
         let state_range = Self::state_range(&merkleized);
         if merkleized.root() != block.state_root || state_range != block.state_range {
             return None;
@@ -539,13 +512,15 @@ where
         block: &Self::Block,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
-        let execution_context = RuntimeContext {
-            epoch: block.context.round.epoch().get(),
-        };
-        let (merkleized, events) =
-            Self::execute_block_with_events(batches, execution_context, block)
-                .await
-                .expect("certified block failed deterministic execution");
+        let execution_context = Self::block_runtime_context(block);
+        let merkleized = Self::execute_block(
+            batches,
+            execution_context,
+            &block.transactions,
+            &self.events,
+        )
+        .await
+        .expect("certified block failed deterministic execution");
         let state_range = Self::state_range(&merkleized);
         assert_eq!(
             merkleized.root(),
@@ -556,10 +531,6 @@ where
             state_range, block.state_range,
             "certified block state range mismatch"
         );
-        self.finalized_events
-            .lock()
-            .await
-            .insert(block.digest(), events);
         merkleized
     }
 
@@ -595,12 +566,8 @@ where
             lane_nonces.into_iter().collect(),
             block.height().get(),
         );
-        let mut finalized_events = self.finalized_events.lock().await;
-        let events = finalized_events
-            .remove(&block.digest())
-            .unwrap_or_else(|| Self::empty_finalized_events(block));
-        finalized_events.retain(|_, events| events.height > block.height());
-        drop(finalized_events);
-        self.event_reporter.finalized_events(events).await;
+        self.events
+            .finalized(Self::block_runtime_context(block))
+            .await;
     }
 }

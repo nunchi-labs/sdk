@@ -6,6 +6,7 @@
 use std::future::Future;
 
 use commonware_codec::{EncodeSize, Read, Write};
+use commonware_cryptography::sha256;
 
 use crate::{EventSink, StateStore};
 
@@ -14,6 +15,14 @@ use crate::{EventSink, StateStore};
 pub struct RuntimeContext {
     /// Consensus epoch for the block being proposed, verified, or applied.
     pub epoch: u64,
+    /// Consensus block height for the transaction execution context.
+    pub height: u64,
+    /// Consensus block timestamp in milliseconds since the Unix epoch.
+    pub timestamp_ms: u64,
+    /// Digest of the block being verified or applied.
+    ///
+    /// This is not available while selecting transactions for a new proposal.
+    pub block_digest: Option<sha256::Digest>,
 }
 
 /// A complete chain runtime assembled from one or more module ledgers.

@@ -3,7 +3,7 @@ use std::{panic::AssertUnwindSafe, sync::Arc};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::types::{Epoch, Height, Round, View};
-use commonware_cryptography::{ed25519, Digestible as _, Hasher, Sha256, Signer};
+use commonware_cryptography::{ed25519, sha256, Digestible as _, Hasher, Sha256, Signer};
 use commonware_glue::stateful::{
     db::{DatabaseSet as _, Merkleized as _},
     Application as StatefulApplication,
@@ -21,8 +21,8 @@ use nunchi_mempool::{Mempool, PoolConfig, PoolTransaction};
 use thiserror::Error;
 
 use crate::{
-    Application, Block, EventReporter, InMemoryEventReporter, NoConsensusExtension,
-    NoopEventReporter, StateCommitment,
+    Application, Block, EventConsumer, InMemoryEventConsumer, NoConsensusExtension,
+    NoopEventConsumer, StateCommitment,
 };
 
 // Keep this test runtime local to nunchi-chain so event reporting tests do not depend on
@@ -71,12 +71,12 @@ impl EncodeSize for TestTx {
 struct BadSignature;
 
 impl PoolTransaction for TestTx {
-    type Digest = u64;
+    type Digest = sha256::Digest;
     type NonceKey = u8;
     type VerifyError = BadSignature;
 
     fn digest(&self) -> Self::Digest {
-        self.id
+        Sha256::hash(&self.id.to_be_bytes())
     }
 
     fn nonce_key(&self) -> Self::NonceKey {
@@ -242,19 +242,19 @@ async fn application(
     QmdbDatabaseSet<deterministic::Context>,
     Block<TestTx>,
 ) {
-    application_with_reporter(context, NoopEventReporter).await
+    application_with_events(context, NoopEventConsumer).await
 }
 
-async fn application_with_reporter<Reporter>(
+async fn application_with_events<Events>(
     context: deterministic::Context,
-    event_reporter: Reporter,
+    events: Events,
 ) -> (
-    Application<TestRuntime, NoConsensusExtension, Reporter>,
+    Application<TestRuntime, NoConsensusExtension, Events>,
     QmdbDatabaseSet<deterministic::Context>,
     Block<TestTx>,
 )
 where
-    Reporter: EventReporter<u64>,
+    Events: EventConsumer,
 {
     let (_mempool, submitter) = Mempool::new(PoolConfig::default());
     let config = QmdbState::<deterministic::Context>::config(&context, "event-sink-test");
@@ -267,10 +267,10 @@ where
         root: genesis_target.root,
         range: genesis_target.range,
     };
-    let app = Application::new_with_event_reporter(
+    let app = Application::new_with_events(
         submitter,
         16,
-        event_reporter,
+        events,
         Arc::new(AsyncMutex::new(Height::zero())),
         genesis_state,
         Sha256::hash(b"test genesis"),
@@ -305,18 +305,17 @@ fn verification_uses_noop_event_sink() {
     });
 }
 
-type ReportingApplication =
-    Application<TestRuntime, NoConsensusExtension, InMemoryEventReporter<u64>>;
+type ReportingApplication = Application<TestRuntime, NoConsensusExtension, InMemoryEventConsumer>;
 
 #[test]
-fn certified_apply_collects_events_without_reporting() {
+fn certified_apply_uses_default_noop_consumer() {
     deterministic::Runner::default().start(|context| async move {
         let (mut app, databases, parent) = application(context.child("app")).await;
         let transactions = vec![TestTx {
             account: 1,
             nonce: 0,
             id: 11,
-            value: 9,
+            value: 7,
         }];
         let state = committed_state(&databases, &transactions).await;
         let block = block(&parent, transactions, state);
@@ -338,9 +337,9 @@ fn certified_apply_collects_events_without_reporting() {
 #[test]
 fn certified_apply_discards_events_from_failed_transaction() {
     deterministic::Runner::default().start(|context| async move {
-        let reporter = InMemoryEventReporter::<u64>::new();
+        let consumer = InMemoryEventConsumer::new();
         let (mut app, databases, parent) =
-            application_with_reporter(context.child("app"), reporter.clone()).await;
+            application_with_events(context.child("app"), consumer.clone()).await;
         let applied = TestTx {
             account: 1,
             nonce: 0,
@@ -363,7 +362,7 @@ fn certified_apply_discards_events_from_failed_transaction() {
             databases.new_batches().await,
         );
         assert!(AssertUnwindSafe(apply).catch_unwind().await.is_err());
-        assert!(reporter.is_empty());
+        assert!(consumer.is_empty());
 
         <ReportingApplication as StatefulApplication<deterministic::Context>>::finalized(
             &mut app,
@@ -373,7 +372,7 @@ fn certified_apply_discards_events_from_failed_transaction() {
         )
         .await;
 
-        let reports = reporter.reports();
+        let reports = consumer.reports();
         assert_eq!(reports.len(), 1);
         let report = &reports[0];
         assert_eq!(report.height, block.height);
@@ -386,9 +385,9 @@ fn certified_apply_discards_events_from_failed_transaction() {
 #[test]
 fn finalized_reports_collected_events_after_database_finalize() {
     deterministic::Runner::default().start(|context| async move {
-        let reporter = InMemoryEventReporter::<u64>::new();
+        let consumer = InMemoryEventConsumer::new();
         let (mut app, databases, parent) =
-            application_with_reporter(context.child("app"), reporter.clone()).await;
+            application_with_events(context.child("app"), consumer.clone()).await;
         let transactions = vec![
             TestTx {
                 account: 1,
@@ -415,9 +414,9 @@ fn finalized_reports_collected_events_after_database_finalize() {
             )
             .await;
 
-        assert!(reporter.is_empty());
+        assert!(consumer.is_empty());
         databases.finalize(merkleized).await;
-        assert!(reporter.is_empty());
+        assert!(consumer.is_empty());
 
         <ReportingApplication as StatefulApplication<deterministic::Context>>::finalized(
             &mut app,
@@ -427,7 +426,7 @@ fn finalized_reports_collected_events_after_database_finalize() {
         )
         .await;
 
-        let reports = reporter.reports();
+        let reports = consumer.reports();
         assert_eq!(reports.len(), 1);
         let report = &reports[0];
         assert_eq!(report.height, block.height);
@@ -437,7 +436,7 @@ fn finalized_reports_collected_events_after_database_finalize() {
 
         let first = &report.transactions[0];
         assert_eq!(first.tx_index, 0);
-        assert_eq!(first.tx_digest, 20);
+        assert_eq!(first.tx_digest, Sha256::hash(&20u64.to_be_bytes()));
         assert_eq!(first.events.len(), 2);
         assert_eq!(first.events[0].event_index, 0);
         assert_eq!(
@@ -457,7 +456,7 @@ fn finalized_reports_collected_events_after_database_finalize() {
 
         let second = &report.transactions[1];
         assert_eq!(second.tx_index, 1);
-        assert_eq!(second.tx_digest, 21);
+        assert_eq!(second.tx_digest, Sha256::hash(&21u64.to_be_bytes()));
         assert_eq!(second.events[0].event_index, 0);
         assert_eq!(second.events[1].event_index, 1);
     });
@@ -466,9 +465,9 @@ fn finalized_reports_collected_events_after_database_finalize() {
 #[test]
 fn finalized_reports_empty_events_when_handoff_is_missing() {
     deterministic::Runner::default().start(|context| async move {
-        let reporter = InMemoryEventReporter::<u64>::new();
+        let consumer = InMemoryEventConsumer::new();
         let (mut app, databases, parent) =
-            application_with_reporter(context.child("app"), reporter.clone()).await;
+            application_with_events(context.child("app"), consumer.clone()).await;
         let transactions = vec![TestTx {
             account: 1,
             nonce: 0,
@@ -487,7 +486,7 @@ fn finalized_reports_empty_events_when_handoff_is_missing() {
         )
         .await;
 
-        let reports = reporter.reports();
+        let reports = consumer.reports();
         assert_eq!(reports.len(), 1);
         let report = &reports[0];
         assert_eq!(report.height, block.height);
