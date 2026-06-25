@@ -45,6 +45,7 @@ const RESOLVER_CHANNEL: u64 = nunchi_coins_chain::channels::RESOLVER;
 const BROADCAST_CHANNEL: u64 = nunchi_coins_chain::channels::BROADCAST;
 const DKG_CHANNEL: u64 = nunchi_coins_chain::channels::DKG;
 const BACKFILL_CHANNEL: u64 = nunchi_coins_chain::channels::BACKFILL;
+const MEMPOOL_CHANNEL: u64 = nunchi_coins_chain::channels::MEMPOOL;
 
 type Channel = (
     Sender<PublicKey, deterministic::Context>,
@@ -121,6 +122,7 @@ struct ValidatorChannels {
     broadcast: Channel,
     dkg: Channel,
     backfill: Channel,
+    mempool: Channel,
 }
 
 pub(crate) struct TestNetworkBuilder {
@@ -494,6 +496,7 @@ async fn start_validator(
         channels.resolver,
         channels.broadcast,
         channels.dkg,
+        channels.mempool,
         marshal_resolver,
         ContinueOnUpdate::boxed(),
     );
@@ -546,6 +549,7 @@ async fn register_validators(
             .unwrap();
         let dkg = oracle.register(DKG_CHANNEL, TEST_QUOTA).await.unwrap();
         let backfill = oracle.register(BACKFILL_CHANNEL, TEST_QUOTA).await.unwrap();
+        let mempool = oracle.register(MEMPOOL_CHANNEL, TEST_QUOTA).await.unwrap();
         registrations.insert(
             validator.clone(),
             ValidatorChannels {
@@ -555,6 +559,7 @@ async fn register_validators(
                 broadcast,
                 dkg,
                 backfill,
+                mempool,
             },
         );
     }

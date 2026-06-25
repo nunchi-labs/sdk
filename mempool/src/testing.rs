@@ -1,6 +1,7 @@
 //! Test-only helpers shared by the pool and actor unit tests.
 
 use crate::tx::PoolTransaction;
+use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use thiserror::Error;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -43,6 +44,40 @@ impl PoolTransaction for TestTx {
         } else {
             Err(BadSignature)
         }
+    }
+}
+
+impl Write for TestTx {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.account.write(buf);
+        self.nonce.write(buf);
+        self.id.write(buf);
+        (self.size as u64).write(buf);
+        self.valid.write(buf);
+    }
+}
+
+impl Read for TestTx {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            account: u8::read(buf)?,
+            nonce: u64::read(buf)?,
+            id: u64::read(buf)?,
+            size: u64::read(buf)? as usize,
+            valid: bool::read(buf)?,
+        })
+    }
+}
+
+impl EncodeSize for TestTx {
+    fn encode_size(&self) -> usize {
+        self.account.encode_size()
+            + self.nonce.encode_size()
+            + self.id.encode_size()
+            + (self.size as u64).encode_size()
+            + self.valid.encode_size()
     }
 }
 
