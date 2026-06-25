@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{panic::AssertUnwindSafe, sync::Arc};
 
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
@@ -11,7 +11,7 @@ use commonware_glue::stateful::{
 use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
 use commonware_storage::mmr::Location;
 use commonware_utils::{non_empty_range, sync::AsyncRwLock};
-use futures::lock::Mutex as AsyncMutex;
+use futures::{lock::Mutex as AsyncMutex, FutureExt};
 use nunchi_common::{
     Event, EventSink, NoopEventSink, QmdbBackend, QmdbBatch, QmdbDatabaseSet, QmdbMerkleized,
     QmdbState, Runtime, RuntimeContext, StateError, StateStore,
@@ -332,6 +332,54 @@ fn certified_apply_collects_events_without_reporting() {
 
         assert_eq!(merkleized.root(), block.state_root);
         assert_eq!(state_range(&merkleized), block.state_range);
+    });
+}
+
+#[test]
+fn certified_apply_discards_events_from_failed_transaction() {
+    deterministic::Runner::default().start(|context| async move {
+        let reporter = InMemoryEventReporter::<u64>::new();
+        let (mut app, databases, parent) =
+            application_with_reporter(context.child("app"), reporter.clone()).await;
+        let applied = TestTx {
+            account: 1,
+            nonce: 0,
+            id: 12,
+            value: 9,
+        };
+        let failing = TestTx {
+            account: 1,
+            nonce: 1,
+            id: 13,
+            value: u8::MAX,
+        };
+        let state = committed_state(&databases, &[applied.clone()]).await;
+        let block = block(&parent, vec![applied, failing], state);
+
+        let apply = <ReportingApplication as StatefulApplication<deterministic::Context>>::apply(
+            &mut app,
+            (context.child("apply"), block.context.clone()),
+            &block,
+            databases.new_batches().await,
+        );
+        assert!(AssertUnwindSafe(apply).catch_unwind().await.is_err());
+        assert!(reporter.is_empty());
+
+        <ReportingApplication as StatefulApplication<deterministic::Context>>::finalized(
+            &mut app,
+            (context.child("finalized"), block.context.clone()),
+            &block,
+            &databases,
+        )
+        .await;
+
+        let reports = reporter.reports();
+        assert_eq!(reports.len(), 1);
+        let report = &reports[0];
+        assert_eq!(report.height, block.height);
+        assert_eq!(report.block_digest, block.digest());
+        assert_eq!(report.block_timestamp, block.timestamp);
+        assert!(report.transactions.is_empty());
     });
 }
 
