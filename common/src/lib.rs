@@ -3,6 +3,7 @@
 pub mod state_db;
 
 mod account;
+mod events;
 mod runtime;
 #[cfg(test)]
 mod tests;
@@ -11,6 +12,7 @@ mod transaction;
 pub use account::{
     AccountPolicyError, Address, Bech32Error, MultisigPolicy, ADDRESS_HRP, MAX_MULTISIG_SIGNERS,
 };
+pub use events::{Event, EventSink, NoopEventSink, VecEventSink};
 pub use runtime::{Runtime, RuntimeContext};
 pub use state_db::{
     CommitState, Namespace, Overlay, QmdbBackend, QmdbBatch, QmdbConfig, QmdbDatabaseSet,
