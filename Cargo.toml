@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "authority",
+    "bridge",
     "common",
     "chain",
     "coins",
@@ -10,6 +11,7 @@ members = [
     "mempool",
     "rpc",
     "mcp",
+    "examples/bridge-chain",
     "examples/template",
     "examples/coins-chain",
     "examples/custom-module",
@@ -24,6 +26,7 @@ license = "BSL"
 [workspace.dependencies]
 nunchi-coins = { version = "2026.5.0", path = "coins" }
 nunchi-authority = { version = "2026.5.0", path = "authority" }
+nunchi-bridge = { version = "2026.5.0", path = "bridge" }
 nunchi-chain = { version = "2026.5.0", path = "chain" }
 nunchi-common = { version = "2026.5.0", path = "common" }
 nunchi-crypto = { version = "2026.5.0", path = "crypto" }
@@ -32,6 +35,7 @@ nunchi-mempool = { version = "2026.5.0", path = "mempool" }
 nunchi-rpc = { version = "2026.5.0", path = "rpc" }
 nunchi-template = { version = "2026.5.0", path = "examples/template" }
 nunchi-coins-chain = { version = "2026.5.0", path = "examples/coins-chain" }
+nunchi-bridge-chain = { version = "2026.5.0", path = "examples/bridge-chain" }
 commonware-actor = "2026.5.0"
 commonware-broadcast = "2026.5.0"
 commonware-codec = "2026.5.0"

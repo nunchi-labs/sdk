@@ -1,0 +1,31 @@
+[package]
+name = "nunchi-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["rpc"]
+rpc = ["dep:jsonrpsee", "dep:nunchi-rpc", "dep:serde"]
+
+[dependencies]
+nunchi-chain = { workspace = true }
+nunchi-dkg = { workspace = true }
+nunchi-rpc = { workspace = true, optional = true }
+commonware-consensus = { workspace = true }
+commonware-cryptography = { workspace = true }
+commonware-parallel = { workspace = true }
+commonware-runtime = { workspace = true }
+futures = { workspace = true }
+jsonrpsee = { workspace = true, optional = true }
+rand = { workspace = true }
+rand_core = { workspace = true }
+serde = { workspace = true, optional = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+commonware-codec = { workspace = true }
+commonware-consensus = { workspace = true, features = ["mocks"] }
+commonware-cryptography = { workspace = true, features = ["mocks"] }
+commonware-storage = { workspace = true }
+commonware-utils = { workspace = true }

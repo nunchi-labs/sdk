@@ -517,6 +517,10 @@ where
             return None;
         }
 
+        if !self.consensus.verify_payload(&block.extension).await {
+            return None;
+        }
+
         let execution_context = RuntimeContext {
             epoch: block.context.round.epoch().get(),
         };
