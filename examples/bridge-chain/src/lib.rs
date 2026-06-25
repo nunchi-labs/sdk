@@ -12,7 +12,7 @@ use commonware_consensus::types::Epoch;
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use nunchi_bridge::BridgeExtension;
 use nunchi_chain::{SharedAppliedHeight, StateCommitment};
-use nunchi_common::{Address, Runtime, RuntimeContext, StateStore};
+use nunchi_common::{Address, EventSink, Runtime, RuntimeContext, StateStore};
 use nunchi_mempool::{Mempool, MempoolHandle, NonceKey, PoolTransaction};
 use std::num::NonZeroU64;
 
@@ -154,13 +154,15 @@ impl Runtime for NoopRuntime {
         Ok(())
     }
 
-    async fn apply<S>(
+    async fn apply<S, Events>(
         _state: &mut S,
         _context: RuntimeContext,
         _transaction: &Self::Transaction,
+        _events: &mut Events,
     ) -> Result<(), Self::Error>
     where
         S: StateStore + Send + Sync,
+        Events: EventSink + Send,
     {
         Ok(())
     }
