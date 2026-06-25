@@ -2,7 +2,7 @@
 
 use nunchi_authority::{AuthorityError, AuthorityLedger};
 use nunchi_coins::{Ledger, LedgerError};
-use nunchi_common::{Runtime, RuntimeContext, StateStore};
+use nunchi_common::{EventSink, Runtime, RuntimeContext, StateStore};
 
 use crate::Transaction;
 
@@ -41,13 +41,15 @@ impl Runtime for CoinsRuntime {
         apply_transaction(state, context, transaction).await
     }
 
-    async fn apply<S>(
+    async fn apply<S, Events>(
         state: &mut S,
         context: RuntimeContext,
         transaction: &Self::Transaction,
+        _events: &mut Events,
     ) -> Result<(), Self::Error>
     where
         S: StateStore + Send + Sync,
+        Events: EventSink + Send,
     {
         apply_transaction(state, context, transaction).await
     }
