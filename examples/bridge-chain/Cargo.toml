@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "A minimal bridge-extension chain example for Nunchi."
 
+[lints]
+workspace = true
+
 [dependencies]
 nunchi-bridge = { workspace = true }
 nunchi-chain = { workspace = true }
@@ -19,6 +22,7 @@ commonware-consensus = { workspace = true, features = ["mocks"] }
 commonware-cryptography = { workspace = true }
 commonware-formatting = { workspace = true }
 commonware-glue = { workspace = true }
+commonware-macros = { workspace = true }
 commonware-p2p = { workspace = true }
 commonware-parallel = { workspace = true }
 commonware-runtime = { workspace = true }

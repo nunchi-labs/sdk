@@ -4,6 +4,7 @@
 //! and [`BridgeExtension`] embeds the latest accepted certificate into proposed
 //! blocks.
 
+commonware_macros::stability_scope!(ALPHA {
 #[cfg(feature = "rpc")]
 pub mod rpc;
 
@@ -249,3 +250,4 @@ impl ConsensusExtension for BridgeExtension {
 
 #[cfg(test)]
 mod tests;
+});

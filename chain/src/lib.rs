@@ -1,5 +1,6 @@
 //! Reusable chain execution primitives for generated Nunchi runtimes.
 
+commonware_macros::stability_scope!(ALPHA {
 pub mod application;
 pub mod block;
 pub mod consensus;
@@ -20,3 +21,4 @@ pub use events::{
     TransactionEventContext, TransactionEvents,
 };
 pub use execution::{NodeHandle, StatefulQuery};
+});

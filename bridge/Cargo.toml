@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lints]
+workspace = true
+
 [features]
 default = ["rpc"]
 rpc = ["dep:jsonrpsee", "dep:nunchi-rpc", "dep:serde"]
@@ -14,6 +17,7 @@ nunchi-dkg = { workspace = true }
 nunchi-rpc = { workspace = true, optional = true }
 commonware-consensus = { workspace = true }
 commonware-cryptography = { workspace = true }
+commonware-macros = { workspace = true }
 commonware-parallel = { workspace = true }
 commonware-runtime = { workspace = true }
 futures = { workspace = true }

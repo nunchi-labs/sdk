@@ -11,6 +11,7 @@
 //! [`execution::NodeHandle`] exposes each node's transaction submitter and stateful database
 //! subscription so clients (and the integration tests in `tests/`) can drive and observe the chain.
 
+commonware_macros::stability_scope!(ALPHA {
 use commonware_consensus::types::Epoch;
 use std::num::NonZeroU64;
 
@@ -63,3 +64,4 @@ pub const EPOCH: Epoch = Epoch::zero();
 /// Production systems should use a much larger value, as DKG/reshare safety depends on
 /// synchrony during the epoch window.
 pub const BLOCKS_PER_EPOCH: NonZeroU64 = commonware_utils::NZU64!(200);
+});

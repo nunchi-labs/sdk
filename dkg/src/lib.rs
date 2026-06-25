@@ -1,3 +1,4 @@
+commonware_macros::stability_scope!(ALPHA {
 use commonware_consensus::{Block, Heightable};
 use commonware_cryptography::{
     bls12381::{dkg::feldman_desmedt::SignedDealerLog, primitives::variant::MinSig},
@@ -31,3 +32,4 @@ pub const MAX_SUPPORTED_MODE: commonware_cryptography::bls12381::primitives::sha
 pub trait ReshareBlock: Block + Heightable + Clone + Send + 'static {
     fn reshare_log(&self) -> Option<&DealerLog>;
 }
+});

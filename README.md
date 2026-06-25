@@ -58,6 +58,6 @@ This repository will contain modules for building public and private blockchains
 
 ### Chain Examples
 
-* `coins-chain`[examples/coins-chain] - default PoA chain
-* `bridge-chain`[examples/bridge-chain] - two chains bridging consensus certificates
-* `custom-module`[examples/custom-module] - starter template for creating a custom nunchi module
+* [`coins-chain`](examples/coins-chain) - default PoA chain
+* [`bridge-chain`](examples/bridge-chain) - two chains bridging consensus certificates
+* [`custom-module`](examples/custom-module) - starter template for creating a custom nunchi module

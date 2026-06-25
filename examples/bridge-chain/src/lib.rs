@@ -6,6 +6,7 @@
 //! [`nunchi_chain::Application`] without owning bridge transport, storage, or
 //! local-finalization publication.
 
+commonware_macros::stability_scope!(ALPHA {
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_consensus::types::Epoch;
@@ -174,3 +175,4 @@ impl Runtime for NoopRuntime {
 
 #[cfg(test)]
 mod tests;
+});

@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "MCP server exposing the Nunchi SDK's JSON-RPC surface as AI-readable tools."
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "nunchi-mcp"
 path = "src/main.rs"

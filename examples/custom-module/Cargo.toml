@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "A compiled custom module skeleton for downstream Nunchi SDK modules."
 
+[lints]
+workspace = true
+
 [features]
 default = ["rpc"]
 rpc = ["dep:jsonrpsee", "dep:nunchi-rpc"]
@@ -15,6 +18,7 @@ bytes = { workspace = true }
 commonware-codec = { workspace = true }
 commonware-cryptography = { workspace = true }
 commonware-formatting = { workspace = true }
+commonware-macros = { workspace = true }
 jsonrpsee = { workspace = true, optional = true }
 nunchi-common = { workspace = true }
 nunchi-crypto = { workspace = true }

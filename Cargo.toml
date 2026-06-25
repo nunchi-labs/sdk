@@ -18,9 +18,19 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "2026.5.0"
+version = "2026.6.0"
 edition = "2021"
 license = "BSL"
+
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(commonware_stability_ALPHA)',
+    'cfg(commonware_stability_BETA)',
+    'cfg(commonware_stability_GAMMA)',
+    'cfg(commonware_stability_DELTA)',
+    'cfg(commonware_stability_EPSILON)',
+    'cfg(commonware_stability_RESERVED)',
+] }
 
 [workspace.dependencies]
 nunchi-coins = { version = "2026.5.0", path = "coins" }

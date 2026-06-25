@@ -1,5 +1,6 @@
 //! Shared Nunchi primitives used across application crates.
 
+commonware_macros::stability_scope!(ALPHA {
 pub mod state_db;
 
 mod account;
@@ -22,3 +23,4 @@ pub use state_db::{
 pub use transaction::{
     AccountSignature, Authorization, Operation, Transaction, TransactionPayload,
 };
+});

@@ -4,6 +4,7 @@
 //! downstream chain owns the context, merges whichever SDK and application modules it wants through
 //! [`RpcRouter`], and then serves the resulting module with jsonrpsee.
 
+commonware_macros::stability_scope!(ALPHA {
 use std::sync::Arc;
 
 use commonware_codec::{DecodeExt, Encode, Read};
@@ -102,3 +103,4 @@ pub fn invalid_params(message: impl Into<String>) -> ErrorObjectOwned {
 pub fn module_error(message: impl Into<String>) -> ErrorObjectOwned {
     ErrorObjectOwned::owned(MODULE_ERROR_CODE, "Module error", Some(message.into()))
 }
+});
