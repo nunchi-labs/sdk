@@ -34,8 +34,27 @@ use crate::{
 /// The height of the last finalized block applied to a node's ledger.
 pub type SharedAppliedHeight = Arc<AsyncMutex<Height>>;
 
+type FinalizedEventCache<TxDigest> =
+    Arc<AsyncMutex<HashMap<sha256::Digest, FinalizedEvents<TxDigest>>>>;
+
 /// Fixed consensus cutoff for block timestamps: 2200-01-01T00:00:00Z.
 const MAX_BLOCK_TIMESTAMP_MS: u64 = 7_258_118_400_000;
+
+/// Configuration for an application with explicit consensus and event reporting.
+pub struct ApplicationConfig<Tx, Ext, Reporter>
+where
+    Tx: PoolTransaction,
+    Ext: ConsensusExtension + Sync,
+    Reporter: EventReporter<Tx::Digest>,
+{
+    pub submitter: MempoolHandle<Tx>,
+    pub max_block_transactions: usize,
+    pub consensus: Ext,
+    pub event_reporter: Reporter,
+    pub applied_height: SharedAppliedHeight,
+    pub genesis_state: StateCommitment,
+    pub genesis_payload: sha256::Digest,
+}
 
 /// The stateful consensus application for a generated runtime.
 #[derive(Clone)]
@@ -51,11 +70,7 @@ where
     dkg: Option<DkgMailbox<R::Transaction, Ext>>,
     consensus: Ext,
     event_reporter: Reporter,
-    finalized_events: Arc<
-        AsyncMutex<
-            HashMap<sha256::Digest, FinalizedEvents<<R::Transaction as PoolTransaction>::Digest>>,
-        >,
-    >,
+    finalized_events: FinalizedEventCache<<R::Transaction as PoolTransaction>::Digest>,
     applied_height: SharedAppliedHeight,
     genesis_state: StateCommitment,
     genesis_payload: sha256::Digest,
@@ -89,15 +104,19 @@ where
     }
 
     pub fn with_consensus_and_event_reporter(
-        submitter: MempoolHandle<R::Transaction>,
-        max_block_transactions: usize,
-        consensus: Ext,
+        config: ApplicationConfig<R::Transaction, Ext, Reporter>,
         dkg: Option<DkgMailbox<R::Transaction, Ext>>,
-        event_reporter: Reporter,
-        applied_height: SharedAppliedHeight,
-        genesis_state: StateCommitment,
-        genesis_payload: sha256::Digest,
     ) -> Self {
+        let ApplicationConfig {
+            submitter,
+            max_block_transactions,
+            consensus,
+            event_reporter,
+            applied_height,
+            genesis_state,
+            genesis_payload,
+        } = config;
+
         Self {
             submitter,
             max_block_transactions,
@@ -287,14 +306,16 @@ where
         genesis_payload: sha256::Digest,
     ) -> Self {
         Self::with_consensus_and_event_reporter(
-            submitter,
-            max_block_transactions,
-            consensus,
+            ApplicationConfig {
+                submitter,
+                max_block_transactions,
+                consensus,
+                event_reporter: NoopEventReporter,
+                applied_height,
+                genesis_state,
+                genesis_payload,
+            },
             dkg,
-            NoopEventReporter,
-            applied_height,
-            genesis_state,
-            genesis_payload,
         )
     }
 }
@@ -338,14 +359,16 @@ where
         genesis_payload: sha256::Digest,
     ) -> Self {
         Self::with_consensus_and_event_reporter(
-            submitter,
-            max_block_transactions,
-            NoConsensusExtension,
+            ApplicationConfig {
+                submitter,
+                max_block_transactions,
+                consensus: NoConsensusExtension,
+                event_reporter,
+                applied_height,
+                genesis_state,
+                genesis_payload,
+            },
             None,
-            event_reporter,
-            applied_height,
-            genesis_state,
-            genesis_payload,
         )
     }
 }
@@ -393,14 +416,16 @@ where
         genesis_payload: sha256::Digest,
     ) -> Self {
         Self::with_consensus_and_event_reporter(
-            submitter,
-            max_block_transactions,
-            NoConsensusExtension,
+            ApplicationConfig {
+                submitter,
+                max_block_transactions,
+                consensus: NoConsensusExtension,
+                event_reporter,
+                applied_height,
+                genesis_state,
+                genesis_payload,
+            },
             Some(dkg),
-            event_reporter,
-            applied_height,
-            genesis_state,
-            genesis_payload,
         )
     }
 }

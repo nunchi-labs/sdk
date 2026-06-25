@@ -230,7 +230,7 @@ fn block(
         parent.timestamp + 1,
         transactions,
         None,
-        <NoConsensusExtension as crate::BlockExtension>::genesis_payload(),
+        (),
         state,
     )
 }
@@ -353,7 +353,7 @@ fn certified_apply_discards_events_from_failed_transaction() {
             id: 13,
             value: u8::MAX,
         };
-        let state = committed_state(&databases, &[applied.clone()]).await;
+        let state = committed_state(&databases, std::slice::from_ref(&applied)).await;
         let block = block(&parent, vec![applied, failing], state);
 
         let apply = <ReportingApplication as StatefulApplication<deterministic::Context>>::apply(
