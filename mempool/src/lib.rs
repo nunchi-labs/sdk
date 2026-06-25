@@ -7,6 +7,7 @@
 //! executable nonce runs. The pool runs as a single actor; [`MempoolHandle`]
 //! is the cloneable ingress used by RPC, block production, and finalization.
 
+commonware_macros::stability_scope!(ALPHA {
 mod actor;
 mod config;
 mod error;
@@ -23,3 +24,4 @@ pub use config::PoolConfig;
 pub use error::{AdmissionError, DropReason};
 pub use status::TxStatus;
 pub use tx::{NonceKey, PoolTransaction};
+});

@@ -4,6 +4,7 @@
 //! surfaces a custom module normally needs while staying active in the
 //! workspace so skeleton drift is caught by `cargo check` and tests.
 
+commonware_macros::stability_scope!(ALPHA {
 mod db;
 mod genesis;
 mod ledger;
@@ -20,3 +21,4 @@ pub use transaction::{CustomOperation, Transaction, TransactionPayload};
 
 /// Domain separator used for custom transaction signatures and state keys.
 pub const CUSTOM_NAMESPACE: &[u8] = b"_NUNCHI_CUSTOM_MODULE";
+});

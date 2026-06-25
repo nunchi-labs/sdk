@@ -1,3 +1,4 @@
+commonware_macros::stability_scope!(ALPHA {
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use commonware_cryptography::{ed25519, secp256r1, Signer as _, Verifier as _};
 
@@ -230,3 +231,4 @@ impl EncodeSize for Signature {
         }
     }
 }
+});
