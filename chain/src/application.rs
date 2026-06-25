@@ -13,6 +13,7 @@ use commonware_utils::{non_empty_range, range::NonEmptyRange, SystemTimeExt};
 use futures::{lock::Mutex as AsyncMutex, StreamExt};
 use nunchi_common::{
     NoopEventSink, Overlay, QmdbBatch, QmdbDatabaseSet, QmdbMerkleized, Runtime, RuntimeContext,
+    VecEventSink,
 };
 use nunchi_dkg::{Context, Scheme};
 use nunchi_mempool::{MempoolHandle, PoolTransaction};
@@ -25,7 +26,10 @@ use std::{
 };
 use tracing::{debug, error};
 
-use crate::{Block, ConsensusExtension, DkgMailbox, NoConsensusExtension, StateCommitment};
+use crate::{
+    Block, ConsensusExtension, DkgMailbox, EventReporter, FinalizedEvents, IndexedEvent,
+    NoConsensusExtension, NoopEventReporter, StateCommitment, TransactionEvents,
+};
 
 /// The height of the last finalized block applied to a node's ledger.
 pub type SharedAppliedHeight = Arc<AsyncMutex<Height>>;
@@ -35,27 +39,35 @@ const MAX_BLOCK_TIMESTAMP_MS: u64 = 7_258_118_400_000;
 
 /// The stateful consensus application for a generated runtime.
 #[derive(Clone)]
-pub struct Application<R, Ext = NoConsensusExtension>
+pub struct Application<R, Ext = NoConsensusExtension, Reporter = NoopEventReporter>
 where
     R: Runtime,
     R::Transaction: PoolTransaction,
     Ext: ConsensusExtension + Sync,
+    Reporter: EventReporter<<R::Transaction as PoolTransaction>::Digest>,
 {
     submitter: MempoolHandle<R::Transaction>,
     max_block_transactions: usize,
     dkg: Option<DkgMailbox<R::Transaction, Ext>>,
     consensus: Ext,
+    event_reporter: Reporter,
+    finalized_events: Arc<
+        AsyncMutex<
+            HashMap<sha256::Digest, FinalizedEvents<<R::Transaction as PoolTransaction>::Digest>>,
+        >,
+    >,
     applied_height: SharedAppliedHeight,
     genesis_state: StateCommitment,
     genesis_payload: sha256::Digest,
     _runtime: PhantomData<R>,
 }
 
-impl<R, Ext> Application<R, Ext>
+impl<R, Ext, Reporter> Application<R, Ext, Reporter>
 where
     R: Runtime,
     R::Transaction: PoolTransaction,
     Ext: ConsensusExtension + Sync,
+    Reporter: EventReporter<<R::Transaction as PoolTransaction>::Digest>,
 {
     /// The genesis block, committing to `genesis_state`.
     pub fn genesis_block(&self) -> Block<R::Transaction, Ext> {
@@ -76,11 +88,12 @@ where
         )
     }
 
-    pub fn with_consensus(
+    pub fn with_consensus_and_event_reporter(
         submitter: MempoolHandle<R::Transaction>,
         max_block_transactions: usize,
         consensus: Ext,
         dkg: Option<DkgMailbox<R::Transaction, Ext>>,
+        event_reporter: Reporter,
         applied_height: SharedAppliedHeight,
         genesis_state: StateCommitment,
         genesis_payload: sha256::Digest,
@@ -90,6 +103,8 @@ where
             max_block_transactions,
             dkg,
             consensus,
+            event_reporter,
+            finalized_events: Arc::new(AsyncMutex::new(HashMap::new())),
             applied_height,
             genesis_state,
             genesis_payload,
@@ -173,6 +188,65 @@ where
         )
     }
 
+    async fn execute_block_with_events<E: Storage + Clock + Metrics>(
+        batches: <QmdbDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
+        context: RuntimeContext,
+        block: &Block<R::Transaction, Ext>,
+    ) -> Option<(
+        QmdbMerkleized<E>,
+        FinalizedEvents<<R::Transaction as PoolTransaction>::Digest>,
+    )> {
+        let mut batch = QmdbBatch::new(batches);
+        let mut transactions = Vec::with_capacity(block.transactions.len());
+        for (tx_index, transaction) in block.transactions.iter().enumerate() {
+            let mut events = VecEventSink::new();
+            match R::apply(&mut batch, context, transaction, &mut events).await {
+                Ok(()) => {}
+                Err(error) if R::is_storage_error(&error) => {
+                    panic!("storage failure while executing finalized block: {error}");
+                }
+                Err(_) => return None,
+            }
+            let events = events
+                .into_events()
+                .into_iter()
+                .enumerate()
+                .map(|(event_index, event)| IndexedEvent {
+                    event_index: u32::try_from(event_index)
+                        .expect("transaction emitted more than u32::MAX events"),
+                    event,
+                })
+                .collect();
+            transactions.push(TransactionEvents {
+                tx_index: u32::try_from(tx_index).expect("block contains more than u32::MAX txs"),
+                tx_digest: transaction.digest(),
+                events,
+            });
+        }
+        let merkleized = batch
+            .merkleize()
+            .await
+            .expect("merkleization failed while executing finalized block");
+        let events = FinalizedEvents {
+            height: block.height,
+            block_digest: block.digest(),
+            block_timestamp: block.timestamp,
+            transactions,
+        };
+        Some((merkleized, events))
+    }
+
+    fn empty_finalized_events(
+        block: &Block<R::Transaction, Ext>,
+    ) -> FinalizedEvents<<R::Transaction as PoolTransaction>::Digest> {
+        FinalizedEvents {
+            height: block.height,
+            block_digest: block.digest(),
+            block_timestamp: block.timestamp,
+            transactions: Vec::new(),
+        }
+    }
+
     fn state_range<E: Storage + Clock + Metrics>(
         merkleized: &QmdbMerkleized<E>,
     ) -> NonEmptyRange<Location> {
@@ -197,6 +271,34 @@ where
     }
 }
 
+impl<R, Ext> Application<R, Ext, NoopEventReporter>
+where
+    R: Runtime,
+    R::Transaction: PoolTransaction,
+    Ext: ConsensusExtension + Sync,
+{
+    pub fn with_consensus(
+        submitter: MempoolHandle<R::Transaction>,
+        max_block_transactions: usize,
+        consensus: Ext,
+        dkg: Option<DkgMailbox<R::Transaction, Ext>>,
+        applied_height: SharedAppliedHeight,
+        genesis_state: StateCommitment,
+        genesis_payload: sha256::Digest,
+    ) -> Self {
+        Self::with_consensus_and_event_reporter(
+            submitter,
+            max_block_transactions,
+            consensus,
+            dkg,
+            NoopEventReporter,
+            applied_height,
+            genesis_state,
+            genesis_payload,
+        )
+    }
+}
+
 impl<R> Application<R>
 where
     R: Runtime,
@@ -214,6 +316,33 @@ where
             max_block_transactions,
             NoConsensusExtension,
             None,
+            applied_height,
+            genesis_state,
+            genesis_payload,
+        )
+    }
+}
+
+impl<R, Reporter> Application<R, NoConsensusExtension, Reporter>
+where
+    R: Runtime,
+    R::Transaction: PoolTransaction,
+    Reporter: EventReporter<<R::Transaction as PoolTransaction>::Digest>,
+{
+    pub fn new_with_event_reporter(
+        submitter: MempoolHandle<R::Transaction>,
+        max_block_transactions: usize,
+        event_reporter: Reporter,
+        applied_height: SharedAppliedHeight,
+        genesis_state: StateCommitment,
+        genesis_payload: sha256::Digest,
+    ) -> Self {
+        Self::with_consensus_and_event_reporter(
+            submitter,
+            max_block_transactions,
+            NoConsensusExtension,
+            None,
+            event_reporter,
             applied_height,
             genesis_state,
             genesis_payload,
@@ -247,12 +376,42 @@ where
     }
 }
 
-impl<E, R, Ext> StatefulApplication<E> for Application<R, Ext>
+impl<R, Reporter> Application<R, NoConsensusExtension, Reporter>
+where
+    R: Runtime,
+    R::Transaction: PoolTransaction,
+    Block<R::Transaction>: nunchi_dkg::ReshareBlock,
+    Reporter: EventReporter<<R::Transaction as PoolTransaction>::Digest>,
+{
+    pub fn with_dkg_and_event_reporter(
+        submitter: MempoolHandle<R::Transaction>,
+        max_block_transactions: usize,
+        dkg: DkgMailbox<R::Transaction>,
+        event_reporter: Reporter,
+        applied_height: SharedAppliedHeight,
+        genesis_state: StateCommitment,
+        genesis_payload: sha256::Digest,
+    ) -> Self {
+        Self::with_consensus_and_event_reporter(
+            submitter,
+            max_block_transactions,
+            NoConsensusExtension,
+            Some(dkg),
+            event_reporter,
+            applied_height,
+            genesis_state,
+            genesis_payload,
+        )
+    }
+}
+
+impl<E, R, Ext, Reporter> StatefulApplication<E> for Application<R, Ext, Reporter>
 where
     E: Rng + Spawner + Metrics + Clock + Storage,
     R: Runtime + Clone + Send + Sync + 'static,
     R::Transaction: PoolTransaction,
     Ext: ConsensusExtension + Sync,
+    Reporter: EventReporter<<R::Transaction as PoolTransaction>::Digest>,
 {
     type SigningScheme = Scheme;
     type Context = Context;
@@ -354,9 +513,10 @@ where
         let execution_context = RuntimeContext {
             epoch: block.context.round.epoch().get(),
         };
-        let merkleized = Self::execute_block(batches, execution_context, &block.transactions)
-            .await
-            .expect("certified block failed deterministic execution");
+        let (merkleized, events) =
+            Self::execute_block_with_events(batches, execution_context, block)
+                .await
+                .expect("certified block failed deterministic execution");
         let state_range = Self::state_range(&merkleized);
         assert_eq!(
             merkleized.root(),
@@ -367,6 +527,10 @@ where
             state_range, block.state_range,
             "certified block state range mismatch"
         );
+        self.finalized_events
+            .lock()
+            .await
+            .insert(block.digest(), events);
         merkleized
     }
 
@@ -402,5 +566,12 @@ where
             lane_nonces.into_iter().collect(),
             block.height().get(),
         );
+        let mut finalized_events = self.finalized_events.lock().await;
+        let events = finalized_events
+            .remove(&block.digest())
+            .unwrap_or_else(|| Self::empty_finalized_events(block));
+        finalized_events.retain(|_, events| events.height > block.height());
+        drop(finalized_events);
+        self.event_reporter.finalized_events(events).await;
     }
 }

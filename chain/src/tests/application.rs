@@ -20,8 +20,13 @@ use nunchi_dkg::Context;
 use nunchi_mempool::{Mempool, PoolConfig, PoolTransaction};
 use thiserror::Error;
 
-use crate::{Application, Block, NoConsensusExtension, StateCommitment};
+use crate::{
+    Application, Block, EventReporter, InMemoryEventReporter, NoConsensusExtension,
+    NoopEventReporter, StateCommitment,
+};
 
+// Keep this test runtime local to nunchi-chain so event reporting tests do not depend on
+// module-specific transaction setup or coins ledger state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TestTx {
     account: u8,
@@ -98,6 +103,8 @@ struct TestRuntime;
 enum TestError {
     #[error("state error: {0}")]
     State(#[from] StateError),
+    #[error("rejected")]
+    Rejected,
 }
 
 impl Runtime for TestRuntime {
@@ -126,14 +133,23 @@ impl Runtime for TestRuntime {
         S: StateStore + Send + Sync,
         Events: EventSink + Send,
     {
-        assert_eq!(
-            std::any::type_name::<Events>(),
-            std::any::type_name::<NoopEventSink>()
-        );
+        if transaction.value == 7 {
+            assert_eq!(
+                std::any::type_name::<Events>(),
+                std::any::type_name::<NoopEventSink>()
+            );
+        }
         events.emit(Event::new(
             Bytes::from_static(b"test.applied.v1"),
             Bytes::copy_from_slice(&transaction.id.to_be_bytes()),
         ));
+        events.emit(Event::new(
+            Bytes::from_static(b"test.value.v1"),
+            Bytes::copy_from_slice(&[transaction.value]),
+        ));
+        if transaction.value == u8::MAX {
+            return Err(TestError::Rejected);
+        }
         write_transaction(state, transaction);
         Ok(())
     }
@@ -172,6 +188,16 @@ async fn committed_state<E>(
 where
     E: commonware_storage::Context,
 {
+    merkleized_state(databases, transactions).await.0
+}
+
+async fn merkleized_state<E>(
+    databases: &QmdbDatabaseSet<E>,
+    transactions: &[TestTx],
+) -> (StateCommitment, QmdbMerkleized<E>)
+where
+    E: commonware_storage::Context,
+{
     let mut batch = QmdbBatch::new(databases.new_batches().await);
     let mut events = NoopEventSink;
     for transaction in transactions {
@@ -185,10 +211,11 @@ where
         .expect("apply transaction");
     }
     let merkleized = batch.merkleize().await.expect("merkleize transactions");
-    StateCommitment {
+    let state = StateCommitment {
         root: merkleized.root(),
         range: state_range(&merkleized),
-    }
+    };
+    (state, merkleized)
 }
 
 fn block(
@@ -215,6 +242,20 @@ async fn application(
     QmdbDatabaseSet<deterministic::Context>,
     Block<TestTx>,
 ) {
+    application_with_reporter(context, NoopEventReporter).await
+}
+
+async fn application_with_reporter<Reporter>(
+    context: deterministic::Context,
+    event_reporter: Reporter,
+) -> (
+    Application<TestRuntime, NoConsensusExtension, Reporter>,
+    QmdbDatabaseSet<deterministic::Context>,
+    Block<TestTx>,
+)
+where
+    Reporter: EventReporter<u64>,
+{
     let (_mempool, submitter) = Mempool::new(PoolConfig::default());
     let config = QmdbState::<deterministic::Context>::config(&context, "event-sink-test");
     let db = QmdbBackend::init(context, config)
@@ -226,9 +267,10 @@ async fn application(
         root: genesis_target.root,
         range: genesis_target.range,
     };
-    let app = Application::new(
+    let app = Application::new_with_event_reporter(
         submitter,
         16,
+        event_reporter,
         Arc::new(AsyncMutex::new(Height::zero())),
         genesis_state,
         Sha256::hash(b"test genesis"),
@@ -263,8 +305,11 @@ fn verification_uses_noop_event_sink() {
     });
 }
 
+type ReportingApplication =
+    Application<TestRuntime, NoConsensusExtension, InMemoryEventReporter<u64>>;
+
 #[test]
-fn certified_apply_uses_noop_event_sink() {
+fn certified_apply_collects_events_without_reporting() {
     deterministic::Runner::default().start(|context| async move {
         let (mut app, databases, parent) = application(context.child("app")).await;
         let transactions = vec![TestTx {
@@ -287,5 +332,119 @@ fn certified_apply_uses_noop_event_sink() {
 
         assert_eq!(merkleized.root(), block.state_root);
         assert_eq!(state_range(&merkleized), block.state_range);
+    });
+}
+
+#[test]
+fn finalized_reports_collected_events_after_database_finalize() {
+    deterministic::Runner::default().start(|context| async move {
+        let reporter = InMemoryEventReporter::<u64>::new();
+        let (mut app, databases, parent) =
+            application_with_reporter(context.child("app"), reporter.clone()).await;
+        let transactions = vec![
+            TestTx {
+                account: 1,
+                nonce: 0,
+                id: 20,
+                value: 3,
+            },
+            TestTx {
+                account: 1,
+                nonce: 1,
+                id: 21,
+                value: 4,
+            },
+        ];
+        let state = committed_state(&databases, &transactions).await;
+        let block = block(&parent, transactions, state);
+
+        let merkleized =
+            <ReportingApplication as StatefulApplication<deterministic::Context>>::apply(
+                &mut app,
+                (context.child("apply"), block.context.clone()),
+                &block,
+                databases.new_batches().await,
+            )
+            .await;
+
+        assert!(reporter.is_empty());
+        databases.finalize(merkleized).await;
+        assert!(reporter.is_empty());
+
+        <ReportingApplication as StatefulApplication<deterministic::Context>>::finalized(
+            &mut app,
+            (context.child("finalized"), block.context.clone()),
+            &block,
+            &databases,
+        )
+        .await;
+
+        let reports = reporter.reports();
+        assert_eq!(reports.len(), 1);
+        let report = &reports[0];
+        assert_eq!(report.height, block.height);
+        assert_eq!(report.block_digest, block.digest());
+        assert_eq!(report.block_timestamp, block.timestamp);
+        assert_eq!(report.transactions.len(), 2);
+
+        let first = &report.transactions[0];
+        assert_eq!(first.tx_index, 0);
+        assert_eq!(first.tx_digest, 20);
+        assert_eq!(first.events.len(), 2);
+        assert_eq!(first.events[0].event_index, 0);
+        assert_eq!(
+            first.events[0].event.name,
+            Bytes::from_static(b"test.applied.v1")
+        );
+        assert_eq!(
+            first.events[0].event.value,
+            Bytes::copy_from_slice(&20u64.to_be_bytes())
+        );
+        assert_eq!(first.events[1].event_index, 1);
+        assert_eq!(
+            first.events[1].event.name,
+            Bytes::from_static(b"test.value.v1")
+        );
+        assert_eq!(first.events[1].event.value, Bytes::copy_from_slice(&[3]));
+
+        let second = &report.transactions[1];
+        assert_eq!(second.tx_index, 1);
+        assert_eq!(second.tx_digest, 21);
+        assert_eq!(second.events[0].event_index, 0);
+        assert_eq!(second.events[1].event_index, 1);
+    });
+}
+
+#[test]
+fn finalized_reports_empty_events_when_handoff_is_missing() {
+    deterministic::Runner::default().start(|context| async move {
+        let reporter = InMemoryEventReporter::<u64>::new();
+        let (mut app, databases, parent) =
+            application_with_reporter(context.child("app"), reporter.clone()).await;
+        let transactions = vec![TestTx {
+            account: 1,
+            nonce: 0,
+            id: 30,
+            value: 5,
+        }];
+        let (state, merkleized) = merkleized_state(&databases, &transactions).await;
+        let block = block(&parent, transactions, state);
+
+        databases.finalize(merkleized).await;
+        <ReportingApplication as StatefulApplication<deterministic::Context>>::finalized(
+            &mut app,
+            (context.child("finalized"), block.context.clone()),
+            &block,
+            &databases,
+        )
+        .await;
+
+        let reports = reporter.reports();
+        assert_eq!(reports.len(), 1);
+        let report = &reports[0];
+        assert_eq!(report.height, block.height);
+        assert_eq!(report.block_digest, block.digest());
+        assert_eq!(report.block_timestamp, block.timestamp);
+        assert!(report.transactions.is_empty());
     });
 }
