@@ -3,11 +3,14 @@ use crate::error::AdmissionError;
 use crate::pool::Pool;
 use crate::status::TxStatus;
 use crate::tx::PoolTransaction;
+use commonware_codec::{Encode, Read};
+use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
+use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use futures::channel::{mpsc, oneshot};
 use futures::{SinkExt, StreamExt};
-use tracing::warn;
+use tracing::{debug, warn};
 
 enum Message<T: PoolTransaction> {
     Submit {
@@ -145,6 +148,25 @@ impl<T: PoolTransaction> Mempool<T> {
         }
         .start()
     }
+
+    /// Spawn the actor's event loop with p2p transaction propagation.
+    ///
+    /// Locally submitted transactions are admitted first, then broadcast to the
+    /// overlay. Transactions received from the overlay pass through the same
+    /// admission checks, but are not re-broadcast.
+    pub fn start_p2p<E, S, R>(self, context: E, p2p: (S, R)) -> Handle<()>
+    where
+        E: Spawner,
+        S: Sender + 'static,
+        R: Receiver<PublicKey = S::PublicKey> + 'static,
+        T: Encode + Read<Cfg = ()>,
+    {
+        InnerActor {
+            context: ContextCell::new(context),
+            mempool: self,
+        }
+        .start_p2p(p2p)
+    }
 }
 
 struct InnerActor<E: Spawner, T: PoolTransaction> {
@@ -161,6 +183,15 @@ where
         spawn_cell!(self.context, self.run())
     }
 
+    fn start_p2p<S, R>(mut self, p2p: (S, R)) -> Handle<()>
+    where
+        S: Sender + 'static,
+        R: Receiver<PublicKey = S::PublicKey> + 'static,
+        T: Encode + Read<Cfg = ()>,
+    {
+        spawn_cell!(self.context, self.run_p2p(p2p))
+    }
+
     async fn run(mut self) {
         select_loop! {
             self.context,
@@ -174,25 +205,96 @@ where
                     return;
                 };
 
-            match message {
-                Message::Submit { tx, responder } => {
-                    let _ = responder.send(self.mempool.pool.admit(tx));
-                }
-                Message::Pending { limit, responder } => {
-                    let _ = responder.send(self.mempool.pool.pending(limit));
-                }
-                Message::Finalized {
-                    digests,
-                    lane_nonces,
-                    height,
-                } => {
-                    self.mempool.pool.finalize(digests, lane_nonces, height);
-                }
-                Message::Status { digest, responder } => {
-                    let _ = responder.send(self.mempool.pool.status_of(&digest));
-                }
-            }
+                self.handle(message);
             },
+        }
+    }
+
+    async fn run_p2p<S, R>(mut self, (mut sender, mut receiver): (S, R))
+    where
+        S: Sender,
+        R: Receiver<PublicKey = S::PublicKey>,
+        T: Encode + Read<Cfg = ()>,
+    {
+        select_loop! {
+            self.context,
+            on_stopped => {},
+            message = self.mempool.receiver.next() => {
+                let Some(message) = message else {
+                    warn!("mempool mailbox closed, stopping runtime");
+                    self.context.child("shutdown").spawn(|context| async move {
+                        let _ = context.stop(1, None).await;
+                    });
+                    return;
+                };
+                self.handle_with_gossip(message, &mut sender);
+            },
+            message = receiver.recv() => {
+                match message {
+                    Ok((peer, bytes)) => self.handle_network(peer, bytes),
+                    Err(error) => {
+                        warn!(?error, "mempool p2p receiver closed; continuing node-local");
+                        self.run().await;
+                        return;
+                    }
+                }
+            },
+        }
+    }
+
+    fn handle(&mut self, message: Message<T>) {
+        match message {
+            Message::Submit { tx, responder } => {
+                let _ = responder.send(self.mempool.pool.admit(tx));
+            }
+            Message::Pending { limit, responder } => {
+                let _ = responder.send(self.mempool.pool.pending(limit));
+            }
+            Message::Finalized {
+                digests,
+                lane_nonces,
+                height,
+            } => {
+                self.mempool.pool.finalize(digests, lane_nonces, height);
+            }
+            Message::Status { digest, responder } => {
+                let _ = responder.send(self.mempool.pool.status_of(&digest));
+            }
+        }
+    }
+
+    fn handle_with_gossip<S>(&mut self, message: Message<T>, sender: &mut S)
+    where
+        S: Sender,
+        T: Encode,
+    {
+        match message {
+            Message::Submit { tx, responder } => {
+                let gossip = tx.clone();
+                let result = self.mempool.pool.admit(tx);
+                if result.is_ok() {
+                    let sent = sender.send(Recipients::All, gossip.encode(), false);
+                    if sent.is_empty() {
+                        debug!("mempool p2p broadcast accepted by no peers");
+                    }
+                }
+                let _ = responder.send(result);
+            }
+            message => self.handle(message),
+        }
+    }
+
+    fn handle_network<P>(&mut self, peer: P, mut bytes: commonware_runtime::IoBuf)
+    where
+        P: PublicKey,
+        T: Read<Cfg = ()>,
+    {
+        match T::read_cfg(&mut bytes, &()) {
+            Ok(tx) => match self.mempool.pool.admit(tx) {
+                Ok(digest) => debug!(?peer, ?digest, "admitted gossiped transaction"),
+                Err(error) => debug!(?peer, ?error, "rejected gossiped transaction"),
+            },
+            Err(error) => warn!(?peer, ?error, "invalid gossiped transaction"),
         }
     }
 }

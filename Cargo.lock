@@ -2891,11 +2891,15 @@ dependencies = [
 name = "nunchi-mempool"
 version = "2026.5.0"
 dependencies = [
+ "bytes",
  "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",
+ "commonware-p2p",
  "commonware-runtime",
+ "commonware-utils",
  "futures",
+ "governor",
  "nunchi-common",
  "nunchi-crypto",
  "thiserror 2.0.18",
