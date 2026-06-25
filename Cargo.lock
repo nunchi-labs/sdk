@@ -2650,6 +2650,66 @@ dependencies = [
 ]
 
 [[package]]
+name = "nunchi-bridge"
+version = "2026.5.0"
+dependencies = [
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-parallel",
+ "commonware-runtime",
+ "commonware-storage",
+ "commonware-utils",
+ "futures",
+ "jsonrpsee",
+ "nunchi-chain",
+ "nunchi-dkg",
+ "nunchi-rpc",
+ "rand 0.8.6",
+ "rand_core 0.6.4",
+ "serde",
+ "tracing",
+]
+
+[[package]]
+name = "nunchi-bridge-chain"
+version = "2026.5.0"
+dependencies = [
+ "bytes",
+ "clap",
+ "commonware-actor",
+ "commonware-broadcast",
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-formatting",
+ "commonware-glue",
+ "commonware-p2p",
+ "commonware-parallel",
+ "commonware-runtime",
+ "commonware-storage",
+ "commonware-utils",
+ "futures",
+ "governor",
+ "jsonrpsee",
+ "nunchi-bridge",
+ "nunchi-chain",
+ "nunchi-common",
+ "nunchi-dkg",
+ "nunchi-mempool",
+ "nunchi-rpc",
+ "rand 0.8.6",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber 0.3.23",
+]
+
+[[package]]
 name = "nunchi-chain"
 version = "2026.5.0"
 dependencies = [
