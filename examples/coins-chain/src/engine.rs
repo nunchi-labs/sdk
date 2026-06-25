@@ -132,7 +132,7 @@ where
     marshal: Marshal<E, S>,
     orchestrator: Orchestrator<E, B, S>,
     orchestrator_mailbox: orchestrator::Mailbox<MinSig, PublicKey>,
-    mempool: Handle<()>,
+    mempool: Mempool<Transaction>,
     stateful: StatefulApp<E>,
     stateful_mailbox: StatefulAppMailbox<E>,
 }
@@ -160,7 +160,6 @@ where
     /// Create a new [Engine].
     pub async fn new(context: E, config: Config<B, P, S>) -> (Self, NodeHandle<E>) {
         let (mempool, submitter) = Mempool::<Transaction>::new(config.pool_config.clone());
-        let mempool = mempool.start(context.child("mempool"));
 
         let page_cache = CacheRef::from_pooler(&context, PAGE_CACHE_PAGE_SIZE, PAGE_CACHE_CAPACITY);
         let consensus_namespace = union(NAMESPACE, b"_CONSENSUS");
@@ -464,6 +463,10 @@ where
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
+        mempool: (
+            impl Sender<PublicKey = PublicKey>,
+            impl Receiver<PublicKey = PublicKey>,
+        ),
         marshal: (
             resolver::handler::Receiver<Digest>,
             resolver::p2p::Mailbox<Digest, PublicKey>,
@@ -478,6 +481,7 @@ where
                 resolver,
                 broadcast,
                 dkg,
+                mempool,
                 marshal,
                 callback
             )
@@ -507,6 +511,10 @@ where
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
+        mempool: (
+            impl Sender<PublicKey = PublicKey>,
+            impl Receiver<PublicKey = PublicKey>,
+        ),
         marshal: (
             resolver::handler::Receiver<Digest>,
             resolver::p2p::Mailbox<Digest, PublicKey>,
@@ -527,6 +535,9 @@ where
             .start(reporters, self.buffered_mailbox, marshal);
         let stateful_handle = self.stateful.start();
         let orchestrator_handle = self.orchestrator.start(votes, certificates, resolver);
+        let mempool_handle = self
+            .mempool
+            .start_p2p(self.context.child("mempool"), mempool);
 
         let mut shutdown = self.context.stopped();
         commonware_macros::select! {
@@ -543,7 +554,7 @@ where
             result = marshal_handle => unexpected_exit("marshal", result),
             result = stateful_handle => unexpected_exit("stateful", result),
             result = orchestrator_handle => unexpected_exit("orchestrator", result),
-            result = self.mempool => unexpected_exit("mempool", result),
+            result = mempool_handle => unexpected_exit("mempool", result),
         }
     }
 }

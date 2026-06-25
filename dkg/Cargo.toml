@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Reusable DKG and resharing support for Nunchi examples."
 
+[lints]
+workspace = true
+
 [dependencies]
 commonware-actor = { workspace = true }
 commonware-codec = { workspace = true }

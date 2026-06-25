@@ -8,10 +8,10 @@ use nunchi_mempool::{NonceKey, PoolTransaction};
 use nunchi_oracle::{OracleOperation, Transaction as OracleTransaction};
 use nunchi_perpetuals::{PerpetualOperation, Transaction as PerpetualTransaction};
 
-const TX_COIN: u8 = 0;
-const TX_AUTHORITY: u8 = 1;
-const TX_ORACLE: u8 = 2;
-const TX_PERPETUAL: u8 = 3;
+pub(crate) const TX_COIN: u8 = 0;
+pub(crate) const TX_AUTHORITY: u8 = 1;
+pub(crate) const TX_ORACLE: u8 = 2;
+pub(crate) const TX_PERPETUAL: u8 = 3;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Transaction {
@@ -172,112 +172,5 @@ impl EncodeSize for Transaction {
             Self::Oracle(tx) => tx.encode_size(),
             Self::Perpetual(tx) => tx.encode_size(),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use commonware_codec::{DecodeExt, Encode};
-    use commonware_cryptography::{ed25519, Hasher, Signer as _};
-    use nunchi_authority::{AuthorityOperation, MultisigPolicy};
-    use nunchi_coins::{CoinOperation, CoinSpec, PrivateKey, TokenName, TokenSymbol};
-    use nunchi_oracle::{NamespaceId, NamespacePolicy, OracleOperation};
-    use nunchi_perpetuals::Side;
-
-    fn coin_transaction(seed: u64, nonce: u64) -> CoinTransaction {
-        let signer = PrivateKey::ed25519_from_seed(seed);
-        CoinTransaction::sign(
-            &signer,
-            nonce,
-            CoinOperation::CreateToken {
-                spec: CoinSpec::new(
-                    TokenSymbol::new("NCH").unwrap(),
-                    TokenName::new("Nunchi").unwrap(),
-                    9,
-                    1_000,
-                    None,
-                ),
-            },
-        )
-    }
-
-    fn authority_transaction(seed: u64, nonce: u64) -> AuthorityTransaction {
-        let owner = nunchi_crypto::PrivateKey::ed25519_from_seed(seed);
-        AuthorityTransaction::sign(
-            &owner,
-            nonce,
-            AuthorityOperation::Configure {
-                policy: MultisigPolicy {
-                    owners: vec![owner.public_key()],
-                    threshold: 1,
-                },
-                initial_validators: vec![ed25519::PrivateKey::from_seed(seed).public_key()],
-                epoch: 0,
-            },
-        )
-    }
-
-    fn oracle_transaction(seed: u64, nonce: u64) -> OracleTransaction {
-        let signer = nunchi_crypto::PrivateKey::ed25519_from_seed(seed);
-        OracleTransaction::sign(
-            &signer,
-            nonce,
-            OracleOperation::ConfigureNamespace {
-                namespace: NamespaceId(commonware_cryptography::Sha256::hash(b"test-namespace")),
-                policy: NamespacePolicy {
-                    admin: Address::external(&signer.public_key()),
-                    max_payload_size: 1024,
-                },
-            },
-        )
-    }
-
-    fn perpetual_transaction(seed: u64, nonce: u64) -> PerpetualTransaction {
-        let signer = nunchi_crypto::PrivateKey::ed25519_from_seed(seed);
-        PerpetualTransaction::sign(
-            &signer,
-            nonce,
-            PerpetualOperation::OpenPosition {
-                market: commonware_cryptography::Sha256::hash(b"btc-usd-perp"),
-                side: Side::Long,
-                collateral: 1_000,
-                leverage_bps: 50_000,
-            },
-        )
-    }
-
-    #[test]
-    fn transaction_codec_uses_stable_tags() {
-        let coin = Transaction::from(coin_transaction(1, 3));
-        let authority = Transaction::from(authority_transaction(2, 4));
-        let oracle = Transaction::from(oracle_transaction(3, 5));
-        let perpetual = Transaction::from(perpetual_transaction(4, 6));
-
-        let coin_encoded = coin.encode();
-        let authority_encoded = authority.encode();
-        let oracle_encoded = oracle.encode();
-        let perpetual_encoded = perpetual.encode();
-
-        assert_eq!(coin_encoded[0], TX_COIN);
-        assert_eq!(authority_encoded[0], TX_AUTHORITY);
-        assert_eq!(oracle_encoded[0], TX_ORACLE);
-        assert_eq!(perpetual_encoded[0], TX_PERPETUAL);
-        assert_eq!(Transaction::decode(coin_encoded).unwrap(), coin);
-        assert_eq!(Transaction::decode(authority_encoded).unwrap(), authority);
-        assert_eq!(Transaction::decode(oracle_encoded).unwrap(), oracle);
-        assert_eq!(Transaction::decode(perpetual_encoded).unwrap(), perpetual);
-        assert!(Transaction::decode([99].as_slice()).is_err());
-    }
-
-    #[test]
-    fn pool_transaction_forwards_to_inner_transaction() {
-        let inner = coin_transaction(3, 7);
-        let transaction = Transaction::from(inner.clone());
-
-        assert_eq!(transaction.digest(), inner.digest());
-        assert_eq!(transaction.account_id(), &inner.account_id);
-        assert_eq!(transaction.nonce(), inner.payload.nonce);
-        assert!(PoolTransaction::verify(&transaction).is_ok());
     }
 }

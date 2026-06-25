@@ -2,7 +2,7 @@
 
 use nunchi_authority::{AuthorityError, AuthorityLedger};
 use nunchi_coins::{Ledger, LedgerError};
-use nunchi_common::{Runtime, RuntimeContext, StateStore};
+use nunchi_common::{EventSink, Runtime, RuntimeContext, StateStore};
 use nunchi_oracle::{OracleError, OracleLedger};
 use nunchi_perpetuals::{PerpetualError, PerpetualLedger};
 
@@ -51,13 +51,15 @@ impl Runtime for CoinsRuntime {
         apply_transaction(state, context, transaction).await
     }
 
-    async fn apply<S>(
+    async fn apply<S, Events>(
         state: &mut S,
         context: RuntimeContext,
         transaction: &Self::Transaction,
+        _events: &mut Events,
     ) -> Result<(), Self::Error>
     where
         S: StateStore + Send + Sync,
+        Events: EventSink + Send,
     {
         apply_transaction(state, context, transaction).await
     }
@@ -109,7 +111,7 @@ mod tests {
 
         assert!(!RuntimeError::Authority(AuthorityError::NotConfigured).is_storage());
         assert!(!RuntimeError::Coins(LedgerError::InvalidTokenSpec("bad")).is_storage());
-        assert!(!RuntimeError::Oracle(OracleError::Unauthorized).is_storage());
+        assert!(!RuntimeError::Oracle(OracleError::PayloadTooLarge).is_storage());
         assert!(!RuntimeError::Perpetuals(PerpetualError::Unauthorized).is_storage());
     }
 }

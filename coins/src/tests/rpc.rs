@@ -74,7 +74,7 @@ fn coin_rpc_queries() {
         crate::rpc::register(&mut router, crate::rpc::CoinsRpc::new(query.clone()))
             .expect("register coin RPC");
         let module = router.into_module();
-        let account = encode_hex(&query.inner.account);
+        let account = query.inner.account.to_bech32();
         let coin = encode_hex(&query.inner.coin);
 
         let mut nonce_params = jsonrpsee::core::params::ObjectParams::new();
@@ -85,6 +85,7 @@ fn coin_rpc_queries() {
             .call("coins.nonce", nonce_params)
             .await
             .expect("nonce response");
+        assert_eq!(nonce.account, account);
         assert_eq!(nonce.nonce, 7);
 
         let mut token_params = jsonrpsee::core::params::ObjectParams::new();
@@ -95,7 +96,9 @@ fn coin_rpc_queries() {
             .call("coins.token", token_params)
             .await
             .expect("token response");
-        assert_eq!(token.unwrap().symbol, "GOLD");
+        let token = token.unwrap();
+        assert_eq!(token.issuer, query.inner.account.to_bech32());
+        assert_eq!(token.symbol, "GOLD");
 
         let mut balance_params = jsonrpsee::core::params::ObjectParams::new();
         balance_params
@@ -108,6 +111,7 @@ fn coin_rpc_queries() {
             .call::<_, crate::rpc::BalanceResponse>("coins.balance", balance_params)
             .await
             .expect("balance response");
+        assert_eq!(balance.account, query.inner.account.to_bech32());
         assert_eq!(balance.amount, "42");
 
         let root: crate::rpc::RootResponse = module

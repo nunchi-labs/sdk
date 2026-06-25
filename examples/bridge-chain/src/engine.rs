@@ -1,6 +1,7 @@
+use crate::execution::NodeHandle;
 use crate::{
-    application::Application, Block, EpochProvider, Finalization, Provider, PublicKey, Scheme,
-    BLOCKS_PER_EPOCH, NAMESPACE,
+    application, Block, EpochProvider, Finalization, NoopTransaction, Provider, PublicKey, Scheme,
+    BLOCKS_PER_EPOCH,
 };
 use commonware_broadcast::buffered;
 use commonware_consensus::{
@@ -9,11 +10,9 @@ use commonware_consensus::{
         core::Actor as MarshalActor,
         resolver,
         standard::{Deferred, Standard},
-        Update,
     },
     simplex::elector::Random,
-    types::{FixedEpocher, ViewDelta},
-    Reporters,
+    types::{FixedEpocher, Height, ViewDelta},
 };
 use commonware_cryptography::{
     bls12381::{
@@ -23,48 +22,42 @@ use commonware_cryptography::{
     certificate::Scheme as _,
     ed25519::{self, Batch},
     sha256::Digest,
-    BatchVerifier, Digestible, Signer,
+    BatchVerifier, Digestible, Hasher, Signer,
+};
+use commonware_glue::stateful::{
+    db::ManagedDb as _, Config as StatefulConfig, Mailbox as StatefulMailbox,
+    Stateful as StatefulActor, SyncPlan,
 };
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     buffer::paged::CacheRef, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics,
-    Network, Spawner, Storage,
+    Network, Spawner, Storage, ThreadPooler,
 };
 use commonware_storage::archive::immutable;
-use commonware_utils::{union, NZUsize, NZU16, NZU64};
-use futures::future::try_join_all;
+use commonware_utils::union;
+use futures::{future::try_join_all, lock::Mutex as AsyncMutex};
+use governor::clock::Clock as GClock;
+use nunchi_bridge::{BridgeExtension, BridgeMailbox};
+use nunchi_chain::engine::*;
+use nunchi_common::{QmdbBackend, QmdbState};
 use nunchi_dkg::{self as dkg, orchestrator, PeerConfig, UpdateCallBack, MAX_SUPPORTED_MODE};
+use nunchi_mempool::{Mempool, PoolConfig};
+use rand::{CryptoRng, Rng};
 use rand_core::CryptoRngCore;
 use std::{
     marker::PhantomData,
-    num::{NonZero, NonZeroU16, NonZeroUsize},
+    sync::Arc,
     time::{Duration, Instant},
 };
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
-const MAILBOX_SIZE: NonZeroUsize = NZUsize!(1024);
-const DEQUE_SIZE: usize = 10;
-const ACTIVITY_TIMEOUT: ViewDelta = ViewDelta::new(256);
-const SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER: u64 = 10;
-const PRUNABLE_ITEMS_PER_SECTION: NonZero<u64> = NZU64!(4_096);
-const IMMUTABLE_ITEMS_PER_SECTION: NonZero<u64> = NZU64!(262_144);
-const FREEZER_TABLE_RESIZE_FREQUENCY: u8 = 4;
-const FREEZER_TABLE_RESIZE_CHUNK_SIZE: u32 = 2u32.pow(16); // 3MB
-const FREEZER_VALUE_TARGET_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
-const FREEZER_VALUE_COMPRESSION: Option<u8> = Some(3);
-const REPLAY_BUFFER: NonZero<usize> = NZUsize!(8 * 1024 * 1024); // 8MB
-const WRITE_BUFFER: NonZero<usize> = NZUsize!(1024 * 1024); // 1MB
-const PAGE_CACHE_PAGE_SIZE: NonZeroU16 = NZU16!(4_096); // 4KB
-const PAGE_CACHE_CAPACITY: NonZero<usize> = NZUsize!(8_192); // 32MB
-const MAX_REPAIR: NonZero<usize> = NZUsize!(50);
-const MAX_PENDING_ACKS: NonZero<usize> = NZUsize!(16);
-
-/// Configuration for the [Engine].
+/// Configuration for the bridge-chain engine.
 pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = PublicKey>, S: Strategy>
 {
     pub blocker: B,
     pub manager: P,
+    pub namespace: Vec<u8>,
     pub partition_prefix: String,
     pub blocks_freezer_table_initial_size: u32,
     pub finalized_freezer_table_initial_size: u32,
@@ -75,11 +68,17 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
     pub leader_timeout: Duration,
     pub certification_timeout: Duration,
     pub strategy: S,
+    pub pool_config: PoolConfig,
+    pub bridge: BridgeMailbox,
+    pub bridge_handle: Handle<()>,
 }
 
-type DkgActor<E, P> = dkg::Actor<E, P, Block>;
-type DkgMailbox = dkg::Mailbox<Block>;
-type Marshaled<E> = Deferred<E, Scheme, Application, Block, FixedEpocher>;
+type DkgActor<E, P> = nunchi_chain::DkgActor<E, P, NoopTransaction, BridgeExtension>;
+type DkgMailbox = nunchi_chain::DkgMailbox<NoopTransaction, BridgeExtension>;
+type StatefulApp<E> =
+    StatefulActor<E, crate::Application, Scheme, Standard<Block>, NoStateSyncResolver>;
+type StatefulAppMailbox<E> = StatefulMailbox<E, crate::Application>;
+type Marshaled<E> = Deferred<E, Scheme, StatefulAppMailbox<E>, Block, FixedEpocher>;
 type SchemeProvider = Provider<Scheme, ed25519::PrivateKey>;
 type FinalizationsArchive<E> = immutable::Archive<E, Digest, Finalization>;
 type BlocksArchive<E> = immutable::Archive<E, Digest, Block>;
@@ -94,11 +93,21 @@ type Marshal<E, S> = MarshalActor<
 >;
 type Orchestrator<E, B, S> = orchestrator::Actor<E, B, Marshaled<E>, Scheme, Random, S, Block>;
 
-/// The engine that drives the [Application].
+/// The engine that drives a bridge-chain validator.
 #[allow(clippy::type_complexity)]
 pub struct Engine<E, B, P, S>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
+    E: BufferPooler
+        + Spawner
+        + Metrics
+        + CryptoRngCore
+        + CryptoRng
+        + Rng
+        + Clock
+        + GClock
+        + Storage
+        + ThreadPooler
+        + Network,
     B: Blocker<PublicKey = PublicKey>,
     P: Manager<PublicKey = PublicKey>,
     S: Strategy,
@@ -110,25 +119,43 @@ where
     buffer: buffered::Engine<E, PublicKey, Block, P>,
     buffered_mailbox: buffered::Mailbox<PublicKey, Block>,
     marshal: Marshal<E, S>,
-    marshaled: Marshaled<E>,
     orchestrator: Orchestrator<E, B, S>,
     orchestrator_mailbox: orchestrator::Mailbox<MinSig, PublicKey>,
+    mempool: Handle<()>,
+    stateful: StatefulApp<E>,
+    stateful_mailbox: StatefulAppMailbox<E>,
 }
 
 impl<E, B, P, S> Engine<E, B, P, S>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
+    E: BufferPooler
+        + Spawner
+        + Metrics
+        + CryptoRngCore
+        + CryptoRng
+        + Rng
+        + Clock
+        + GClock
+        + Storage
+        + ThreadPooler
+        + Network
+        + Send
+        + 'static,
     B: Blocker<PublicKey = PublicKey>,
     P: Manager<PublicKey = PublicKey>,
     S: Strategy,
     Batch: BatchVerifier<PublicKey = PublicKey>,
 {
-    /// Create a new [Engine].
-    pub async fn new(context: E, config: Config<B, P, S>) -> Self {
+    /// Create a new bridge-chain engine.
+    pub async fn new(context: E, config: Config<B, P, S>) -> (Self, NodeHandle<E>) {
+        let (mempool, submitter) = Mempool::<NoopTransaction>::new(config.pool_config.clone());
+        let mempool = mempool.start(context.child("mempool"));
+
         let page_cache = CacheRef::from_pooler(&context, PAGE_CACHE_PAGE_SIZE, PAGE_CACHE_CAPACITY);
-        let consensus_namespace = union(NAMESPACE, b"_CONSENSUS");
+        let consensus_namespace = union(&config.namespace, b"_CONSENSUS");
         let num_participants =
             commonware_utils::NZU32!(config.peer_config.max_participants_per_round());
+        let block_codec_config = (num_participants, ());
 
         let (dkg, dkg_mailbox) = dkg::Actor::new(
             context.child("dkg"),
@@ -139,7 +166,7 @@ where
                 partition_prefix: config.partition_prefix.clone(),
                 peer_config: config.peer_config.clone(),
                 max_supported_mode: MAX_SUPPORTED_MODE,
-                namespace: NAMESPACE.to_vec(),
+                namespace: config.namespace.clone(),
                 epoch_length: BLOCKS_PER_EPOCH,
             },
         );
@@ -151,7 +178,7 @@ where
                 mailbox_size: MAILBOX_SIZE,
                 deque_size: DEQUE_SIZE,
                 priority: true,
-                codec_config: num_participants,
+                codec_config: block_codec_config,
                 peer_provider: config.manager.clone(),
             },
         );
@@ -229,7 +256,7 @@ where
                 ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
                 ordinal_write_buffer: WRITE_BUFFER,
                 items_per_section: IMMUTABLE_ITEMS_PER_SECTION,
-                codec_config: num_participants,
+                codec_config: block_codec_config,
                 replay_buffer: REPLAY_BUFFER,
             },
         )
@@ -242,12 +269,43 @@ where
             &config.output,
         );
         let provider = Provider::new(
-            consensus_namespace.clone(),
+            consensus_namespace,
             config.signer.clone(),
             certificate_verifier,
         );
-        let genesis = Application::genesis();
+        let state_partition = format!("{}-bridge", config.partition_prefix);
+        let db_config =
+            QmdbState::<E>::config_with_page_cache(&state_partition, page_cache.clone());
+        let empty_state = {
+            let empty = QmdbBackend::init(
+                context.child("empty_genesis_state"),
+                QmdbState::<E>::config_with_page_cache(
+                    &format!("{}-empty-genesis-bridge", config.partition_prefix),
+                    page_cache.clone(),
+                ),
+            )
+            .await
+            .expect("failed to initialize empty state database for genesis commitment");
+            let target = empty.sync_target().await;
+            nunchi_chain::StateCommitment {
+                root: target.root,
+                range: target.range,
+            }
+        };
+        let applied_height = Arc::new(AsyncMutex::new(Height::zero()));
+        let bridge = BridgeExtension::new(config.bridge.clone());
+        let app = application(
+            submitter.clone(),
+            bridge,
+            applied_height.clone(),
+            empty_state,
+            commonware_cryptography::Sha256::hash(&config.namespace),
+        );
+        let genesis = app.genesis_block();
         let genesis_digest = genesis.digest();
+        let plan =
+            SyncPlan::<_, Scheme, Standard<Block>>::init(&context, config.partition_prefix.clone())
+                .await;
         let (marshal, marshal_mailbox, _processed_height) = MarshalActor::init(
             context.child("marshal"),
             finalizations_by_height,
@@ -255,7 +313,7 @@ where
             marshal::Config {
                 provider: provider.clone(),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                start: marshal::Start::Genesis(genesis),
+                start: plan.marshal_start(genesis),
                 partition_prefix: format!("{}_marshal", config.partition_prefix),
                 mailbox_size: MAILBOX_SIZE,
                 view_retention_timeout: ViewDelta::new(
@@ -268,7 +326,7 @@ where
                 replay_buffer: REPLAY_BUFFER,
                 key_write_buffer: WRITE_BUFFER,
                 value_write_buffer: WRITE_BUFFER,
-                block_codec_config: num_participants,
+                block_codec_config,
                 max_repair: MAX_REPAIR,
                 max_pending_acks: MAX_PENDING_ACKS,
                 strategy: config.strategy.clone(),
@@ -276,9 +334,30 @@ where
         )
         .await;
 
+        let (stateful, stateful_mailbox) = StatefulActor::init(
+            context.child("stateful"),
+            StatefulConfig {
+                application: app,
+                db_config,
+                input_provider: submitter,
+                marshal: marshal_mailbox.clone(),
+                max_pending_acks: MAX_PENDING_ACKS,
+                mailbox_size: MAILBOX_SIZE,
+                plan,
+                resolvers: NoStateSyncResolver,
+                sync_config: state_sync_config(),
+            },
+        );
+        let node_handle = NodeHandle::new(
+            config.bridge.clone(),
+            stateful_mailbox.clone(),
+            marshal_mailbox.clone(),
+            applied_height,
+        );
+
         let application = Deferred::new(
             context.child("application"),
-            Application::with_dkg(dkg_mailbox.clone()),
+            stateful_mailbox.clone(),
             marshal_mailbox.clone(),
             FixedEpocher::new(BLOCKS_PER_EPOCH),
         );
@@ -287,7 +366,7 @@ where
             context.child("orchestrator"),
             orchestrator::Config {
                 oracle: config.blocker.clone(),
-                application: application.clone(),
+                application,
                 provider,
                 marshal: marshal_mailbox,
                 strategy: config.strategy.clone(),
@@ -302,7 +381,7 @@ where
             },
         );
 
-        Self {
+        let engine = Self {
             context: ContextCell::new(context),
             config,
             dkg,
@@ -310,10 +389,13 @@ where
             buffer,
             buffered_mailbox,
             marshal,
-            marshaled: application,
             orchestrator,
             orchestrator_mailbox,
-        }
+            mempool,
+            stateful,
+            stateful_mailbox,
+        };
+        (engine, node_handle)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -396,23 +478,26 @@ where
             callback,
         );
         let buffer_handle = self.buffer.start(broadcast);
-        let reporters = Reporters::<Update<Block>, _, _>::from((self.marshaled, self.dkg_mailbox));
+        let reporters = nunchi_chain::dkg_reporters(self.stateful_mailbox, self.dkg_mailbox);
         let marshal_handle = self
             .marshal
             .start(reporters, self.buffered_mailbox, marshal);
+        let stateful_handle = self.stateful.start();
         let orchestrator_handle = self.orchestrator.start(votes, certificates, resolver);
 
-        if let Err(e) = try_join_all(vec![
+        match try_join_all(vec![
             dkg_handle,
             buffer_handle,
             marshal_handle,
+            stateful_handle,
             orchestrator_handle,
+            self.mempool,
+            self.config.bridge_handle,
         ])
         .await
         {
-            error!(?e, "engine failed");
-        } else {
-            warn!("engine stopped");
+            Err(e) => panic!("engine failed: {e:?}"),
+            Ok(_) => warn!("engine stopped"),
         }
     }
 }

@@ -1,5 +1,6 @@
 //! Proof-of-authority validator registry primitives for Nunchi chains.
 
+commonware_macros::stability_scope!(ALPHA {
 mod db;
 mod genesis;
 mod ledger;
@@ -19,3 +20,4 @@ pub use types::{
 
 /// Domain separator used for authority transaction signatures and state keys.
 pub const AUTHORITY_NAMESPACE: &[u8] = b"_NUNCHI_AUTHORITY";
+});

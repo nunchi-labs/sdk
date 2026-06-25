@@ -451,6 +451,7 @@ async fn start_node(
     let broadcast = register(channels::BROADCAST);
     let dkg = register(channels::DKG);
     let backfill = register(channels::BACKFILL);
+    let mempool = register(channels::MEMPOOL);
     network.start();
 
     let engine_config: EngineConfig<_, _, _> = EngineConfig {
@@ -492,6 +493,7 @@ async fn start_node(
         resolver,
         broadcast,
         dkg,
+        mempool,
         marshal_resolver,
         ContinueOnUpdate::boxed(),
     );
@@ -510,7 +512,7 @@ async fn start_node(
     Ok((rpc_server, engine_handle))
 }
 
-fn decode_output(
+pub(crate) fn decode_output(
     value: &str,
     max_participants: NonZeroU32,
 ) -> Result<Output<MinSig, PublicKey>, Error> {
@@ -529,7 +531,7 @@ fn read_genesis(path: Option<&PathBuf>) -> Result<Option<ChainGenesis>, Error> {
         .map_err(Error::Genesis)
 }
 
-fn decode_unit<T>(value: &str, field: &'static str) -> Result<T, Error>
+pub(crate) fn decode_unit<T>(value: &str, field: &'static str) -> Result<T, Error>
 where
     T: DecodeExt<()>,
 {
@@ -543,74 +545,4 @@ fn decode_hex(value: &str, field: &'static str) -> Result<Vec<u8>, Error> {
 
 fn encode(value: &impl Encode) -> String {
     hex(&value.encode())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashSet;
-
-    #[test]
-    fn generated_testnet_has_unique_ports_dirs_and_complete_peer_sets() {
-        let dir = std::env::temp_dir().join(format!("coins-chain-testnet-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-
-        let manifest = generate_local_testnet(LocalTestnetConfig {
-            validators: 4,
-            base_port: 40_000,
-            base_rpc_port: 41_000,
-            base_metrics_port: 42_000,
-            base_data_dir: dir.clone(),
-            seed: 7,
-        })
-        .expect("generate testnet");
-
-        assert_eq!(manifest.nodes.len(), 4);
-        let ports = manifest
-            .nodes
-            .iter()
-            .map(|node| node.port)
-            .collect::<HashSet<_>>();
-        assert_eq!(ports.len(), 4);
-        let rpc_ports = manifest
-            .nodes
-            .iter()
-            .map(|node| node.rpc_port)
-            .collect::<HashSet<_>>();
-        assert_eq!(rpc_ports.len(), 4);
-        let metrics_ports = manifest
-            .nodes
-            .iter()
-            .map(|node| node.metrics_port)
-            .collect::<HashSet<_>>();
-        assert_eq!(metrics_ports.len(), 4);
-        let dirs = manifest
-            .nodes
-            .iter()
-            .map(|node| node.data_dir.clone())
-            .collect::<HashSet<_>>();
-        assert_eq!(dirs.len(), 4);
-
-        for node in &manifest.nodes {
-            let config = NodeConfig::read(&node.config_path).expect("read node config");
-            assert_eq!(config.peer_config.participants.len(), 4);
-            assert_eq!(config.bootstrappers.len(), 3);
-            assert!(!config
-                .bootstrappers
-                .iter()
-                .any(|bootstrapper| bootstrapper.address.port() == node.port));
-            assert_eq!(config.rpc_address.port(), node.rpc_port);
-            assert_eq!(config.metrics_address.port(), node.metrics_port);
-
-            // The threshold material must round-trip from the written config.
-            let max_participants =
-                NonZeroU32::new(config.peer_config.max_participants_per_round()).unwrap();
-            decode_output(&config.output, max_participants).expect("decode output");
-            decode_unit::<group::Share>(&config.share, "share").expect("decode share");
-            decode_unit::<ed25519::PrivateKey>(&config.private_key, "private_key")
-                .expect("decode private key");
-        }
-
-        let _ = fs::remove_dir_all(dir);
-    }
 }
