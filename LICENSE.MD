@@ -1,6 +1,7 @@
 Business Source License
 =======================
 
+License text copyright (c) 2020 MariaDB Corporation Ab, All Rights Reserved.
 “Business Source License” is a trademark of MariaDB Corporation Ab.
 
 Parameters
