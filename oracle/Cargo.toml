@@ -16,5 +16,5 @@ commonware-formatting = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
-futures = { workspace = true }
+commonware-runtime = { workspace = true }
 serde_json = { workspace = true }

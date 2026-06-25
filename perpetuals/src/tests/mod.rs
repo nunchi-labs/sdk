@@ -7,8 +7,7 @@ use nunchi_coins::{CoinDB, CoinSpec, TokenDefinition, TokenName, TokenSymbol};
 use nunchi_common::{Address, RuntimeContext, StateError, StateStore};
 use nunchi_crypto::PrivateKey;
 use nunchi_oracle::{
-    IntervalKey, NamespaceId, NamespacePolicy, OracleLedger, OracleOperation,
-    Transaction as OracleTransaction,
+    IntervalKey, NamespaceId, OracleLedger, OracleOperation, Transaction as OracleTransaction,
 };
 
 use crate::{
@@ -52,41 +51,12 @@ fn context(timestamp_ms: u64) -> RuntimeContext {
         epoch: 0,
         height: timestamp_ms / 100,
         timestamp_ms,
+        block_digest: None,
     }
 }
 
 fn address(signer: &PrivateKey) -> Address {
     Address::external(&signer.public_key())
-}
-
-fn configure_oracle(
-    ledger: &mut PerpetualLedger<MemoryStore>,
-    admin: &PrivateKey,
-    writer: &PrivateKey,
-) {
-    let mut oracle = OracleLedger::new(ledger.db_mut());
-    let configure = OracleTransaction::sign(
-        admin,
-        0,
-        OracleOperation::ConfigureNamespace {
-            namespace: namespace(),
-            policy: NamespacePolicy {
-                admin: address(admin),
-                max_payload_size: 1024,
-            },
-        },
-    );
-    block_on(oracle.apply_transaction(&configure, context(100))).unwrap();
-    let set_writer = OracleTransaction::sign(
-        admin,
-        1,
-        OracleOperation::SetWriter {
-            namespace: namespace(),
-            writer: address(writer),
-            enabled: true,
-        },
-    );
-    block_on(oracle.apply_transaction(&set_writer, context(100))).unwrap();
 }
 
 fn append_price(
@@ -215,10 +185,8 @@ fn open_short(
 
 #[test]
 fn refresh_market_from_oracle_decodes_mock_price_payload() {
-    let admin = PrivateKey::from_seed(1);
     let writer = PrivateKey::from_seed(2);
     let mut ledger = PerpetualLedger::new(MemoryStore::default());
-    configure_oracle(&mut ledger, &admin, &writer);
     let market = create_market(&mut ledger);
 
     append_price(&mut ledger, &writer, 0, market, 500_000_000, 4, 1_000);
@@ -232,12 +200,10 @@ fn refresh_market_from_oracle_decodes_mock_price_payload() {
 
 #[test]
 fn long_position_blocks_unsafe_withdrawal_then_liquidates_after_price_drop() {
-    let admin = PrivateKey::from_seed(10);
     let writer = PrivateKey::from_seed(11);
     let trader = PrivateKey::from_seed(12);
     let trader_address = address(&trader);
     let mut ledger = PerpetualLedger::new(MemoryStore::default());
-    configure_oracle(&mut ledger, &admin, &writer);
     let market = create_market(&mut ledger);
     seed_collateral(&mut ledger, &trader_address, 10_000);
 
@@ -268,12 +234,10 @@ fn long_position_blocks_unsafe_withdrawal_then_liquidates_after_price_drop() {
 
 #[test]
 fn collateral_moves_through_escrow_on_open_adjust_and_close() {
-    let admin = PrivateKey::from_seed(30);
     let writer = PrivateKey::from_seed(31);
     let trader = PrivateKey::from_seed(32);
     let trader_address = address(&trader);
     let mut ledger = PerpetualLedger::new(MemoryStore::default());
-    configure_oracle(&mut ledger, &admin, &writer);
     let market = create_market(&mut ledger);
     seed_collateral(&mut ledger, &trader_address, 5_000);
 
@@ -301,12 +265,10 @@ fn collateral_moves_through_escrow_on_open_adjust_and_close() {
 
 #[test]
 fn funding_accrual_is_capped_and_interval_based() {
-    let admin = PrivateKey::from_seed(40);
     let writer = PrivateKey::from_seed(41);
     let trader = PrivateKey::from_seed(42);
     let trader_address = address(&trader);
     let mut ledger = PerpetualLedger::new(MemoryStore::default());
-    configure_oracle(&mut ledger, &admin, &writer);
     let market = create_market(&mut ledger);
     seed_collateral(&mut ledger, &trader_address, 5_000);
 
@@ -325,12 +287,10 @@ fn funding_accrual_is_capped_and_interval_based() {
 
 #[test]
 fn funding_reduces_long_close_payout_when_mark_exceeds_index() {
-    let admin = PrivateKey::from_seed(50);
     let writer = PrivateKey::from_seed(51);
     let trader = PrivateKey::from_seed(52);
     let trader_address = address(&trader);
     let mut ledger = PerpetualLedger::new(MemoryStore::default());
-    configure_oracle(&mut ledger, &admin, &writer);
     let market = create_market(&mut ledger);
     seed_collateral(&mut ledger, &trader_address, 10_000);
 
@@ -349,12 +309,10 @@ fn funding_reduces_long_close_payout_when_mark_exceeds_index() {
 
 #[test]
 fn funding_increases_short_close_payout_when_mark_exceeds_index() {
-    let admin = PrivateKey::from_seed(60);
     let writer = PrivateKey::from_seed(61);
     let trader = PrivateKey::from_seed(62);
     let trader_address = address(&trader);
     let mut ledger = PerpetualLedger::new(MemoryStore::default());
-    configure_oracle(&mut ledger, &admin, &writer);
     let market = create_market(&mut ledger);
     seed_collateral(&mut ledger, &trader_address, 10_000);
     set_escrow_balance(&mut ledger, 1_000);
@@ -374,11 +332,9 @@ fn funding_increases_short_close_payout_when_mark_exceeds_index() {
 
 #[test]
 fn stale_oracle_price_blocks_trading() {
-    let admin = PrivateKey::from_seed(20);
     let writer = PrivateKey::from_seed(21);
     let trader = PrivateKey::from_seed(22);
     let mut ledger = PerpetualLedger::new(MemoryStore::default());
-    configure_oracle(&mut ledger, &admin, &writer);
     let market = create_market(&mut ledger);
 
     append_price(&mut ledger, &writer, 0, market, 500_000_000, 4, 1_000);

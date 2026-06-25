@@ -4,13 +4,18 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 bytes = { workspace = true }
+bech32 = { workspace = true }
 thiserror = { workspace = true }
 nunchi-crypto = { workspace = true }
 commonware-codec = { workspace = true }
 commonware-cryptography = { workspace = true }
 commonware-glue = { workspace = true }
+commonware-macros = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-storage = { workspace = true }
 commonware-parallel = { workspace = true }

@@ -4,13 +4,23 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 nunchi-common = { workspace = true }
 nunchi-crypto = { workspace = true }
 commonware-codec = { workspace = true }
 commonware-cryptography = { workspace = true }
 commonware-macros = { workspace = true }
+commonware-p2p = { workspace = true }
 commonware-runtime = { workspace = true }
 futures = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+bytes = { workspace = true }
+commonware-macros = { workspace = true }
+commonware-utils = { workspace = true }
+governor = { workspace = true }

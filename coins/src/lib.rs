@@ -1,5 +1,6 @@
 //! Foundational coin, account, and ledger primitives for the Nunchi SDK.
 
+commonware_macros::stability_scope!(ALPHA {
 mod account;
 mod asset;
 mod db;
@@ -31,3 +32,4 @@ pub use transaction::{CoinOperation, Transaction, TransactionPayload};
 
 /// Domain separator used for coin transaction signatures and token identifiers.
 pub const COINS_NAMESPACE: &[u8] = b"_NUNCHI_COINS";
+});

@@ -1,6 +1,6 @@
 use crate::{
-    IntervalKey, NamespaceId, NamespacePolicy, OracleDB, OracleOperation, OracleRecord, RecordId,
-    Transaction, MAX_PAYLOAD_SIZE, MAX_PROOF_SIZE, MAX_QUERY_INTERVALS, MAX_RECORDS_PER_BUCKET,
+    IntervalKey, NamespaceId, OracleDB, OracleOperation, OracleRecord, RecordId, Transaction,
+    MAX_PAYLOAD_SIZE, MAX_PROOF_SIZE, MAX_QUERY_INTERVALS, MAX_RECORDS_PER_BUCKET,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{Hasher, Sha256};
@@ -21,14 +21,6 @@ pub enum OracleError {
     },
     #[error("nonce overflow")]
     NonceOverflow,
-    #[error("oracle namespace is not configured")]
-    NamespaceNotConfigured,
-    #[error("invalid oracle namespace policy: {0}")]
-    InvalidNamespacePolicy(&'static str),
-    #[error("invalid oracle genesis: {0}")]
-    InvalidGenesis(String),
-    #[error("unauthorized oracle operation")]
-    Unauthorized,
     #[error("oracle payload is too large")]
     PayloadTooLarge,
     #[error("oracle proof is too large")]
@@ -64,10 +56,6 @@ impl<D: OracleDB> OracleLedger<D> {
         &self.db
     }
 
-    pub(crate) fn db_mut(&mut self) -> &mut D {
-        &mut self.db
-    }
-
     /// Consume the ledger, returning the underlying database.
     pub fn into_inner(self) -> D {
         self.db
@@ -100,23 +88,6 @@ impl<D: OracleDB> OracleLedger<D> {
         let next_nonce = expected.checked_add(1).ok_or(OracleError::NonceOverflow)?;
         self.db.set_nonce(&tx.account_id, next_nonce);
         Ok(())
-    }
-
-    /// Load namespace policy.
-    pub async fn namespace(
-        &self,
-        namespace: &NamespaceId,
-    ) -> Result<Option<NamespacePolicy>, OracleError> {
-        self.db.namespace(namespace).await
-    }
-
-    /// Load writer policy for one namespace.
-    pub async fn writer(
-        &self,
-        namespace: &NamespaceId,
-        writer: &Address,
-    ) -> Result<Option<bool>, OracleError> {
-        self.db.writer(namespace, writer).await
     }
 
     /// Load an oracle record by id.
@@ -172,95 +143,27 @@ impl<D: OracleDB> OracleLedger<D> {
         context: RuntimeContext,
     ) -> Result<(), OracleError> {
         match operation {
-            OracleOperation::ConfigureNamespace { namespace, policy } => {
-                self.configure_namespace(signer, namespace, policy.clone())
-                    .await
-            }
-            OracleOperation::SetWriter {
-                namespace,
-                writer,
-                enabled,
-            } => self.set_writer(signer, namespace, writer, *enabled).await,
-            OracleOperation::AppendRecord {
-                namespace,
-                interval,
-                payload,
-                proof,
-            } => {
-                self.append_record(
-                    signer,
-                    nonce,
-                    namespace,
-                    *interval,
-                    payload.clone(),
-                    proof.clone(),
-                    context,
-                )
-                .await
+            OracleOperation::AppendRecord { .. } => {
+                self.append_record(signer, nonce, operation, context).await
             }
         }
-    }
-
-    async fn configure_namespace(
-        &mut self,
-        signer: &Address,
-        namespace: &NamespaceId,
-        policy: NamespacePolicy,
-    ) -> Result<(), OracleError> {
-        validate_policy(&policy)?;
-        match self.db.namespace(namespace).await? {
-            Some(existing) if existing.admin != *signer => return Err(OracleError::Unauthorized),
-            None if policy.admin != *signer => return Err(OracleError::Unauthorized),
-            _ => {}
-        }
-
-        self.db.set_namespace(namespace, &policy);
-        Ok(())
-    }
-
-    async fn set_writer(
-        &mut self,
-        signer: &Address,
-        namespace: &NamespaceId,
-        writer: &Address,
-        enabled: bool,
-    ) -> Result<(), OracleError> {
-        let namespace_policy = self
-            .db
-            .namespace(namespace)
-            .await?
-            .ok_or(OracleError::NamespaceNotConfigured)?;
-        if namespace_policy.admin != *signer {
-            return Err(OracleError::Unauthorized);
-        }
-        self.db.set_writer(namespace, writer, enabled);
-        Ok(())
     }
 
     async fn append_record(
         &mut self,
         signer: &Address,
         nonce: u64,
-        namespace: &NamespaceId,
-        interval: IntervalKey,
-        payload: Vec<u8>,
-        proof: Option<Vec<u8>>,
+        operation: &OracleOperation,
         context: RuntimeContext,
     ) -> Result<(), OracleError> {
-        let policy = self
-            .db
-            .namespace(namespace)
-            .await?
-            .ok_or(OracleError::NamespaceNotConfigured)?;
-        if !self
-            .db
-            .writer(namespace, signer)
-            .await?
-            .is_some_and(|enabled| enabled)
-        {
-            return Err(OracleError::Unauthorized);
-        }
-        if payload.len() > policy.max_payload_size as usize || payload.len() > MAX_PAYLOAD_SIZE {
+        let OracleOperation::AppendRecord {
+            namespace,
+            interval,
+            payload,
+            proof,
+        } = operation;
+
+        if payload.len() > MAX_PAYLOAD_SIZE {
             return Err(OracleError::PayloadTooLarge);
         }
         if proof
@@ -270,22 +173,22 @@ impl<D: OracleDB> OracleLedger<D> {
             return Err(OracleError::ProofTooLarge);
         }
 
-        let mut namespace_records = self.db.namespace_index(namespace, &interval).await?;
-        let mut writer_records = self.db.writer_index(signer, &interval).await?;
+        let mut namespace_records = self.db.namespace_index(namespace, interval).await?;
+        let mut writer_records = self.db.writer_index(signer, interval).await?;
         if namespace_records.len() == MAX_RECORDS_PER_BUCKET
             || writer_records.len() == MAX_RECORDS_PER_BUCKET
         {
             return Err(OracleError::IndexFull);
         }
 
-        let id = record_id(signer, nonce, namespace, &interval);
+        let id = record_id(signer, nonce, namespace, interval);
         let record = OracleRecord {
             id,
             writer: signer.clone(),
             namespace: *namespace,
-            interval,
-            payload,
-            proof,
+            interval: *interval,
+            payload: payload.clone(),
+            proof: proof.clone(),
             written_at_height: context.height,
             written_at_ms: context.timestamp_ms,
         };
@@ -293,10 +196,10 @@ impl<D: OracleDB> OracleLedger<D> {
 
         namespace_records.push(id);
         self.db
-            .set_namespace_index(namespace, &interval, &namespace_records);
+            .set_namespace_index(namespace, interval, &namespace_records);
 
         writer_records.push(id);
-        self.db.set_writer_index(signer, &interval, &writer_records);
+        self.db.set_writer_index(signer, interval, &writer_records);
         Ok(())
     }
 
@@ -315,20 +218,6 @@ impl<D: OracleDB> OracleLedger<D> {
         }
         Ok(())
     }
-}
-
-pub(crate) fn validate_policy(policy: &NamespacePolicy) -> Result<(), OracleError> {
-    if policy.max_payload_size == 0 {
-        return Err(OracleError::InvalidNamespacePolicy(
-            "maximum payload size is zero",
-        ));
-    }
-    if policy.max_payload_size as usize > MAX_PAYLOAD_SIZE {
-        return Err(OracleError::InvalidNamespacePolicy(
-            "maximum payload size exceeds module limit",
-        ));
-    }
-    Ok(())
 }
 
 fn validate_interval_range(start: IntervalKey, end: IntervalKey) -> Result<(), OracleError> {

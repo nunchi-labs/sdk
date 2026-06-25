@@ -4,9 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 commonware-codec = { workspace = true }
 commonware-formatting = { workspace = true }
+commonware-macros = { workspace = true }
 jsonrpsee = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }

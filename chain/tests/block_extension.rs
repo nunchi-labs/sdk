@@ -58,6 +58,13 @@ impl ConsensusExtension for TestConsensusExtension {
     fn propose(&mut self) -> impl std::future::Future<Output = Self::Payload> + Send {
         std::future::ready(TestPayload(self.0))
     }
+
+    fn verify_payload(
+        &mut self,
+        payload: &Self::Payload,
+    ) -> impl std::future::Future<Output = bool> + Send {
+        std::future::ready(payload.0 == self.0)
+    }
 }
 
 fn context() -> Context {
@@ -181,6 +188,21 @@ fn composite_consensus_extension_proposes_both_payloads() {
         futures::executor::block_on(extension.propose()),
         (TestPayload(1), TestPayload(2))
     );
+}
+
+#[test]
+fn composite_consensus_extension_verifies_both_payloads() {
+    let mut extension = Composite::new(TestConsensusExtension(1), TestConsensusExtension(2));
+
+    assert!(futures::executor::block_on(
+        extension.verify_payload(&(TestPayload(1), TestPayload(2)))
+    ));
+    assert!(!futures::executor::block_on(
+        extension.verify_payload(&(TestPayload(1), TestPayload(3)))
+    ));
+    assert!(!futures::executor::block_on(
+        extension.verify_payload(&(TestPayload(0), TestPayload(2)))
+    ));
 }
 
 #[test]

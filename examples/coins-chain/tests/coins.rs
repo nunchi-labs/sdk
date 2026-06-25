@@ -18,12 +18,10 @@ use nunchi_coins::{
     Address, CoinId, CoinOperation, CoinSpec, PrivateKey, TokenFactory, TokenName, TokenSymbol,
     Transaction,
 };
-use nunchi_oracle::{
-    IntervalKey, NamespaceId, NamespacePolicy, OracleOperation, Transaction as OracleTransaction,
-};
+use nunchi_oracle::{IntervalKey, NamespaceId, OracleOperation, Transaction as OracleTransaction};
 use nunchi_perpetuals::{
     collateral_escrow_account, derive_market_id, derive_position_id, OraclePricePayload,
-    PerpetualOperation, Side, Transaction as PerpetualTransaction, BPS_DENOMINATOR,
+    PerpetualOperation, Side, Transaction as PerpetualTransaction,
 };
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::time::Duration;
@@ -37,7 +35,6 @@ const BOB: u64 = 101;
 const CAROL: u64 = 102;
 const COLLATERAL_ISSUER: u64 = 800;
 const PERPS_TRADER: u64 = 801;
-const PERPS_ORACLE_ADMIN: u64 = 802;
 const PERPS_ORACLE_WRITER: u64 = 803;
 
 fn key(seed: u64) -> PrivateKey {
@@ -482,43 +479,8 @@ fn oracle_updates_finalize_across_validators() {
             .await;
         network.start_all().await;
 
-        let admin = authority_key(700);
         let updater = authority_key(701);
-        let admin_id = Address::from(admin.public_key());
-        let updater_id = Address::from(updater.public_key());
         let submitter = network.submitter(0);
-        submitter
-            .submit(
-                OracleTransaction::sign(
-                    &admin,
-                    0,
-                    OracleOperation::ConfigureNamespace {
-                        namespace: oracle_namespace(),
-                        policy: NamespacePolicy {
-                            admin: admin_id.clone(),
-                            max_payload_size: 1024,
-                        },
-                    },
-                )
-                .into(),
-            )
-            .await
-            .expect("admit oracle configure");
-        submitter
-            .submit(
-                OracleTransaction::sign(
-                    &admin,
-                    1,
-                    OracleOperation::SetWriter {
-                        namespace: oracle_namespace(),
-                        writer: updater_id,
-                        enabled: true,
-                    },
-                )
-                .into(),
-            )
-            .await
-            .expect("admit oracle updater");
         submitter
             .submit(
                 OracleTransaction::sign(
@@ -574,15 +536,11 @@ fn perps_oracle_flow_finalizes_across_validators() {
 
         let issuer = key(COLLATERAL_ISSUER);
         let trader = key(PERPS_TRADER);
-        let oracle_admin = authority_key(PERPS_ORACLE_ADMIN);
         let oracle_writer = authority_key(PERPS_ORACLE_WRITER);
         let issuer_id = Address::from(issuer.public_key());
         let trader_id = Address::from(trader.public_key());
-        let oracle_admin_id = Address::from(oracle_admin.public_key());
-        let oracle_writer_id = Address::from(oracle_writer.public_key());
-        let collateral = usdc_coin();
-        let market = derive_market_id(btc_coin(), usd_coin(), collateral, 0);
-        let position = derive_position_id(&trader_id, &market, 0);
+        let market_id = derive_market_id(btc_coin(), usd_coin(), usdc_coin(), 0);
+        let position_id = derive_position_id(&trader_id, &market_id, 0);
         let submitter = network.submitter(0);
 
         submitter
@@ -598,48 +556,18 @@ fn perps_oracle_flow_finalizes_across_validators() {
                     &issuer,
                     1,
                     CoinOperation::Transfer {
-                        coin: collateral,
+                        coin: usdc_coin(),
                         from: issuer_id.clone(),
                         to: trader_id.clone(),
-                        amount: 10_000,
+                        amount: 100_000,
                     },
                 )
                 .into(),
             )
             .await
-            .expect("admit collateral transfer");
-        submitter
-            .submit(
-                OracleTransaction::sign(
-                    &oracle_admin,
-                    0,
-                    OracleOperation::ConfigureNamespace {
-                        namespace: perps_oracle_namespace(),
-                        policy: NamespacePolicy {
-                            admin: oracle_admin_id,
-                            max_payload_size: 1024,
-                        },
-                    },
-                )
-                .into(),
-            )
-            .await
-            .expect("admit perps oracle namespace");
-        submitter
-            .submit(
-                OracleTransaction::sign(
-                    &oracle_admin,
-                    1,
-                    OracleOperation::SetWriter {
-                        namespace: perps_oracle_namespace(),
-                        writer: oracle_writer_id,
-                        enabled: true,
-                    },
-                )
-                .into(),
-            )
-            .await
-            .expect("admit perps oracle writer");
+            .expect("admit trader collateral transfer");
+        network.run_until_nonces(&[(issuer_id, 2)]).await;
+
         submitter
             .submit(
                 OracleTransaction::sign(
@@ -649,9 +577,9 @@ fn perps_oracle_flow_finalizes_across_validators() {
                         namespace: perps_oracle_namespace(),
                         interval: IntervalKey::new(0),
                         payload: OraclePricePayload {
-                            market,
-                            price: 500_000_000,
-                            price_decimals: 4,
+                            market: market_id,
+                            price: 5_000_000,
+                            price_decimals: 2,
                             source_timestamp_ms: 0,
                         }
                         .encode()
@@ -663,9 +591,8 @@ fn perps_oracle_flow_finalizes_across_validators() {
                 .into(),
             )
             .await
-            .expect("admit initial perps price");
+            .expect("admit initial perps oracle record");
 
-        network.run_until_nonces(&[(issuer_id.clone(), 2)]).await;
         loop {
             let ledgers = network.oracle_ledgers().await;
             if ledgers.len() == VALIDATORS as usize {
@@ -699,13 +626,13 @@ fn perps_oracle_flow_finalizes_across_validators() {
                     PerpetualOperation::CreateMarket {
                         base_asset: btc_coin(),
                         quote_asset: usd_coin(),
-                        collateral_asset: collateral,
+                        collateral_asset: usdc_coin(),
                         oracle_namespace: perps_oracle_namespace(),
-                        oracle_interval_ms: 1_000_000_000,
-                        max_oracle_staleness_ms: 1_000_000_000,
+                        oracle_interval_ms: u64::MAX,
+                        max_oracle_staleness_ms: u64::MAX,
                         price_decimals: 2,
-                        max_leverage_bps: 10 * BPS_DENOMINATOR,
-                        maintenance_margin_bps: 500,
+                        max_leverage_bps: 50_000,
+                        maintenance_margin_bps: 1_000,
                         funding_interval_ms: 3_600_000,
                         max_funding_rate_bps: 100,
                     },
@@ -719,7 +646,7 @@ fn perps_oracle_flow_finalizes_across_validators() {
                 PerpetualTransaction::sign(
                     &trader,
                     1,
-                    PerpetualOperation::RefreshMarketFromOracle { market },
+                    PerpetualOperation::RefreshMarketFromOracle { market: market_id },
                 )
                 .into(),
             )
@@ -731,39 +658,37 @@ fn perps_oracle_flow_finalizes_across_validators() {
                     &trader,
                     2,
                     PerpetualOperation::OpenPosition {
-                        market,
+                        market: market_id,
                         side: Side::Long,
                         collateral: 1_000,
-                        leverage_bps: 5 * BPS_DENOMINATOR,
+                        leverage_bps: 50_000,
                     },
                 )
                 .into(),
             )
             .await
-            .expect("admit perps open position");
-
+            .expect("admit long position");
         network
             .run_until_perpetual_nonces(&[(trader_id.clone(), 3)])
             .await;
-        let ledger = network.ledgers().await.into_iter().next().expect("ledger");
-        assert_eq!(
-            ledger.balance(&trader_id, &collateral).await.unwrap(),
-            9_000
-        );
-        assert_eq!(
-            ledger
-                .balance(&collateral_escrow_account(), &collateral)
-                .await
-                .unwrap(),
-            1_000
-        );
-        let perps = network
-            .perpetual_ledgers()
-            .await
-            .into_iter()
-            .next()
-            .expect("perps ledger");
-        assert!(perps.position(&position).await.unwrap().is_some());
+
+        for ledger in network.perpetual_ledgers().await {
+            assert!(ledger.market(&market_id).await.unwrap().is_some());
+            assert!(ledger.position(&position_id).await.unwrap().is_some());
+        }
+        for ledger in network.ledgers().await {
+            assert_eq!(
+                ledger.balance(&trader_id, &usdc_coin()).await.unwrap(),
+                99_000
+            );
+            assert_eq!(
+                ledger
+                    .balance(&collateral_escrow_account(), &usdc_coin())
+                    .await
+                    .unwrap(),
+                1_000
+            );
+        }
 
         submitter
             .submit(
@@ -774,9 +699,9 @@ fn perps_oracle_flow_finalizes_across_validators() {
                         namespace: perps_oracle_namespace(),
                         interval: IntervalKey::new(0),
                         payload: OraclePricePayload {
-                            market,
-                            price: 400_000_000,
-                            price_decimals: 4,
+                            market: market_id,
+                            price: 2_500_000,
+                            price_decimals: 2,
                             source_timestamp_ms: 0,
                         }
                         .encode()
@@ -788,7 +713,8 @@ fn perps_oracle_flow_finalizes_across_validators() {
                 .into(),
             )
             .await
-            .expect("admit adverse perps price");
+            .expect("admit adverse perps oracle record");
+
         loop {
             let ledgers = network.oracle_ledgers().await;
             if ledgers.len() == VALIDATORS as usize {
@@ -819,42 +745,32 @@ fn perps_oracle_flow_finalizes_across_validators() {
                 PerpetualTransaction::sign(
                     &trader,
                     3,
-                    PerpetualOperation::RefreshMarketFromOracle { market },
+                    PerpetualOperation::RefreshMarketFromOracle { market: market_id },
                 )
                 .into(),
             )
             .await
-            .expect("admit adverse perps refresh");
+            .expect("admit adverse market refresh");
         submitter
             .submit(
-                PerpetualTransaction::sign(&trader, 4, PerpetualOperation::Liquidate { position })
-                    .into(),
+                PerpetualTransaction::sign(
+                    &trader,
+                    4,
+                    PerpetualOperation::Liquidate {
+                        position: position_id,
+                    },
+                )
+                .into(),
             )
             .await
-            .expect("admit perps liquidation");
-
+            .expect("admit liquidation");
         network
             .run_until_perpetual_nonces(&[(trader_id.clone(), 5)])
             .await;
-        let ledger = network.ledgers().await.into_iter().next().expect("ledger");
-        assert_eq!(
-            ledger.balance(&trader_id, &collateral).await.unwrap(),
-            9_000
-        );
-        assert_eq!(
-            ledger
-                .balance(&collateral_escrow_account(), &collateral)
-                .await
-                .unwrap(),
-            1_000
-        );
-        let perps = network
-            .perpetual_ledgers()
-            .await
-            .into_iter()
-            .next()
-            .expect("perps ledger");
-        assert!(perps.position(&position).await.unwrap().is_none());
+
+        for ledger in network.perpetual_ledgers().await {
+            assert!(ledger.position(&position_id).await.unwrap().is_none());
+        }
     });
 }
 

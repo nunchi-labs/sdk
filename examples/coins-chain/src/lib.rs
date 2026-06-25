@@ -11,6 +11,7 @@
 //! [`execution::NodeHandle`] exposes each node's transaction submitter and stateful database
 //! subscription so clients (and the integration tests in `tests/`) can drive and observe the chain.
 
+commonware_macros::stability_scope!(ALPHA {
 use commonware_consensus::types::Epoch;
 use std::num::NonZeroU64;
 
@@ -22,6 +23,9 @@ pub mod rpc;
 pub mod runtime;
 pub mod testnet;
 pub mod transaction;
+
+#[cfg(test)]
+mod tests;
 
 pub use nunchi_chain::{StateCommitment, MAX_TRANSACTIONS};
 pub use nunchi_dkg::{
@@ -49,6 +53,7 @@ pub mod channels {
     pub const BROADCAST: u64 = 3;
     pub const DKG: u64 = 4;
     pub const BACKFILL: u64 = 5;
+    pub const MEMPOOL: u64 = 6;
 }
 
 /// The consensus epoch. The demo chain never reconfigures, so the epoch is hardcoded to 0.
@@ -59,3 +64,4 @@ pub const EPOCH: Epoch = Epoch::zero();
 /// Production systems should use a much larger value, as DKG/reshare safety depends on
 /// synchrony during the epoch window.
 pub const BLOCKS_PER_EPOCH: NonZeroU64 = commonware_utils::NZU64!(200);
+});

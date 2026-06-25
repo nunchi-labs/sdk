@@ -1,15 +1,11 @@
-use crate::{
-    IntervalKey, NamespaceId, NamespacePolicy, MAX_PAYLOAD_SIZE, MAX_PROOF_SIZE, ORACLE_NAMESPACE,
-};
+use crate::{IntervalKey, NamespaceId, MAX_PAYLOAD_SIZE, MAX_PROOF_SIZE, ORACLE_NAMESPACE};
 use commonware_codec::{EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
-use nunchi_common::{Address, Operation as CommonOperation};
+use nunchi_common::Operation as CommonOperation;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OperationTag {
-    ConfigureNamespace = 0,
-    SetWriter = 1,
-    AppendRecord = 2,
+    AppendRecord = 0,
 }
 
 impl TryFrom<u8> for OperationTag {
@@ -17,9 +13,7 @@ impl TryFrom<u8> for OperationTag {
 
     fn try_from(tag: u8) -> Result<Self, Self::Error> {
         match tag {
-            0 => Ok(Self::ConfigureNamespace),
-            1 => Ok(Self::SetWriter),
-            2 => Ok(Self::AppendRecord),
+            0 => Ok(Self::AppendRecord),
             tag => Err(Error::InvalidEnum(tag)),
         }
     }
@@ -28,22 +22,6 @@ impl TryFrom<u8> for OperationTag {
 /// Oracle state-machine operation carried by a signed Nunchi transaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OracleOperation {
-    /// Create or update generic policy for a namespace.
-    ConfigureNamespace {
-        /// Namespace whose policy is being configured.
-        namespace: NamespaceId,
-        /// Namespace policy to store.
-        policy: NamespacePolicy,
-    },
-    /// Enable or disable a writer for one namespace.
-    SetWriter {
-        /// Namespace whose writer policy is changing.
-        namespace: NamespaceId,
-        /// Account being enabled or disabled.
-        writer: Address,
-        /// Whether the writer may append records.
-        enabled: bool,
-    },
     /// Append opaque data to one namespace and interval.
     AppendRecord {
         /// Namespace under which the payload is stored.
@@ -60,21 +38,6 @@ pub enum OracleOperation {
 impl Write for OracleOperation {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         match self {
-            Self::ConfigureNamespace { namespace, policy } => {
-                (OperationTag::ConfigureNamespace as u8).write(buf);
-                namespace.write(buf);
-                policy.write(buf);
-            }
-            Self::SetWriter {
-                namespace,
-                writer,
-                enabled,
-            } => {
-                (OperationTag::SetWriter as u8).write(buf);
-                namespace.write(buf);
-                writer.write(buf);
-                enabled.write(buf);
-            }
             Self::AppendRecord {
                 namespace,
                 interval,
@@ -96,15 +59,6 @@ impl Read for OracleOperation {
 
     fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         match OperationTag::try_from(u8::read(buf)?)? {
-            OperationTag::ConfigureNamespace => Ok(Self::ConfigureNamespace {
-                namespace: NamespaceId::read(buf)?,
-                policy: NamespacePolicy::read(buf)?,
-            }),
-            OperationTag::SetWriter => Ok(Self::SetWriter {
-                namespace: NamespaceId::read(buf)?,
-                writer: Address::read(buf)?,
-                enabled: bool::read(buf)?,
-            }),
             OperationTag::AppendRecord => Ok(Self::AppendRecord {
                 namespace: NamespaceId::read(buf)?,
                 interval: IntervalKey::read(buf)?,
@@ -118,14 +72,6 @@ impl Read for OracleOperation {
 impl EncodeSize for OracleOperation {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Self::ConfigureNamespace { namespace, policy } => {
-                namespace.encode_size() + policy.encode_size()
-            }
-            Self::SetWriter {
-                namespace,
-                writer,
-                enabled,
-            } => namespace.encode_size() + writer.encode_size() + enabled.encode_size(),
             Self::AppendRecord {
                 namespace,
                 interval,
