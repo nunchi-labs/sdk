@@ -1,19 +1,18 @@
 Business Source License
 =======================
 
-License text copyright (c) 2020 MariaDB Corporation Ab, All Rights Reserved.
 “Business Source License” is a trademark of MariaDB Corporation Ab.
 
 Parameters
 
-Licensor:             Nunchi Corp
-Licensed Works:       Azure-related code in Artillery. The Licensed Work is (c) 2024 Nunchi Corp
+Licensor:             Nunchi Ltd
+Licensed Works:       The Nunchi SDK source code in this repository. The Licensed Work is (c) 2026 Nunchi Ltd
 Additional Use Grant: You may make use of the Licensed Work strictly for evaluation and/or non-production use only. Your use does not include offering the Licensed Work to third parties on a hosted or embedded basis.
 Change Date:          Four years from the date the Licensed Work is published
 Change License:       MPL 2.0
 
 For information about commercial licensing arrangements for the Licensed Work,
-please contact info@nunchi.trade or.
+please contact info@nunchi.trade.
 
 Notice
 
