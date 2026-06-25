@@ -5,14 +5,17 @@ use nunchi_coins::{CoinOperation, Transaction as CoinTransaction};
 use nunchi_common::{Address, Operation};
 use nunchi_crypto::SignatureError;
 use nunchi_mempool::{NonceKey, PoolTransaction};
+use nunchi_oracle::{OracleOperation, Transaction as OracleTransaction};
 
 pub(crate) const TX_COIN: u8 = 0;
 pub(crate) const TX_AUTHORITY: u8 = 1;
+pub(crate) const TX_ORACLE: u8 = 2;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Transaction {
     Coin(Box<CoinTransaction>),
     Authority(Box<AuthorityTransaction>),
+    Oracle(Box<OracleTransaction>),
 }
 
 impl Transaction {
@@ -20,6 +23,7 @@ impl Transaction {
         match self {
             Self::Coin(tx) => tx.verify().is_ok(),
             Self::Authority(tx) => tx.verify().is_ok(),
+            Self::Oracle(tx) => tx.verify().is_ok(),
         }
     }
 
@@ -27,6 +31,7 @@ impl Transaction {
         match self {
             Self::Coin(tx) => tx.digest(),
             Self::Authority(tx) => tx.digest(),
+            Self::Oracle(tx) => tx.digest(),
         }
     }
 
@@ -34,6 +39,7 @@ impl Transaction {
         match self {
             Self::Coin(tx) => &tx.account_id,
             Self::Authority(tx) => &tx.account_id,
+            Self::Oracle(tx) => &tx.account_id,
         }
     }
 
@@ -45,6 +51,7 @@ impl Transaction {
         match self {
             Self::Coin(tx) => tx.payload.nonce,
             Self::Authority(tx) => tx.payload.nonce,
+            Self::Oracle(tx) => tx.payload.nonce,
         }
     }
 }
@@ -64,6 +71,7 @@ impl PoolTransaction for Transaction {
             Self::Authority(tx) => {
                 NonceKey::new(AuthorityOperation::NAMESPACE, tx.account_id.clone())
             }
+            Self::Oracle(tx) => NonceKey::new(OracleOperation::NAMESPACE, tx.account_id.clone()),
         }
     }
 
@@ -79,6 +87,7 @@ impl PoolTransaction for Transaction {
         match self {
             Self::Coin(tx) => tx.verify(),
             Self::Authority(tx) => tx.verify(),
+            Self::Oracle(tx) => tx.verify(),
         }
     }
 }
@@ -95,6 +104,12 @@ impl From<AuthorityTransaction> for Transaction {
     }
 }
 
+impl From<OracleTransaction> for Transaction {
+    fn from(tx: OracleTransaction) -> Self {
+        Self::Oracle(Box::new(tx))
+    }
+}
+
 impl Write for Transaction {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         match self {
@@ -104,6 +119,10 @@ impl Write for Transaction {
             }
             Self::Authority(tx) => {
                 TX_AUTHORITY.write(buf);
+                tx.write(buf);
+            }
+            Self::Oracle(tx) => {
+                TX_ORACLE.write(buf);
                 tx.write(buf);
             }
         }
@@ -117,6 +136,7 @@ impl Read for Transaction {
         match u8::read(buf)? {
             TX_COIN => Ok(Self::Coin(Box::new(CoinTransaction::read(buf)?))),
             TX_AUTHORITY => Ok(Self::Authority(Box::new(AuthorityTransaction::read(buf)?))),
+            TX_ORACLE => Ok(Self::Oracle(Box::new(OracleTransaction::read(buf)?))),
             tag => Err(Error::InvalidEnum(tag)),
         }
     }
@@ -127,6 +147,7 @@ impl EncodeSize for Transaction {
         1 + match self {
             Self::Coin(tx) => tx.encode_size(),
             Self::Authority(tx) => tx.encode_size(),
+            Self::Oracle(tx) => tx.encode_size(),
         }
     }
 }

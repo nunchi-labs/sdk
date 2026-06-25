@@ -30,6 +30,7 @@ use nunchi_coins_chain::{
 use nunchi_common::QmdbReader;
 use nunchi_dkg::{ContinueOnUpdate, PeerConfig};
 use nunchi_mempool::{MempoolHandle, PoolConfig};
+use nunchi_oracle::OracleLedger;
 use std::{
     collections::{HashMap, HashSet},
     time::Duration,
@@ -53,6 +54,7 @@ type Channel = (
 );
 type ReadLedger = Ledger<QmdbReader<deterministic::Context>>;
 type ReadAuthorityLedger = AuthorityLedger<QmdbReader<deterministic::Context>>;
+type ReadOracleLedger = OracleLedger<QmdbReader<deterministic::Context>>;
 
 #[derive(Clone)]
 pub(crate) struct ThresholdFixture {
@@ -377,6 +379,18 @@ impl TestNetwork<'_> {
             };
             let db = node.stateful.subscribe_databases().await;
             ledgers.push(AuthorityLedger::new(QmdbReader::new(db)));
+        }
+        ledgers
+    }
+
+    pub(crate) async fn oracle_ledgers(&self) -> Vec<ReadOracleLedger> {
+        let mut ledgers = Vec::new();
+        for participant in &self.participants {
+            let Some(node) = self.nodes.get(participant) else {
+                continue;
+            };
+            let db = node.stateful.subscribe_databases().await;
+            ledgers.push(OracleLedger::new(QmdbReader::new(db)));
         }
         ledgers
     }

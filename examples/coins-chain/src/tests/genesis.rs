@@ -8,6 +8,7 @@ use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
 use nunchi_authority::{AuthorityDB, AuthorityOperation, Transaction as AuthorityTransaction};
 use nunchi_coins::{Address, CoinDB, CoinSpec, TokenFactory, TokenName, TokenSymbol};
 use nunchi_crypto::PrivateKey;
+use nunchi_oracle::{IntervalKey, OracleGenesis, OracleLedger};
 
 use crate::genesis::*;
 
@@ -67,6 +68,7 @@ fn sample_genesis() -> ChainGenesis {
                 ],
             }],
         }),
+        oracle: Some(OracleGenesis {}),
     }
 }
 
@@ -279,5 +281,24 @@ fn coins_genesis_creates_token_and_initial_balances() {
         assert_eq!(ledger.balance(&issuer, &coin).await.unwrap(), 0);
         assert_eq!(ledger.balance(&alice, &coin).await.unwrap(), 400);
         assert_eq!(ledger.balance(&bob, &coin).await.unwrap(), 600);
+    });
+}
+
+#[test]
+fn oracle_genesis_applies_without_policy_state() {
+    deterministic::Runner::default().start(|context| async move {
+        let genesis = sample_genesis();
+        let empty = empty_commitment(context.child("empty"), "genesis-oracle-empty").await;
+        let mut state = QmdbState::init(context.child("state"), "genesis-oracle")
+            .await
+            .unwrap();
+        genesis.apply_to_state(&mut state, &empty).await.unwrap();
+
+        let oracle = OracleLedger::new(state);
+        let records = oracle
+            .records_by_writer(&external(201), IntervalKey::new(0), IntervalKey::new(0))
+            .await
+            .unwrap();
+        assert!(records.is_empty());
     });
 }

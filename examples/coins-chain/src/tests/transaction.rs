@@ -4,9 +4,10 @@ use nunchi_coins::{CoinOperation, Transaction as CoinTransaction};
 use nunchi_mempool::PoolTransaction;
 
 use commonware_codec::DecodeExt;
-use commonware_cryptography::{ed25519, Signer as _};
+use commonware_cryptography::{ed25519, Hasher, Sha256, Signer as _};
 use nunchi_authority::MultisigPolicy;
 use nunchi_coins::{CoinSpec, PrivateKey, TokenName, TokenSymbol};
+use nunchi_oracle::{IntervalKey, NamespaceId, OracleOperation, Transaction as OracleTransaction};
 
 use crate::transaction::*;
 
@@ -43,18 +44,36 @@ fn authority_transaction(seed: u64, nonce: u64) -> AuthorityTransaction {
     )
 }
 
+fn oracle_transaction(seed: u64, nonce: u64) -> OracleTransaction {
+    let signer = nunchi_crypto::PrivateKey::ed25519_from_seed(seed);
+    OracleTransaction::sign(
+        &signer,
+        nonce,
+        OracleOperation::AppendRecord {
+            namespace: NamespaceId(Sha256::hash(b"test-namespace")),
+            interval: IntervalKey::new(0),
+            payload: b"payload".to_vec(),
+            proof: None,
+        },
+    )
+}
+
 #[test]
 fn transaction_codec_uses_stable_tags() {
     let coin = Transaction::from(coin_transaction(1, 3));
     let authority = Transaction::from(authority_transaction(2, 4));
+    let oracle = Transaction::from(oracle_transaction(3, 5));
 
     let coin_encoded = coin.encode();
     let authority_encoded = authority.encode();
+    let oracle_encoded = oracle.encode();
 
     assert_eq!(coin_encoded[0], TX_COIN);
     assert_eq!(authority_encoded[0], TX_AUTHORITY);
+    assert_eq!(oracle_encoded[0], TX_ORACLE);
     assert_eq!(Transaction::decode(coin_encoded).unwrap(), coin);
     assert_eq!(Transaction::decode(authority_encoded).unwrap(), authority);
+    assert_eq!(Transaction::decode(oracle_encoded).unwrap(), oracle);
     assert!(Transaction::decode([99].as_slice()).is_err());
 }
 

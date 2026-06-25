@@ -5,6 +5,7 @@ use common::network::{
     ValidatorConfig,
 };
 use commonware_cryptography::Signer as _;
+use commonware_cryptography::{Hasher, Sha256};
 use commonware_macros::{select, test_traced};
 use commonware_p2p::simulated::Link;
 use commonware_runtime::{deterministic, Clock, Runner as _};
@@ -16,6 +17,7 @@ use nunchi_coins::{
     Address, CoinId, CoinOperation, CoinSpec, PrivateKey, TokenFactory, TokenName, TokenSymbol,
     Transaction,
 };
+use nunchi_oracle::{IntervalKey, NamespaceId, OracleOperation, Transaction as OracleTransaction};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::time::Duration;
 use tracing::info;
@@ -49,6 +51,10 @@ fn gold_spec() -> CoinSpec {
 /// factory derives it with nonce 0.
 fn gold_coin() -> CoinId {
     TokenFactory::derive_coin_id(&Address::from(key(ALICE).public_key()), 0, &gold_spec())
+}
+
+fn oracle_namespace() -> NamespaceId {
+    NamespaceId(Sha256::hash(b"coins-chain-integration-oracle-namespace"))
 }
 
 #[test_traced]
@@ -422,6 +428,61 @@ fn authority_registry_updates_onchain() {
             assert!(!epoch_4.dealers.contains(&added));
             assert!(epoch_5.players.contains(&added));
             assert!(epoch_5.dealers.contains(&added));
+        }
+    });
+}
+
+#[test_traced]
+fn oracle_updates_finalize_across_validators() {
+    let executor = deterministic::Runner::timed(Duration::from_secs(120));
+    executor.start(|mut context| async move {
+        let mut network = TestNetworkBuilder::new(VALIDATORS)
+            .build(&mut context)
+            .await;
+        network.start_all().await;
+
+        let updater = authority_key(701);
+        let submitter = network.submitter(0);
+        submitter
+            .submit(
+                OracleTransaction::sign(
+                    &updater,
+                    0,
+                    OracleOperation::AppendRecord {
+                        namespace: oracle_namespace(),
+                        interval: IntervalKey::new(3),
+                        payload: b"opaque-oracle-payload".to_vec(),
+                        proof: None,
+                    },
+                )
+                .into(),
+            )
+            .await
+            .expect("admit oracle update");
+
+        loop {
+            let ledgers = network.oracle_ledgers().await;
+            if ledgers.len() == VALIDATORS as usize {
+                let mut all_updated = true;
+                for ledger in ledgers {
+                    let records = ledger
+                        .records_by_namespace(
+                            &oracle_namespace(),
+                            IntervalKey::new(3),
+                            IntervalKey::new(3),
+                        )
+                        .await
+                        .unwrap();
+                    if records.len() != 1 || records[0].payload != b"opaque-oracle-payload" {
+                        all_updated = false;
+                        break;
+                    }
+                }
+                if all_updated {
+                    break;
+                }
+            }
+            network.context().sleep(Duration::from_secs(1)).await;
         }
     });
 }
