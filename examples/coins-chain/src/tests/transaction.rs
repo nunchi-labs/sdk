@@ -1,0 +1,70 @@
+use commonware_codec::Encode;
+use nunchi_authority::{AuthorityOperation, Transaction as AuthorityTransaction};
+use nunchi_coins::{CoinOperation, Transaction as CoinTransaction};
+use nunchi_mempool::PoolTransaction;
+
+use commonware_codec::DecodeExt;
+use commonware_cryptography::{ed25519, Signer as _};
+use nunchi_authority::MultisigPolicy;
+use nunchi_coins::{CoinSpec, PrivateKey, TokenName, TokenSymbol};
+
+use crate::transaction::*;
+
+fn coin_transaction(seed: u64, nonce: u64) -> CoinTransaction {
+    let signer = PrivateKey::ed25519_from_seed(seed);
+    CoinTransaction::sign(
+        &signer,
+        nonce,
+        CoinOperation::CreateToken {
+            spec: CoinSpec::new(
+                TokenSymbol::new("NCH").unwrap(),
+                TokenName::new("Nunchi").unwrap(),
+                9,
+                1_000,
+                None,
+            ),
+        },
+    )
+}
+
+fn authority_transaction(seed: u64, nonce: u64) -> AuthorityTransaction {
+    let owner = nunchi_crypto::PrivateKey::ed25519_from_seed(seed);
+    AuthorityTransaction::sign(
+        &owner,
+        nonce,
+        AuthorityOperation::Configure {
+            policy: MultisigPolicy {
+                owners: vec![owner.public_key()],
+                threshold: 1,
+            },
+            initial_validators: vec![ed25519::PrivateKey::from_seed(seed).public_key()],
+            epoch: 0,
+        },
+    )
+}
+
+#[test]
+fn transaction_codec_uses_stable_tags() {
+    let coin = Transaction::from(coin_transaction(1, 3));
+    let authority = Transaction::from(authority_transaction(2, 4));
+
+    let coin_encoded = coin.encode();
+    let authority_encoded = authority.encode();
+
+    assert_eq!(coin_encoded[0], TX_COIN);
+    assert_eq!(authority_encoded[0], TX_AUTHORITY);
+    assert_eq!(Transaction::decode(coin_encoded).unwrap(), coin);
+    assert_eq!(Transaction::decode(authority_encoded).unwrap(), authority);
+    assert!(Transaction::decode([99].as_slice()).is_err());
+}
+
+#[test]
+fn pool_transaction_forwards_to_inner_transaction() {
+    let inner = coin_transaction(3, 7);
+    let transaction = Transaction::from(inner.clone());
+
+    assert_eq!(transaction.digest(), inner.digest());
+    assert_eq!(transaction.account_id(), &inner.account_id);
+    assert_eq!(transaction.nonce(), inner.payload.nonce);
+    assert!(PoolTransaction::verify(&transaction).is_ok());
+}

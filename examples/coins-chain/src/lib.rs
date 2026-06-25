@@ -23,6 +23,9 @@ pub mod runtime;
 pub mod testnet;
 pub mod transaction;
 
+#[cfg(test)]
+mod tests;
+
 pub use nunchi_chain::{StateCommitment, MAX_TRANSACTIONS};
 pub use nunchi_dkg::{
     Activity, Context, EdScheme, EpochProvider, Finalization, Identity, Notarization, Provider,

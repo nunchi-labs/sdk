@@ -12,7 +12,6 @@ members = [
     "rpc",
     "mcp",
     "examples/bridge-chain",
-    "examples/template",
     "examples/coins-chain",
     "examples/custom-module",
 ]
@@ -33,7 +32,6 @@ nunchi-crypto = { version = "2026.5.0", path = "crypto" }
 nunchi-dkg = { version = "2026.5.0", path = "dkg" }
 nunchi-mempool = { version = "2026.5.0", path = "mempool" }
 nunchi-rpc = { version = "2026.5.0", path = "rpc" }
-nunchi-template = { version = "2026.5.0", path = "examples/template" }
 nunchi-coins-chain = { version = "2026.5.0", path = "examples/coins-chain" }
 nunchi-bridge-chain = { version = "2026.5.0", path = "examples/bridge-chain" }
 commonware-actor = "2026.5.0"
