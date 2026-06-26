@@ -117,7 +117,7 @@ pub enum Execution {
     /// Run on the runtime's shared executor.
     #[default]
     Shared,
-    /// Run on a dedicated runtime thread when supported.
+    /// With a large validator set, run on a dedicated runtime thread.
     Dedicated,
 }
 
