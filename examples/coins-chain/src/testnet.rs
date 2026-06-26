@@ -9,7 +9,7 @@ use crate::{
     channels,
     engine::{Config as EngineConfig, Engine},
     genesis::{ChainGenesis, GenesisError},
-    rpc, PublicKey, NAMESPACE,
+    indexer, rpc, PublicKey, NAMESPACE,
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_consensus::marshal;
@@ -109,6 +109,8 @@ pub struct NodeConfig {
     pub bootstrappers: Vec<BootstrapperConfig>,
     pub storage_dir: PathBuf,
     pub genesis_path: Option<PathBuf>,
+    #[serde(default)]
+    pub indexer_url: Option<String>,
     pub consensus: ConsensusConfig,
     pub networking: NetworkConfig,
     pub max_block_transactions: usize,
@@ -273,6 +275,7 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
             bootstrappers,
             storage_dir: storage_dir.clone(),
             genesis_path: None,
+            indexer_url: None,
             consensus: ConsensusConfig::default(),
             networking: NetworkConfig::default(),
             max_block_transactions: DEFAULT_MAX_BLOCK_TRANSACTIONS,
@@ -470,6 +473,7 @@ async fn start_node(
         max_block_transactions: config.max_block_transactions,
         pool_config: PoolConfig::default(),
         genesis: read_genesis(config.genesis_path.as_ref())?,
+        indexer: config.indexer_url.as_deref().map(indexer::HttpClient::new),
     };
 
     let resolver_config = marshal::resolver::p2p::Config {

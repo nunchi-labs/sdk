@@ -2803,6 +2803,7 @@ dependencies = [
  "nunchi-rpc",
  "rand 0.8.6",
  "rand_core 0.6.4",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

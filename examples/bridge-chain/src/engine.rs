@@ -370,6 +370,7 @@ where
                 application,
                 provider,
                 marshal: marshal_mailbox,
+                reporter: orchestrator::NoopReporter::default(),
                 strategy: config.strategy.clone(),
                 leader_timeout: config.leader_timeout,
                 certification_timeout: config.certification_timeout,
