@@ -112,18 +112,13 @@ pub struct Config<P> {
 }
 
 /// Execution mode for the DKG actor.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Execution {
     /// Run on the runtime's shared executor.
+    #[default]
     Shared,
     /// Run on a dedicated runtime thread when supported.
     Dedicated,
-}
-
-impl Default for Execution {
-    fn default() -> Self {
-        Self::Shared
-    }
 }
 
 pub struct Actor<E, P, B>
