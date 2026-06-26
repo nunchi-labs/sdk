@@ -128,8 +128,7 @@ fn peer_config(
     (peer_config, participants)
 }
 
-#[test_traced]
-fn recovered_storage_controls_dkg_mode_on_restart() {
+fn assert_recovered_storage_controls_dkg_mode_on_restart(execution: Execution, suffix: &str) {
     let executor = deterministic::Runner::seeded(8);
     executor.start(|mut context| async move {
         const RECOVERED_EPOCH: u64 = 5;
@@ -152,7 +151,7 @@ fn recovered_storage_controls_dkg_mode_on_restart() {
         )
         .expect("deal should succeed");
         let share = shares.get_value(&first_player).cloned();
-        let partition_prefix = format!("recovered_restart_{first_player}");
+        let partition_prefix = format!("recovered_restart_{suffix}_{first_player}");
 
         let mut storage = Storage::<_, MinSig, Ed25519PublicKey>::init(
             context.child("seed_storage"),
@@ -180,6 +179,7 @@ fn recovered_storage_controls_dkg_mode_on_restart() {
                 manager: NoopManager::<Ed25519PublicKey>::default(),
                 signer,
                 mailbox_size: NZUsize!(8),
+                execution,
                 partition_prefix,
                 peer_config: peer_config.clone(),
                 max_supported_mode: crate::MAX_SUPPORTED_MODE,
@@ -190,7 +190,7 @@ fn recovered_storage_controls_dkg_mode_on_restart() {
         let (sender, receiver) = inert_channel(&peer_config.participants);
         let (orchestrator_sender, mut orchestrator_receiver) =
             mailbox::new(context.child("orchestrator_mailbox"), NZUsize!(4));
-        actor.start(
+        let handle = actor.start(
             None,
             None,
             crate::orchestrator::Mailbox::new(orchestrator_sender),
@@ -204,5 +204,18 @@ fn recovered_storage_controls_dkg_mode_on_restart() {
         assert_eq!(transition.epoch, Epoch::new(RECOVERED_EPOCH));
         assert!(transition.poly.is_some());
         assert_eq!(transition.dealers, peer_config.dealers(RECOVERED_ROUND));
+
+        handle.abort();
+        let _ = handle.await;
     });
+}
+
+#[test_traced]
+fn default_execution_recovered_storage_controls_dkg_mode_on_restart() {
+    assert_recovered_storage_controls_dkg_mode_on_restart(Execution::default(), "shared");
+}
+
+#[test_traced]
+fn dedicated_execution_recovered_storage_controls_dkg_mode_on_restart() {
+    assert_recovered_storage_controls_dkg_mode_on_restart(Execution::Dedicated, "dedicated");
 }
