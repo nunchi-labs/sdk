@@ -1,10 +1,8 @@
-/// Define a chain-level transaction wrapper over module transaction types.
+/// Chain aggregate transaction wrapper over modules' tx types.
 ///
-/// This macro is intentionally narrow: it generates the enum wrapper, stable
-/// codec tags, forwarding helpers, and [`nunchi_mempool::PoolTransaction`]
-/// implementation for modules whose transaction type is a
-/// [`nunchi_common::Transaction`] alias. Runtime dispatch is left explicit
-/// because module application APIs can require different execution context.
+/// This macro generates an enum wrapper, stable codec tags, forwarding
+/// helpers, and [`nunchi_mempool::PoolTransaction`] implementation for
+/// modules whose transaction type is a [`nunchi_common::Transaction`] alias.
 #[macro_export]
 macro_rules! transaction_wrapper {
     (
