@@ -4,6 +4,7 @@ members = [
     "bridge",
     "common",
     "chain",
+    "chain-macros",
     "coins",
     "crypto",
     "dkg",
@@ -38,6 +39,7 @@ nunchi-coins = { version = "2026.5.0", path = "coins" }
 nunchi-authority = { version = "2026.5.0", path = "authority" }
 nunchi-bridge = { version = "2026.5.0", path = "bridge" }
 nunchi-chain = { version = "2026.5.0", path = "chain" }
+nunchi-chain-macros = { version = "2026.5.0", path = "chain-macros" }
 nunchi-common = { version = "2026.5.0", path = "common" }
 nunchi-crypto = { version = "2026.5.0", path = "crypto" }
 nunchi-dkg = { version = "2026.5.0", path = "dkg" }
@@ -74,6 +76,9 @@ toml = "0.9.12"
 governor = "0.10.2"
 prometheus-client = "0.24.0"
 async-trait = "0.1.89"
+proc-macro2 = "1.0.106"
+quote = "1.0.46"
+syn = "2.0.118"
 jsonrpsee = { version = "0.26.0", features = ["server", "macros"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"

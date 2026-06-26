@@ -2738,12 +2738,22 @@ dependencies = [
  "commonware-storage",
  "commonware-utils",
  "futures",
+ "nunchi-chain-macros",
  "nunchi-common",
  "nunchi-dkg",
  "nunchi-mempool",
  "rand 0.8.6",
  "thiserror 2.0.18",
  "tracing",
+]
+
+[[package]]
+name = "nunchi-chain-macros"
+version = "2026.6.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

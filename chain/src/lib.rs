@@ -21,4 +21,5 @@ pub use events::{
     TransactionEventContext, TransactionEvents,
 };
 pub use execution::{NodeHandle, StatefulQuery};
+pub use nunchi_chain_macros::TransactionWrapper;
 });

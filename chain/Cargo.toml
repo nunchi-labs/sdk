@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+nunchi-chain-macros = { workspace = true }
 nunchi-common = { workspace = true }
 nunchi-dkg = { workspace = true }
 nunchi-mempool = { workspace = true }

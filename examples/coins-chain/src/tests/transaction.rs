@@ -1,6 +1,7 @@
 use commonware_codec::Encode;
 use nunchi_authority::{AuthorityOperation, Transaction as AuthorityTransaction};
 use nunchi_coins::{CoinOperation, Transaction as CoinTransaction};
+use nunchi_common::Operation;
 use nunchi_mempool::PoolTransaction;
 
 use commonware_codec::DecodeExt;
@@ -68,9 +69,9 @@ fn transaction_codec_uses_stable_tags() {
     let authority_encoded = authority.encode();
     let oracle_encoded = oracle.encode();
 
-    assert_eq!(coin_encoded[0], TX_COIN);
-    assert_eq!(authority_encoded[0], TX_AUTHORITY);
-    assert_eq!(oracle_encoded[0], TX_ORACLE);
+    assert_eq!(coin_encoded[0], 0);
+    assert_eq!(authority_encoded[0], 1);
+    assert_eq!(oracle_encoded[0], 2);
     assert_eq!(Transaction::decode(coin_encoded).unwrap(), coin);
     assert_eq!(Transaction::decode(authority_encoded).unwrap(), authority);
     assert_eq!(Transaction::decode(oracle_encoded).unwrap(), oracle);
@@ -86,4 +87,33 @@ fn pool_transaction_forwards_to_inner_transaction() {
     assert_eq!(transaction.account_id(), &inner.account_id);
     assert_eq!(transaction.nonce(), inner.payload.nonce);
     assert!(PoolTransaction::verify(&transaction).is_ok());
+}
+
+#[test]
+fn pool_transaction_nonce_key_uses_operation_namespace() {
+    let coin = Transaction::from(coin_transaction(1, 0));
+    let authority = Transaction::from(authority_transaction(1, 0));
+    let oracle = Transaction::from(oracle_transaction(1, 0));
+
+    assert_eq!(
+        PoolTransaction::nonce_key(&coin).namespace(),
+        CoinOperation::NAMESPACE
+    );
+    assert_eq!(
+        PoolTransaction::nonce_key(&authority).namespace(),
+        AuthorityOperation::NAMESPACE
+    );
+    assert_eq!(
+        PoolTransaction::nonce_key(&oracle).namespace(),
+        OracleOperation::NAMESPACE
+    );
+
+    assert_ne!(
+        PoolTransaction::nonce_key(&coin),
+        PoolTransaction::nonce_key(&authority)
+    );
+    assert_ne!(
+        PoolTransaction::nonce_key(&coin),
+        PoolTransaction::nonce_key(&oracle)
+    );
 }
