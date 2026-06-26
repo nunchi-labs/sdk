@@ -6,7 +6,7 @@ use crate::{
     CoinSpec, Ledger, LedgerError, Transaction,
 };
 use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
-use nunchi_common::QmdbState;
+use nunchi_common::{NoopEventSink, QmdbState};
 use nunchi_crypto::SignatureError;
 
 async fn ledger(context: deterministic::Context) -> Ledger<QmdbState<deterministic::Context>> {
@@ -14,6 +14,14 @@ async fn ledger(context: deterministic::Context) -> Ledger<QmdbState<determinist
         .await
         .expect("init state db");
     Ledger::new(db)
+}
+
+async fn apply_transaction(
+    ledger: &mut Ledger<QmdbState<deterministic::Context>>,
+    tx: &Transaction,
+) -> Result<(), LedgerError> {
+    let mut events = NoopEventSink;
+    ledger.apply_transaction(tx, &mut events).await
 }
 
 fn spec(supply: u128, max: Option<u128>) -> Result<CoinSpec, TokenError> {
@@ -91,7 +99,7 @@ fn mint_respects_max_supply() {
                 amount: 200,
             },
         );
-        ledger.apply_transaction(&mint).await.expect("mint to cap");
+        apply_transaction(&mut ledger, &mint).await.expect("mint to cap");
         assert_eq!(ledger.balance(&bob, &coin).await.unwrap(), 200);
         assert_eq!(
             ledger.token(&coin).await.unwrap().unwrap().total_supply,
@@ -107,7 +115,7 @@ fn mint_respects_max_supply() {
                 amount: 1,
             },
         );
-        let err = ledger.apply_transaction(&mint).await.unwrap_err();
+        let err = apply_transaction(&mut ledger, &mint).await.unwrap_err();
         assert_eq!(
             err,
             LedgerError::MaxSupplyExceeded {
@@ -142,7 +150,7 @@ fn transfer_via_signed_transaction_moves_balance_and_bumps_nonce() {
                 amount: 250,
             },
         );
-        ledger.apply_transaction(&tx).await.expect("apply transfer");
+        apply_transaction(&mut ledger, &tx).await.expect("apply transfer");
 
         assert_eq!(ledger.balance(&alice, &coin).await.unwrap(), 750);
         assert_eq!(ledger.balance(&bob, &coin).await.unwrap(), 250);
@@ -174,7 +182,7 @@ fn rejects_transaction_with_wrong_nonce() {
                 amount: 1,
             },
         );
-        let err = ledger.apply_transaction(&tx).await.unwrap_err();
+        let err = apply_transaction(&mut ledger, &tx).await.unwrap_err();
         assert!(matches!(
             err,
             LedgerError::NonceMismatch {
@@ -217,7 +225,7 @@ fn rejects_transaction_with_bad_signature() {
             amount: 1,
         };
 
-        let err = ledger.apply_transaction(&tx).await.unwrap_err();
+        let err = apply_transaction(&mut ledger, &tx).await.unwrap_err();
         assert_eq!(
             err,
             LedgerError::BadSignature(SignatureError::InvalidSignature)
@@ -287,8 +295,7 @@ fn multisig_transaction_moves_balance_and_bumps_account_nonce_once() {
                 amount: 250,
             },
         );
-        ledger
-            .apply_transaction(&tx)
+        apply_transaction(&mut ledger, &tx)
             .await
             .expect("apply multisig transfer");
 
@@ -331,7 +338,7 @@ fn rejects_multisig_transaction_below_threshold() {
         );
 
         assert_eq!(
-            ledger.apply_transaction(&tx).await.unwrap_err(),
+            apply_transaction(&mut ledger, &tx).await.unwrap_err(),
             LedgerError::BadSignature(SignatureError::InvalidSignature)
         );
     });
@@ -359,7 +366,7 @@ fn rejects_unregistered_multisig_policy() {
         );
 
         assert_eq!(
-            ledger.apply_transaction(&tx).await.unwrap_err(),
+            apply_transaction(&mut ledger, &tx).await.unwrap_err(),
             LedgerError::UnknownAccountPolicy(Box::new(alice))
         );
     });
@@ -411,8 +418,7 @@ fn register_account_policy_operation_initializes_multisig_on_chain() {
                 policy: policy.clone(),
             },
         );
-        ledger
-            .apply_transaction(&tx)
+        apply_transaction(&mut ledger, &tx)
             .await
             .expect("register policy");
 
@@ -439,8 +445,7 @@ fn register_account_policy_operation_initializes_multisig_on_chain() {
             },
         );
 
-        ledger
-            .apply_transaction(&tx)
+        apply_transaction(&mut ledger, &tx)
             .await
             .expect("apply multisig transfer");
     });
@@ -468,7 +473,7 @@ fn register_account_policy_operation_rejects_external_registration() {
         );
 
         assert_eq!(
-            ledger.apply_transaction(&tx).await,
+            apply_transaction(&mut ledger, &tx).await,
             Err(LedgerError::Unauthorized)
         );
     });
@@ -500,7 +505,7 @@ fn register_account_policy_operation_cannot_hijack_external_account() {
         );
 
         assert_eq!(
-            ledger.apply_transaction(&tx).await,
+            apply_transaction(&mut ledger, &tx).await,
             Err(LedgerError::AccountPolicyMismatch(Box::new(alice.clone())))
         );
         assert_eq!(
@@ -535,7 +540,7 @@ fn register_account_policy_operation_rejects_policy_witness_mismatch() {
         );
 
         assert_eq!(
-            ledger.apply_transaction(&tx).await,
+            apply_transaction(&mut ledger, &tx).await,
             Err(LedgerError::AccountPolicyMismatch(Box::new(alice)))
         );
     });
@@ -575,7 +580,7 @@ fn rejects_cross_account_multisig_replay() {
         tx.account_id = account_b;
 
         assert_eq!(
-            ledger.apply_transaction(&tx).await.unwrap_err(),
+            apply_transaction(&mut ledger, &tx).await.unwrap_err(),
             LedgerError::BadSignature(SignatureError::InvalidSignature)
         );
     });
