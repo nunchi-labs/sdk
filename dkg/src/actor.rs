@@ -103,11 +103,27 @@ pub struct Config<P> {
     pub manager: P,
     pub signer: ed25519::PrivateKey,
     pub mailbox_size: NonZeroUsize,
+    pub execution: Execution,
     pub partition_prefix: String,
     pub peer_config: PeerConfig<ed25519::PublicKey>,
     pub max_supported_mode: ModeVersion,
     pub namespace: Vec<u8>,
     pub epoch_length: NonZeroU64,
+}
+
+/// Execution mode for the DKG actor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Execution {
+    /// Run on the runtime's shared executor.
+    Shared,
+    /// Run on a dedicated runtime thread when supported.
+    Dedicated,
+}
+
+impl Default for Execution {
+    fn default() -> Self {
+        Self::Shared
+    }
 }
 
 pub struct Actor<E, P, B>
@@ -120,6 +136,7 @@ where
     manager: P,
     mailbox: ActorReceiver<MailboxMessage<B>>,
     signer: ed25519::PrivateKey,
+    execution: Execution,
     peer_config: PeerConfig<ed25519::PublicKey>,
     partition_prefix: String,
     max_supported_mode: ModeVersion,
@@ -166,6 +183,7 @@ where
                 manager: config.manager,
                 mailbox,
                 signer: config.signer,
+                execution: config.execution,
                 peer_config: config.peer_config,
                 partition_prefix: config.partition_prefix,
                 max_supported_mode: config.max_supported_mode,
@@ -195,13 +213,19 @@ where
         ),
         callback: Box<dyn UpdateCallBack<MinSig, ed25519::PublicKey>>,
     ) -> Handle<()> {
-        // NOTE: In a production setting with a large validator set, the implementor may want
-        // to choose a dedicated thread for the DKG actor. This actor can perform CPU-intensive
-        // cryptographic operations.
-        spawn_cell!(
-            self.context,
-            self.run(output, share, orchestrator, dkg, callback)
-        )
+        match self.execution {
+            Execution::Shared => spawn_cell!(
+                self.context,
+                self.run(output, share, orchestrator, dkg, callback)
+            ),
+            Execution::Dedicated => {
+                let context = self.context.take();
+                context.dedicated().spawn(move |context| {
+                    self.context.restore(context);
+                    self.run(output, share, orchestrator, dkg, callback)
+                })
+            }
+        }
     }
 
     async fn run(
