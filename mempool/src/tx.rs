@@ -74,7 +74,9 @@ impl<Op: Operation + Clone + Send + 'static> PoolTransaction for Transaction<Op>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
+    use commonware_codec::{
+        DecodeExt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
+    };
     use nunchi_common::TransactionPayload;
     use nunchi_crypto::PrivateKey;
 
@@ -175,5 +177,14 @@ mod tests {
         let mut tx = signed_tx(42, 3);
         tx.payload.operation = TestOp(8);
         assert!(PoolTransaction::verify(&tx).is_err());
+    }
+
+    #[test]
+    fn transaction_round_trips_through_codec() {
+        let tx = signed_tx(42, 3);
+        assert_eq!(
+            Transaction::<TestOp>::decode(tx.encode().as_ref()).unwrap(),
+            tx
+        );
     }
 }
