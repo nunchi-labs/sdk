@@ -1,4 +1,4 @@
-use crate::testing::{tx, TestTx};
+use crate::testing::{digest, tx, TestTx};
 use crate::{AdmissionError, Mempool, PoolConfig, TxStatus};
 use commonware_cryptography::{ed25519, Signer};
 use commonware_p2p::simulated::{self, Link, Network};
@@ -13,16 +13,17 @@ fn submit_pending_finalize_status_roundtrip() {
         let (mempool, handle) = Mempool::new(PoolConfig::default());
         mempool.start(context);
 
-        let digest = handle.submit(tx(1, 0, 10)).await.unwrap();
-        assert_eq!(digest, 10);
-        assert_eq!(handle.status(10).await, Some(TxStatus::Pending));
+        let expected = digest(10);
+        let actual = handle.submit(tx(1, 0, 10)).await.unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(handle.status(expected).await, Some(TxStatus::Pending));
 
         let pending = handle.pending(10).await;
         assert_eq!(pending.len(), 1);
 
-        handle.finalized(vec![10], vec![(1, 1)], 5);
+        handle.finalized(vec![expected], vec![(1, 1)], 5);
         assert_eq!(
-            handle.status(10).await,
+            handle.status(expected).await,
             Some(TxStatus::Finalized { height: 5 })
         );
         assert!(handle.pending(10).await.is_empty());
@@ -48,7 +49,7 @@ fn status_unknown_digest_is_none() {
     deterministic::Runner::default().start(|context| async move {
         let (mempool, handle) = Mempool::<crate::testing::TestTx>::new(PoolConfig::default());
         mempool.start(context);
-        assert_eq!(handle.status(404).await, None);
+        assert_eq!(handle.status(digest(404)).await, None);
     });
 }
 
@@ -98,11 +99,12 @@ fn p2p_gossips_submitted_transactions() {
         mempool_b.start_p2p(context.child("mempool_b"), p2p_b);
         context.sleep(Duration::from_millis(1)).await;
 
-        let digest = handle_a.submit(tx(1, 0, 10)).await.unwrap();
-        assert_eq!(digest, 10);
+        let expected = digest(10);
+        let actual = handle_a.submit(tx(1, 0, 10)).await.unwrap();
+        assert_eq!(actual, expected);
 
         for _ in 0..100 {
-            if handle_b.status(10).await == Some(TxStatus::Pending) {
+            if handle_b.status(expected).await == Some(TxStatus::Pending) {
                 return;
             }
             context.sleep(Duration::from_millis(5)).await;
