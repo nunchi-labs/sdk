@@ -4,10 +4,10 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  examples/coins-chain/deploy/deploy-hosts.sh <testnet-dir> <ssh-host>...
+  examples/coins-chain/deploy/deploy-hosts.sh <image-tar> <testnet-dir> <ssh-host>...
 
 Example:
-  cargo run -p narae -- generate coins-chain \
+  cargo run -p xtask -- generate coins-chain \
     --validators 4 \
     --out testnet/deploy \
     --bind-ip 0.0.0.0 \
@@ -18,31 +18,32 @@ Example:
     --storage-dir /var/lib/nunchi/coins-chain
 
   examples/coins-chain/deploy/deploy-hosts.sh \
+    /tmp/nunchi-coins-chain/coins-chain-node.tar \
     testnet/deploy \
     root@203.0.113.10 root@203.0.113.11 root@203.0.113.12 root@203.0.113.13
 EOF
 }
 
-if [[ $# -lt 2 ]]; then
+if [[ $# -lt 3 ]]; then
   usage
   exit 2
 fi
 
-testnet_dir=$1
-shift
+image_tar=$1
+testnet_dir=$2
+shift 2
 hosts=("$@")
 repo_root=$(git rev-parse --show-toplevel)
 image=${COINS_CHAIN_IMAGE:-nunchi-coins-chain:latest}
 remote_dir=${COINS_CHAIN_REMOTE_DIR:-/opt/nunchi/coins-chain}
-image_tar=$(mktemp "${TMPDIR:-/tmp}/coins-chain-image.XXXXXX.tar")
-
-cleanup() {
-  rm -f "$image_tar"
-}
-trap cleanup EXIT
 
 if [[ ! -d "$testnet_dir" ]]; then
   echo "testnet directory not found: $testnet_dir" >&2
+  exit 1
+fi
+
+if [[ ! -f "$image_tar" ]]; then
+  echo "image tar not found: $image_tar" >&2
   exit 1
 fi
 
@@ -51,12 +52,6 @@ if [[ "${#hosts[@]}" -ne "$validator_count" ]]; then
   echo "expected $validator_count ssh hosts, got ${#hosts[@]}" >&2
   exit 1
 fi
-
-echo "building $image"
-docker build -t "$image" -f "$repo_root/examples/coins-chain/Dockerfile" "$repo_root"
-
-echo "saving $image"
-docker save "$image" -o "$image_tar"
 
 for index in "${!hosts[@]}"; do
   host=${hosts[$index]}
@@ -75,7 +70,7 @@ for index in "${!hosts[@]}"; do
   fi
 
   echo "deploying validator-$index to $host"
-  ssh "$host" "mkdir -p '$remote_dir' '$remote_dir/data'"
+  ssh "$host" "mkdir -p '$remote_dir' '$remote_dir/data' && chown -R 10001:10001 '$remote_dir/data'"
   scp "$image_tar" "$host:$remote_dir/image.tar"
   scp "$repo_root/examples/coins-chain/deploy/compose.yaml" "$host:$remote_dir/compose.yaml"
   scp "$config" "$host:$remote_dir/validator.toml"

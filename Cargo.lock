@@ -2536,6 +2536,7 @@ dependencies = [
  "serde",
  "thiserror 2.0.18",
  "toml",
+ "xtask",
 ]
 
 [[package]]
@@ -5400,6 +5401,14 @@ dependencies = [
  "rand_core 0.6.4",
  "serde",
  "zeroize",
+]
+
+[[package]]
+name = "xtask"
+version = "2026.6.0"
+dependencies = [
+ "clap",
+ "nunchi-coins-chain",
 ]
 
 [[package]]
