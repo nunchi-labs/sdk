@@ -14,6 +14,12 @@
   <a href="https://x.com/nunchi"><strong>X</strong></a>
 </p>
 
+<p align="center">
+  <a href="https://app.codecov.io/gh/nunchi-labs/sdk">
+    <img src="https://codecov.io/gh/nunchi-labs/sdk/graph/badge.svg" alt="Codecov" />
+  </a>
+</p>
+
 ---
 
 
