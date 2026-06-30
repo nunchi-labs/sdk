@@ -1,7 +1,7 @@
 use crate::error::{AdmissionError, DropReason};
 use crate::pool::Pool;
 use crate::status::TxStatus;
-use crate::testing::{tx, TestTx};
+use crate::testing::{digest, tx, TestTx};
 use crate::PoolConfig;
 
 fn pool(config: PoolConfig) -> Pool<TestTx> {
@@ -40,7 +40,7 @@ fn rejects_invalid_signature() {
         pool.admit(bad),
         Err(AdmissionError::InvalidSignature(_))
     ));
-    assert_eq!(pool.status_of(&10), None);
+    assert_eq!(pool.status_of(&digest(10)), None);
 }
 
 #[test]
@@ -83,12 +83,12 @@ fn same_nonce_resubmission_replaces() {
     let ids: Vec<u64> = pool.pending(10).iter().map(|t| t.id).collect();
     assert_eq!(ids, vec![99]);
     assert_eq!(
-        pool.status_of(&10),
+        pool.status_of(&digest(10)),
         Some(TxStatus::Dropped {
             reason: DropReason::Replaced
         })
     );
-    assert_eq!(pool.status_of(&99), Some(TxStatus::Pending));
+    assert_eq!(pool.status_of(&digest(99)), Some(TxStatus::Pending));
 }
 
 #[test]
@@ -126,7 +126,7 @@ fn evicts_highest_nonce_of_largest_queue_when_full() {
     pool.admit(tx(2, 0, 20)).unwrap();
     pool.admit(tx(3, 0, 30)).unwrap();
     assert_eq!(
-        pool.status_of(&12),
+        pool.status_of(&digest(12)),
         Some(TxStatus::Dropped {
             reason: DropReason::Evicted
         })
@@ -145,7 +145,7 @@ fn refuses_admission_that_would_be_next_victim() {
     assert_eq!(pool.admit(tx(1, 2, 12)), Err(AdmissionError::PoolFull));
     pool.admit(tx(3, 0, 30)).unwrap();
     assert_eq!(
-        pool.status_of(&11),
+        pool.status_of(&digest(11)),
         Some(TxStatus::Dropped {
             reason: DropReason::Evicted
         })
@@ -158,15 +158,18 @@ fn finalize_marks_included_and_prunes_stale() {
     pool.admit(tx(1, 0, 10)).unwrap();
     pool.admit(tx(1, 1, 11)).unwrap();
     pool.admit(tx(1, 2, 12)).unwrap();
-    pool.finalize(vec![10], vec![(1, 2)], 7);
-    assert_eq!(pool.status_of(&10), Some(TxStatus::Finalized { height: 7 }));
+    pool.finalize(vec![digest(10)], vec![(1, 2)], 7);
     assert_eq!(
-        pool.status_of(&11),
+        pool.status_of(&digest(10)),
+        Some(TxStatus::Finalized { height: 7 })
+    );
+    assert_eq!(
+        pool.status_of(&digest(11)),
         Some(TxStatus::Dropped {
             reason: DropReason::StaleNonce
         })
     );
-    assert_eq!(pool.status_of(&12), Some(TxStatus::Pending));
+    assert_eq!(pool.status_of(&digest(12)), Some(TxStatus::Pending));
     let ids: Vec<u64> = pool.pending(10).iter().map(|t| t.id).collect();
     assert_eq!(ids, vec![12]);
 }
@@ -174,8 +177,11 @@ fn finalize_marks_included_and_prunes_stale() {
 #[test]
 fn finalize_records_unpooled_digests() {
     let mut pool = pool(PoolConfig::default());
-    pool.finalize(vec![42], vec![], 3);
-    assert_eq!(pool.status_of(&42), Some(TxStatus::Finalized { height: 3 }));
+    pool.finalize(vec![digest(42)], vec![], 3);
+    assert_eq!(
+        pool.status_of(&digest(42)),
+        Some(TxStatus::Finalized { height: 3 })
+    );
 }
 
 #[test]
@@ -183,10 +189,10 @@ fn ttl_expires_unincluded_transactions() {
     let mut pool = pool(small_config());
     pool.admit(tx(1, 5, 15)).unwrap();
     pool.finalize(vec![], vec![], 10);
-    assert_eq!(pool.status_of(&15), Some(TxStatus::Pending));
+    assert_eq!(pool.status_of(&digest(15)), Some(TxStatus::Pending));
     pool.finalize(vec![], vec![], 11);
     assert_eq!(
-        pool.status_of(&15),
+        pool.status_of(&digest(15)),
         Some(TxStatus::Dropped {
             reason: DropReason::Expired
         })
@@ -200,10 +206,10 @@ fn ttl_is_measured_from_admission_height() {
     pool.finalize(vec![], vec![], 100);
     pool.admit(tx(1, 5, 15)).unwrap();
     pool.finalize(vec![], vec![], 110);
-    assert_eq!(pool.status_of(&15), Some(TxStatus::Pending));
+    assert_eq!(pool.status_of(&digest(15)), Some(TxStatus::Pending));
     pool.finalize(vec![], vec![], 111);
     assert_eq!(
-        pool.status_of(&15),
+        pool.status_of(&digest(15)),
         Some(TxStatus::Dropped {
             reason: DropReason::Expired
         })

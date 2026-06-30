@@ -2,6 +2,7 @@ use crate::config::PoolConfig;
 use crate::error::{AdmissionError, DropReason};
 use crate::status::{StatusCache, TxStatus};
 use crate::tx::PoolTransaction;
+use commonware_cryptography::sha256::Digest;
 use std::collections::{BTreeMap, HashMap};
 
 struct Entry<T> {
@@ -15,13 +16,13 @@ pub(crate) struct Pool<T: PoolTransaction> {
     /// Per-lane pending transactions, ordered by nonce.
     queues: BTreeMap<T::NonceKey, BTreeMap<u64, Entry<T>>>,
     /// Digest -> queue position, for O(1) dedup and removal.
-    index: HashMap<T::Digest, (T::NonceKey, u64)>,
+    index: HashMap<Digest, (T::NonceKey, u64)>,
     /// Snapshot of committed lane nonces, fed exclusively by finalization.
     committed_nonces: HashMap<T::NonceKey, u64>,
     /// Highest finalized height reported so far.
     last_height: u64,
     total_count: usize,
-    status: StatusCache<T::Digest>,
+    status: StatusCache<Digest>,
     config: PoolConfig,
 }
 
@@ -39,7 +40,7 @@ impl<T: PoolTransaction> Pool<T> {
     }
 
     /// Admit a transaction, returning its digest or the reason it was refused.
-    pub fn admit(&mut self, tx: T) -> Result<T::Digest, AdmissionError> {
+    pub fn admit(&mut self, tx: T) -> Result<Digest, AdmissionError> {
         if let Err(err) = tx.verify() {
             return Err(AdmissionError::InvalidSignature(err.to_string()));
         }
@@ -131,7 +132,7 @@ impl<T: PoolTransaction> Pool<T> {
     /// committed nonces, and expire transactions older than the TTL.
     pub fn finalize(
         &mut self,
-        digests: Vec<T::Digest>,
+        digests: Vec<Digest>,
         lane_nonces: Vec<(T::NonceKey, u64)>,
         height: u64,
     ) {
@@ -186,7 +187,7 @@ impl<T: PoolTransaction> Pool<T> {
         }
     }
 
-    pub fn status_of(&self, digest: &T::Digest) -> Option<TxStatus> {
+    pub fn status_of(&self, digest: &Digest) -> Option<TxStatus> {
         self.status.get(digest)
     }
 

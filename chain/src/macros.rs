@@ -71,11 +71,10 @@ macro_rules! transaction_wrapper {
         }
 
         impl ::nunchi_mempool::PoolTransaction for $name {
-            type Digest = ::commonware_cryptography::sha256::Digest;
             type NonceKey = ::nunchi_mempool::NonceKey;
             type VerifyError = ::nunchi_crypto::SignatureError;
 
-            fn digest(&self) -> Self::Digest {
+            fn digest(&self) -> ::commonware_cryptography::sha256::Digest {
                 Self::digest(self)
             }
 

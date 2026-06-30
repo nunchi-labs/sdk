@@ -4,7 +4,7 @@ use crate::pool::Pool;
 use crate::status::TxStatus;
 use crate::tx::PoolTransaction;
 use commonware_codec::{Encode, Read};
-use commonware_cryptography::PublicKey;
+use commonware_cryptography::{sha256::Digest, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
@@ -15,19 +15,19 @@ use tracing::{debug, warn};
 enum Message<T: PoolTransaction> {
     Submit {
         tx: T,
-        responder: oneshot::Sender<Result<T::Digest, AdmissionError>>,
+        responder: oneshot::Sender<Result<Digest, AdmissionError>>,
     },
     Pending {
         limit: usize,
         responder: oneshot::Sender<Vec<T>>,
     },
     Finalized {
-        digests: Vec<T::Digest>,
+        digests: Vec<Digest>,
         lane_nonces: Vec<(T::NonceKey, u64)>,
         height: u64,
     },
     Status {
-        digest: T::Digest,
+        digest: Digest,
         responder: oneshot::Sender<Option<TxStatus>>,
     },
 }
@@ -48,7 +48,7 @@ impl<T: PoolTransaction> Clone for MempoolHandle<T> {
 impl<T: PoolTransaction> MempoolHandle<T> {
     /// Submit a transaction for admission, returning its digest on success or
     /// the reason it was refused.
-    pub async fn submit(&self, tx: T) -> Result<T::Digest, AdmissionError> {
+    pub async fn submit(&self, tx: T) -> Result<Digest, AdmissionError> {
         let (responder, receiver) = oneshot::channel();
         let mut sender = self.sender.clone();
         if sender
@@ -83,7 +83,7 @@ impl<T: PoolTransaction> MempoolHandle<T> {
     /// gate and are pruned then).
     pub fn finalized(
         &self,
-        digests: Vec<T::Digest>,
+        digests: Vec<Digest>,
         lane_nonces: Vec<(T::NonceKey, u64)>,
         height: u64,
     ) {
@@ -106,7 +106,7 @@ impl<T: PoolTransaction> MempoolHandle<T> {
     /// Status of a transaction the pool has seen. In-memory only: history is
     /// lost on restart, and old entries are evicted once the status cache is
     /// at capacity.
-    pub async fn status(&self, digest: T::Digest) -> Option<TxStatus> {
+    pub async fn status(&self, digest: Digest) -> Option<TxStatus> {
         let (responder, receiver) = oneshot::channel();
         let mut sender = self.sender.clone();
         if sender
