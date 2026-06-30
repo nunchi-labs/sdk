@@ -1,6 +1,9 @@
 FROM rust:1-bookworm AS builder
 
 WORKDIR /workspace
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends mold \
+    && rm -rf /var/lib/apt/lists/*
 COPY . .
 RUN cargo build --release \
     -p nunchi-coins-chain --bin coins-chain-node \

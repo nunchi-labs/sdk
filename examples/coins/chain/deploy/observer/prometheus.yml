@@ -1,0 +1,65 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: coins-chain-validators
+    static_configs:
+      - targets:
+          - validator-0-private-ip:9090
+        labels:
+          chain: coins-chain
+          deployer_name: validator-0
+          deployer_ip: validator-0-private-ip
+          deployer_region: validator-region
+      - targets:
+          - validator-1-private-ip:9091
+        labels:
+          chain: coins-chain
+          deployer_name: validator-1
+          deployer_ip: validator-1-private-ip
+          deployer_region: validator-region
+      - targets:
+          - validator-2-private-ip:9092
+        labels:
+          chain: coins-chain
+          deployer_name: validator-2
+          deployer_ip: validator-2-private-ip
+          deployer_region: validator-region
+      - targets:
+          - validator-3-private-ip:9093
+        labels:
+          chain: coins-chain
+          deployer_name: validator-3
+          deployer_ip: validator-3-private-ip
+          deployer_region: validator-region
+
+  - job_name: coins-chain-validator-hosts
+    static_configs:
+      - targets:
+          - validator-0-private-ip:9100
+        labels:
+          chain: coins-chain
+          deployer_name: validator-0
+          deployer_ip: validator-0-private-ip
+          deployer_region: validator-region
+      - targets:
+          - validator-1-private-ip:9100
+        labels:
+          chain: coins-chain
+          deployer_name: validator-1
+          deployer_ip: validator-1-private-ip
+          deployer_region: validator-region
+      - targets:
+          - validator-2-private-ip:9100
+        labels:
+          chain: coins-chain
+          deployer_name: validator-2
+          deployer_ip: validator-2-private-ip
+          deployer_region: validator-region
+      - targets:
+          - validator-3-private-ip:9100
+        labels:
+          chain: coins-chain
+          deployer_name: validator-3
+          deployer_ip: validator-3-private-ip
+          deployer_region: validator-region

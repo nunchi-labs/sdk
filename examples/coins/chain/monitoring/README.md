@@ -5,13 +5,15 @@ testnet. It is intended as a lightweight example for viewing metrics exposed by
 `coins-chain-node`.
 
 The setup starts Prometheus and Grafana in a Docker container, provisions a
-Prometheus datasource, and automatically loads `dashboard.json` into Grafana.
+Prometheus datasource, and automatically loads the local dashboards into Grafana.
 
 ## Files
 
 - `create.sh` starts the monitoring container.
 - `run.sh` installs and starts Prometheus and Grafana inside the container.
-- `dashboard.json` is the sample Grafana dashboard.
+- `dashboard.json` is the compact Grafana dashboard for common local metrics.
+- `detailed-dashboard.json` is the imported detailed chain dashboard, normalized
+  to use the local Prometheus datasource.
 
 ## Running
 
@@ -43,6 +45,7 @@ Grafana should automatically contain:
 
 - a Prometheus datasource named `Prometheus`
 - a dashboard named `Coins Chain Common Metrics`
+- a dashboard named `Coins Chain Detailed Metrics`
 
 ## Ports And Addresses
 
@@ -92,7 +95,7 @@ explicit port publishing instead.
 ## Dashboard
 
 `dashboard.json` contains panels for metrics that are common between the local
-`coins-chain-node` metrics endpoint and the Alto dashboard metrics:
+`coins-chain-node` metrics endpoint and the detailed dashboard metrics:
 
 - `engine_finalized_blocks_freezer_resizes_total`
 - `engine_marshal_processed_height`
@@ -107,6 +110,10 @@ explicit port publishing instead.
 - `runtime_tasks_running`
 
 Counter-like metrics are shown as rates where useful.
+
+`detailed-dashboard.json` contains a broader imported chain dashboard. Some
+panels may be empty until the chain emits the exact metric names or labels those
+queries expect.
 
 ## Troubleshooting
 

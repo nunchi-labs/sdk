@@ -53,7 +53,7 @@ providers:
     disableDeletion: false
     editable: true
     options:
-      path: /workspace/dashboard.json
+      path: /workspace
 EOF
 
 prometheus_pid=

@@ -44,8 +44,13 @@ type SummaryEvent = {
 
 const STORAGE_KEY = "nunchi.coins.frontend.settings";
 const WS_RENDER_INTERVAL_MS = 25;
+const LOCAL_INDEXER_URL = "http://localhost:8080";
+const APP_TITLE = import.meta.env.VITE_APP_TITLE ?? "Nunchi Coins";
+const APP_SUBTITLE = import.meta.env.VITE_APP_SUBTITLE ?? "indexer console";
+const DEFAULT_BACKEND_URL =
+  import.meta.env.VITE_INDEXER_URL ?? (window.location.port === "5173" ? LOCAL_INDEXER_URL : window.location.origin);
 const DEFAULT_SETTINGS: Settings = {
-  backendUrl: import.meta.env.VITE_INDEXER_URL ?? "http://localhost:8080",
+  backendUrl: DEFAULT_BACKEND_URL,
   identity: import.meta.env.VITE_INDEXER_IDENTITY ?? "",
   participants: import.meta.env.VITE_INDEXER_PARTICIPANTS ?? "1",
 };
@@ -54,7 +59,11 @@ function readSettings(): Settings {
   const saved = window.localStorage.getItem(STORAGE_KEY);
   if (!saved) return DEFAULT_SETTINGS;
   try {
-    return { ...DEFAULT_SETTINGS, ...(JSON.parse(saved) as Partial<Settings>) };
+    const settings = { ...DEFAULT_SETTINGS, ...(JSON.parse(saved) as Partial<Settings>) };
+    if (settings.backendUrl === LOCAL_INDEXER_URL) {
+      return { ...settings, backendUrl: DEFAULT_SETTINGS.backendUrl };
+    }
+    return settings;
   } catch {
     return DEFAULT_SETTINGS;
   }
@@ -76,6 +85,10 @@ function App() {
   const flushTimer = useRef<number | undefined>(undefined);
 
   const backend = useMemo(() => httpBase(settings.backendUrl), [settings.backendUrl]);
+
+  useEffect(() => {
+    document.title = APP_TITLE;
+  }, []);
 
   const flushSummaryUpdates = useCallback(() => {
     flushTimer.current = undefined;
@@ -223,8 +236,8 @@ function App() {
     <main className="shell">
       <section className="topbar">
         <div>
-          <h1>Nunchi Coins</h1>
-          <div className="subtle">local indexer console</div>
+          <h1>{APP_TITLE}</h1>
+          <div className="subtle">{APP_SUBTITLE}</div>
         </div>
         <div className="statusStrip">
           <StatusPill label="API" ok={health === "ok"} busy={health === "checking"} />
