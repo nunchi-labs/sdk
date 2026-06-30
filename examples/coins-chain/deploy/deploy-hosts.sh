@@ -9,7 +9,7 @@ Usage:
 Example:
   cargo run -p narae -- generate coins-chain \
     --validators 4 \
-    --out testnet/hetzner \
+    --out testnet/deploy \
     --bind-ip 0.0.0.0 \
     --public-host 203.0.113.10 \
     --public-host 203.0.113.11 \
@@ -18,7 +18,7 @@ Example:
     --storage-dir /var/lib/nunchi/coins-chain
 
   examples/coins-chain/deploy/deploy-hosts.sh \
-    testnet/hetzner \
+    testnet/deploy \
     root@203.0.113.10 root@203.0.113.11 root@203.0.113.12 root@203.0.113.13
 EOF
 }
