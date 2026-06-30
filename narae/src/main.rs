@@ -94,6 +94,8 @@ enum ChainCommand {
         public_host: Vec<IpAddr>,
         #[arg(long)]
         storage_dir: Option<PathBuf>,
+        #[arg(long)]
+        indexer_url: Option<String>,
         #[arg(long, default_value_t = 0)]
         seed: u64,
     },
@@ -110,6 +112,7 @@ fn generate(chain: ChainCommand) -> Result<PathBuf, Box<dyn std::error::Error>> 
             bind_ip,
             public_host,
             storage_dir,
+            indexer_url,
             seed,
         } => {
             let manifest_path = manifest_path(&out);
@@ -122,6 +125,7 @@ fn generate(chain: ChainCommand) -> Result<PathBuf, Box<dyn std::error::Error>> 
                 bind_ip,
                 public_ips: (!public_host.is_empty()).then_some(public_host),
                 storage_dir,
+                indexer_url,
                 seed,
             })?;
             manifest.executable_path = coins_chain_executable();

@@ -15,8 +15,14 @@ cargo run -p narae -- generate coins-chain \
   --public-host <server-1-ip> \
   --public-host <server-2-ip> \
   --public-host <server-3-ip> \
-  --storage-dir /var/lib/nunchi/coins-chain
+  --storage-dir /var/lib/nunchi/coins-chain \
+  --indexer-url https://<indexer-host>
 ```
+
+Omit `--indexer-url` if this deployment should not upload chain artifacts. When
+set, every validator uploads binary-encoded artifacts to an external
+Alto-compatible indexer over HTTP. The configured URL is used as the base URL for
+`POST /seed`, `POST /notarization`, `POST /finalization`, and `POST /block`.
 
 Deploy to the hosts:
 

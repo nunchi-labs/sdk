@@ -58,6 +58,7 @@ pub struct LocalTestnetConfig {
     pub bind_ip: IpAddr,
     pub public_ips: Option<Vec<IpAddr>>,
     pub storage_dir: Option<PathBuf>,
+    pub indexer_url: Option<String>,
     pub seed: u64,
 }
 
@@ -305,7 +306,7 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
             bootstrappers,
             storage_dir: storage_dir.clone(),
             genesis_path: None,
-            indexer_url: None,
+            indexer_url: config.indexer_url.clone(),
             consensus: ConsensusConfig::default(),
             networking: NetworkConfig::default(),
             max_block_transactions: DEFAULT_MAX_BLOCK_TRANSACTIONS,

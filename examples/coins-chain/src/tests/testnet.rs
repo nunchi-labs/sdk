@@ -30,6 +30,7 @@ fn generated_testnet_has_unique_ports_dirs_and_complete_peer_sets() {
         bind_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
         public_ips: None,
         storage_dir: None,
+        indexer_url: None,
         seed: 7,
     })
     .expect("generate testnet");
@@ -103,6 +104,7 @@ fn generated_testnet_can_advertise_remote_hosts() {
         bind_ip: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         public_ips: Some(public_ips.clone()),
         storage_dir: Some(storage_dir.clone()),
+        indexer_url: Some("https://indexer.example.com/coins-chain".to_string()),
         seed: 8,
     })
     .expect("generate remote testnet");
@@ -114,8 +116,16 @@ fn generated_testnet_can_advertise_remote_hosts() {
     assert_eq!(first.dialable_address.ip(), public_ips[0]);
     assert_eq!(first.bootstrappers[0].address.ip(), public_ips[1]);
     assert_eq!(first.storage_dir, storage_dir);
+    assert_eq!(
+        first.indexer_url.as_deref(),
+        Some("https://indexer.example.com/coins-chain")
+    );
     assert_eq!(second.dialable_address.ip(), public_ips[1]);
     assert_eq!(second.bootstrappers[0].address.ip(), public_ips[0]);
+    assert_eq!(
+        second.indexer_url.as_deref(),
+        Some("https://indexer.example.com/coins-chain")
+    );
 
     let _ = fs::remove_dir_all(dir);
 }

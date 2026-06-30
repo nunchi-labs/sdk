@@ -54,5 +54,6 @@ cargo run -p narae -- generate coins-chain \
   --public-host <server-1-ip> \
   --public-host <server-2-ip> \
   --public-host <server-3-ip> \
-  --storage-dir /var/lib/nunchi/coins-chain
+  --storage-dir /var/lib/nunchi/coins-chain \
+  --indexer-url https://<indexer-host>
 ```
