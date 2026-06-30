@@ -4,7 +4,7 @@ use crate::{
     VALUE_CLEARED_EVENT, VALUE_SET_EVENT,
 };
 use commonware_codec::DecodeExt;
-use nunchi_common::{Address, VecEventSink};
+use nunchi_common::{Address, NoopEventSink, VecEventSink};
 use nunchi_crypto::{PrivateKey, SignatureError};
 
 fn address(key: &PrivateKey) -> Address {
@@ -25,7 +25,7 @@ fn set_value_emits_event() {
         let mut ledger = CustomLedger::new(&mut state);
         let mut events = event_sink();
 
-        ledger.apply_transaction(&tx, Some(&mut events)).await.unwrap();
+        ledger.apply_transaction(&tx, &mut events).await.unwrap();
 
         assert_eq!(events.len(), 1);
         let event = &events.events()[0];
@@ -51,9 +51,9 @@ fn clear_value_emits_event() {
         let mut ledger = CustomLedger::new(&mut state);
         let mut events = event_sink();
 
-        ledger.apply_transaction(&set, None).await.unwrap();
+        ledger.apply_transaction(&set, NoopEventSink).await.unwrap();
         ledger
-            .apply_transaction(&clear, Some(&mut events))
+            .apply_transaction(&clear, &mut events)
             .await
             .unwrap();
 
@@ -79,9 +79,9 @@ fn events_are_recorded_in_application_order() {
         let mut ledger = CustomLedger::new(&mut state);
         let mut events = event_sink();
 
-        ledger.apply_transaction(&set, Some(&mut events)).await.unwrap();
+        ledger.apply_transaction(&set, &mut events).await.unwrap();
         ledger
-            .apply_transaction(&clear, Some(&mut events))
+            .apply_transaction(&clear, &mut events)
             .await
             .unwrap();
 
@@ -112,7 +112,7 @@ fn failed_transactions_emit_no_events() {
         let wrong_nonce = Transaction::sign(&signer, 5, CustomOperation::SetValue { value: 1 });
         let mut events = event_sink();
         assert!(matches!(
-            ledger.apply_transaction(&wrong_nonce, Some(&mut events)).await,
+            ledger.apply_transaction(&wrong_nonce, &mut events).await,
             Err(CustomError::NonceMismatch {
                 expected: 0,
                 actual: 5,
@@ -141,7 +141,7 @@ fn nonce_overflow_emits_no_event_and_leaves_value_unchanged() {
         let mut events = event_sink();
 
         assert_eq!(
-            ledger.apply_transaction(&tx, Some(&mut events)).await,
+            ledger.apply_transaction(&tx, &mut events).await,
             Err(CustomError::NonceOverflow)
         );
         assert!(events.is_empty());
@@ -159,7 +159,7 @@ fn none_event_sink_applies_transaction() {
         let tx = Transaction::sign(&signer, 0, CustomOperation::SetValue { value: 42 });
         let mut ledger = CustomLedger::new(&mut state);
 
-        ledger.apply_transaction(&tx, None).await.unwrap();
+        ledger.apply_transaction(&tx, NoopEventSink).await.unwrap();
 
         assert_eq!(ledger.value(&account).await.unwrap(), Some(42));
         assert_eq!(ledger.nonce(&account).await.unwrap(), 1);
@@ -173,7 +173,7 @@ async fn assert_no_event(
 ) {
     let mut events = event_sink();
     assert_eq!(
-        ledger.apply_transaction(tx, Some(&mut events)).await,
+        ledger.apply_transaction(tx, &mut events).await,
         Err(expected)
     );
     assert!(events.is_empty());

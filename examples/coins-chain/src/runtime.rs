@@ -2,7 +2,7 @@
 
 use nunchi_authority::{AuthorityError, AuthorityLedger};
 use nunchi_coins::{Ledger, LedgerError};
-use nunchi_common::{EventSink, Runtime, RuntimeContext, StateStore};
+use nunchi_common::{EventSink, NoopEventSink, Runtime, RuntimeContext, StateStore};
 use nunchi_oracle::{OracleError, OracleLedger};
 
 use crate::Transaction;
@@ -43,7 +43,7 @@ impl Runtime for CoinsRuntime {
     where
         S: StateStore + Send + Sync,
     {
-        apply_transaction(state, context, transaction, None).await
+        apply_transaction(state, context, transaction, NoopEventSink).await
     }
 
     async fn apply<S, Events>(
@@ -56,7 +56,7 @@ impl Runtime for CoinsRuntime {
         S: StateStore + Send + Sync,
         Events: EventSink + Send,
     {
-        apply_transaction(state, context, transaction, Some(events)).await
+        apply_transaction(state, context, transaction, events).await
     }
 
     fn is_storage_error(error: &Self::Error) -> bool {
@@ -64,14 +64,15 @@ impl Runtime for CoinsRuntime {
     }
 }
 
-async fn apply_transaction<S>(
+async fn apply_transaction<S, Events>(
     state: &mut S,
     context: RuntimeContext,
     transaction: &Transaction,
-    events: Option<&mut (dyn EventSink + Send)>,
+    events: Events,
 ) -> Result<(), RuntimeError>
 where
     S: StateStore + Send + Sync,
+    Events: EventSink + Send,
 {
     match transaction {
         Transaction::Coin(transaction) => {
