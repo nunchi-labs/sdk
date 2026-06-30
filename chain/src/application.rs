@@ -73,7 +73,7 @@ where
 impl<R, Ext, Events> Application<R, Ext, Events>
 where
     R: Runtime,
-    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
+    R::Transaction: PoolTransaction,
     Ext: ConsensusExtension + Sync,
     Events: EventConsumer,
 {
@@ -261,7 +261,7 @@ where
 impl<R, Ext> Application<R, Ext, NoopEventConsumer>
 where
     R: Runtime,
-    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
+    R::Transaction: PoolTransaction,
     Ext: ConsensusExtension + Sync,
 {
     pub fn with_consensus(
@@ -291,7 +291,7 @@ where
 impl<R> Application<R>
 where
     R: Runtime,
-    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
+    R::Transaction: PoolTransaction,
 {
     pub fn new(
         submitter: MempoolHandle<R::Transaction>,
@@ -315,7 +315,7 @@ where
 impl<R, Events> Application<R, NoConsensusExtension, Events>
 where
     R: Runtime,
-    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
+    R::Transaction: PoolTransaction,
     Events: EventConsumer,
 {
     pub fn new_with_events(
@@ -344,7 +344,7 @@ where
 impl<R> Application<R>
 where
     R: Runtime,
-    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
+    R::Transaction: PoolTransaction,
     Block<R::Transaction>: nunchi_dkg::ReshareBlock,
 {
     pub fn with_dkg(
@@ -370,7 +370,7 @@ where
 impl<R, Events> Application<R, NoConsensusExtension, Events>
 where
     R: Runtime,
-    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
+    R::Transaction: PoolTransaction,
     Block<R::Transaction>: nunchi_dkg::ReshareBlock,
     Events: EventConsumer,
 {
@@ -402,7 +402,7 @@ impl<E, R, Ext, Events> StatefulApplication<E> for Application<R, Ext, Events>
 where
     E: Rng + Spawner + Metrics + Clock + Storage,
     R: Runtime + Clone + Send + Sync + 'static,
-    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
+    R::Transaction: PoolTransaction,
     Ext: ConsensusExtension + Sync,
     Events: EventConsumer,
 {

@@ -57,11 +57,10 @@ impl Transaction {
 }
 
 impl PoolTransaction for Transaction {
-    type Digest = Digest;
     type NonceKey = NonceKey;
     type VerifyError = SignatureError;
 
-    fn digest(&self) -> Self::Digest {
+    fn digest(&self) -> Digest {
         Self::digest(self)
     }
 

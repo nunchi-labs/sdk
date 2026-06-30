@@ -115,11 +115,10 @@ impl EncodeSize for NoopTransaction {
 }
 
 impl PoolTransaction for NoopTransaction {
-    type Digest = Digest;
     type NonceKey = NonceKey;
     type VerifyError = NoopVerificationError;
 
-    fn digest(&self) -> Self::Digest {
+    fn digest(&self) -> Digest {
         Sha256::hash(&self.encode())
     }
 
