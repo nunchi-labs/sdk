@@ -15,7 +15,7 @@ mod state;
 #[cfg(test)]
 mod tests;
 
-pub use actor::{Actor, Config};
+pub use actor::{Actor, Config, Execution};
 pub use consensus::{
     Activity, Context, EdScheme, EpochProvider, Finalization, Identity, Notarization, Provider,
     PublicKey, Scheme, Seed, Seedable, Signature, ThresholdScheme,

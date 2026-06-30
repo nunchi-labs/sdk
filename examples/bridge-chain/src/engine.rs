@@ -163,6 +163,7 @@ where
                 manager: config.manager.clone(),
                 signer: config.signer.clone(),
                 mailbox_size: MAILBOX_SIZE,
+                execution: dkg::Execution::default(),
                 partition_prefix: config.partition_prefix.clone(),
                 peer_config: config.peer_config.clone(),
                 max_supported_mode: MAX_SUPPORTED_MODE,

@@ -43,20 +43,20 @@ impl Runtime for CoinsRuntime {
     where
         S: StateStore + Send + Sync,
     {
-        apply_transaction(state, context, transaction).await
+        apply_transaction(state, context, transaction, None).await
     }
 
     async fn apply<S, Events>(
         state: &mut S,
         context: RuntimeContext,
         transaction: &Self::Transaction,
-        _events: &mut Events,
+        events: &mut Events,
     ) -> Result<(), Self::Error>
     where
         S: StateStore + Send + Sync,
         Events: EventSink + Send,
     {
-        apply_transaction(state, context, transaction).await
+        apply_transaction(state, context, transaction, Some(events)).await
     }
 
     fn is_storage_error(error: &Self::Error) -> bool {
@@ -68,6 +68,7 @@ async fn apply_transaction<S>(
     state: &mut S,
     context: RuntimeContext,
     transaction: &Transaction,
+    events: Option<&mut (dyn EventSink + Send)>,
 ) -> Result<(), RuntimeError>
 where
     S: StateStore + Send + Sync,
@@ -75,7 +76,7 @@ where
     match transaction {
         Transaction::Coin(transaction) => {
             let mut ledger = Ledger::new(state);
-            ledger.apply_transaction(transaction).await?;
+            ledger.apply_transaction(transaction, events).await?;
         }
         Transaction::Authority(transaction) => {
             let mut ledger = AuthorityLedger::new(state);
