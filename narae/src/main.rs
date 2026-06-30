@@ -3,7 +3,10 @@ use narae::Config;
 use nunchi_coins_chain::testnet::{
     generate_local_testnet, LocalTestnetConfig, LocalTestnetManifest,
 };
-use std::path::{Path, PathBuf};
+use std::{
+    net::{IpAddr, Ipv4Addr},
+    path::{Path, PathBuf},
+};
 
 const DEFAULT_BASE_METRICS_PORT: u16 = 9_090;
 
@@ -85,6 +88,12 @@ enum ChainCommand {
         base_rpc_port: u16,
         #[arg(long, default_value_t = DEFAULT_BASE_METRICS_PORT)]
         base_metrics_port: u16,
+        #[arg(long, default_value_t = IpAddr::V4(Ipv4Addr::LOCALHOST))]
+        bind_ip: IpAddr,
+        #[arg(long)]
+        public_host: Vec<IpAddr>,
+        #[arg(long)]
+        storage_dir: Option<PathBuf>,
         #[arg(long, default_value_t = 0)]
         seed: u64,
     },
@@ -98,6 +107,9 @@ fn generate(chain: ChainCommand) -> Result<PathBuf, Box<dyn std::error::Error>> 
             base_port,
             base_rpc_port,
             base_metrics_port,
+            bind_ip,
+            public_host,
+            storage_dir,
             seed,
         } => {
             let manifest_path = manifest_path(&out);
@@ -107,6 +119,9 @@ fn generate(chain: ChainCommand) -> Result<PathBuf, Box<dyn std::error::Error>> 
                 base_rpc_port,
                 base_metrics_port,
                 base_data_dir: out,
+                bind_ip,
+                public_ips: (!public_host.is_empty()).then_some(public_host),
+                storage_dir,
                 seed,
             })?;
             manifest.executable_path = coins_chain_executable();

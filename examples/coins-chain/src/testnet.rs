@@ -35,7 +35,7 @@ use rand::{rngs::StdRng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, SocketAddr},
     num::{NonZeroU32, TryFromIntError},
     path::{Path, PathBuf},
     str::FromStr,
@@ -55,6 +55,9 @@ pub struct LocalTestnetConfig {
     pub base_rpc_port: u16,
     pub base_metrics_port: u16,
     pub base_data_dir: PathBuf,
+    pub bind_ip: IpAddr,
+    pub public_ips: Option<Vec<IpAddr>>,
+    pub storage_dir: Option<PathBuf>,
     pub seed: u64,
 }
 
@@ -171,6 +174,8 @@ impl Default for NetworkConfig {
 pub enum Error {
     #[error("validator count must be non-zero")]
     EmptyValidatorSet,
+    #[error("expected {validators} public hosts, got {hosts}")]
+    PublicHostCount { validators: u32, hosts: usize },
     #[error("validator count is too large for this platform: {0}")]
     ValidatorCountTooLarge(#[from] TryFromIntError),
     #[error("port range starting at {base_port} cannot fit {validators} validators")]
@@ -216,6 +221,14 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
     check_port_range(config.base_port, config.validators)?;
     check_port_range(config.base_rpc_port, config.validators)?;
     check_port_range(config.base_metrics_port, config.validators)?;
+    if let Some(public_ips) = &config.public_ips {
+        if public_ips.len() != node_count {
+            return Err(Error::PublicHostCount {
+                validators: config.validators,
+                hosts: public_ips.len(),
+            });
+        }
+    }
 
     let private_keys = (0..config.validators)
         .map(|index| ed25519::PrivateKey::from_seed(config.seed.wrapping_add(index as u64)))
@@ -241,10 +254,23 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
         let port = config.base_port + u16::try_from(index)?;
         let rpc_port = config.base_rpc_port + u16::try_from(index)?;
         let metrics_port = config.base_metrics_port + u16::try_from(index)?;
-        let storage_dir = config.base_data_dir.join(&name);
-        fs::create_dir_all(&storage_dir)?;
+        let storage_dir = config
+            .storage_dir
+            .clone()
+            .unwrap_or_else(|| config.base_data_dir.join(&name));
+        if config.storage_dir.is_none() {
+            fs::create_dir_all(&storage_dir)?;
+        }
         let config_path = config.base_data_dir.join(format!("{name}.toml"));
-        let listen_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+        let listen_address = SocketAddr::new(config.bind_ip, port);
+        let dialable_address = SocketAddr::new(
+            config
+                .public_ips
+                .as_ref()
+                .map(|hosts| hosts[index])
+                .unwrap_or(config.bind_ip),
+            port,
+        );
         let bootstrappers = participants
             .iter()
             .enumerate()
@@ -253,7 +279,11 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
                 Ok(BootstrapperConfig {
                     public_key: encode(public_key),
                     address: SocketAddr::new(
-                        IpAddr::V4(Ipv4Addr::LOCALHOST),
+                        config
+                            .public_ips
+                            .as_ref()
+                            .map(|hosts| hosts[candidate])
+                            .unwrap_or(config.bind_ip),
                         config.base_port + u16::try_from(candidate)?,
                     ),
                 })
@@ -269,9 +299,9 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
             share: encode(share),
             peer_config: peer_config.clone(),
             listen_address,
-            dialable_address: listen_address,
-            rpc_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), rpc_port),
-            metrics_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), metrics_port),
+            dialable_address,
+            rpc_address: SocketAddr::new(config.bind_ip, rpc_port),
+            metrics_address: SocketAddr::new(config.bind_ip, metrics_port),
             bootstrappers,
             storage_dir: storage_dir.clone(),
             genesis_path: None,

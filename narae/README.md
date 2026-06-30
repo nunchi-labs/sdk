@@ -41,3 +41,18 @@ The node binary can also be run directly, which is what `narae` does under the h
 ```sh
 cargo run -p nunchi-coins-chain --bin coins-chain-node -- --config testnet/validator-0.toml
 ```
+
+For one-validator-per-host deployments, generate configs that bind inside the process to all
+interfaces but advertise each server's public address:
+
+```sh
+cargo run -p narae -- generate coins-chain \
+  --validators 4 \
+  --out testnet/hetzner \
+  --bind-ip 0.0.0.0 \
+  --public-host <server-0-ip> \
+  --public-host <server-1-ip> \
+  --public-host <server-2-ip> \
+  --public-host <server-3-ip> \
+  --storage-dir /var/lib/nunchi/coins-chain
+```
