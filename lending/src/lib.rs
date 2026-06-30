@@ -1263,7 +1263,7 @@ mod tests {
                 },
             );
             ledger
-                .apply_transaction(&fund_market)
+                .apply_transaction(&fund_market, None)
                 .await
                 .expect("fund market liquidity");
         }
@@ -1345,37 +1345,39 @@ mod tests {
                     .expect("apply lending tx");
             }
 
-            let lending = LendingLedger::new(&mut state);
-            let market = lending.market(market_id).await.unwrap().expect("market");
-            let position = lending.position(market_id, &borrower).await.unwrap();
-            assert_eq!(
-                lending
-                    .interest_rate_quote_from_isfr(market_id, &isfr_snapshot(450))
-                    .await
-                    .unwrap(),
-                InterestRateQuote {
-                    benchmark: RateBenchmark::Isfr,
-                    benchmark_epoch: 42,
-                    benchmark_timestamp: Some(1_719_000_000),
-                    benchmark_rate_bps: 450,
-                    available_liquidity: 450,
-                    total_borrowed: 50,
-                    utilization_bps: 1_000,
-                    protocol_rate_bps: 50,
-                    borrow_rate_bps: 500,
-                    supply_rate_bps: 45,
-                }
-            );
-            assert_eq!(market.total_collateral, 100);
-            assert_eq!(market.total_borrowed, 50);
-            assert_eq!(
-                position,
-                Position {
-                    collateral: 100,
-                    debt: 50,
-                }
-            );
-            drop(lending);
+            let market = {
+                let lending = LendingLedger::new(&mut state);
+                let market = lending.market(market_id).await.unwrap().expect("market");
+                let position = lending.position(market_id, &borrower).await.unwrap();
+                assert_eq!(
+                    lending
+                        .interest_rate_quote_from_isfr(market_id, &isfr_snapshot(450))
+                        .await
+                        .unwrap(),
+                    InterestRateQuote {
+                        benchmark: RateBenchmark::Isfr,
+                        benchmark_epoch: 42,
+                        benchmark_timestamp: Some(1_719_000_000),
+                        benchmark_rate_bps: 450,
+                        available_liquidity: 450,
+                        total_borrowed: 50,
+                        utilization_bps: 1_000,
+                        protocol_rate_bps: 50,
+                        borrow_rate_bps: 500,
+                        supply_rate_bps: 45,
+                    }
+                );
+                assert_eq!(market.total_collateral, 100);
+                assert_eq!(market.total_borrowed, 50);
+                assert_eq!(
+                    position,
+                    Position {
+                        collateral: 100,
+                        debt: 50,
+                    }
+                );
+                market
+            };
 
             let ledger = Ledger::new(&mut state);
             assert_eq!(
