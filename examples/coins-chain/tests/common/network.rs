@@ -31,6 +31,7 @@ use nunchi_common::QmdbReader;
 use nunchi_dkg::{ContinueOnUpdate, PeerConfig};
 use nunchi_mempool::{MempoolHandle, PoolConfig};
 use nunchi_oracle::OracleLedger;
+use nunchi_perpetuals::PerpetualLedger;
 use std::{
     collections::{HashMap, HashSet},
     time::Duration,
@@ -55,6 +56,7 @@ type Channel = (
 type ReadLedger = Ledger<QmdbReader<deterministic::Context>>;
 type ReadAuthorityLedger = AuthorityLedger<QmdbReader<deterministic::Context>>;
 type ReadOracleLedger = OracleLedger<QmdbReader<deterministic::Context>>;
+type ReadPerpetualLedger = PerpetualLedger<QmdbReader<deterministic::Context>>;
 
 #[derive(Clone)]
 pub(crate) struct ThresholdFixture {
@@ -395,6 +397,18 @@ impl TestNetwork<'_> {
         ledgers
     }
 
+    pub(crate) async fn perpetual_ledgers(&self) -> Vec<ReadPerpetualLedger> {
+        let mut ledgers = Vec::new();
+        for participant in &self.participants {
+            let Some(node) = self.nodes.get(participant) else {
+                continue;
+            };
+            let db = node.stateful.subscribe_databases().await;
+            ledgers.push(PerpetualLedger::new(QmdbReader::new(db)));
+        }
+        ledgers
+    }
+
     /// Poll until every node's ledger shows the expected nonce for each listed account.
     ///
     /// An account's nonce advances once per applied transaction, so this is a precise "all the
@@ -402,6 +416,15 @@ impl TestNetwork<'_> {
     pub(crate) async fn run_until_nonces(&self, expected: &[(Address, u64)]) {
         loop {
             if self.all_nonces_reached(expected).await {
+                break;
+            }
+            self.context.sleep(Duration::from_secs(1)).await;
+        }
+    }
+
+    pub(crate) async fn run_until_perpetual_nonces(&self, expected: &[(Address, u64)]) {
+        loop {
+            if self.all_perpetual_nonces_reached(expected).await {
                 break;
             }
             self.context.sleep(Duration::from_secs(1)).await;
@@ -416,6 +439,25 @@ impl TestNetwork<'_> {
         for ledger in ledgers {
             for (account, target) in expected {
                 let nonce = ledger.nonce(account).await.expect("nonce read failed");
+                if nonce != *target {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    async fn all_perpetual_nonces_reached(&self, expected: &[(Address, u64)]) -> bool {
+        let ledgers = self.perpetual_ledgers().await;
+        if ledgers.len() != self.participants.len() {
+            return false;
+        }
+        for ledger in ledgers {
+            for (account, target) in expected {
+                let nonce = ledger
+                    .nonce(account)
+                    .await
+                    .expect("perpetual nonce read failed");
                 if nonce != *target {
                     return false;
                 }

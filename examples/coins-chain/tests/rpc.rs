@@ -4,6 +4,7 @@
 //! connection tasks, exercising the same server path an operator would run.
 
 use commonware_consensus::types::Height;
+use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_runtime::{tokio, Runner as _, Supervisor as _};
 use futures::lock::Mutex as AsyncMutex;
 use jsonrpsee::{
@@ -11,15 +12,19 @@ use jsonrpsee::{
     types::error::INVALID_PARAMS_CODE,
 };
 use nunchi_coins::{
-    rpc::SharedLedger, CoinOperation, CoinSpec, Ledger, PrivateKey, TokenName, TokenSymbol,
-    Transaction as CoinTransaction,
+    rpc::CoinQuery, CoinId, CoinOperation, CoinSpec, LedgerError, PrivateKey, TokenDefinition,
+    TokenName, TokenSymbol, Transaction as CoinTransaction,
 };
 use nunchi_coins_chain::rpc::{
     self, StatusResponse, SubmitTransactionResponse, TransactionStatusResponse,
 };
 use nunchi_coins_chain::Transaction;
-use nunchi_common::QmdbState;
+use nunchi_common::Address;
 use nunchi_mempool::{Mempool, PoolConfig};
+use nunchi_perpetuals::{
+    rpc::PerpetualQuery, Market, MarketId, PerpetualError, PerpetualOperation, Position,
+    PositionId, Side, Transaction as PerpetualTransaction,
+};
 use nunchi_rpc::{encode_hex, ServerBuilder};
 use std::sync::Arc;
 
@@ -31,21 +36,63 @@ fn submit_params(transaction: &str) -> ObjectParams {
     params
 }
 
+#[derive(Clone)]
+struct TestQuery {
+    root: Digest,
+}
+
+#[jsonrpsee::core::async_trait]
+impl CoinQuery for TestQuery {
+    async fn nonce(&self, _account: Address) -> Result<u64, LedgerError> {
+        Ok(0)
+    }
+
+    async fn token(&self, _coin: CoinId) -> Result<Option<TokenDefinition>, LedgerError> {
+        Ok(None)
+    }
+
+    async fn balance(&self, _account: Address, _coin: CoinId) -> Result<u128, LedgerError> {
+        Ok(0)
+    }
+
+    async fn state_root(&self) -> Result<Digest, LedgerError> {
+        Ok(self.root)
+    }
+}
+
+#[jsonrpsee::core::async_trait]
+impl PerpetualQuery for TestQuery {
+    async fn nonce(&self, _account: Address) -> Result<u64, PerpetualError> {
+        Ok(0)
+    }
+
+    async fn market(&self, _market: MarketId) -> Result<Option<Market>, PerpetualError> {
+        Ok(None)
+    }
+
+    async fn position(&self, _position: PositionId) -> Result<Option<Position>, PerpetualError> {
+        Ok(None)
+    }
+
+    async fn state_root(&self) -> Result<Digest, PerpetualError> {
+        Ok(self.root)
+    }
+}
+
 #[test]
 fn rpc_serves_status_and_filters_submissions_over_http() {
     tokio::Runner::default().start(|context| async move {
         // An RPC backend without the full engine: a mempool plus a fresh ledger.
         let (mempool, submitter) = Mempool::<Transaction>::new(PoolConfig::default());
         let _mempool = mempool.start(context.child("mempool"));
-        let db = QmdbState::init(context.child("coins_state"), "rpc-test-coins")
-            .await
-            .expect("init coin state");
-        let ledger = SharedLedger::new(Ledger::new(db));
+        let query = TestQuery {
+            root: Sha256::hash(b"rpc-test-root"),
+        };
         let applied_height = Arc::new(AsyncMutex::new(Height::zero()));
-        let expected_root = encode_hex(&ledger.lock().await.root());
+        let expected_root = encode_hex(&query.root);
 
-        let module = rpc::module(ledger.clone(), submitter.clone(), applied_height)
-            .expect("build RPC module");
+        let module =
+            rpc::module(query, submitter.clone(), applied_height).expect("build RPC module");
         let server = ServerBuilder::default()
             .build("127.0.0.1:0")
             .await
@@ -93,6 +140,30 @@ fn rpc_serves_status_and_filters_submissions_over_http() {
             vec![transaction.clone().into()]
         );
 
+        let perps_signer = PrivateKey::from_seed(101);
+        let perpetual = PerpetualTransaction::sign(
+            &perps_signer,
+            0,
+            PerpetualOperation::OpenPosition {
+                market: Sha256::hash(b"btc-usd-perp"),
+                side: Side::Long,
+                collateral: 1_000,
+                leverage_bps: 50_000,
+            },
+        );
+        let accepted_perp: nunchi_perpetuals::rpc::SubmitTransactionResponse = client
+            .request(
+                "perpetuals.submit_transaction",
+                submit_params(&encode_hex(&perpetual)),
+            )
+            .await
+            .expect("submit valid perpetuals transaction");
+        assert_eq!(accepted_perp.hash, encode_hex(&perpetual.digest()));
+        assert_eq!(
+            submitter.pending(usize::MAX).await,
+            vec![transaction.clone().into(), perpetual.clone().into()]
+        );
+
         // The pool reports the admitted transaction as pending.
         let mut status_params = ObjectParams::new();
         status_params
@@ -103,6 +174,16 @@ fn rpc_serves_status_and_filters_submissions_over_http() {
             .await
             .expect("transaction status");
         assert_eq!(tx_status.status, "pending");
+
+        let mut perp_status_params = ObjectParams::new();
+        perp_status_params
+            .insert("hash", accepted_perp.hash)
+            .expect("serialize perps hash param");
+        let perp_status: nunchi_perpetuals::rpc::TransactionStatusResponse = client
+            .request("perpetuals.transaction_status", perp_status_params)
+            .await
+            .expect("perpetuals transaction status");
+        assert_eq!(perp_status.status, "pending");
 
         // Resubmitting the identical transaction is rejected as a duplicate.
         let duplicate = client
@@ -139,7 +220,7 @@ fn rpc_serves_status_and_filters_submissions_over_http() {
         // The pool still only holds the valid submission.
         assert_eq!(
             submitter.pending(usize::MAX).await,
-            vec![transaction.into()]
+            vec![transaction.into(), perpetual.into()]
         );
 
         server.stop().expect("stop RPC server");

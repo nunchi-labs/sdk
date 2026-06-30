@@ -9,6 +9,9 @@ use jsonrpsee::core::async_trait;
 use nunchi_coins::{rpc::CoinQuery, Address, CoinId, Ledger, LedgerError, TokenDefinition};
 use nunchi_common::QmdbReader;
 use nunchi_mempool::MempoolHandle;
+use nunchi_perpetuals::{
+    rpc::PerpetualQuery, Market, MarketId, PerpetualError, PerpetualLedger, Position, PositionId,
+};
 
 pub use nunchi_chain::SharedAppliedHeight;
 
@@ -39,8 +42,8 @@ where
         }
     }
 
-    /// A read-only coin query backend over this node's committed databases, suitable for
-    /// serving the coin RPC (see [`crate::rpc::module`]).
+    /// A read-only query backend over this node's committed databases, suitable for
+    /// serving the chain RPC (see [`crate::rpc::module`]).
     pub fn query(&self) -> StatefulQuery<E> {
         StatefulQuery::new(self.stateful.clone())
     }
@@ -76,6 +79,10 @@ where
     async fn ledger(&self) -> Ledger<QmdbReader<E>> {
         Ledger::new(QmdbReader::new(self.stateful.subscribe_databases().await))
     }
+
+    async fn perpetuals(&self) -> PerpetualLedger<QmdbReader<E>> {
+        PerpetualLedger::new(QmdbReader::new(self.stateful.subscribe_databases().await))
+    }
 }
 
 #[async_trait]
@@ -96,6 +103,29 @@ where
     }
 
     async fn state_root(&self) -> Result<Digest, LedgerError> {
+        let db = self.stateful.subscribe_databases().await;
+        Ok(QmdbReader::new(db).root().await)
+    }
+}
+
+#[async_trait]
+impl<E> PerpetualQuery for StatefulQuery<E>
+where
+    E: Context + Spawner + Metrics + Clock + rand::Rng + Send + Sync + 'static,
+{
+    async fn nonce(&self, account: Address) -> Result<u64, PerpetualError> {
+        self.perpetuals().await.nonce(&account).await
+    }
+
+    async fn market(&self, market: MarketId) -> Result<Option<Market>, PerpetualError> {
+        self.perpetuals().await.market(&market).await
+    }
+
+    async fn position(&self, position: PositionId) -> Result<Option<Position>, PerpetualError> {
+        self.perpetuals().await.position(&position).await
+    }
+
+    async fn state_root(&self) -> Result<Digest, PerpetualError> {
         let db = self.stateful.subscribe_databases().await;
         Ok(QmdbReader::new(db).root().await)
     }
