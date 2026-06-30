@@ -68,6 +68,8 @@ pub struct LocalTestnetConfig {
 pub struct LocalTestnetManifest {
     pub chain: String,
     pub executable_path: PathBuf,
+    #[serde(default)]
+    pub indexer: IndexerManifest,
     pub nodes: Vec<ManifestNode>,
 }
 
@@ -93,6 +95,12 @@ pub struct ManifestNode {
     pub rpc_port: u16,
     pub metrics_port: u16,
     pub data_dir: PathBuf,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct IndexerManifest {
+    pub identity: String,
+    pub participants: u32,
 }
 
 /// One validator's standalone configuration.
@@ -325,6 +333,10 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
     Ok(LocalTestnetManifest {
         chain: "coins-chain".to_string(),
         executable_path: PathBuf::from("coins-chain-node"),
+        indexer: IndexerManifest {
+            identity: encode(output.public().public()),
+            participants: config.validators,
+        },
         nodes,
     })
 }

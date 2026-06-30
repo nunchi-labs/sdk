@@ -1,0 +1,30 @@
+[package]
+name = "nunchi-coins-indexer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Serve indexed coins-chain consensus activity."
+
+[lints]
+workspace = true
+
+[dependencies]
+nunchi-coins-chain = { workspace = true }
+commonware-codec = { workspace = true }
+commonware-consensus = { workspace = true }
+commonware-cryptography = { workspace = true }
+commonware-formatting = { workspace = true }
+commonware-parallel = { workspace = true }
+commonware-utils = { workspace = true }
+axum = { workspace = true, features = ["ws"] }
+bytes = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+futures = { workspace = true }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync"] }
+tower-http = { workspace = true, features = ["cors"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[[bin]]
+name = "coins-chain-indexer"
+path = "src/main.rs"

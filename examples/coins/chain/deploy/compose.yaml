@@ -1,4 +1,21 @@
 services:
+  coins-chain-indexer:
+    image: ${COINS_INDEXER_IMAGE:-nunchi-coins-indexer:latest}
+    container_name: coins-chain-indexer
+    profiles: ["indexer"]
+    restart: unless-stopped
+    command:
+      [
+        "--port",
+        "8080",
+        "--identity",
+        "${INDEXER_IDENTITY:-}",
+        "--participants",
+        "${INDEXER_PARTICIPANTS:-1}",
+      ]
+    ports:
+      - "${INDEXER_BIND:-127.0.0.1}:${INDEXER_PORT:-8080}:8080/tcp"
+
   coins-chain-node:
     image: ${COINS_CHAIN_IMAGE:-nunchi-coins-chain:latest}
     container_name: coins-chain-node

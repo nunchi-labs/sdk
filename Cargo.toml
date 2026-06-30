@@ -14,7 +14,8 @@ members = [
     "rpc",
     "mcp",
     "examples/bridge-chain",
-    "examples/coins-chain",
+    "examples/coins/chain",
+    "examples/coins/indexer",
     "examples/custom-module",
 ]
 resolver = "2"
@@ -45,7 +46,7 @@ nunchi-dkg = { version = "2026.5.0", path = "dkg" }
 nunchi-mempool = { version = "2026.5.0", path = "mempool" }
 nunchi-oracle = { version = "2026.5.0", path = "oracle" }
 nunchi-rpc = { version = "2026.5.0", path = "rpc" }
-nunchi-coins-chain = { version = "2026.5.0", path = "examples/coins-chain" }
+nunchi-coins-chain = { version = "2026.5.0", path = "examples/coins/chain" }
 nunchi-bridge-chain = { version = "2026.5.0", path = "examples/bridge-chain" }
 nunchi-xtask = { version = "2026.5.0", package = "xtask", path = "xtask" }
 commonware-actor = "2026.5.0"
@@ -81,6 +82,9 @@ serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 serde_with = "3"
 bech32 = "0.11"
+axum = "0.8.8"
+tokio = "1.41.0"
+tower-http = "0.6.2"
 
 [profile.bench]
 overflow-checks = true

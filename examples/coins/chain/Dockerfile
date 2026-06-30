@@ -4,6 +4,7 @@ WORKDIR /workspace
 COPY . .
 RUN cargo build --release \
     -p nunchi-coins-chain --bin coins-chain-node \
+    -p nunchi-coins-indexer --bin coins-chain-indexer \
     -p xtask --bin xtask
 
 FROM debian:bookworm-slim AS runtime
@@ -25,6 +26,22 @@ VOLUME ["/var/lib/nunchi/coins-chain"]
 EXPOSE 30000 8545 9090
 
 ENTRYPOINT ["/usr/local/bin/coins-chain-node"]
+
+FROM debian:bookworm-slim AS indexer
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd --gid 10001 nunchi \
+    && useradd --uid 10001 --gid nunchi --shell /bin/false --create-home nunchi
+
+COPY --from=builder /workspace/target/release/coins-chain-indexer /usr/local/bin/coins-chain-indexer
+
+USER nunchi
+EXPOSE 8080
+
+ENTRYPOINT ["/usr/local/bin/coins-chain-indexer"]
 
 FROM debian:bookworm-slim AS tools
 

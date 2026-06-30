@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  examples/coins-chain/deploy/deploy-hosts.sh <image-tar> <testnet-dir> <ssh-host>...
+  examples/coins/chain/deploy/deploy-hosts.sh <image-tar> <testnet-dir> <ssh-host>...
 
 Example:
   cargo run -p xtask -- generate coins-chain \
@@ -17,7 +17,7 @@ Example:
     --public-host 203.0.113.13 \
     --storage-dir /var/lib/nunchi/coins-chain
 
-  examples/coins-chain/deploy/deploy-hosts.sh \
+  examples/coins/chain/deploy/deploy-hosts.sh \
     /tmp/nunchi-coins-chain/coins-chain-node.tar \
     testnet/deploy \
     root@203.0.113.10 root@203.0.113.11 root@203.0.113.12 root@203.0.113.13
@@ -35,6 +35,7 @@ shift 2
 hosts=("$@")
 repo_root=$(git rev-parse --show-toplevel)
 image=${COINS_CHAIN_IMAGE:-nunchi-coins-chain:latest}
+indexer_image=${COINS_INDEXER_IMAGE:-nunchi-coins-indexer:latest}
 remote_dir=${COINS_CHAIN_REMOTE_DIR:-/opt/nunchi/coins-chain}
 
 if [[ ! -d "$testnet_dir" ]]; then
@@ -51,6 +52,14 @@ validator_count=$(find "$testnet_dir" -maxdepth 1 -name 'validator-*.toml' | wc 
 if [[ "${#hosts[@]}" -ne "$validator_count" ]]; then
   echo "expected $validator_count ssh hosts, got ${#hosts[@]}" >&2
   exit 1
+fi
+
+manifest="$testnet_dir/narae.toml"
+indexer_identity=""
+indexer_participants=""
+if [[ -f "$manifest" ]]; then
+  indexer_identity=$(sed -n -E 's/^identity = "([^"]+)"$/\1/p' "$manifest")
+  indexer_participants=$(sed -n -E 's/^participants = ([0-9]+)$/\1/p' "$manifest")
 fi
 
 for index in "${!hosts[@]}"; do
@@ -72,10 +81,13 @@ for index in "${!hosts[@]}"; do
   echo "deploying validator-$index to $host"
   ssh "$host" "mkdir -p '$remote_dir' '$remote_dir/data' && chown -R 10001:10001 '$remote_dir/data'"
   scp "$image_tar" "$host:$remote_dir/image.tar"
-  scp "$repo_root/examples/coins-chain/deploy/compose.yaml" "$host:$remote_dir/compose.yaml"
+  scp "$repo_root/examples/coins/chain/deploy/compose.yaml" "$host:$remote_dir/compose.yaml"
   scp "$config" "$host:$remote_dir/validator.toml"
   ssh "$host" "cat > '$remote_dir/.env' <<EOF
 COINS_CHAIN_IMAGE=$image
+COINS_INDEXER_IMAGE=$indexer_image
+INDEXER_IDENTITY=$indexer_identity
+INDEXER_PARTICIPANTS=$indexer_participants
 P2P_PORT=$p2p_port
 RPC_PORT=$rpc_port
 METRICS_PORT=$metrics_port

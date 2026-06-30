@@ -36,6 +36,8 @@ fn generated_testnet_has_unique_ports_dirs_and_complete_peer_sets() {
     .expect("generate testnet");
 
     assert_eq!(manifest.nodes.len(), 4);
+    assert_eq!(manifest.indexer.participants, 4);
+    assert!(!manifest.indexer.identity.is_empty());
     let ports = manifest
         .nodes
         .iter()
@@ -108,6 +110,9 @@ fn generated_testnet_can_advertise_remote_hosts() {
         seed: 8,
     })
     .expect("generate remote testnet");
+
+    assert_eq!(manifest.indexer.participants, 2);
+    assert!(!manifest.indexer.identity.is_empty());
 
     let first = NodeConfig::read(&manifest.nodes[0].config_path).expect("read first config");
     let second = NodeConfig::read(&manifest.nodes[1].config_path).expect("read second config");

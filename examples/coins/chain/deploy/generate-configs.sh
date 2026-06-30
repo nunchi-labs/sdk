@@ -4,10 +4,10 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  examples/coins-chain/deploy/generate-configs.sh <xtask generate coins-chain args...>
+  examples/coins/chain/deploy/generate-configs.sh <xtask generate coins-chain args...>
 
 Example:
-  examples/coins-chain/deploy/generate-configs.sh \
+  examples/coins/chain/deploy/generate-configs.sh \
     --validators 4 \
     --out testnet/deploy \
     --bind-ip 0.0.0.0 \
