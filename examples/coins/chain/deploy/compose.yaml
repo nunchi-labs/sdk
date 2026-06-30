@@ -12,7 +12,11 @@ services:
         "${INDEXER_IDENTITY:-}",
         "--participants",
         "${INDEXER_PARTICIPANTS:-1}",
+        "--frontend-dir",
+        "/usr/share/nunchi/coins/frontend",
       ]
+    volumes:
+      - ../../frontend/dist:/usr/share/nunchi/coins/frontend:ro
     ports:
       - "${INDEXER_BIND:-127.0.0.1}:${INDEXER_PORT:-8080}:8080/tcp"
 

@@ -40,6 +40,7 @@ COPY --from=builder /workspace/target/release/coins-chain-indexer /usr/local/bin
 
 USER nunchi
 EXPOSE 8080
+VOLUME ["/usr/share/nunchi/coins/frontend"]
 
 ENTRYPOINT ["/usr/local/bin/coins-chain-indexer"]
 
