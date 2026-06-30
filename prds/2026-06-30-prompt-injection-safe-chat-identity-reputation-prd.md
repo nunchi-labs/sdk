@@ -1,5 +1,5 @@
 ---
-title: "AgenC-safe chat, identity, and reputation refactor"
+title: "Prompt-injection-safe chat, identity, and reputation refactor"
 date: 2026-06-30
 version: "0.1"
 status: draft
@@ -8,16 +8,16 @@ domain: sdk / chat / identity / reputation
 related:
   - "https://github.com/Nunchi-trade/research/pull/46"
   - "https://github.com/Nunchi-trade/research/pull/53"
-tags: [agenc, chat, identity, reputation, prompt-injection, signer-policy, prd]
+tags: [chat, identity, reputation, prompt-injection, signer-policy, prd]
 ---
 
-# AgenC-safe chat, identity, and reputation refactor
+# Prompt-injection-safe chat, identity, and reputation refactor
 
 > Status: draft PRD. This is a spec for the SDK module boundary and launch controls. It does not implement the modules yet.
 
 ## 1. Summary
 
-Refactor the chat plan around the AgenC security model: every marketplace job spec, user prompt, docs excerpt, Telegram message, chat message, and artifact body is untrusted input. Chat should carry structured, signed data and durable knowledge artifacts, but it must not be a hidden control plane for wallet mutation.
+Refactor the chat plan around a general agent-runtime safety model: every marketplace job spec, user prompt, docs excerpt, Telegram message, chat message, and artifact body is untrusted input. Chat should carry structured, signed data and durable knowledge artifacts, but it must not be a hidden control plane for wallet mutation.
 
 The SDK should split the work into three coupled modules:
 
@@ -34,7 +34,7 @@ This PRD supersedes the chat assumptions in:
 - Research PR #46, "Rules of Chat - Done vs Not Done": locked the chat rules, including signed messages, no bus history, settle-on-binding, and the boundary between chat and chain.
 - Research PR #53, "Chat-module knowledge persistence": specified hash-on-chain, bytes-off-chain persistence with forum/search surfacing.
 
-It also incorporates the AgenC threat-model controls for prompt injection:
+It also adopts the same prompt-injection safeguards used by hardened agent runtimes:
 
 | Control | Requirement |
 | --- | --- |
@@ -54,7 +54,7 @@ Important distinction: signer policy does not restrict arbitrary external wallet
 
 ## 3. Problem
 
-The original chat specs focused on transport, rooms, settlement, and persistence. That is not enough for AgenC. Once chat contains marketplace job specs, prompt text, docs excerpts, Telegram-originated instructions, and artifact text, it becomes an adversarial input stream into agents that may have wallet access.
+The original chat specs focused on transport, rooms, settlement, and persistence. That is not enough for a wallet-capable agent runtime. Once chat contains marketplace job specs, prompt text, docs excerpts, Telegram-originated instructions, and artifact text, it becomes an adversarial input stream into agents that may have wallet access.
 
 The dangerous failure mode is not "a bad message is published." The dangerous failure mode is "a bad message is interpreted as authority to call a mutation tool or sign a transaction."
 
@@ -79,7 +79,7 @@ The SDK needs a chat design where:
 
 - Do not build private ZK marketplace tasks in this scope.
 - Do not build storefront checkout in this scope.
-- Do not build AgenC Lab in this scope.
+- Do not build hosted agent lab surfaces in this scope.
 - Do not build Telegram buyer rails in this scope.
 - Do not make reputation a wallet authorization mechanism.
 - Do not store raw transcripts on-chain.
@@ -123,7 +123,7 @@ Official agents get runtime/signer protection. Direct callers get protocol contr
 
 - Private ZK marketplace tasks.
 - Storefront checkout.
-- AgenC Lab.
+- Hosted agent lab surfaces.
 - Telegram buyer rails.
 - Full Gateway session manager implementation. This PRD reserves the API surface for gateway approval policies, but the gateway phase should own its own implementation PRD.
 
@@ -334,10 +334,10 @@ Disallowed uses:
 ### PRD acceptance
 
 - The SDK repo contains a PRD that clearly scopes chat, identity, and reputation.
-- The PRD explicitly carries the AgenC threat-model controls.
+- The PRD explicitly carries the core prompt-injection controls: read-only defaults, explicit mutation opt-in, and signer-backed mutations.
 - The PRD distinguishes official-agent runtime protection from direct external wallet behavior.
 - The PRD preserves the prior hash-on-chain, bytes-off-chain knowledge-persistence model.
-- The PRD lists out-of-scope surfaces: private ZK marketplace tasks, storefront checkout, AgenC Lab, and Telegram buyer rails.
+- The PRD lists out-of-scope surfaces: private ZK marketplace tasks, storefront checkout, hosted agent lab surfaces, and Telegram buyer rails.
 
 ### Implementation acceptance for future PRs
 
