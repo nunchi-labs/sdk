@@ -470,6 +470,7 @@ async fn start_node(
         max_block_transactions: config.max_block_transactions,
         pool_config: PoolConfig::default(),
         genesis: read_genesis(config.genesis_path.as_ref())?,
+        indexer: None,
     };
 
     let resolver_config = marshal::resolver::p2p::Config {
