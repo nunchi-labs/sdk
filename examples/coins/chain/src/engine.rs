@@ -1,6 +1,7 @@
 use crate::application::{self, Application};
 use crate::execution::NodeHandle;
 use crate::genesis::{genesis_target, state_commitment, ChainGenesis};
+use crate::indexer;
 use crate::{
     Block, EpochProvider, Finalization, Provider, PublicKey, Scheme, Transaction, BLOCKS_PER_EPOCH,
     NAMESPACE,
@@ -15,6 +16,7 @@ use commonware_consensus::{
     },
     simplex::elector::Random,
     types::{FixedEpocher, Height, ViewDelta},
+    Reporters,
 };
 use commonware_cryptography::{
     bls12381::{
@@ -36,8 +38,8 @@ use commonware_runtime::{
     buffer::paged::CacheRef, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics,
     Network, Spawner, Storage, ThreadPooler,
 };
-use commonware_storage::archive::immutable;
-use commonware_utils::union;
+use commonware_storage::{archive::immutable, queue};
+use commonware_utils::{union, NZU64};
 use futures::lock::Mutex as AsyncMutex;
 use governor::clock::Clock as GClock;
 use nunchi_chain::engine::*;
@@ -83,6 +85,7 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
     pub max_block_transactions: usize,
     pub pool_config: PoolConfig,
     pub genesis: Option<ChainGenesis>,
+    pub indexer: Option<indexer::HttpClient>,
 }
 
 type DkgActor<E, P> = nunchi_chain::DkgActor<E, P, Transaction>;
@@ -102,7 +105,17 @@ type Marshal<E, S> = MarshalActor<
     FixedEpocher,
     S,
 >;
-type Orchestrator<E, B, S> = orchestrator::Actor<E, B, Marshaled<E>, Scheme, Random, S, Block>;
+type Orchestrator<E, B, S> = orchestrator::Actor<
+    E,
+    B,
+    Marshaled<E>,
+    Scheme,
+    Random,
+    S,
+    Block,
+    Option<indexer::Pusher<E, indexer::HttpClient>>,
+>;
+type IndexerConsumer<E> = indexer::Consumer<E, indexer::HttpClient>;
 
 /// The engine that drives the coins-chain [Application].
 #[allow(clippy::type_complexity)]
@@ -135,6 +148,8 @@ where
     mempool: Mempool<Transaction>,
     stateful: StatefulApp<E>,
     stateful_mailbox: StatefulAppMailbox<E>,
+    indexer_producer: Option<indexer::Producer>,
+    indexer_consumer: Option<IndexerConsumer<E>>,
 }
 
 impl<E, B, P, S> Engine<E, B, P, S>
@@ -405,6 +420,37 @@ where
             FixedEpocher::new(BLOCKS_PER_EPOCH),
         );
 
+        let (indexer_producer, indexer_pusher, indexer_consumer) =
+            if let Some(client) = config.indexer.clone() {
+                let queue = queue::shared::init(
+                    context.child("indexer_queue"),
+                    queue::Config {
+                        partition: format!("{}-indexer-finalized-queue", config.partition_prefix),
+                        items_per_section: NZU64!(128),
+                        compression: None,
+                        codec_config: (),
+                        page_cache: page_cache.clone(),
+                        write_buffer: WRITE_BUFFER,
+                    },
+                )
+                .await
+                .expect("failed to initialize indexer queue");
+                let indexer = indexer::Indexer::new(
+                    context.child("indexer"),
+                    client,
+                    marshal_mailbox.clone(),
+                    queue,
+                    MAILBOX_SIZE,
+                    commonware_utils::NZUsize!(16),
+                    Duration::from_millis(500),
+                )
+                .await;
+                let (producer, pusher, consumer) = indexer.split();
+                (Some(producer), Some(pusher), Some(consumer))
+            } else {
+                (None, None, None)
+            };
+
         let (orchestrator, orchestrator_mailbox) = orchestrator::Actor::new(
             context.child("orchestrator"),
             orchestrator::Config {
@@ -412,6 +458,7 @@ where
                 application: application.clone(),
                 provider,
                 marshal: marshal_mailbox,
+                reporter: indexer_pusher,
                 strategy: config.strategy.clone(),
                 leader_timeout: config.leader_timeout,
                 certification_timeout: config.certification_timeout,
@@ -437,6 +484,8 @@ where
             mempool,
             stateful,
             stateful_mailbox,
+            indexer_producer,
+            indexer_consumer,
         };
         (engine, node_handle)
     }
@@ -530,7 +579,10 @@ where
             callback,
         );
         let buffer_handle = self.buffer.start(broadcast);
-        let reporters = nunchi_chain::dkg_reporters(self.stateful_mailbox, self.dkg_mailbox);
+        let reporters: Reporters<_, _, indexer::Producer> = Reporters::from((
+            nunchi_chain::dkg_reporters(self.stateful_mailbox, self.dkg_mailbox),
+            self.indexer_producer,
+        ));
         let marshal_handle = self
             .marshal
             .start(reporters, self.buffered_mailbox, marshal);
@@ -539,23 +591,44 @@ where
         let mempool_handle = self
             .mempool
             .start_p2p(self.context.child("mempool"), mempool);
+        let indexer_consumer_handle = self.indexer_consumer.map(indexer::Consumer::start);
 
         let mut shutdown = self.context.stopped();
-        commonware_macros::select! {
-            stopped = &mut shutdown => match stopped {
-                Ok(0) => {
-                    warn!("engine stopped");
-                    Ok(())
-                }
-                Ok(code) => Err(EngineError::Stopped(code)),
-                Err(_) => Err(EngineError::ShutdownSignalClosed),
-            },
-            result = dkg_handle => unexpected_exit("dkg", result),
-            result = buffer_handle => unexpected_exit("buffer", result),
-            result = marshal_handle => unexpected_exit("marshal", result),
-            result = stateful_handle => unexpected_exit("stateful", result),
-            result = orchestrator_handle => unexpected_exit("orchestrator", result),
-            result = mempool_handle => unexpected_exit("mempool", result),
+        if let Some(indexer_consumer_handle) = indexer_consumer_handle {
+            commonware_macros::select! {
+                stopped = &mut shutdown => match stopped {
+                    Ok(0) => {
+                        warn!("engine stopped");
+                        Ok(())
+                    }
+                    Ok(code) => Err(EngineError::Stopped(code)),
+                    Err(_) => Err(EngineError::ShutdownSignalClosed),
+                },
+                result = dkg_handle => unexpected_exit("dkg", result),
+                result = buffer_handle => unexpected_exit("buffer", result),
+                result = marshal_handle => unexpected_exit("marshal", result),
+                result = stateful_handle => unexpected_exit("stateful", result),
+                result = orchestrator_handle => unexpected_exit("orchestrator", result),
+                result = mempool_handle => unexpected_exit("mempool", result),
+                result = indexer_consumer_handle => unexpected_exit("indexer_consumer", result),
+            }
+        } else {
+            commonware_macros::select! {
+                stopped = &mut shutdown => match stopped {
+                    Ok(0) => {
+                        warn!("engine stopped");
+                        Ok(())
+                    }
+                    Ok(code) => Err(EngineError::Stopped(code)),
+                    Err(_) => Err(EngineError::ShutdownSignalClosed),
+                },
+                result = dkg_handle => unexpected_exit("dkg", result),
+                result = buffer_handle => unexpected_exit("buffer", result),
+                result = marshal_handle => unexpected_exit("marshal", result),
+                result = stateful_handle => unexpected_exit("stateful", result),
+                result = orchestrator_handle => unexpected_exit("orchestrator", result),
+                result = mempool_handle => unexpected_exit("mempool", result),
+            }
         }
     }
 }

@@ -7,9 +7,11 @@ use crate::{
 use commonware_actor::mailbox;
 use commonware_consensus::{
     marshal::{core::Mailbox as MarshalMailbox, standard::Standard},
-    simplex::{self, elector::Config as Elector, scheme, types::Context, Floor, Plan},
+    simplex::{
+        self, elector::Config as Elector, scheme, types::Activity, types::Context, Floor, Plan,
+    },
     types::{Epoch, Epocher, FixedEpocher, Height, ViewDelta},
-    CertifiableAutomaton, Relay,
+    CertifiableAutomaton, Relay, Reporter, Reporters,
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, certificate::Scheme, ed25519, sha256::Digest, Digestible,
@@ -36,8 +38,37 @@ use std::{
 };
 use tracing::{debug, info, warn};
 
+/// Reporter that discards consensus activity.
+pub struct NoopReporter<A> {
+    _phantom: PhantomData<A>,
+}
+
+impl<A> Clone for NoopReporter<A> {
+    fn clone(&self) -> Self {
+        Self {
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<A> Default for NoopReporter<A> {
+    fn default() -> Self {
+        Self {
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<A: Send + 'static> Reporter for NoopReporter<A> {
+    type Activity = A;
+
+    fn report(&mut self, _: Self::Activity) -> commonware_actor::Feedback {
+        commonware_actor::Feedback::Ok
+    }
+}
+
 /// Configuration for the orchestrator.
-pub struct Config<B, A, S, L, T, Blk>
+pub struct Config<B, A, S, L, T, Blk, R = NoopReporter<Activity<S, Digest>>>
 where
     B: Blocker<PublicKey = ed25519::PublicKey>,
     A: CertifiableAutomaton<Context = Context<Digest, ed25519::PublicKey>, Digest = Digest>
@@ -50,11 +81,13 @@ where
         + commonware_consensus::CertifiableBlock<Context = Context<Digest, ed25519::PublicKey>>
         + Digestible<Digest = Digest>
         + Clone,
+    R: Reporter<Activity = Activity<S, Digest>> + Clone,
 {
     pub oracle: B,
     pub application: A,
     pub provider: Provider<S, ed25519::PrivateKey>,
     pub marshal: MarshalMailbox<S, Standard<Blk>>,
+    pub reporter: R,
     pub strategy: T,
     pub leader_timeout: Duration,
     pub certification_timeout: Duration,
@@ -70,7 +103,7 @@ where
     pub _phantom: PhantomData<L>,
 }
 
-pub struct Actor<E, B, A, S, L, T, Blk>
+pub struct Actor<E, B, A, S, L, T, Blk, R = NoopReporter<Activity<S, Digest>>>
 where
     E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
     B: Blocker<PublicKey = ed25519::PublicKey>,
@@ -87,6 +120,7 @@ where
         + Send
         + Sync
         + 'static,
+    R: Reporter<Activity = Activity<S, Digest>> + Clone,
     Provider<S, ed25519::PrivateKey>:
         EpochProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
 {
@@ -96,6 +130,7 @@ where
 
     oracle: B,
     marshal: MarshalMailbox<S, Standard<Blk>>,
+    reporter: R,
     provider: Provider<S, ed25519::PrivateKey>,
     strategy: T,
     leader_timeout: Duration,
@@ -112,7 +147,7 @@ where
     _phantom: PhantomData<L>,
 }
 
-impl<E, B, A, S, L, T, Blk> Actor<E, B, A, S, L, T, Blk>
+impl<E, B, A, S, L, T, Blk, R> Actor<E, B, A, S, L, T, Blk, R>
 where
     E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
     B: Blocker<PublicKey = ed25519::PublicKey>,
@@ -129,12 +164,13 @@ where
         + Send
         + Sync
         + 'static,
+    R: Reporter<Activity = Activity<S, Digest>> + Clone,
     Provider<S, ed25519::PrivateKey>:
         EpochProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
 {
     pub fn new(
         context: E,
-        config: Config<B, A, S, L, T, Blk>,
+        config: Config<B, A, S, L, T, Blk, R>,
     ) -> (Self, Mailbox<MinSig, ed25519::PublicKey>) {
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
         let page_cache_ref = CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000));
@@ -149,6 +185,7 @@ where
                 application: config.application,
                 oracle: config.oracle,
                 marshal: config.marshal,
+                reporter: config.reporter,
                 provider: config.provider,
                 strategy: config.strategy,
                 leader_timeout: config.leader_timeout,
@@ -373,7 +410,7 @@ where
                 blocker: self.oracle.clone(),
                 automaton: self.application.clone(),
                 relay: self.application.clone(),
-                reporter: self.marshal.clone(),
+                reporter: Reporters::from((self.marshal.clone(), self.reporter.clone())),
                 partition: format!("{}_consensus_{}", self.partition_prefix, epoch),
                 mailbox_size: NZUsize!(1024),
                 epoch,
