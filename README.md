@@ -56,6 +56,7 @@ This repository will contain modules for building public and private blockchains
 ### Financial Primitives
 
 * `nunchi-margin` - user has BTC + nunchi and doesn't want to sell, and deposits BTC+nunchi and gets a stablecoin.  Could be backed by other coins, not just btc and nunchi. 
+* [`nunchi-lending`](lending/) - collateralized lending markets with ISFR-backed Aave-style utilization rates
 * `nunchi-securities` - Non-synthetic perps contracts (delivery of tokenized stock)
 * `nunchi-vaults` - a module for running vaults composed of many types of capital, traded by an authorised offchain party
 * `nunchi-clob` - used on the global chain, provides liquidity between local chain tokens

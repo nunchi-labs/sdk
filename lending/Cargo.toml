@@ -1,0 +1,21 @@
+[package]
+name = "nunchi-lending"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Minimal collateralized lending primitives over Nunchi coin balances."
+
+[dependencies]
+async-trait = { workspace = true }
+bytes = { workspace = true }
+commonware-codec = { workspace = true }
+commonware-cryptography = { workspace = true }
+thiserror = { workspace = true }
+nunchi-coins = { workspace = true }
+nunchi-common = { workspace = true }
+nunchi-crypto = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+serde = { workspace = true }
+
+[dev-dependencies]
+commonware-runtime = { workspace = true }
