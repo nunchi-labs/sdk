@@ -1,8 +1,8 @@
 # narae
 
-`narae` is a local testnet runner with a ratatui log dashboard. It generates standalone
-validator configs for an example chain (trusted key setup plus an initial threshold deal),
-launches one `coins-chain-node` process per validator, and tails their logs side by side.
+`narae` is a local testnet runner with a ratatui log dashboard. It launches one
+`coins-chain-node` process per local validator and tails their logs side by side.
+Deployment-oriented config generation lives in `xtask`.
 
 Generate configs and start a 4-validator coins-chain devnet in one step (the node binary must
 be built first; narae will tell you if it's missing):
@@ -19,9 +19,10 @@ cargo run -p narae -- generate coins-chain --validators 4 --out testnet
 cargo run -p narae -- run testnet
 ```
 
-`generate` writes one `validator-N.toml` per node plus a `narae.toml` manifest into the output
-directory. Each node listens for peers on `--base-port + N` (default 30000), serves the
-aggregated JSON-RPC on `--base-rpc-port + N` (default 8545), and exposes Prometheus metrics on
+`generate` is local-only and writes one `validator-N.toml` per node plus a
+`narae.toml` manifest into the output directory. Each node listens for peers on
+`--base-port + N` (default 30000), serves the aggregated JSON-RPC on
+`--base-rpc-port + N` (default 8545), and exposes Prometheus metrics on
 `--base-metrics-port + N` (default 9090), e.g.:
 
 ```sh
