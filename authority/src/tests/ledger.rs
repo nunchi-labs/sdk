@@ -374,3 +374,24 @@ fn nonce_mismatch_is_rejected() {
         );
     });
 }
+
+#[test]
+fn configure_rejects_empty_validator_set() {
+    commonware_runtime::deterministic::Runner::default().start(|_| async move {
+        let owners = vec![owner(1), owner(2), owner(3)];
+        let mut ledger = AuthorityLedger::new(MemoryState::default());
+        // An empty validator set must be rejected, matching the genesis path.
+        let result = submit(
+            &mut ledger,
+            &owners[0],
+            AuthorityOperation::Configure {
+                policy: policy(&owners, 2),
+                initial_validators: vec![],
+                epoch: 0,
+            },
+            0,
+        )
+        .await;
+        assert_eq!(result, Err(AuthorityError::InvalidPolicy));
+    });
+}
