@@ -1,4 +1,4 @@
-# run from current folder (examples/coins-chain/monitoring)
+# run from current folder (examples/coins/chain/monitoring)
 
 docker stop monitoring 2>/dev/null || true
 docker rm monitoring 2>/dev/null || true

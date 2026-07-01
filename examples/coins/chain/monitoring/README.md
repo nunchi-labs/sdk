@@ -19,7 +19,7 @@ Start the `coins-chain` testnet first so that node metrics are available on the
 host. Then run the monitoring container from this directory:
 
 ```sh
-cd examples/coins-chain/monitoring
+cd examples/coins/chain/monitoring
 sh create.sh
 ```
 
