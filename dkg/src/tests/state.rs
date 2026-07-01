@@ -1,4 +1,7 @@
-use crate::{protector::StorageProtector, state::{Dealer, Storage}};
+use crate::{
+    protector::{ProtectionError, StorageProtector},
+    state::{Dealer, Epoch as EpochState, Error as StorageError, Storage},
+};
 use commonware_codec::{Encode, ReadExt};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
@@ -7,6 +10,7 @@ use commonware_cryptography::{
         primitives::{group::Scalar, sharing::Mode, variant::MinPk},
     },
     ed25519::{self},
+    transcript::Summary,
     Signer,
 };
 use commonware_macros::test_traced;
@@ -18,6 +22,7 @@ use std::collections::BTreeMap;
 
 const TEST_NAMESPACE: &[u8] = b"test_dkg";
 const TEST_STORAGE_KEY: [u8; 32] = [7u8; 32];
+const WRONG_STORAGE_KEY: [u8; 32] = [8u8; 32];
 
 fn create_test_signers(n: usize) -> Vec<ed25519::PrivateKey> {
     (0..n)
@@ -43,6 +48,110 @@ fn create_round_info(signers: &[ed25519::PrivateKey]) -> Info<MinPk, ed25519::Pu
 }
 
 #[test_traced]
+fn storage_recovery_rejects_wrong_key() {
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        let signers = create_test_signers(4);
+        let public_key = signers[0].public_key();
+        let partition = "wrong_key_recovery";
+
+        let mut storage = Storage::<_, MinPk, ed25519::PublicKey>::init(
+            context.child("storage"),
+            partition,
+            StorageProtector::new(TEST_STORAGE_KEY),
+            TEST_NAMESPACE.to_vec(),
+            public_key.clone(),
+            NZU32!(10),
+            crate::MAX_SUPPORTED_MODE,
+        )
+        .await
+        .expect("storage init should succeed");
+        storage
+            .set_epoch(
+                Epoch::zero(),
+                EpochState {
+                    round: 0,
+                    rng_seed: Summary::random(&mut context),
+                    output: None,
+                    share: None,
+                },
+            )
+            .await
+            .expect("set epoch should succeed");
+        drop(storage);
+
+        let result = Storage::<_, MinPk, ed25519::PublicKey>::init(
+            context.child("wrong_key_storage"),
+            partition,
+            StorageProtector::new(WRONG_STORAGE_KEY),
+            TEST_NAMESPACE.to_vec(),
+            public_key,
+            NZU32!(10),
+            crate::MAX_SUPPORTED_MODE,
+        )
+        .await;
+
+        match result {
+            Err(StorageError::Protection(ProtectionError::Open)) => {}
+            Err(err) => panic!("expected protection open failure, got {err}"),
+            Ok(_) => panic!("wrong key should fail closed"),
+        }
+    });
+}
+
+#[test_traced]
+fn storage_recovery_rejects_wrong_associated_data() {
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        let signers = create_test_signers(4);
+        let public_key = signers[0].public_key();
+        let partition = "wrong_ad_recovery";
+
+        let mut storage = Storage::<_, MinPk, ed25519::PublicKey>::init(
+            context.child("storage"),
+            partition,
+            StorageProtector::new(TEST_STORAGE_KEY),
+            TEST_NAMESPACE.to_vec(),
+            public_key.clone(),
+            NZU32!(10),
+            crate::MAX_SUPPORTED_MODE,
+        )
+        .await
+        .expect("storage init should succeed");
+        storage
+            .set_epoch(
+                Epoch::zero(),
+                EpochState {
+                    round: 0,
+                    rng_seed: Summary::random(&mut context),
+                    output: None,
+                    share: None,
+                },
+            )
+            .await
+            .expect("set epoch should succeed");
+        drop(storage);
+
+        let result = Storage::<_, MinPk, ed25519::PublicKey>::init(
+            context.child("wrong_ad_storage"),
+            partition,
+            StorageProtector::new(TEST_STORAGE_KEY),
+            b"wrong_namespace".to_vec(),
+            public_key,
+            NZU32!(10),
+            crate::MAX_SUPPORTED_MODE,
+        )
+        .await;
+
+        match result {
+            Err(StorageError::Protection(ProtectionError::Open)) => {}
+            Err(err) => panic!("expected protection open failure, got {err}"),
+            Ok(_) => panic!("wrong associated data should fail closed"),
+        }
+    });
+}
+
+#[test_traced]
 fn test_dealer_handle_returns_false_when_player_not_in_unsent() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
@@ -58,7 +167,8 @@ fn test_dealer_handle_returns_false_when_player_not_in_unsent() {
             NZU32!(10),
             crate::MAX_SUPPORTED_MODE,
         )
-        .await;
+        .await
+        .expect("storage init should succeed");
 
         let dealer_signer = signers[0].clone();
         let mut rng = test_rng();
@@ -105,7 +215,8 @@ fn test_dealer_handle_returns_false_when_crypto_dealer_is_none() {
             NZU32!(10),
             crate::MAX_SUPPORTED_MODE,
         )
-        .await;
+        .await
+        .expect("storage init should succeed");
 
         let dealer_signer = signers[0].clone();
         let mut rng = test_rng();
@@ -152,7 +263,8 @@ fn test_dealer_handle_returns_true_for_valid_ack() {
             NZU32!(10),
             crate::MAX_SUPPORTED_MODE,
         )
-        .await;
+        .await
+        .expect("storage init should succeed");
 
         let dealer_signer = signers[0].clone();
         let mut rng = test_rng();
@@ -207,7 +319,8 @@ fn test_dealer_handle_returns_false_for_duplicate_ack() {
             NZU32!(10),
             crate::MAX_SUPPORTED_MODE,
         )
-        .await;
+        .await
+        .expect("storage init should succeed");
 
         let dealer_signer = signers[0].clone();
         let mut rng = test_rng();

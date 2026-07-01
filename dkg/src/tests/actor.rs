@@ -164,7 +164,8 @@ fn assert_recovered_storage_controls_dkg_mode_on_restart(execution: Execution, s
             NZU32!(peer_config.max_participants_per_round()),
             crate::MAX_SUPPORTED_MODE,
         )
-        .await;
+        .await
+        .expect("storage init should succeed");
         storage
             .set_epoch(
                 Epoch::new(RECOVERED_EPOCH),
@@ -175,7 +176,8 @@ fn assert_recovered_storage_controls_dkg_mode_on_restart(execution: Execution, s
                     share,
                 },
             )
-            .await;
+            .await
+            .expect("set epoch should succeed");
         drop(storage);
 
         let (actor, _mailbox) = Actor::<_, _, TestBlock>::new(

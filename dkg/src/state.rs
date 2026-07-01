@@ -4,8 +4,8 @@
 //! (dealer broadcasts, player acks, logs) using append-only journals for crash recovery.
 //! In-memory BTreeMaps provide fast lookups while storage ensures durability.
 //!
-use crate::protector::{SealedRecord, StorageProtector, NONCE_SIZE};
-use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
+use crate::protector::{ProtectionError, SealedRecord, StorageProtector, NONCE_SIZE};
+use commonware_codec::{Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
 use commonware_consensus::types::Epoch as EpochNum;
 use commonware_cryptography::{
     bls12381::{
@@ -23,8 +23,8 @@ use commonware_runtime::{
     buffer::paged::CacheRef, Buf, BufMut, BufferPooler, Clock, Metrics, Storage as RuntimeStorage,
 };
 use commonware_storage::{
-    journal::segmented::variable::{Config as SVConfig, Journal as SVJournal},
-    metadata::{Config as MetadataConfig, Metadata},
+    journal::{self, segmented::variable::{Config as SVConfig, Journal as SVJournal}},
+    metadata::{self, Config as MetadataConfig, Metadata},
 };
 use commonware_utils::{Faults, NZUsize, NZU16};
 use futures::StreamExt;
@@ -33,7 +33,7 @@ use std::{
     collections::BTreeMap,
     num::{NonZeroU16, NonZeroU32, NonZeroUsize},
 };
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 // Configure 32MB page cache
 const PAGE_SIZE: NonZeroU16 = NZU16!(1 << 12);
@@ -45,6 +45,23 @@ const READ_BUFFER: NonZeroUsize = NZUsize!(1 << 20);
 const RECORD_AD_DOMAIN: &[u8] = b"nunchi-dkg-storage";
 const RECORD_KIND_EPOCH: u8 = 0;
 const RECORD_KIND_EVENT: u8 = 1;
+
+/// Errors returned by DKG persistent storage.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("metadata storage error: {0}")]
+    Metadata(#[from] metadata::Error),
+    #[error("journal storage error: {0}")]
+    Journal(#[from] journal::Error),
+    #[error("record protection error: {0}")]
+    Protection(#[from] ProtectionError),
+    #[error("record decode error: {0}")]
+    Decode(#[from] CodecError),
+    #[error("decoded record has trailing bytes")]
+    TrailingBytes,
+    #[error("missing epoch state for key: {0}")]
+    MissingEpochState(u64),
+}
 
 /// Epoch-level DKG state persisted across restarts.
 #[derive(Clone)]
@@ -210,7 +227,7 @@ where
         public_key: P,
         max_read_size: NonZeroU32,
         max_supported_mode: ModeVersion,
-    ) -> Self {
+    ) -> Result<Self, Error> {
         let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_CAPACITY);
 
         let states: Metadata<E, u64, SealedRecord> = Metadata::init(
@@ -220,8 +237,7 @@ where
                 codec_config: RangeCfg::from(..),
             },
         )
-        .await
-        .expect("should be able to init dkg_states metadata");
+        .await?;
 
         let msgs = SVJournal::init(
             context.child("msgs"),
@@ -233,13 +249,14 @@ where
                 write_buffer: WRITE_BUFFER,
             },
         )
-        .await
-        .expect("should be able to init dkg_msgs journal");
+        .await?;
 
         // Find the current epoch by looking for the highest key in metadata
         let partition_prefix = partition_prefix.to_owned();
-        let current = states.keys().max().map(|&epoch_num| {
-            let record = states.get(&epoch_num).expect("key must exist");
+        let current = if let Some(&epoch_num) = states.keys().max() {
+            let record = states
+                .get(&epoch_num)
+                .ok_or(Error::MissingEpochState(epoch_num))?;
             let state = Self::open_epoch_record(
                 &protector,
                 &partition_prefix,
@@ -248,22 +265,20 @@ where
                 (max_read_size, max_supported_mode),
                 EpochNum::new(epoch_num),
                 record,
-            )
-            .expect("should be able to open dkg epoch state");
-            (EpochNum::new(epoch_num), state)
-        });
+            )?;
+            Some((EpochNum::new(epoch_num), state))
+        } else {
+            None
+        };
 
         // Replay msgs to populate epoch caches
         let mut epochs = BTreeMap::<EpochNum, EpochCache<V, P>>::new();
         {
-            let replay = msgs
-                .replay(0, 0, READ_BUFFER)
-                .await
-                .expect("should be able to replay msgs");
+            let replay = msgs.replay(0, 0, READ_BUFFER).await?;
             futures::pin_mut!(replay);
 
             while let Some(result) = replay.next().await {
-                let (section, _, _, record) = result.expect("should be able to read msg");
+                let (section, _, _, record) = result?;
                 let epoch = EpochNum::new(section);
                 let event = Self::open_event_record(
                     &protector,
@@ -273,8 +288,7 @@ where
                     max_read_size,
                     epoch,
                     &record,
-                )
-                .expect("should be able to open dkg msg");
+                )?;
                 let cache = epochs.entry(epoch).or_default();
                 match event {
                     Event::Dealing(dealer, pub_msg, priv_msg) => {
@@ -290,7 +304,7 @@ where
             }
         }
 
-        Self {
+        Ok(Self {
             context,
             protector,
             partition_prefix,
@@ -300,7 +314,7 @@ where
             msgs,
             current,
             epochs,
-        }
+        })
     }
 
     fn associated_data(
@@ -336,7 +350,7 @@ where
         cfg: (NonZeroU32, ModeVersion),
         epoch: EpochNum,
         record: &SealedRecord,
-    ) -> Result<Epoch<V, P>, String> {
+    ) -> Result<Epoch<V, P>, Error> {
         let ad = Self::associated_data(
             partition_prefix,
             namespace,
@@ -344,14 +358,11 @@ where
             RECORD_KIND_EPOCH,
             epoch,
         );
-        let plaintext = protector
-            .open(record, &ad)
-            .map_err(|err| format!("open failed: {err}"))?;
+        let plaintext = protector.open(record, &ad)?;
         let mut buf = plaintext.as_ref();
-        let state = Epoch::read_cfg(&mut buf, &cfg)
-            .map_err(|err| format!("decode failed: {err}"))?;
+        let state = Epoch::read_cfg(&mut buf, &cfg)?;
         if buf.has_remaining() {
-            return Err("decode failed: trailing bytes".to_string());
+            return Err(Error::TrailingBytes);
         }
         Ok(state)
     }
@@ -364,7 +375,7 @@ where
         max_read_size: NonZeroU32,
         epoch: EpochNum,
         record: &SealedRecord,
-    ) -> Result<Event<V, P>, String> {
+    ) -> Result<Event<V, P>, Error> {
         let ad = Self::associated_data(
             partition_prefix,
             namespace,
@@ -372,19 +383,21 @@ where
             RECORD_KIND_EVENT,
             epoch,
         );
-        let plaintext = protector
-            .open(record, &ad)
-            .map_err(|err| format!("open failed: {err}"))?;
+        let plaintext = protector.open(record, &ad)?;
         let mut buf = plaintext.as_ref();
-        let event = Event::read_cfg(&mut buf, &max_read_size)
-            .map_err(|err| format!("decode failed: {err}"))?;
+        let event = Event::read_cfg(&mut buf, &max_read_size)?;
         if buf.has_remaining() {
-            return Err("decode failed: trailing bytes".to_string());
+            return Err(Error::TrailingBytes);
         }
         Ok(event)
     }
 
-    fn seal_record(&mut self, kind: u8, epoch: EpochNum, plaintext: &[u8]) -> SealedRecord {
+    fn seal_record(
+        &mut self,
+        kind: u8,
+        epoch: EpochNum,
+        plaintext: &[u8],
+    ) -> Result<SealedRecord, Error> {
         let mut nonce = [0u8; NONCE_SIZE];
         self.context.fill_bytes(&mut nonce);
         let ad = Self::associated_data(
@@ -394,9 +407,7 @@ where
             kind,
             epoch,
         );
-        self.protector
-            .seal(plaintext, &ad, nonce)
-            .expect("should be able to seal dkg record")
+        Ok(self.protector.seal(plaintext, &ad, nonce)?)
     }
 
     /// Returns all dealer messages received during the given epoch.
@@ -472,120 +483,105 @@ where
         dealer: P,
         pub_msg: DealerPubMsg<V>,
         priv_msg: DealerPrivMsg,
-    ) -> bool {
+    ) -> Result<bool, Error> {
         // Check if already stored
         if self.has_cached(epoch, |c| &c.dealings, &dealer) {
-            return false;
+            return Ok(false);
         }
 
         // Persist to journal
         let section = epoch.get();
         let event = Event::Dealing(dealer.clone(), pub_msg.clone(), priv_msg.clone());
-        let record = self.seal_record(RECORD_KIND_EVENT, epoch, &event.encode());
-        self.msgs
-            .append(section, &record)
-            .await
-            .expect("should be able to write to msgs");
-        self.msgs
-            .sync(section)
-            .await
-            .expect("should be able to sync msgs");
+        let record = self.seal_record(RECORD_KIND_EVENT, epoch, &event.encode())?;
+        self.msgs.append(section, &record).await?;
+        self.msgs.sync(section).await?;
 
         // Update in-memory cache
         self.get_or_create_epoch(epoch)
             .dealings
             .insert(dealer, (pub_msg, priv_msg));
-        true
+        Ok(true)
     }
 
     /// Persists a player acknowledgment we received (as a dealer) for crash recovery.
     /// Returns false if the ack was already stored.
-    pub async fn append_ack(&mut self, epoch: EpochNum, player: P, ack: PlayerAck<P>) -> bool {
+    pub async fn append_ack(
+        &mut self,
+        epoch: EpochNum,
+        player: P,
+        ack: PlayerAck<P>,
+    ) -> Result<bool, Error> {
         // Check if already stored
         if self.has_cached(epoch, |c| &c.acks, &player) {
-            return false;
+            return Ok(false);
         }
 
         // Persist to journal
         let section = epoch.get();
         let event: Event<V, P> = Event::Ack(player.clone(), ack.clone());
-        let record = self.seal_record(RECORD_KIND_EVENT, epoch, &event.encode());
-        self.msgs
-            .append(section, &record)
-            .await
-            .expect("should be able to write to msgs");
-        self.msgs
-            .sync(section)
-            .await
-            .expect("should be able to sync msgs");
+        let record = self.seal_record(RECORD_KIND_EVENT, epoch, &event.encode())?;
+        self.msgs.append(section, &record).await?;
+        self.msgs.sync(section).await?;
 
         // Update in-memory cache
         self.get_or_create_epoch(epoch).acks.insert(player, ack);
-        true
+        Ok(true)
     }
 
     /// Persists a finalized dealer log.
     /// Returns false if the log was already stored.
-    pub async fn append_log(&mut self, epoch: EpochNum, dealer: P, log: DealerLog<V, P>) -> bool {
+    pub async fn append_log(
+        &mut self,
+        epoch: EpochNum,
+        dealer: P,
+        log: DealerLog<V, P>,
+    ) -> Result<bool, Error> {
         // Check if already stored
         if self.has_cached(epoch, |c| &c.logs, &dealer) {
-            return false;
+            return Ok(false);
         }
 
         // Persist to journal
         let section = epoch.get();
         let event = Event::Log(dealer.clone(), log.clone());
-        let record = self.seal_record(RECORD_KIND_EVENT, epoch, &event.encode());
-        self.msgs
-            .append(section, &record)
-            .await
-            .expect("should be able to write to msgs");
-        self.msgs
-            .sync(section)
-            .await
-            .expect("should be able to sync msgs");
+        let record = self.seal_record(RECORD_KIND_EVENT, epoch, &event.encode())?;
+        self.msgs.append(section, &record).await?;
+        self.msgs.sync(section).await?;
 
         // Update in-memory cache
         self.get_or_create_epoch(epoch).logs.insert(dealer, log);
-        true
+        Ok(true)
     }
 
     /// Persists epoch state.
-    pub async fn set_epoch(&mut self, epoch: EpochNum, state: Epoch<V, P>) {
+    pub async fn set_epoch(&mut self, epoch: EpochNum, state: Epoch<V, P>) -> Result<(), Error> {
         // Persist to metadata using epoch number as key
         let epoch_key = epoch.get();
-        let record = self.seal_record(RECORD_KIND_EPOCH, epoch, &state.encode());
+        let record = self.seal_record(RECORD_KIND_EPOCH, epoch, &state.encode())?;
         if self.states.put(epoch_key, record).is_some() {
             warn!(%epoch, "overwriting existing epoch state");
         }
-        self.states
-            .sync()
-            .await
-            .expect("should be able to sync state");
+        self.states.sync().await?;
 
         // Update in-memory state
         self.current = Some((epoch, state));
+        Ok(())
     }
 
     /// Removes all data from epochs older than `min`.
-    pub async fn prune(&mut self, min: EpochNum) {
+    pub async fn prune(&mut self, min: EpochNum) -> Result<(), Error> {
         let min_epoch = min.get();
 
         // Prune msgs journal
-        self.msgs
-            .prune(min_epoch)
-            .await
-            .expect("should be able to prune msgs");
+        self.msgs.prune(min_epoch).await?;
 
         // Prune states metadata - remove all epochs < min
         self.states.retain(|&epoch_key, _| epoch_key >= min_epoch);
-        self.states
-            .sync()
-            .await
-            .expect("should be able to sync states after prune");
+        self.states.sync().await?;
 
         // Remove old epoch caches
         self.epochs.retain(|&epoch, _| epoch >= min);
+        Ok(())
     }
 
     /// Create a Dealer for the given epoch, replaying any stored acks.
@@ -695,7 +691,14 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
                 .is_ok()
             {
                 self.unsent.remove(&player);
-                storage.append_ack(epoch, player, ack).await;
+                match storage.append_ack(epoch, player.clone(), ack).await {
+                    Ok(true) => {}
+                    Ok(false) => return false,
+                    Err(err) => {
+                        error!(?epoch, ?player, %err, "failed to persist DKG ack");
+                        return false;
+                    }
+                }
                 return true;
             }
         }
@@ -773,9 +776,17 @@ impl<V: Variant, C: Signer> Player<V, C> {
             self.player
                 .dealer_message::<M>(dealer.clone(), pub_msg.clone(), priv_msg.clone())
         {
-            storage
+            match storage
                 .append_dealing(epoch, dealer.clone(), pub_msg, priv_msg)
-                .await;
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => return None,
+                Err(err) => {
+                    error!(?epoch, ?dealer, %err, "failed to persist DKG dealing");
+                    return None;
+                }
+            }
             self.acks.insert(dealer, ack.clone());
             return Some(ack);
         }
