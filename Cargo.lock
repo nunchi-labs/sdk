@@ -2865,6 +2865,7 @@ name = "nunchi-dkg"
 version = "2026.6.0"
 dependencies = [
  "bytes",
+ "chacha20poly1305",
  "commonware-actor",
  "commonware-codec",
  "commonware-consensus",
@@ -2882,6 +2883,7 @@ dependencies = [
  "rand 0.8.6",
  "rand_core 0.6.4",
  "serde",
+ "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber 0.3.23",
 ]
