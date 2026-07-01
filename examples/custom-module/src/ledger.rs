@@ -2,7 +2,7 @@ use crate::{
     value_cleared_event, value_set_event, CustomDB, CustomOperation, Transaction, ValueCleared,
     ValueSet,
 };
-use nunchi_common::{Address, Event, EventSink, NoopEventSink};
+use nunchi_common::{Address, Event, EventSink};
 use nunchi_crypto::SignatureError;
 use thiserror::Error;
 
@@ -53,11 +53,14 @@ impl<D: CustomDB> CustomLedger<D> {
         self.db.value(account).await
     }
 
-    pub async fn apply_transaction(
+    pub async fn apply_transaction<Events>(
         &mut self,
         tx: &Transaction,
-        events: Option<&mut (dyn EventSink + Send)>,
-    ) -> Result<(), CustomError> {
+        mut events: Events,
+    ) -> Result<(), CustomError>
+    where
+        Events: EventSink + Send,
+    {
         tx.verify()?;
 
         let expected = self.db.nonce(&tx.account_id).await?;
@@ -72,8 +75,6 @@ impl<D: CustomDB> CustomLedger<D> {
         let next_nonce = expected.checked_add(1).ok_or(CustomError::NonceOverflow)?;
         let event = self.apply_operation(&tx.account_id, &tx.payload.operation);
         self.db.set_nonce(&tx.account_id, next_nonce);
-        let mut noop = NoopEventSink;
-        let events = events.unwrap_or(&mut noop);
         events.emit(event);
         Ok(())
     }

@@ -8,7 +8,7 @@ use crate::events::{
     transferred_event, AccountPolicyRegistered, Burned, Minted, TokenCreated, Transferred,
 };
 use commonware_cryptography::sha256::Digest;
-use nunchi_common::{CommitState, Event, EventSink, NoopEventSink};
+use nunchi_common::{CommitState, Event, EventSink};
 use nunchi_crypto::SignatureError;
 use thiserror::Error;
 
@@ -107,11 +107,13 @@ impl<D: CoinDB> Ledger<D> {
         self.db.balance(account, coin).await
     }
 
-    pub async fn apply_transaction(
+    pub async fn apply_transaction<Events>(
         &mut self,
         tx: &Transaction,
-        events: Option<&mut (dyn EventSink + Send)>,
+        mut events: Events,
     ) -> Result<(), LedgerError>
+    where
+        Events: EventSink + Send,
     {
         self.ensure_authorized(tx).await?;
 
@@ -129,8 +131,6 @@ impl<D: CoinDB> Ledger<D> {
             .apply_operation(&tx.account_id, &tx.payload.operation)
             .await?;
         self.db.set_nonce(&tx.account_id, next_nonce);
-        let mut noop = NoopEventSink;
-        let events = events.unwrap_or(&mut noop);
         events.emit(event);
         Ok(())
     }
