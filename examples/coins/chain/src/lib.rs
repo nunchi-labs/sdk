@@ -64,5 +64,5 @@ pub const EPOCH: Epoch = Epoch::zero();
 ///
 /// Production systems should use a much larger value, as DKG/reshare safety depends on
 /// synchrony during the epoch window.
-pub const BLOCKS_PER_EPOCH: NonZeroU64 = commonware_utils::NZU64!(200);
+pub const BLOCKS_PER_EPOCH: NonZeroU64 = commonware_utils::NZU64!(200_000);
 });

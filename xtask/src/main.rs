@@ -1,8 +1,7 @@
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
-#[command(about = "Run workspace automation tasks")]
+#[command(name = "xtask", about = "Workspace automation tasks")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -10,32 +9,28 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Generate local testnet node configs.
+    /// Generate deployment artifacts.
     Generate {
         #[command(subcommand)]
-        chain: ChainCommand,
+        chain: GenerateCommand,
     },
 }
 
 #[derive(Debug, Subcommand)]
-enum ChainCommand {
-    /// Generate a coins-chain local validator set.
+enum GenerateCommand {
+    /// Generate coins-chain validator configs and manifest.
     CoinsChain(nunchi_xtask::coins_chain::Generate),
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Generate { chain } => {
-            let manifest_path = generate(chain)?;
-            println!("{}", manifest_path.display());
-        }
+        Command::Generate { chain } => match chain {
+            GenerateCommand::CoinsChain(cmd) => {
+                let manifest_path = cmd.run()?;
+                println!("{}", manifest_path.display());
+            }
+        },
     }
     Ok(())
-}
-
-fn generate(chain: ChainCommand) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    match chain {
-        ChainCommand::CoinsChain(generate) => generate.run(),
-    }
 }
