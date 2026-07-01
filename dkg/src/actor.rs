@@ -4,6 +4,7 @@ use super::{
 };
 use crate::{
     orchestrator::{self, EpochTransition},
+    protector::StorageProtector,
     setup::PeerConfig,
     ReshareBlock,
 };
@@ -108,6 +109,7 @@ pub struct Config<P> {
     pub peer_config: PeerConfig<ed25519::PublicKey>,
     pub max_supported_mode: ModeVersion,
     pub namespace: Vec<u8>,
+    pub storage_protector: StorageProtector,
     pub epoch_length: NonZeroU64,
 }
 
@@ -136,6 +138,7 @@ where
     partition_prefix: String,
     max_supported_mode: ModeVersion,
     namespace: Vec<u8>,
+    storage_protector: StorageProtector,
     epoch_length: NonZeroU64,
 
     successful_epochs: Counter,
@@ -183,6 +186,7 @@ where
                 partition_prefix: config.partition_prefix,
                 max_supported_mode: config.max_supported_mode,
                 namespace: config.namespace,
+                storage_protector: config.storage_protector,
                 epoch_length: config.epoch_length,
 
                 successful_epochs,
@@ -236,11 +240,15 @@ where
     ) {
         let max_read_size = NZU32!(self.peer_config.max_participants_per_round());
         let epocher = FixedEpocher::new(self.epoch_length);
+        let self_pk = self.signer.public_key();
 
         // Initialize persistent state
         let mut storage = Storage::init(
             self.context.child("storage"),
             &self.partition_prefix,
+            self.storage_protector.clone(),
+            self.namespace.clone(),
+            self_pk.clone(),
             max_read_size,
             self.max_supported_mode,
         )
@@ -315,7 +323,6 @@ where
                 ),
             );
 
-            let self_pk = self.signer.public_key();
             let am_dealer = dealers.position(&self_pk).is_some();
             let am_player = players.position(&self_pk).is_some();
 

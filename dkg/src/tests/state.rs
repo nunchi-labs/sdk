@@ -1,4 +1,4 @@
-use crate::state::{Dealer, Storage};
+use crate::{protector::StorageProtector, state::{Dealer, Storage}};
 use commonware_codec::{Encode, ReadExt};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
@@ -17,6 +17,7 @@ use commonware_utils::{ordered::Set, test_rng, test_rng_seeded, N3f1};
 use std::collections::BTreeMap;
 
 const TEST_NAMESPACE: &[u8] = b"test_dkg";
+const TEST_STORAGE_KEY: [u8; 32] = [7u8; 32];
 
 fn create_test_signers(n: usize) -> Vec<ed25519::PrivateKey> {
     (0..n)
@@ -51,6 +52,9 @@ fn test_dealer_handle_returns_false_when_player_not_in_unsent() {
         let mut storage = Storage::<_, MinPk, _>::init(
             context.child("storage"),
             "test",
+            StorageProtector::new(TEST_STORAGE_KEY),
+            TEST_NAMESPACE.to_vec(),
+            signers[0].public_key(),
             NZU32!(10),
             crate::MAX_SUPPORTED_MODE,
         )
@@ -95,6 +99,9 @@ fn test_dealer_handle_returns_false_when_crypto_dealer_is_none() {
         let mut storage = Storage::<_, MinPk, ed25519::PublicKey>::init(
             context.child("storage"),
             "test",
+            StorageProtector::new(TEST_STORAGE_KEY),
+            TEST_NAMESPACE.to_vec(),
+            signers[0].public_key(),
             NZU32!(10),
             crate::MAX_SUPPORTED_MODE,
         )
@@ -139,6 +146,9 @@ fn test_dealer_handle_returns_true_for_valid_ack() {
         let mut storage = Storage::<_, MinPk, _>::init(
             context.child("storage"),
             "test",
+            StorageProtector::new(TEST_STORAGE_KEY),
+            TEST_NAMESPACE.to_vec(),
+            signers[0].public_key(),
             NZU32!(10),
             crate::MAX_SUPPORTED_MODE,
         )
@@ -191,6 +201,9 @@ fn test_dealer_handle_returns_false_for_duplicate_ack() {
         let mut storage = Storage::<_, MinPk, ed25519::PublicKey>::init(
             context.child("storage"),
             "test",
+            StorageProtector::new(TEST_STORAGE_KEY),
+            TEST_NAMESPACE.to_vec(),
+            signers[0].public_key(),
             NZU32!(10),
             crate::MAX_SUPPORTED_MODE,
         )

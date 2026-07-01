@@ -4,14 +4,8 @@
 //! (dealer broadcasts, player acks, logs) using append-only journals for crash recovery.
 //! In-memory BTreeMaps provide fast lookups while storage ensures durability.
 //!
-//! # Warning
-//!
-//! This module persists private key material (specifically `Share` in the `Epoch` struct)
-//! to disk. In a production environment:
-//! - This key material should be stored securely (e.g., encrypted at rest)
-//! - Old shares should be securely deleted after successful resharing
-
-use commonware_codec::{EncodeSize, Read, ReadExt, Write};
+use crate::protector::{SealedRecord, StorageProtector, NONCE_SIZE};
+use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_consensus::types::Epoch as EpochNum;
 use commonware_cryptography::{
     bls12381::{
@@ -47,6 +41,10 @@ const PAGE_CACHE_CAPACITY: NonZeroUsize = NZUsize!(1 << 13);
 
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1 << 12);
 const READ_BUFFER: NonZeroUsize = NZUsize!(1 << 20);
+
+const RECORD_AD_DOMAIN: &[u8] = b"nunchi-dkg-storage";
+const RECORD_KIND_EPOCH: u8 = 0;
+const RECORD_KIND_EVENT: u8 = 1;
 
 /// Epoch-level DKG state persisted across restarts.
 #[derive(Clone)]
@@ -178,12 +176,18 @@ impl<V: Variant, P: PublicKey> Default for EpochCache<V, P> {
 /// the position/epoch confusion that can occur with position-based journals.
 pub struct Storage<E, V, P>
 where
-    E: BufferPooler + Clock + RuntimeStorage + Metrics,
+    E: BufferPooler + Clock + RuntimeStorage + Metrics + CryptoRngCore,
     V: Variant,
     P: PublicKey,
 {
-    states: Metadata<E, u64, Epoch<V, P>>,
-    msgs: SVJournal<E, Event<V, P>>,
+    context: E,
+    protector: StorageProtector,
+    partition_prefix: String,
+    namespace: Vec<u8>,
+    public_key: P,
+
+    states: Metadata<E, u64, SealedRecord>,
+    msgs: SVJournal<E, SealedRecord>,
 
     // In-memory state
     current: Option<(EpochNum, Epoch<V, P>)>,
@@ -192,7 +196,7 @@ where
 
 impl<E, V, P> Storage<E, V, P>
 where
-    E: BufferPooler + Clock + RuntimeStorage + Metrics,
+    E: BufferPooler + Clock + RuntimeStorage + Metrics + CryptoRngCore,
     V: Variant,
     P: PublicKey,
 {
@@ -201,16 +205,19 @@ where
     pub async fn init(
         context: E,
         partition_prefix: &str,
+        protector: StorageProtector,
+        namespace: Vec<u8>,
+        public_key: P,
         max_read_size: NonZeroU32,
         max_supported_mode: ModeVersion,
     ) -> Self {
         let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_CAPACITY);
 
-        let states: Metadata<E, u64, Epoch<V, P>> = Metadata::init(
+        let states: Metadata<E, u64, SealedRecord> = Metadata::init(
             context.child("states"),
             MetadataConfig {
                 partition: format!("{partition_prefix}_states"),
-                codec_config: (max_read_size, max_supported_mode),
+                codec_config: RangeCfg::from(..),
             },
         )
         .await
@@ -221,7 +228,7 @@ where
             SVConfig {
                 partition: format!("{partition_prefix}_msgs"),
                 compression: None,
-                codec_config: max_read_size,
+                codec_config: RangeCfg::from(..),
                 page_cache,
                 write_buffer: WRITE_BUFFER,
             },
@@ -230,8 +237,19 @@ where
         .expect("should be able to init dkg_msgs journal");
 
         // Find the current epoch by looking for the highest key in metadata
+        let partition_prefix = partition_prefix.to_owned();
         let current = states.keys().max().map(|&epoch_num| {
-            let state = states.get(&epoch_num).expect("key must exist").clone();
+            let record = states.get(&epoch_num).expect("key must exist");
+            let state = Self::open_epoch_record(
+                &protector,
+                &partition_prefix,
+                &namespace,
+                &public_key,
+                (max_read_size, max_supported_mode),
+                EpochNum::new(epoch_num),
+                record,
+            )
+            .expect("should be able to open dkg epoch state");
             (EpochNum::new(epoch_num), state)
         });
 
@@ -245,8 +263,18 @@ where
             futures::pin_mut!(replay);
 
             while let Some(result) = replay.next().await {
-                let (section, _, _, event) = result.expect("should be able to read msg");
+                let (section, _, _, record) = result.expect("should be able to read msg");
                 let epoch = EpochNum::new(section);
+                let event = Self::open_event_record(
+                    &protector,
+                    &partition_prefix,
+                    &namespace,
+                    &public_key,
+                    max_read_size,
+                    epoch,
+                    &record,
+                )
+                .expect("should be able to open dkg msg");
                 let cache = epochs.entry(epoch).or_default();
                 match event {
                     Event::Dealing(dealer, pub_msg, priv_msg) => {
@@ -263,11 +291,112 @@ where
         }
 
         Self {
+            context,
+            protector,
+            partition_prefix,
+            namespace,
+            public_key,
             states,
             msgs,
             current,
             epochs,
         }
+    }
+
+    fn associated_data(
+        partition_prefix: &str,
+        namespace: &[u8],
+        public_key: &P,
+        kind: u8,
+        epoch: EpochNum,
+    ) -> Vec<u8> {
+        fn append_bytes(out: &mut Vec<u8>, value: &[u8]) {
+            out.extend_from_slice(&(value.len() as u64).to_be_bytes());
+            out.extend_from_slice(value);
+        }
+
+        let public_key = public_key.encode();
+        let mut ad = Vec::with_capacity(
+            RECORD_AD_DOMAIN.len() + 1 + 8 + partition_prefix.len() + namespace.len() + public_key.len(),
+        );
+        append_bytes(&mut ad, RECORD_AD_DOMAIN);
+        ad.push(kind);
+        append_bytes(&mut ad, partition_prefix.as_bytes());
+        append_bytes(&mut ad, namespace);
+        append_bytes(&mut ad, &public_key);
+        ad.extend_from_slice(&epoch.get().to_be_bytes());
+        ad
+    }
+
+    fn open_epoch_record(
+        protector: &StorageProtector,
+        partition_prefix: &str,
+        namespace: &[u8],
+        public_key: &P,
+        cfg: (NonZeroU32, ModeVersion),
+        epoch: EpochNum,
+        record: &SealedRecord,
+    ) -> Result<Epoch<V, P>, String> {
+        let ad = Self::associated_data(
+            partition_prefix,
+            namespace,
+            public_key,
+            RECORD_KIND_EPOCH,
+            epoch,
+        );
+        let plaintext = protector
+            .open(record, &ad)
+            .map_err(|err| format!("open failed: {err}"))?;
+        let mut buf = plaintext.as_ref();
+        let state = Epoch::read_cfg(&mut buf, &cfg)
+            .map_err(|err| format!("decode failed: {err}"))?;
+        if buf.has_remaining() {
+            return Err("decode failed: trailing bytes".to_string());
+        }
+        Ok(state)
+    }
+
+    fn open_event_record(
+        protector: &StorageProtector,
+        partition_prefix: &str,
+        namespace: &[u8],
+        public_key: &P,
+        max_read_size: NonZeroU32,
+        epoch: EpochNum,
+        record: &SealedRecord,
+    ) -> Result<Event<V, P>, String> {
+        let ad = Self::associated_data(
+            partition_prefix,
+            namespace,
+            public_key,
+            RECORD_KIND_EVENT,
+            epoch,
+        );
+        let plaintext = protector
+            .open(record, &ad)
+            .map_err(|err| format!("open failed: {err}"))?;
+        let mut buf = plaintext.as_ref();
+        let event = Event::read_cfg(&mut buf, &max_read_size)
+            .map_err(|err| format!("decode failed: {err}"))?;
+        if buf.has_remaining() {
+            return Err("decode failed: trailing bytes".to_string());
+        }
+        Ok(event)
+    }
+
+    fn seal_record(&mut self, kind: u8, epoch: EpochNum, plaintext: &[u8]) -> SealedRecord {
+        let mut nonce = [0u8; NONCE_SIZE];
+        self.context.fill_bytes(&mut nonce);
+        let ad = Self::associated_data(
+            &self.partition_prefix,
+            &self.namespace,
+            &self.public_key,
+            kind,
+            epoch,
+        );
+        self.protector
+            .seal(plaintext, &ad, nonce)
+            .expect("should be able to seal dkg record")
     }
 
     /// Returns all dealer messages received during the given epoch.
@@ -351,11 +480,10 @@ where
 
         // Persist to journal
         let section = epoch.get();
+        let event = Event::Dealing(dealer.clone(), pub_msg.clone(), priv_msg.clone());
+        let record = self.seal_record(RECORD_KIND_EVENT, epoch, &event.encode());
         self.msgs
-            .append(
-                section,
-                &Event::Dealing(dealer.clone(), pub_msg.clone(), priv_msg.clone()),
-            )
+            .append(section, &record)
             .await
             .expect("should be able to write to msgs");
         self.msgs
@@ -380,8 +508,10 @@ where
 
         // Persist to journal
         let section = epoch.get();
+        let event: Event<V, P> = Event::Ack(player.clone(), ack.clone());
+        let record = self.seal_record(RECORD_KIND_EVENT, epoch, &event.encode());
         self.msgs
-            .append(section, &Event::Ack(player.clone(), ack.clone()))
+            .append(section, &record)
             .await
             .expect("should be able to write to msgs");
         self.msgs
@@ -404,8 +534,10 @@ where
 
         // Persist to journal
         let section = epoch.get();
+        let event = Event::Log(dealer.clone(), log.clone());
+        let record = self.seal_record(RECORD_KIND_EVENT, epoch, &event.encode());
         self.msgs
-            .append(section, &Event::Log(dealer.clone(), log.clone()))
+            .append(section, &record)
             .await
             .expect("should be able to write to msgs");
         self.msgs
@@ -422,7 +554,8 @@ where
     pub async fn set_epoch(&mut self, epoch: EpochNum, state: Epoch<V, P>) {
         // Persist to metadata using epoch number as key
         let epoch_key = epoch.get();
-        if self.states.put(epoch_key, state.clone()).is_some() {
+        let record = self.seal_record(RECORD_KIND_EPOCH, epoch, &state.encode());
+        if self.states.put(epoch_key, record).is_some() {
             warn!(%epoch, "overwriting existing epoch state");
         }
         self.states
@@ -551,7 +684,7 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
         ack: PlayerAck<C::PublicKey>,
     ) -> bool
     where
-        E: BufferPooler + Clock + RuntimeStorage + Metrics,
+        E: BufferPooler + Clock + RuntimeStorage + Metrics + CryptoRngCore,
     {
         if !self.unsent.contains_key(&player) {
             return false;
@@ -627,7 +760,7 @@ impl<V: Variant, C: Signer> Player<V, C> {
         priv_msg: DealerPrivMsg,
     ) -> Option<PlayerAck<C::PublicKey>>
     where
-        E: BufferPooler + Clock + RuntimeStorage + Metrics,
+        E: BufferPooler + Clock + RuntimeStorage + Metrics + CryptoRngCore,
         M: Faults,
     {
         // If we've already generated an ack, return the cached version

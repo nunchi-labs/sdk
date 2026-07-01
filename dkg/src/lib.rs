@@ -23,7 +23,7 @@ pub use consensus::{
 };
 pub use egress::{ContinueOnUpdate, PostUpdate, Update, UpdateCallBack};
 pub use ingress::{Mailbox, Message};
-pub use protector::StorageKey;
+pub use protector::{StorageKey, StorageProtector};
 pub use setup::PeerConfig;
 
 pub type DealerLog = SignedDealerLog<MinSig, ed25519::PrivateKey>;
