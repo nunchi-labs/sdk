@@ -2863,6 +2863,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "nunchi-coins-wasm"
+version = "2026.6.0"
+dependencies = [
+ "bytes",
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-parallel",
+ "commonware-utils",
+ "getrandom 0.3.4",
+ "js-sys",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "nunchi-common"
 version = "2026.6.0"
 dependencies = [

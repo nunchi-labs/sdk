@@ -1,0 +1,26 @@
+[package]
+name = "nunchi-coins-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WASM helpers for decoding coins-chain indexer artifacts."
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+commonware-codec = { workspace = true }
+commonware-consensus = { workspace = true }
+commonware-cryptography = { workspace = true }
+commonware-parallel = { workspace = true }
+commonware-utils = { workspace = true }
+bytes = { workspace = true }
+js-sys = "0.3.103"
+wasm-bindgen = "0.2.126"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
+version = "0.3.4"
+features = ["wasm_js"]

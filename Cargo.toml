@@ -16,6 +16,7 @@ members = [
     "examples/bridge-chain",
     "examples/coins/chain",
     "examples/coins/indexer",
+    "examples/coins/wasm",
     "examples/custom-module",
 ]
 resolver = "2"
