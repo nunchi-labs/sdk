@@ -2,7 +2,10 @@ use clap::Args;
 use nunchi_coins_chain::testnet::{
     generate_local_testnet, LocalTestnetConfig, LocalTestnetManifest,
 };
-use std::path::{Path, PathBuf};
+use std::{
+    net::{IpAddr, Ipv4Addr},
+    path::{Path, PathBuf},
+};
 
 const DEFAULT_BASE_METRICS_PORT: u16 = 9_090;
 
@@ -18,6 +21,14 @@ pub struct Generate {
     pub base_rpc_port: u16,
     #[arg(long, default_value_t = DEFAULT_BASE_METRICS_PORT)]
     pub base_metrics_port: u16,
+    #[arg(long, default_value_t = IpAddr::V4(Ipv4Addr::LOCALHOST))]
+    pub bind_ip: IpAddr,
+    #[arg(long)]
+    pub public_host: Vec<IpAddr>,
+    #[arg(long)]
+    pub storage_dir: Option<PathBuf>,
+    #[arg(long)]
+    pub indexer_url: Option<String>,
     #[arg(long, default_value_t = 0)]
     pub seed: u64,
 }
@@ -37,6 +48,10 @@ impl Generate {
             base_port,
             base_rpc_port,
             base_metrics_port,
+            bind_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            public_host: Vec::new(),
+            storage_dir: None,
+            indexer_url: None,
             seed,
         }
     }
@@ -49,6 +64,10 @@ impl Generate {
             base_rpc_port: self.base_rpc_port,
             base_metrics_port: self.base_metrics_port,
             base_data_dir: self.out,
+            bind_ip: self.bind_ip,
+            public_ips: (!self.public_host.is_empty()).then_some(self.public_host),
+            storage_dir: self.storage_dir,
+            indexer_url: self.indexer_url,
             seed: self.seed,
         })?;
         manifest.executable_path = coins_chain_executable();
