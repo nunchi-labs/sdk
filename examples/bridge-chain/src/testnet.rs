@@ -712,6 +712,7 @@ mod tests {
         assert_eq!(chain_a.foreign_namespace, chain_b.namespace);
         assert_eq!(chain_b.foreign_namespace, chain_a.namespace);
 
+        let mut dkg_storage_keys = HashSet::new();
         for node in &manifest.nodes {
             let config = NodeConfig::read(&node.config_path).expect("read node config");
             assert_eq!(config.peer_config.participants.len(), 4);
@@ -728,7 +729,12 @@ mod tests {
             decode_unit::<group::Share>(&config.share, "share").expect("decode share");
             decode_unit::<ed25519::PrivateKey>(&config.private_key, "private_key")
                 .expect("decode private key");
+            let dkg_storage_key =
+                decode_storage_key(&config.dkg_storage_key).expect("decode dkg storage key");
+            assert_ne!(config.dkg_storage_key, config.private_key);
+            assert!(dkg_storage_keys.insert(dkg_storage_key));
         }
+        assert_eq!(dkg_storage_keys.len(), 8);
 
         let manifest_path = dir.join(LocalBridgePairManifest::FILE_NAME);
         manifest.write(&manifest_path).expect("write manifest");

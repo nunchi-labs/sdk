@@ -547,7 +547,7 @@ fn decode_hex(value: &str, field: &'static str) -> Result<Vec<u8>, Error> {
     from_hex(value).ok_or(Error::HexDecode { field })
 }
 
-fn decode_storage_key(value: &str) -> Result<StorageKey, Error> {
+pub(crate) fn decode_storage_key(value: &str) -> Result<StorageKey, Error> {
     let bytes = decode_hex(value, "dkg_storage_key")?;
     bytes.try_into().map_err(|_| Error::CodecDecode {
         field: "dkg_storage_key",
