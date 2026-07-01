@@ -395,3 +395,294 @@ fn configure_rejects_empty_validator_set() {
         assert_eq!(result, Err(AuthorityError::InvalidPolicy));
     });
 }
+
+// ----- configuration -----
+
+#[test]
+fn configure_twice_is_rejected() {
+    commonware_runtime::deterministic::Runner::default().start(|_| async move {
+        let (mut ledger, owners, validators) = configured().await;
+        let result = submit(
+            &mut ledger,
+            &owners[0],
+            AuthorityOperation::Configure {
+                policy: policy(&owners, 2),
+                initial_validators: validators,
+                epoch: 0,
+            },
+            0,
+        )
+        .await;
+        assert_eq!(result, Err(AuthorityError::AlreadyConfigured));
+    });
+}
+
+#[test]
+fn configure_rejects_signer_outside_owner_set() {
+    commonware_runtime::deterministic::Runner::default().start(|_| async move {
+        let owners = vec![owner(1), owner(2), owner(3)];
+        let stranger = owner(9);
+        let mut ledger = AuthorityLedger::new(MemoryState::default());
+        // The signer is not part of the policy it is trying to install.
+        let result = submit(
+            &mut ledger,
+            &stranger,
+            AuthorityOperation::Configure {
+                policy: policy(&owners, 2),
+                initial_validators: vec![validator(10), validator(11)],
+                epoch: 0,
+            },
+            0,
+        )
+        .await;
+        assert_eq!(result, Err(AuthorityError::Unauthorized));
+    });
+}
+
+// ----- authorization: owner gating -----
+
+#[test]
+fn propose_before_configure_is_rejected() {
+    commonware_runtime::deterministic::Runner::default().start(|_| async move {
+        let mut ledger = AuthorityLedger::new(MemoryState::default());
+        let result = submit(
+            &mut ledger,
+            &owner(1),
+            AuthorityOperation::Propose {
+                change: RegistryChange::AddValidator {
+                    validator: validator(12),
+                },
+                effective_epoch: 1,
+            },
+            0,
+        )
+        .await;
+        assert_eq!(result, Err(AuthorityError::NotConfigured));
+    });
+}
+
+#[test]
+fn non_owner_cannot_propose() {
+    commonware_runtime::deterministic::Runner::default().start(|_| async move {
+        let (mut ledger, _owners, _) = configured().await;
+        let stranger = owner(9);
+        let result = submit(
+            &mut ledger,
+            &stranger,
+            AuthorityOperation::Propose {
+                change: RegistryChange::AddValidator {
+                    validator: validator(12),
+                },
+                effective_epoch: 1,
+            },
+            0,
+        )
+        .await;
+        assert_eq!(result, Err(AuthorityError::Unauthorized));
+    });
+}
+
+// ----- proposal lifecycle -----
+
+#[test]
+fn duplicate_proposal_is_rejected() {
+    commonware_runtime::deterministic::Runner::default().start(|_| async move {
+        let (mut ledger, owners, _) = configured().await;
+        let change = RegistryChange::AddValidator {
+            validator: validator(12),
+        };
+        submit(
+            &mut ledger,
+            &owners[0],
+            AuthorityOperation::Propose {
+                change: change.clone(),
+                effective_epoch: 1,
+            },
+            0,
+        )
+        .await
+        .unwrap();
+        // The same change at the same epoch collides on the proposal id.
+        let result = submit(
+            &mut ledger,
+            &owners[1],
+            AuthorityOperation::Propose {
+                change,
+                effective_epoch: 1,
+            },
+            0,
+        )
+        .await;
+        assert_eq!(result, Err(AuthorityError::ProposalExists));
+    });
+}
+
+#[test]
+fn approve_unknown_proposal_is_rejected() {
+    commonware_runtime::deterministic::Runner::default().start(|_| async move {
+        let (mut ledger, owners, _) = configured().await;
+        let missing = crate::proposal_id(
+            &RegistryChange::AddValidator {
+                validator: validator(12),
+            },
+            1,
+        );
+        let result = submit(
+            &mut ledger,
+            &owners[0],
+            AuthorityOperation::Approve { proposal: missing },
+            0,
+        )
+        .await;
+        assert_eq!(result, Err(AuthorityError::ProposalNotFound(missing)));
+    });
+}
+
+#[test]
+fn execute_unknown_proposal_is_rejected() {
+    commonware_runtime::deterministic::Runner::default().start(|_| async move {
+        let (mut ledger, owners, _) = configured().await;
+        let missing = crate::proposal_id(
+            &RegistryChange::AddValidator {
+                validator: validator(12),
+            },
+            1,
+        );
+        let result = submit(
+            &mut ledger,
+            &owners[0],
+            AuthorityOperation::Execute { proposal: missing },
+            0,
+        )
+        .await;
+        assert_eq!(result, Err(AuthorityError::ProposalNotFound(missing)));
+    });
+}
+
+#[test]
+fn approve_executed_proposal_is_rejected() {
+    commonware_runtime::deterministic::Runner::default().start(|_| async move {
+        let (mut ledger, owners, _) = configured().await;
+        let change = RegistryChange::AddValidator {
+            validator: validator(12),
+        };
+        let proposal = crate::proposal_id(&change, 1);
+        govern(&mut ledger, &owners, change, 1, 0).await;
+        let result = submit(
+            &mut ledger,
+            &owners[0],
+            AuthorityOperation::Approve { proposal },
+            0,
+        )
+        .await;
+        assert_eq!(result, Err(AuthorityError::ProposalAlreadyExecuted));
+    });
+}
+
+#[test]
+fn execute_executed_proposal_is_rejected() {
+    commonware_runtime::deterministic::Runner::default().start(|_| async move {
+        let (mut ledger, owners, _) = configured().await;
+        let change = RegistryChange::AddValidator {
+            validator: validator(12),
+        };
+        let proposal = crate::proposal_id(&change, 1);
+        govern(&mut ledger, &owners, change, 1, 0).await;
+        let result = submit(
+            &mut ledger,
+            &owners[0],
+            AuthorityOperation::Execute { proposal },
+            0,
+        )
+        .await;
+        assert_eq!(result, Err(AuthorityError::ProposalAlreadyExecuted));
+    });
+}
+
+// ----- validator set changes (checked at execution) -----
+
+#[test]
+fn add_active_validator_is_rejected() {
+    commonware_runtime::deterministic::Runner::default().start(|_| async move {
+        let (mut ledger, owners, validators) = configured().await;
+        // validators[0] is already active from configuration.
+        let change = RegistryChange::AddValidator {
+            validator: validators[0].clone(),
+        };
+        let proposal = crate::proposal_id(&change, 1);
+        submit(
+            &mut ledger,
+            &owners[0],
+            AuthorityOperation::Propose {
+                change,
+                effective_epoch: 1,
+            },
+            0,
+        )
+        .await
+        .unwrap();
+        submit(
+            &mut ledger,
+            &owners[1],
+            AuthorityOperation::Approve { proposal },
+            0,
+        )
+        .await
+        .unwrap();
+        let result = submit(
+            &mut ledger,
+            &owners[2],
+            AuthorityOperation::Execute { proposal },
+            0,
+        )
+        .await;
+        assert_eq!(
+            result,
+            Err(AuthorityError::ValidatorAlreadyActive(Box::new(
+                validators[0].clone()
+            )))
+        );
+    });
+}
+
+#[test]
+fn remove_unknown_validator_is_rejected() {
+    commonware_runtime::deterministic::Runner::default().start(|_| async move {
+        let (mut ledger, owners, _) = configured().await;
+        let unknown = validator(99);
+        let change = RegistryChange::RemoveValidator {
+            validator: unknown.clone(),
+        };
+        let proposal = crate::proposal_id(&change, 1);
+        submit(
+            &mut ledger,
+            &owners[0],
+            AuthorityOperation::Propose {
+                change,
+                effective_epoch: 1,
+            },
+            0,
+        )
+        .await
+        .unwrap();
+        submit(
+            &mut ledger,
+            &owners[1],
+            AuthorityOperation::Approve { proposal },
+            0,
+        )
+        .await
+        .unwrap();
+        let result = submit(
+            &mut ledger,
+            &owners[2],
+            AuthorityOperation::Execute { proposal },
+            0,
+        )
+        .await;
+        assert_eq!(
+            result,
+            Err(AuthorityError::UnknownValidator(Box::new(unknown)))
+        );
+    });
+}
