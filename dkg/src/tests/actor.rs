@@ -1,6 +1,6 @@
 use super::super::*;
 use crate::state::{Epoch as EpochState, Storage};
-use crate::{orchestrator::Message, ContinueOnUpdate, PeerConfig};
+use crate::{orchestrator::Message, protector::StorageProtector, ContinueOnUpdate, PeerConfig};
 use bytes::{Buf, BufMut};
 use commonware_actor::{mailbox, Feedback};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
@@ -20,6 +20,8 @@ use commonware_runtime::{deterministic, Runner, Supervisor as _};
 use commonware_utils::{channel::mpsc, N3f1, NZUsize, TryCollect, NZU32, NZU64};
 use core::marker::PhantomData;
 use std::collections::BTreeMap;
+
+const TEST_STORAGE_KEY: [u8; 32] = [7u8; 32];
 
 #[derive(Clone)]
 struct TestBlock {
@@ -156,10 +158,14 @@ fn assert_recovered_storage_controls_dkg_mode_on_restart(execution: Execution, s
         let mut storage = Storage::<_, MinSig, Ed25519PublicKey>::init(
             context.child("seed_storage"),
             &partition_prefix,
+            StorageProtector::new(TEST_STORAGE_KEY),
+            b"test_dkg".to_vec(),
+            first_player.clone(),
             NZU32!(peer_config.max_participants_per_round()),
             crate::MAX_SUPPORTED_MODE,
         )
-        .await;
+        .await
+        .expect("storage init should succeed");
         storage
             .set_epoch(
                 Epoch::new(RECOVERED_EPOCH),
@@ -170,7 +176,8 @@ fn assert_recovered_storage_controls_dkg_mode_on_restart(execution: Execution, s
                     share,
                 },
             )
-            .await;
+            .await
+            .expect("set epoch should succeed");
         drop(storage);
 
         let (actor, _mailbox) = Actor::<_, _, TestBlock>::new(
@@ -184,6 +191,7 @@ fn assert_recovered_storage_controls_dkg_mode_on_restart(execution: Execution, s
                 peer_config: peer_config.clone(),
                 max_supported_mode: crate::MAX_SUPPORTED_MODE,
                 namespace: b"test_dkg".to_vec(),
+                storage_protector: StorageProtector::new(TEST_STORAGE_KEY),
                 epoch_length: NZU64!(200),
             },
         );

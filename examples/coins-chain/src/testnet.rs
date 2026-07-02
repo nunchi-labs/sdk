@@ -29,9 +29,9 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{tokio, Handle, Runner as _, Spawner as _, Supervisor as _};
 use commonware_utils::{ordered::Set, N3f1, NZUsize, NZU32};
 use governor::Quota;
-use nunchi_dkg::{ContinueOnUpdate, PeerConfig, MAX_SUPPORTED_MODE};
+use nunchi_dkg::{ContinueOnUpdate, PeerConfig, StorageKey, MAX_SUPPORTED_MODE};
 use nunchi_mempool::PoolConfig;
-use rand::{rngs::StdRng, SeedableRng};
+use rand::{rngs::StdRng, RngCore, SeedableRng};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -99,6 +99,7 @@ pub struct ManifestNode {
 pub struct NodeConfig {
     pub name: String,
     pub private_key: String,
+    pub dkg_storage_key: String,
     pub output: String,
     pub share: String,
     pub peer_config: PeerConfig<PublicKey>,
@@ -263,6 +264,7 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
         let node_config = NodeConfig {
             name: name.clone(),
             private_key: encode(&private_keys[index]),
+            dkg_storage_key: encode_storage_key(&storage_key(config.seed, index)),
             output: encode(&output),
             share: encode(share),
             peer_config: peer_config.clone(),
@@ -404,6 +406,7 @@ async fn start_node(
     Error,
 > {
     let private_key = decode_unit::<ed25519::PrivateKey>(&config.private_key, "private_key")?;
+    let dkg_storage_key = decode_storage_key(&config.dkg_storage_key)?;
     let public_key = private_key.public_key();
     let max_participants = NonZeroU32::new(config.peer_config.max_participants_per_round())
         .ok_or(Error::EmptyValidatorSet)?;
@@ -461,6 +464,7 @@ async fn start_node(
         blocks_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
         finalized_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
         signer: private_key,
+        dkg_storage_key,
         output,
         share: Some(share),
         peer_config: config.peer_config.clone(),
@@ -543,6 +547,25 @@ fn decode_hex(value: &str, field: &'static str) -> Result<Vec<u8>, Error> {
     from_hex(value).ok_or(Error::HexDecode { field })
 }
 
+pub(crate) fn decode_storage_key(value: &str) -> Result<StorageKey, Error> {
+    let bytes = decode_hex(value, "dkg_storage_key")?;
+    bytes.try_into().map_err(|_| Error::CodecDecode {
+        field: "dkg_storage_key",
+        source: commonware_codec::Error::InvalidLength(32),
+    })
+}
+
 fn encode(value: &impl Encode) -> String {
     hex(&value.encode())
+}
+
+fn encode_storage_key(key: &StorageKey) -> String {
+    hex(key)
+}
+
+fn storage_key(seed: u64, index: usize) -> StorageKey {
+    let mut rng = StdRng::seed_from_u64(seed ^ 0xd6b0_44a5_6d1b_5a11 ^ index as u64);
+    let mut key = [0u8; 32];
+    rng.fill_bytes(&mut key);
+    key
 }

@@ -74,6 +74,7 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
     pub blocks_freezer_table_initial_size: u32,
     pub finalized_freezer_table_initial_size: u32,
     pub signer: ed25519::PrivateKey,
+    pub dkg_storage_key: dkg::StorageKey,
     pub output: Output<MinSig, PublicKey>,
     pub share: Option<group::Share>,
     pub peer_config: PeerConfig<PublicKey>,
@@ -178,6 +179,7 @@ where
                 peer_config: config.peer_config.clone(),
                 max_supported_mode: MAX_SUPPORTED_MODE,
                 namespace: NAMESPACE.to_vec(),
+                storage_protector: dkg::StorageProtector::new(config.dkg_storage_key),
                 epoch_length: BLOCKS_PER_EPOCH,
             },
         );
