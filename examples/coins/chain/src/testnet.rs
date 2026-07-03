@@ -5,6 +5,7 @@
 //! as `narae` consume. [`run_node`] boots a single validator from one of those configs on the
 //! tokio runtime with authenticated peer discovery, and serves the aggregated JSON-RPC module.
 
+use crate::indexer::Client as _;
 use crate::{
     channels,
     engine::{Config as EngineConfig, Engine},
@@ -25,11 +26,14 @@ use commonware_p2p::{
     authenticated::discovery::{self, Network},
     Ingress, Manager,
 };
-use commonware_parallel::Sequential;
-use commonware_runtime::{tokio, Handle, Runner as _, Spawner as _, Supervisor as _};
+use commonware_runtime::{
+    tokio, Clock as _, Handle, Runner as _, Spawner as _, Supervisor as _, ThreadPooler as _,
+};
 use commonware_utils::{ordered::Set, N3f1, NZUsize, NZU32};
 use governor::Quota;
-use nunchi_dkg::{ContinueOnUpdate, PeerConfig, MAX_SUPPORTED_MODE};
+use nunchi_dkg::{
+    ContinueOnUpdate, PeerConfig, Storage as DkgStorage, UpdateCallBack, MAX_SUPPORTED_MODE,
+};
 use nunchi_mempool::PoolConfig;
 use rand::{rngs::StdRng, SeedableRng};
 use serde::{Deserialize, Serialize};
@@ -41,10 +45,10 @@ use std::{
     str::FromStr,
     time::Duration,
 };
-use tracing::{info, Level};
+use tracing::{info, warn, Level};
 
 const FREEZER_TABLE_INITIAL_SIZE: u32 = 2u32.pow(14);
-const DEFAULT_MAX_BLOCK_TRANSACTIONS: usize = 256;
+const DEFAULT_MAX_BLOCK_TRANSACTIONS: usize = 4_096;
 const DEFAULT_MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 const DEFAULT_CHANNEL_BACKLOG: usize = 1024;
 
@@ -58,6 +62,7 @@ pub struct LocalTestnetConfig {
     pub bind_ip: IpAddr,
     pub public_ips: Option<Vec<IpAddr>>,
     pub storage_dir: Option<PathBuf>,
+    pub genesis_path: Option<PathBuf>,
     pub indexer_url: Option<String>,
     pub seed: u64,
 }
@@ -100,6 +105,8 @@ pub struct ManifestNode {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct IndexerManifest {
     pub identity: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub output: String,
     pub participants: u32,
 }
 
@@ -313,7 +320,7 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
             metrics_address: SocketAddr::new(config.bind_ip, metrics_port),
             bootstrappers,
             storage_dir: storage_dir.clone(),
-            genesis_path: None,
+            genesis_path: config.genesis_path.clone(),
             indexer_url: config.indexer_url.clone(),
             consensus: ConsensusConfig::default(),
             networking: NetworkConfig::default(),
@@ -335,6 +342,7 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
         executable_path: PathBuf::from("coins-chain-node"),
         indexer: IndexerManifest {
             identity: encode(output.public().public()),
+            output: encode(&output),
             participants: config.validators,
         },
         nodes,
@@ -500,6 +508,13 @@ async fn start_node(
     let mempool = register(channels::MEMPOOL);
     network.start();
 
+    let indexer_client = config.indexer_url.as_deref().map(indexer::HttpClient::new);
+    if let Some(client) = indexer_client.clone() {
+        upload_current_dkg_output(context, &config.name, max_participants, client).await;
+    }
+    if let Some(client) = indexer_client.clone() {
+        spawn_current_dkg_output_uploader(context, config.name.clone(), max_participants, client);
+    }
     let engine_config: EngineConfig<_, _, _> = EngineConfig {
         blocker: oracle.clone(),
         manager: oracle.clone(),
@@ -512,11 +527,19 @@ async fn start_node(
         peer_config: config.peer_config.clone(),
         leader_timeout: Duration::from_millis(config.consensus.leader_timeout_ms),
         certification_timeout: Duration::from_millis(config.consensus.certification_timeout_ms),
-        strategy: Sequential,
+        strategy: context
+            .create_strategy(
+                std::thread::available_parallelism().unwrap_or(std::num::NonZeroUsize::MIN),
+            )
+            .expect("failed to create engine thread pool"),
         max_block_transactions: config.max_block_transactions,
         pool_config: PoolConfig::default(),
         genesis: read_genesis(config.genesis_path.as_ref())?,
-        indexer: config.indexer_url.as_deref().map(indexer::HttpClient::new),
+        indexer: indexer_client.clone(),
+    };
+    let dkg_callback: Box<dyn UpdateCallBack<MinSig, PublicKey>> = match indexer_client {
+        Some(client) => indexer::DkgOutputPusher::boxed(client),
+        None => ContinueOnUpdate::boxed(),
     };
 
     let resolver_config = marshal::resolver::p2p::Config {
@@ -542,7 +565,7 @@ async fn start_node(
         dkg,
         mempool,
         marshal_resolver,
-        ContinueOnUpdate::boxed(),
+        dkg_callback,
     );
 
     let rpc_module = rpc::module(
@@ -557,6 +580,48 @@ async fn start_node(
 
     info!(node = %config.name, "coins-chain validator started");
     Ok((rpc_server, engine_handle))
+}
+
+async fn upload_current_dkg_output(
+    context: &tokio::Context,
+    node_name: &str,
+    max_participants: NonZeroU32,
+    client: indexer::HttpClient,
+) {
+    let storage = DkgStorage::<_, MinSig, PublicKey>::init(
+        context.child("dkg_output_seed"),
+        node_name,
+        max_participants,
+        MAX_SUPPORTED_MODE,
+    )
+    .await;
+    let Some((epoch, state)) = storage.epoch() else {
+        return;
+    };
+    let Some(output) = state.output else {
+        return;
+    };
+    match client.dkg_output_upload(epoch, output).await {
+        Ok(()) => info!(%epoch, "uploaded current DKG output to indexer"),
+        Err(error) => warn!(%epoch, %error, "failed to upload current DKG output to indexer"),
+    }
+}
+
+fn spawn_current_dkg_output_uploader(
+    context: &tokio::Context,
+    node_name: String,
+    max_participants: NonZeroU32,
+    client: indexer::HttpClient,
+) {
+    context
+        .child("dkg_output_uploader")
+        .spawn(move |context| async move {
+            loop {
+                context.sleep(Duration::from_secs(60)).await;
+                upload_current_dkg_output(&context, &node_name, max_participants, client.clone())
+                    .await;
+            }
+        });
 }
 
 pub(crate) fn decode_output(

@@ -7,15 +7,22 @@ services:
       [
         "--port",
         "8080",
+        "--output",
+        "${INDEXER_OUTPUT:-}",
+        "--output-epoch",
+        "${INDEXER_OUTPUT_EPOCH:-0}",
         "--identity",
-        "${INDEXER_IDENTITY:?INDEXER_IDENTITY is required}",
+        "${INDEXER_IDENTITY:-}",
         "--participants",
         "${INDEXER_PARTICIPANTS:?INDEXER_PARTICIPANTS is required}",
         "--frontend-dir",
         "/usr/share/nunchi/coins/frontend",
+        "--dkg-output-state-dir",
+        "/var/lib/nunchi/coins-indexer",
       ]
     volumes:
       - ./frontend:/usr/share/nunchi/coins/frontend:ro
+      - indexer-data:/var/lib/nunchi/coins-indexer
     ports:
       - "${INDEXER_BIND:-0.0.0.0}:${INDEXER_PORT:-8080}:8080/tcp"
 
@@ -54,5 +61,6 @@ services:
       - "${GRAFANA_BIND:-127.0.0.1}:${GRAFANA_PORT:-3000}:3000/tcp"
 
 volumes:
+  indexer-data:
   prometheus-data:
   grafana-data:

@@ -99,6 +99,10 @@ impl<D: CoinDB> Ledger<D> {
         self.db.nonce(id).await
     }
 
+    pub async fn factory_nonce(&self) -> Result<u64, LedgerError> {
+        self.db.factory_nonce().await
+    }
+
     pub async fn token(&self, coin: &CoinId) -> Result<Option<TokenDefinition>, LedgerError> {
         self.db.token(coin).await
     }
@@ -107,12 +111,18 @@ impl<D: CoinDB> Ledger<D> {
         self.db.balance(account, coin).await
     }
 
+    /// Validate and apply a signed coin transaction.
+    ///
+    /// Does not re-check the transaction signature: callers must only pass
+    /// transactions that already passed stateless verification
+    /// ([`Transaction::verify`]), which the chain guarantees at mempool
+    /// admission and block verification. Account policy, nonce, and balance
+    /// checks are all performed here.
     pub async fn apply_transaction(
         &mut self,
         tx: &Transaction,
         events: Option<&mut (dyn EventSink + Send)>,
-    ) -> Result<(), LedgerError>
-    {
+    ) -> Result<(), LedgerError> {
         self.ensure_authorized(tx).await?;
 
         let expected = self.db.nonce(&tx.account_id).await?;
@@ -136,6 +146,7 @@ impl<D: CoinDB> Ledger<D> {
     }
 
     pub async fn validate_authorization(&self, tx: &Transaction) -> Result<(), LedgerError> {
+        tx.verify()?;
         self.ensure_authorized(tx).await
     }
 
@@ -188,9 +199,10 @@ impl<D: CoinDB> Ledger<D> {
         Ok(token)
     }
 
+    /// Stateful authorization checks (account policy consistency). Signature
+    /// validity is a stateless property checked before transactions reach the
+    /// ledger; see [`Ledger::apply_transaction`].
     async fn ensure_authorized(&self, tx: &Transaction) -> Result<(), LedgerError> {
-        tx.verify()?;
-
         match (&tx.authorization, &tx.payload.operation) {
             (
                 Authorization::Multisig { policy, .. },

@@ -2854,6 +2854,7 @@ dependencies = [
  "commonware-utils",
  "futures",
  "nunchi-coins-chain",
+ "rand 0.8.6",
  "serde",
  "serde_json",
  "tokio",

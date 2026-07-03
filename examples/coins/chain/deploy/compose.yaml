@@ -8,15 +8,22 @@ services:
       [
         "--port",
         "8080",
+        "--output",
+        "${INDEXER_OUTPUT:-}",
+        "--output-epoch",
+        "${INDEXER_OUTPUT_EPOCH:-0}",
         "--identity",
         "${INDEXER_IDENTITY:-}",
         "--participants",
         "${INDEXER_PARTICIPANTS:-1}",
         "--frontend-dir",
         "/usr/share/nunchi/coins/frontend",
+        "--dkg-output-state-dir",
+        "/var/lib/nunchi/coins-indexer",
       ]
     volumes:
       - ../../frontend/dist:/usr/share/nunchi/coins/frontend:ro
+      - indexer-data:/var/lib/nunchi/coins-indexer
     ports:
       - "${INDEXER_BIND:-127.0.0.1}:${INDEXER_PORT:-8080}:8080/tcp"
 
@@ -26,7 +33,7 @@ services:
     restart: unless-stopped
     command: ["--config", "/etc/nunchi/coins-chain/validator.toml"]
     volumes:
-      - ./validator.toml:/etc/nunchi/coins-chain/validator.toml:ro
+      - ./:/etc/nunchi/coins-chain:ro
       - ./data:/var/lib/nunchi/coins-chain
     ports:
       - "${P2P_PORT:-30000}:${P2P_PORT:-30000}/tcp"
@@ -52,3 +59,6 @@ services:
       - /:/host/root:ro,rslave
     ports:
       - "${NODE_EXPORTER_BIND:-127.0.0.1}:${NODE_EXPORTER_PORT:-9100}:9100/tcp"
+
+volumes:
+  indexer-data:

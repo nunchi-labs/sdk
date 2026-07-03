@@ -2,11 +2,17 @@
 
 use crate::{Block, Finalized, Notarized, Seed};
 use commonware_consensus::marshal::{core::Mailbox as MarshalMailbox, standard::Standard};
+use commonware_consensus::types::Epoch;
+use commonware_cryptography::bls12381::{
+    dkg::feldman_desmedt::Output as DkgOutput, primitives::variant::MinSig,
+};
 use commonware_runtime::{Clock, Metrics, Spawner, Storage};
 use commonware_storage::queue;
 use commonware_utils::sync::Mutex;
-use std::{future::Future, num::NonZeroUsize, sync::Arc, time::Duration};
+use nunchi_dkg::{PostUpdate, Update, UpdateCallBack};
+use std::{future::Future, num::NonZeroUsize, pin::Pin, sync::Arc, time::Duration};
 use thiserror::Error;
+use tracing::{info, warn};
 
 mod backfiller;
 mod pusher;
@@ -27,6 +33,12 @@ pub enum Error {
 /// Trait for uploading coins-chain artifacts to an indexer backend.
 pub trait Client: Clone + Send + Sync + 'static {
     type Error: std::error::Error + Send + Sync + 'static;
+
+    fn dkg_output_upload(
+        &self,
+        epoch: Epoch,
+        output: DkgOutput<MinSig, crate::PublicKey>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     fn seed_upload(&self, seed: Seed) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
@@ -75,6 +87,18 @@ impl HttpClient {
 impl Client for HttpClient {
     type Error = Error;
 
+    async fn dkg_output_upload(
+        &self,
+        epoch: Epoch,
+        output: DkgOutput<MinSig, crate::PublicKey>,
+    ) -> Result<(), Self::Error> {
+        self.post(
+            &format!("/dkg-output/{}", epoch.get()),
+            commonware_codec::Encode::encode(&output).to_vec(),
+        )
+        .await
+    }
+
     async fn seed_upload(&self, seed: Seed) -> Result<(), Self::Error> {
         self.post("/seed", commonware_codec::Encode::encode(&seed).to_vec())
             .await
@@ -99,6 +123,39 @@ impl Client for HttpClient {
     async fn block_upload(&self, block: Block) -> Result<(), Self::Error> {
         self.post("/block", commonware_codec::Encode::encode(&block).to_vec())
             .await
+    }
+}
+
+pub(crate) struct DkgOutputPusher<C> {
+    client: C,
+}
+
+impl<C: Client> DkgOutputPusher<C> {
+    pub(crate) fn boxed(client: C) -> Box<Self> {
+        Box::new(Self { client })
+    }
+}
+
+impl<C: Client> UpdateCallBack<MinSig, crate::PublicKey> for DkgOutputPusher<C> {
+    fn on_update(
+        &mut self,
+        update: Update<MinSig, crate::PublicKey>,
+    ) -> Pin<Box<dyn Future<Output = PostUpdate> + Send>> {
+        let client = self.client.clone();
+        Box::pin(async move {
+            if let Update::Success { epoch, output, .. } = update {
+                let next_epoch = epoch.next();
+                match client.dkg_output_upload(next_epoch, output).await {
+                    Ok(()) => {
+                        info!(%next_epoch, "uploaded DKG output to indexer");
+                    }
+                    Err(error) => {
+                        warn!(%next_epoch, %error, "failed to upload DKG output to indexer");
+                    }
+                }
+            }
+            PostUpdate::Continue
+        })
     }
 }
 

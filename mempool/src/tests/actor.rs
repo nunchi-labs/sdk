@@ -2,7 +2,7 @@ use crate::testing::{digest, tx, TestTx};
 use crate::{AdmissionError, Mempool, PoolConfig, TxStatus};
 use commonware_cryptography::{ed25519, Signer};
 use commonware_p2p::simulated::{self, Link, Network};
-use commonware_runtime::{deterministic, Clock, Runner as _, Supervisor};
+use commonware_runtime::{deterministic, Clock, Metrics, Runner as _, Supervisor};
 use commonware_utils::{NZUsize, NZU32};
 use governor::Quota;
 use std::time::Duration;
@@ -41,6 +41,28 @@ fn submit_reports_rejections() {
             handle.submit(tx(1, 0, 10)).await,
             Err(AdmissionError::Duplicate)
         );
+    });
+}
+
+#[test]
+fn metrics_are_exposed() {
+    deterministic::Runner::default().start(|context| async move {
+        let (mempool, handle) = Mempool::new(PoolConfig::default());
+        mempool.start(context.child("mempool"));
+
+        let expected = digest(10);
+        handle.submit(tx(1, 0, 10)).await.unwrap();
+        let pending = handle.pending(10).await;
+        assert_eq!(pending.len(), 1);
+        handle.finalized(vec![expected], vec![(1, 1)], 5);
+        context.sleep(Duration::from_millis(1)).await;
+
+        let encoded = context.encode();
+        assert!(encoded.contains("mempool_transactions"));
+        assert!(encoded.contains("mempool_ready_transactions"));
+        assert!(encoded.contains("mempool_submissions"));
+        assert!(encoded.contains("mempool_pending_returned_transactions"));
+        assert!(encoded.contains("mempool_submit_duration_seconds"));
     });
 }
 

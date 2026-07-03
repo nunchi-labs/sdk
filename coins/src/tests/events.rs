@@ -255,12 +255,12 @@ fn failed_transactions_emit_no_events() {
             to: carol.clone(),
             amount: 1,
         };
-        assert_no_event(
-            &mut ledger,
-            &bad_signature,
-            LedgerError::BadSignature(SignatureError::InvalidSignature),
-        )
-        .await;
+        // Bad signatures never reach execution: they are rejected by the
+        // stateless check mirrored by `validate_authorization`.
+        assert_eq!(
+            ledger.validate_authorization(&bad_signature).await,
+            Err(LedgerError::BadSignature(SignatureError::InvalidSignature))
+        );
 
         let wrong_nonce = Transaction::sign(
             &alice_key,

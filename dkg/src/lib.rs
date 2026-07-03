@@ -23,6 +23,7 @@ pub use consensus::{
 pub use egress::{ContinueOnUpdate, PostUpdate, Update, UpdateCallBack};
 pub use ingress::{Mailbox, Message};
 pub use setup::PeerConfig;
+pub use state::{Epoch as StoredEpoch, Storage};
 
 pub type DealerLog = SignedDealerLog<MinSig, ed25519::PrivateKey>;
 

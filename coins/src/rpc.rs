@@ -5,7 +5,8 @@ mod mempool;
 #[cfg(feature = "mempool")]
 pub use mempool::{
     register_mempool, CoinMempoolServer, CoinsMempoolRpc, MempoolIngress, SubmitTransactionParams,
-    SubmitTransactionResponse, TransactionStatusResponse,
+    SubmitTransactionResponse, SubmitTransactionResult, SubmitTransactionsParams,
+    SubmitTransactionsResponse, TransactionStatusResponse,
 };
 
 use std::sync::Arc;
@@ -26,6 +27,8 @@ use nunchi_common::CommitState;
 #[async_trait]
 pub trait CoinQuery: Clone + Send + Sync + 'static {
     async fn nonce(&self, account: Address) -> Result<u64, LedgerError>;
+
+    async fn factory_nonce(&self) -> Result<u64, LedgerError>;
 
     async fn token(&self, coin: CoinId) -> Result<Option<TokenDefinition>, LedgerError>;
 
@@ -68,6 +71,10 @@ where
         self.lock().await.nonce(&account).await
     }
 
+    async fn factory_nonce(&self) -> Result<u64, LedgerError> {
+        self.lock().await.factory_nonce().await
+    }
+
     async fn token(&self, coin: CoinId) -> Result<Option<TokenDefinition>, LedgerError> {
         self.lock().await.token(&coin).await
     }
@@ -98,6 +105,9 @@ pub trait Coins {
     #[method(name = "nonce", param_kind = map)]
     async fn nonce(&self, account: String) -> RpcResult<NonceResponse>;
 
+    #[method(name = "factory_nonce")]
+    async fn factory_nonce(&self) -> RpcResult<FactoryNonceResponse>;
+
     #[method(name = "token", param_kind = map)]
     async fn token(&self, coin: String) -> RpcResult<Option<TokenResponse>>;
 
@@ -120,6 +130,11 @@ where
             account: account.to_bech32(),
             nonce,
         })
+    }
+
+    async fn factory_nonce(&self) -> RpcResult<FactoryNonceResponse> {
+        let nonce = self.query.factory_nonce().await.map_err(rpc_error)?;
+        Ok(FactoryNonceResponse { nonce })
     }
 
     async fn token(&self, coin: String) -> RpcResult<Option<TokenResponse>> {
@@ -154,6 +169,11 @@ where
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct NonceResponse {
     pub account: String,
+    pub nonce: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FactoryNonceResponse {
     pub nonce: u64,
 }
 

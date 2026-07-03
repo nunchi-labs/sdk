@@ -101,7 +101,7 @@ impl<E: Spawner + Metrics, C: Client> Pusher<E, C> {
         digest: Digest,
         upload_fn: F,
     ) where
-        F: FnOnce(C, Block) -> Fut + Send + 'static,
+        F: Fn(C, Block) -> Fut + Send + 'static,
         Fut: Future<Output = Result<(), C::Error>> + Send,
     {
         self.context.child(label).spawn({
@@ -146,10 +146,13 @@ impl<E: Spawner + Metrics, C: Client> Reporter for Pusher<E, C> {
                     view,
                     notarization.round(),
                     notarization.proposal.payload,
-                    |indexer, block| async move {
-                        indexer
-                            .notarized_upload(Notarized::new(notarization, block))
-                            .await
+                    move |indexer, block| {
+                        let notarization = notarization.clone();
+                        async move {
+                            indexer
+                                .notarized_upload(Notarized::new(notarization, block))
+                                .await
+                        }
                     },
                 );
             }
@@ -161,10 +164,13 @@ impl<E: Spawner + Metrics, C: Client> Reporter for Pusher<E, C> {
                     view,
                     finalization.round(),
                     finalization.proposal.payload,
-                    |indexer, block| async move {
-                        indexer
-                            .finalized_upload(Finalized::new(finalization, block))
-                            .await
+                    move |indexer, block| {
+                        let finalization = finalization.clone();
+                        async move {
+                            indexer
+                                .finalized_upload(Finalized::new(finalization, block))
+                                .await
+                        }
                     },
                 );
             }

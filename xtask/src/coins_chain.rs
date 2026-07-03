@@ -28,6 +28,8 @@ pub struct Generate {
     #[arg(long)]
     pub storage_dir: Option<PathBuf>,
     #[arg(long)]
+    pub genesis_path: Option<PathBuf>,
+    #[arg(long)]
     pub indexer_url: Option<String>,
     #[arg(long, default_value_t = 0)]
     pub seed: u64,
@@ -51,6 +53,7 @@ impl Generate {
             bind_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
             public_host: Vec::new(),
             storage_dir: None,
+            genesis_path: None,
             indexer_url: None,
             seed,
         }
@@ -58,6 +61,7 @@ impl Generate {
 
     pub fn run(self) -> Result<PathBuf, Box<dyn std::error::Error>> {
         let manifest_path = manifest_path(&self.out);
+        let genesis_path = normalize_path(self.genesis_path)?;
         let mut manifest = generate_local_testnet(LocalTestnetConfig {
             validators: self.validators,
             base_port: self.base_port,
@@ -67,6 +71,7 @@ impl Generate {
             bind_ip: self.bind_ip,
             public_ips: (!self.public_host.is_empty()).then_some(self.public_host),
             storage_dir: self.storage_dir,
+            genesis_path,
             indexer_url: self.indexer_url,
             seed: self.seed,
         })?;
@@ -85,4 +90,15 @@ fn coins_chain_executable() -> PathBuf {
         .ok()
         .and_then(|path| path.parent().map(|parent| parent.join("coins-chain-node")))
         .unwrap_or_else(|| PathBuf::from("coins-chain-node"))
+}
+
+fn normalize_path(path: Option<PathBuf>) -> Result<Option<PathBuf>, std::io::Error> {
+    path.map(|path| {
+        if path.is_absolute() {
+            Ok(path)
+        } else {
+            Ok(std::env::current_dir()?.join(path))
+        }
+    })
+    .transpose()
 }

@@ -7,6 +7,7 @@ RUN apt-get update \
 COPY . .
 RUN cargo build --release \
     -p nunchi-coins-chain --bin coins-chain-node \
+    -p nunchi-coins-chain --bin coins-chain-tool \
     -p nunchi-coins-indexer --bin coins-chain-indexer \
     -p xtask --bin xtask
 
@@ -37,13 +38,15 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --gid 10001 nunchi \
-    && useradd --uid 10001 --gid nunchi --shell /bin/false --create-home nunchi
+    && useradd --uid 10001 --gid nunchi --shell /bin/false --create-home nunchi \
+    && mkdir -p /var/lib/nunchi/coins-indexer \
+    && chown -R nunchi:nunchi /var/lib/nunchi
 
 COPY --from=builder /workspace/target/release/coins-chain-indexer /usr/local/bin/coins-chain-indexer
 
 USER nunchi
 EXPOSE 8080
-VOLUME ["/usr/share/nunchi/coins/frontend"]
+VOLUME ["/usr/share/nunchi/coins/frontend", "/var/lib/nunchi/coins-indexer"]
 
 ENTRYPOINT ["/usr/local/bin/coins-chain-indexer"]
 
@@ -54,6 +57,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /workspace/target/release/xtask /usr/local/bin/xtask
+COPY --from=builder /workspace/target/release/coins-chain-tool /usr/local/bin/coins-chain-tool
 
 WORKDIR /workspace
 ENTRYPOINT ["/usr/local/bin/xtask"]

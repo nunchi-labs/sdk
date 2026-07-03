@@ -217,7 +217,9 @@ fn rejects_transaction_with_bad_signature() {
             amount: 1,
         };
 
-        let err = ledger.apply_transaction(&tx, None).await.unwrap_err();
+        // Signature validity is checked statelessly before execution;
+        // `validate_authorization` is the full admission-equivalent check.
+        let err = ledger.validate_authorization(&tx).await.unwrap_err();
         assert_eq!(
             err,
             LedgerError::BadSignature(SignatureError::InvalidSignature)
@@ -329,8 +331,10 @@ fn rejects_multisig_transaction_below_threshold() {
             },
         );
 
+        // Threshold enforcement is part of stateless verification, which runs
+        // before execution; `validate_authorization` covers it.
         assert_eq!(
-            ledger.apply_transaction(&tx, None).await.unwrap_err(),
+            ledger.validate_authorization(&tx).await.unwrap_err(),
             LedgerError::BadSignature(SignatureError::InvalidSignature)
         );
     });
@@ -571,8 +575,10 @@ fn rejects_cross_account_multisig_replay() {
         );
         tx.account_id = account_b;
 
+        // The replayed signatures commit to account_a's id, so stateless
+        // verification rejects the transaction before execution.
         assert_eq!(
-            ledger.apply_transaction(&tx, None).await.unwrap_err(),
+            ledger.validate_authorization(&tx).await.unwrap_err(),
             LedgerError::BadSignature(SignatureError::InvalidSignature)
         );
     });

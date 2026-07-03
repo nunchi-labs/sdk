@@ -50,6 +50,10 @@ impl crate::rpc::CoinQuery for MockQuery {
         Ok(7)
     }
 
+    async fn factory_nonce(&self) -> Result<u64, LedgerError> {
+        Ok(9)
+    }
+
     async fn token(&self, coin: CoinId) -> Result<Option<TokenDefinition>, LedgerError> {
         assert_eq!(coin, self.inner.coin);
         Ok(Some(self.inner.token.clone()))
@@ -87,6 +91,15 @@ fn coin_rpc_queries() {
             .expect("nonce response");
         assert_eq!(nonce.account, account);
         assert_eq!(nonce.nonce, 7);
+
+        let factory_nonce: crate::rpc::FactoryNonceResponse = module
+            .call(
+                "coins.factory_nonce",
+                jsonrpsee::core::EmptyServerParams::new(),
+            )
+            .await
+            .expect("factory nonce response");
+        assert_eq!(factory_nonce.nonce, 9);
 
         let mut token_params = jsonrpsee::core::params::ObjectParams::new();
         token_params

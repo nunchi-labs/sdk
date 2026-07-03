@@ -30,6 +30,7 @@ fn generated_testnet_has_unique_ports_dirs_and_complete_peer_sets() {
         bind_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
         public_ips: None,
         storage_dir: None,
+        genesis_path: None,
         indexer_url: None,
         seed: 7,
     })
@@ -106,6 +107,7 @@ fn generated_testnet_can_advertise_remote_hosts() {
         bind_ip: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         public_ips: Some(public_ips.clone()),
         storage_dir: Some(storage_dir.clone()),
+        genesis_path: None,
         indexer_url: Some("https://indexer.example.com/coins-chain".to_string()),
         seed: 8,
     })

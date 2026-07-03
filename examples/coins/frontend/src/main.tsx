@@ -18,6 +18,7 @@ type EventRow = {
   view: number | null;
   height: number | null;
   digest: string;
+  transactionCount: number | null;
   timestamp: number;
 };
 
@@ -26,6 +27,7 @@ type BlockTiming = {
   digest: string;
   view: number | null;
   blockTimestamp: number;
+  transactionCount?: number;
   notarizedAt?: number;
   finalizedAt?: number;
   notarizationMs?: number;
@@ -38,6 +40,7 @@ type SummaryEvent = {
   view: number | null;
   height: number | null;
   digest: string | null;
+  transactionCount: number | null;
   blockTimestamp: number | null;
   observedAt: number;
 };
@@ -173,7 +176,7 @@ function App() {
         const displayAt = Date.now();
         const parsed = parseSummaryMessage(message.data);
         if (!parsed) return;
-        const { kind, view, height, blockTimestamp } = parsed;
+        const { kind, view, height, blockTimestamp, transactionCount } = parsed;
         const digestHex = parsed.digest ?? "";
         if ((kind === "notarization" || kind === "finalization") && height !== null && blockTimestamp !== null) {
           updateTiming(timingByHeight.current, {
@@ -182,6 +185,7 @@ function App() {
             digest: digestHex,
             view,
             blockTimestamp,
+            transactionCount,
             observedAt: parsed.observedAt,
           });
         }
@@ -192,6 +196,7 @@ function App() {
           view,
           height,
           digest: digestHex,
+          transactionCount,
           timestamp: displayAt,
         });
         if (kind === "finalization") {
@@ -231,6 +236,10 @@ function App() {
   const latestDigest = latest?.digest ?? "";
   const latestHeight = latest?.height ?? null;
   const latestView = latest?.view ?? null;
+  const finalizedWindow = timings.filter((timing) => timing.finalizedAt !== undefined);
+  const recentFinalizedTxs = finalizedWindow.reduce((sum, timing) => sum + (timing.transactionCount ?? 0), 0);
+  const recentNonEmptyBlocks = finalizedWindow.filter((timing) => (timing.transactionCount ?? 0) > 0).length;
+  const averageTxPerBlock = finalizedWindow.length === 0 ? undefined : recentFinalizedTxs / finalizedWindow.length;
 
   return (
     <main className="shell">
@@ -271,7 +280,14 @@ function App() {
           <div className="metrics">
             <Metric label="Height" value={latestHeight?.toString() ?? "-"} />
             <Metric label="View" value={latestView?.toString() ?? "-"} />
+            <Metric label="Latest Txs" value={latest?.transactionCount?.toString() ?? "-"} />
+            <Metric label="Recent Txs" value={recentFinalizedTxs.toString()} />
+            <Metric label="Avg / Block" value={formatDecimal(averageTxPerBlock)} />
             <Metric label="Digest" value={compactHex(latestDigest ?? undefined)} wide />
+          </div>
+          <div className="txSummary">
+            <span>{finalizedWindow.length} finalized blocks sampled</span>
+            <span>{recentNonEmptyBlocks} non-empty</span>
           </div>
 
           <LatencyTimeline timings={timings} />
@@ -292,6 +308,7 @@ function App() {
               <span>Kind</span>
               <span>View</span>
               <span>Height</span>
+              <span>Txs</span>
               <span>Digest</span>
               <span>Observed</span>
             </div>
@@ -302,6 +319,7 @@ function App() {
                 <span className={`kind ${event.kind}`}>{event.kind}</span>
                 <span>{event.view ?? "-"}</span>
                 <span>{event.height ?? "-"}</span>
+                <span>{event.transactionCount ?? "-"}</span>
                 <span className="mono">{compactHex(event.digest)}</span>
                 <span>{new Date(event.timestamp).toLocaleTimeString()}</span>
               </div>
@@ -413,6 +431,7 @@ function updateTiming(
     digest: string;
     view: number | null;
     blockTimestamp: number;
+    transactionCount: number | null;
     observedAt: number;
   },
 ): void {
@@ -428,6 +447,9 @@ function updateTiming(
   next.digest = update.digest || next.digest;
   next.view = update.view ?? next.view;
   next.blockTimestamp = update.blockTimestamp;
+  if (update.transactionCount !== null) {
+    next.transactionCount = update.transactionCount;
+  }
   if (update.kind === "notarization") {
     next.notarizedAt = update.observedAt;
     next.notarizationMs = latency;
@@ -462,6 +484,7 @@ function normalizeSummary(value: unknown): SummaryEvent | null {
   if (typeof record.kind !== "string") return null;
   const view = optionalNumber(record.view);
   const height = optionalNumber(record.height);
+  const transactionCount = optionalNumber(record.transactionCount);
   const blockTimestamp = optionalNumber(record.blockTimestamp);
   const observedAt = optionalNumber(record.observedAt);
   if (observedAt === null) return null;
@@ -470,6 +493,7 @@ function normalizeSummary(value: unknown): SummaryEvent | null {
     view,
     height,
     digest: typeof record.digest === "string" ? record.digest : null,
+    transactionCount,
     blockTimestamp,
     observedAt,
   };
@@ -495,6 +519,10 @@ function percent(value: number | undefined, max: number): number {
 
 function formatMs(value: number | undefined): string {
   return value === undefined ? "-" : `${Math.round(value)}ms`;
+}
+
+function formatDecimal(value: number | undefined): string {
+  return value === undefined ? "-" : value.toFixed(1);
 }
 
 createRoot(document.getElementById("root")!).render(<App />);

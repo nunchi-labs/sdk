@@ -34,6 +34,8 @@ Create `.env` next to `compose.yaml`:
 
 ```sh
 COINS_INDEXER_IMAGE=nunchi-coins-indexer:latest
+INDEXER_OUTPUT=<output from narae.toml>
+INDEXER_OUTPUT_EPOCH=0
 INDEXER_IDENTITY=<identity from narae.toml>
 INDEXER_PARTICIPANTS=4
 INDEXER_BIND=0.0.0.0

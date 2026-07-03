@@ -31,7 +31,7 @@ mod tests;
 pub use nunchi_chain::{StateCommitment, MAX_TRANSACTIONS};
 pub use nunchi_dkg::{
     Activity, Context, EdScheme, EpochProvider, Finalization, Identity, Notarization, Provider,
-    PublicKey, Scheme, Seed, Seedable, Signature, ThresholdScheme,
+    PublicKey, Scheme, Seed, Seedable, Signature, ThresholdScheme, MAX_SUPPORTED_MODE,
 };
 pub use runtime::{CoinsRuntime, RuntimeError};
 pub use transaction::Transaction;
