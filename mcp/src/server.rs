@@ -16,8 +16,9 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_formatting::{from_hex, hex};
 use nunchi_coins::{
     external_account_id, multisig_account_id, CoinId, CoinOperation, CoinSpec, MultisigPolicy,
-    PrivateKey, TokenFactory, TokenName, TokenSymbol, Transaction,
+    PrivateKey, TokenFactory, TokenName, TokenSymbol,
 };
+use nunchi_coins_chain::{CoinTransaction, FeeV1};
 use nunchi_crypto::PublicKey;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -136,6 +137,14 @@ pub struct BuildTransferParams {
     pub to: String,
     /// Amount to transfer, as a decimal u128 string.
     pub amount: String,
+    /// Hex-encoded native fee coin ID.
+    pub fee_coin: String,
+    /// Maximum fee the account authorizes, as a decimal u128 string.
+    pub max_fee: String,
+    /// Optional tip, as a decimal u128 string. Defaults to 0.
+    pub tip: Option<String>,
+    /// Maximum deterministic execution weight the account authorizes.
+    pub weight_limit: u64,
 }
 
 /// Parameters for `sdk_build_mint`.
@@ -151,6 +160,14 @@ pub struct BuildMintParams {
     pub to: String,
     /// Amount to mint, as a decimal u128 string.
     pub amount: String,
+    /// Hex-encoded native fee coin ID.
+    pub fee_coin: String,
+    /// Maximum fee the account authorizes, as a decimal u128 string.
+    pub max_fee: String,
+    /// Optional tip, as a decimal u128 string. Defaults to 0.
+    pub tip: Option<String>,
+    /// Maximum deterministic execution weight the account authorizes.
+    pub weight_limit: u64,
 }
 
 /// Parameters for `sdk_build_burn`.
@@ -166,6 +183,14 @@ pub struct BuildBurnParams {
     pub from: String,
     /// Amount to burn, as a decimal u128 string.
     pub amount: String,
+    /// Hex-encoded native fee coin ID.
+    pub fee_coin: String,
+    /// Maximum fee the account authorizes, as a decimal u128 string.
+    pub max_fee: String,
+    /// Optional tip, as a decimal u128 string. Defaults to 0.
+    pub tip: Option<String>,
+    /// Maximum deterministic execution weight the account authorizes.
+    pub weight_limit: u64,
 }
 
 /// Parameters for `sdk_build_create_token`.
@@ -185,6 +210,14 @@ pub struct BuildCreateTokenParams {
     pub initial_supply: String,
     /// Optional hard cap on total supply, as a decimal u128 string.
     pub max_supply: Option<String>,
+    /// Hex-encoded native fee coin ID.
+    pub fee_coin: String,
+    /// Maximum fee the account authorizes, as a decimal u128 string.
+    pub max_fee: String,
+    /// Optional tip, as a decimal u128 string. Defaults to 0.
+    pub tip: Option<String>,
+    /// Maximum deterministic execution weight the account authorizes.
+    pub weight_limit: u64,
 }
 
 /// Parameters for `sdk_build_register_account_policy`.
@@ -200,6 +233,14 @@ pub struct BuildRegisterAccountPolicyParams {
     pub threshold: u16,
     /// Hex-encoded curve-tagged public keys of all policy members.
     pub signer_public_keys_hex: Vec<String>,
+    /// Hex-encoded native fee coin ID.
+    pub fee_coin: String,
+    /// Maximum fee the account authorizes, as a decimal u128 string.
+    pub max_fee: String,
+    /// Optional tip, as a decimal u128 string. Defaults to 0.
+    pub tip: Option<String>,
+    /// Maximum deterministic execution weight the account authorizes.
+    pub weight_limit: u64,
 }
 
 // ── parameter structs — repo tools ────────────────────────────────────────────
@@ -311,10 +352,10 @@ impl NunchiServer {
     /// Submit a signed transaction to the node's mempool.
     ///
     /// The transaction must be hex-encoded bytes produced by one of the `sdk_build_*` tools
-    /// or the Nunchi SDK's `Transaction::sign` function.  On success returns the transaction hash.
+    /// or an equivalent fee-aware SDK transaction builder. On success returns the transaction hash.
     #[tool(
         name = "coins_submit_transaction",
-        description = "Submit a signed Nunchi coin transaction to the node's mempool. \
+        description = "Submit a signed fee-aware Nunchi coin transaction to the node's mempool. \
                         Provide hex-encoded transaction bytes (e.g. from sdk_build_transfer). \
                         Returns the transaction hash on success."
     )]
@@ -431,7 +472,7 @@ impl NunchiServer {
     /// The private key must control the `from` address.
     #[tool(
         name = "sdk_build_transfer",
-        description = "Build and sign a Nunchi coin Transfer transaction offline. \
+        description = "Build and sign a fee-aware Nunchi coin Transfer transaction offline. \
                         Returns hex-encoded transaction bytes to submit via coins_submit_transaction."
     )]
     async fn sdk_build_transfer(&self, Parameters(p): Parameters<BuildTransferParams>) -> String {
@@ -444,9 +485,11 @@ impl NunchiServer {
                 .amount
                 .parse::<u128>()
                 .map_err(|_| anyhow::anyhow!("amount is not a valid u128"))?;
-            let tx = Transaction::sign(
+            let fee = build_fee(&p.fee_coin, &p.max_fee, p.tip.as_deref(), p.weight_limit)?;
+            let tx = CoinTransaction::sign_with_fee(
                 &signer,
                 p.nonce,
+                fee,
                 CoinOperation::Transfer {
                     coin,
                     from,
@@ -467,7 +510,7 @@ impl NunchiServer {
     /// Returns hex-encoded transaction bytes ready to pass to `coins_submit_transaction`.
     #[tool(
         name = "sdk_build_mint",
-        description = "Build and sign a Nunchi coin Mint transaction offline (issuer only). \
+        description = "Build and sign a fee-aware Nunchi coin Mint transaction offline (issuer only). \
                         Returns hex-encoded transaction bytes to submit via coins_submit_transaction."
     )]
     async fn sdk_build_mint(&self, Parameters(p): Parameters<BuildMintParams>) -> String {
@@ -479,7 +522,13 @@ impl NunchiServer {
                 .amount
                 .parse::<u128>()
                 .map_err(|_| anyhow::anyhow!("amount is not a valid u128"))?;
-            let tx = Transaction::sign(&signer, p.nonce, CoinOperation::Mint { coin, to, amount });
+            let fee = build_fee(&p.fee_coin, &p.max_fee, p.tip.as_deref(), p.weight_limit)?;
+            let tx = CoinTransaction::sign_with_fee(
+                &signer,
+                p.nonce,
+                fee,
+                CoinOperation::Mint { coin, to, amount },
+            );
             Ok(encode_value(&tx))
         })() {
             Ok(hex) => hex,
@@ -492,7 +541,7 @@ impl NunchiServer {
     /// Returns hex-encoded transaction bytes ready to pass to `coins_submit_transaction`.
     #[tool(
         name = "sdk_build_burn",
-        description = "Build and sign a Nunchi coin Burn transaction offline. \
+        description = "Build and sign a fee-aware Nunchi coin Burn transaction offline. \
                         Destroys the specified amount of coins from the `from` account. \
                         Returns hex-encoded transaction bytes to submit via coins_submit_transaction."
     )]
@@ -505,8 +554,13 @@ impl NunchiServer {
                 .amount
                 .parse::<u128>()
                 .map_err(|_| anyhow::anyhow!("amount is not a valid u128"))?;
-            let tx =
-                Transaction::sign(&signer, p.nonce, CoinOperation::Burn { coin, from, amount });
+            let fee = build_fee(&p.fee_coin, &p.max_fee, p.tip.as_deref(), p.weight_limit)?;
+            let tx = CoinTransaction::sign_with_fee(
+                &signer,
+                p.nonce,
+                fee,
+                CoinOperation::Burn { coin, from, amount },
+            );
             Ok(encode_value(&tx))
         })() {
             Ok(hex) => hex,
@@ -521,7 +575,7 @@ impl NunchiServer {
     /// Returns hex-encoded transaction bytes ready to pass to `coins_submit_transaction`.
     #[tool(
         name = "sdk_build_create_token",
-        description = "Build and sign a Nunchi CreateToken transaction offline. \
+        description = "Build and sign a fee-aware Nunchi CreateToken transaction offline. \
                         Creates a new token with the given symbol, name, decimals, and supply policy. \
                         The signing key becomes the token issuer. \
                         Returns hex-encoded transaction bytes to submit via coins_submit_transaction."
@@ -539,7 +593,13 @@ impl NunchiServer {
                 &p.initial_supply,
                 p.max_supply.as_deref(),
             )?;
-            let tx = Transaction::sign(&signer, p.nonce, CoinOperation::CreateToken { spec });
+            let fee = build_fee(&p.fee_coin, &p.max_fee, p.tip.as_deref(), p.weight_limit)?;
+            let tx = CoinTransaction::sign_with_fee(
+                &signer,
+                p.nonce,
+                fee,
+                CoinOperation::CreateToken { spec },
+            );
             Ok(encode_value(&tx))
         })() {
             Ok(hex) => hex,
@@ -554,7 +614,7 @@ impl NunchiServer {
     /// Returns hex-encoded transaction bytes ready to pass to `coins_submit_transaction`.
     #[tool(
         name = "sdk_build_register_account_policy",
-        description = "Build and sign a Nunchi RegisterAccountPolicy transaction offline. \
+        description = "Build and sign a fee-aware Nunchi RegisterAccountPolicy transaction offline. \
                         Registers or rotates the multisig policy of the given account. \
                         Returns hex-encoded transaction bytes to submit via coins_submit_transaction."
     )]
@@ -566,9 +626,11 @@ impl NunchiServer {
             let signer = decode_value::<PrivateKey>(&p.private_key_hex, "private key")?;
             let account_id = decode_value::<nunchi_coins::Address>(&p.account_id, "account_id")?;
             let policy = build_multisig_policy(p.threshold, &p.signer_public_keys_hex)?;
-            let tx = Transaction::sign(
+            let fee = build_fee(&p.fee_coin, &p.max_fee, p.tip.as_deref(), p.weight_limit)?;
+            let tx = CoinTransaction::sign_with_fee(
                 &signer,
                 p.nonce,
+                fee,
                 CoinOperation::RegisterAccountPolicy { account_id, policy },
             );
             Ok(encode_value(&tx))
@@ -692,6 +754,23 @@ fn build_coin_spec_from_params(
         initial_supply,
         max_supply,
     ))
+}
+
+fn build_fee(
+    fee_coin: &str,
+    max_fee: &str,
+    tip: Option<&str>,
+    weight_limit: u64,
+) -> anyhow::Result<FeeV1> {
+    let coin = decode_value::<CoinId>(fee_coin, "fee coin id")?;
+    let max_amount = max_fee
+        .parse::<u128>()
+        .map_err(|_| anyhow::anyhow!("max_fee is not a valid u128"))?;
+    let tip = tip
+        .unwrap_or("0")
+        .parse::<u128>()
+        .map_err(|_| anyhow::anyhow!("tip is not a valid u128"))?;
+    Ok(FeeV1::new(coin, max_amount, tip, weight_limit))
 }
 
 #[tool_handler(

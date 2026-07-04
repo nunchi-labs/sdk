@@ -53,6 +53,11 @@ macro_rules! transaction_wrapper {
                 }
             }
 
+            /// Return the v1 fee payer. Sponsored fees are not part of this format.
+            pub fn fee_payer(&self) -> &::nunchi_common::Address {
+                self.account_id()
+            }
+
             /// Return a deterministic ordering key for proposer sorting.
             pub fn ordering_key(&self) -> ::std::vec::Vec<u8> {
                 ::commonware_codec::Encode::encode(self.account_id())

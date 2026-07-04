@@ -13,40 +13,75 @@ pub trait Operation: EncodeSize + Read<Cfg = ()> + Write {
     const NAMESPACE: &'static [u8];
 }
 
+/// Empty fee metadata for modules or tests that are not running under a fee-aware chain.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct NoFee;
+
+impl Write for NoFee {
+    fn write(&self, _buf: &mut impl bytes::BufMut) {}
+}
+
+impl Read for NoFee {
+    type Cfg = ();
+
+    fn read_cfg(_buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+        Ok(Self)
+    }
+}
+
+impl EncodeSize for NoFee {
+    fn encode_size(&self) -> usize {
+        0
+    }
+}
+
 /// Signable transaction payload. The nonce is scoped to the account being authorized.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TransactionPayload<Operation> {
+pub struct TransactionPayload<Operation, Fee = NoFee> {
     pub nonce: u64,
+    pub fee: Fee,
     pub operation: Operation,
 }
 
 impl<Operation> TransactionPayload<Operation> {
     pub fn new(nonce: u64, operation: Operation) -> Self {
-        Self { nonce, operation }
+        Self::with_fee(nonce, NoFee, operation)
     }
 }
 
-impl<Operation: Write> Write for TransactionPayload<Operation> {
+impl<Operation, Fee> TransactionPayload<Operation, Fee> {
+    pub fn with_fee(nonce: u64, fee: Fee, operation: Operation) -> Self {
+        Self {
+            nonce,
+            fee,
+            operation,
+        }
+    }
+}
+
+impl<Operation: Write, Fee: Write> Write for TransactionPayload<Operation, Fee> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.nonce.write(buf);
+        self.fee.write(buf);
         self.operation.write(buf);
     }
 }
 
-impl<Operation: Read<Cfg = ()>> Read for TransactionPayload<Operation> {
+impl<Operation: Read<Cfg = ()>, Fee: Read<Cfg = ()>> Read for TransactionPayload<Operation, Fee> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
             nonce: u64::read(buf)?,
+            fee: Fee::read(buf)?,
             operation: Operation::read(buf)?,
         })
     }
 }
 
-impl<Operation: EncodeSize> EncodeSize for TransactionPayload<Operation> {
+impl<Operation: EncodeSize, Fee: EncodeSize> EncodeSize for TransactionPayload<Operation, Fee> {
     fn encode_size(&self) -> usize {
-        self.nonce.encode_size() + self.operation.encode_size()
+        self.nonce.encode_size() + self.fee.encode_size() + self.operation.encode_size()
     }
 }
 
@@ -63,6 +98,18 @@ impl AccountSignature {
         account_id: &Address,
         payload: &TransactionPayload<Operation>,
     ) -> Self {
+        Self::sign_with_fee(signer, account_id, payload)
+    }
+
+    pub fn sign_with_fee<Operation, Fee>(
+        signer: &PrivateKey,
+        account_id: &Address,
+        payload: &TransactionPayload<Operation, Fee>,
+    ) -> Self
+    where
+        Operation: self::Operation,
+        Fee: EncodeSize + Write,
+    {
         Self {
             signer: signer.public_key(),
             signature: signer.sign(
@@ -77,6 +124,18 @@ impl AccountSignature {
         account_id: &Address,
         payload: &TransactionPayload<Operation>,
     ) -> Result<(), SignatureError> {
+        self.verify_with_fee(account_id, payload)
+    }
+
+    pub fn verify_with_fee<Operation, Fee>(
+        &self,
+        account_id: &Address,
+        payload: &TransactionPayload<Operation, Fee>,
+    ) -> Result<(), SignatureError>
+    where
+        Operation: self::Operation,
+        Fee: EncodeSize + Write,
+    {
         self.signer.verify(
             Operation::NAMESPACE,
             &signing_bytes(account_id, AUTH_MULTISIG, payload),
@@ -135,6 +194,18 @@ impl Authorization {
         account_id: &Address,
         payload: &TransactionPayload<Operation>,
     ) -> Result<(), SignatureError> {
+        self.verify_with_fee(account_id, payload)
+    }
+
+    pub fn verify_with_fee<Operation, Fee>(
+        &self,
+        account_id: &Address,
+        payload: &TransactionPayload<Operation, Fee>,
+    ) -> Result<(), SignatureError>
+    where
+        Operation: self::Operation,
+        Fee: EncodeSize + Write,
+    {
         match self {
             Self::Single { signer, signature } => {
                 if Address::external(signer) != *account_id {
@@ -163,7 +234,7 @@ impl Authorization {
                     if !seen.insert(signature.signer.clone()) {
                         return Err(SignatureError::IncompatibleKey);
                     }
-                    signature.verify(account_id, payload)?;
+                    signature.verify_with_fee(account_id, payload)?;
                     previous_signer_key = Some(signer_key);
                 }
 
@@ -238,9 +309,9 @@ impl EncodeSize for Authorization {
 
 /// A signed Nunchi transaction over a caller-defined operation enum.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Transaction<Operation> {
+pub struct Transaction<Operation, Fee = NoFee> {
     pub account_id: Address,
-    pub payload: TransactionPayload<Operation>,
+    pub payload: TransactionPayload<Operation, Fee>,
     pub authorization: Authorization,
 }
 
@@ -282,9 +353,54 @@ impl<Operation: self::Operation> Transaction<Operation> {
             authorization: Authorization::Multisig { policy, signatures },
         }
     }
+}
+
+impl<Operation: self::Operation, Fee: EncodeSize + Write> Transaction<Operation, Fee> {
+    pub fn sign_with_fee(signer: &PrivateKey, nonce: u64, fee: Fee, operation: Operation) -> Self {
+        let signer_public = signer.public_key();
+        let account_id = Address::external(&signer_public);
+        let payload = TransactionPayload::with_fee(nonce, fee, operation);
+        let authorization = Authorization::Single {
+            signer: Box::new(signer_public),
+            signature: signer.sign(
+                Operation::NAMESPACE,
+                &signing_bytes(&account_id, AUTH_SINGLE, &payload),
+            ),
+        };
+        Self {
+            account_id,
+            payload,
+            authorization,
+        }
+    }
+
+    pub fn sign_multisig_with_fee(
+        account_id: Address,
+        policy: MultisigPolicy,
+        signers: &[&PrivateKey],
+        nonce: u64,
+        fee: Fee,
+        operation: Operation,
+    ) -> Self
+    where
+        Fee: Clone,
+    {
+        let payload = TransactionPayload::with_fee(nonce, fee, operation);
+        let mut signatures: Vec<AccountSignature> = signers
+            .iter()
+            .map(|signer| AccountSignature::sign_with_fee(signer, &account_id, &payload))
+            .collect();
+        signatures.sort_by_cached_key(|signature| signature.signer.encode().as_ref().to_vec());
+        Self {
+            account_id,
+            payload,
+            authorization: Authorization::Multisig { policy, signatures },
+        }
+    }
 
     pub fn verify(&self) -> Result<(), SignatureError> {
-        self.authorization.verify(&self.account_id, &self.payload)
+        self.authorization
+            .verify_with_fee(&self.account_id, &self.payload)
     }
 
     pub fn digest(&self) -> Digest {
@@ -292,7 +408,7 @@ impl<Operation: self::Operation> Transaction<Operation> {
     }
 }
 
-impl<Operation: Write> Write for Transaction<Operation> {
+impl<Operation: Write, Fee: Write> Write for Transaction<Operation, Fee> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.account_id.write(buf);
         self.payload.write(buf);
@@ -300,12 +416,12 @@ impl<Operation: Write> Write for Transaction<Operation> {
     }
 }
 
-impl<Operation: Read<Cfg = ()>> Read for Transaction<Operation> {
+impl<Operation: Read<Cfg = ()>, Fee: Read<Cfg = ()>> Read for Transaction<Operation, Fee> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         let account_id = Address::read(buf)?;
-        let payload = TransactionPayload::read(buf)?;
+        let payload = TransactionPayload::<Operation, Fee>::read(buf)?;
         let authorization = Authorization::read(buf)?;
 
         if let Authorization::Single { signer, signature } = &authorization {
@@ -325,7 +441,7 @@ impl<Operation: Read<Cfg = ()>> Read for Transaction<Operation> {
     }
 }
 
-impl<Operation: EncodeSize> EncodeSize for Transaction<Operation> {
+impl<Operation: EncodeSize, Fee: EncodeSize> EncodeSize for Transaction<Operation, Fee> {
     fn encode_size(&self) -> usize {
         self.account_id.encode_size()
             + self.payload.encode_size()
@@ -333,10 +449,10 @@ impl<Operation: EncodeSize> EncodeSize for Transaction<Operation> {
     }
 }
 
-fn signing_bytes<Operation: EncodeSize + Write>(
+fn signing_bytes<Operation: EncodeSize + Write, Fee: EncodeSize + Write>(
     account_id: &Address,
     authorization_tag: u8,
-    payload: &TransactionPayload<Operation>,
+    payload: &TransactionPayload<Operation, Fee>,
 ) -> Vec<u8> {
     let mut bytes = account_id.encode().as_ref().to_vec();
     bytes.push(authorization_tag);

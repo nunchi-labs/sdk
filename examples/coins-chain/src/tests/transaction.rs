@@ -1,22 +1,27 @@
 use commonware_codec::Encode;
-use nunchi_authority::{AuthorityOperation, Transaction as AuthorityTransaction};
-use nunchi_coins::{CoinOperation, Transaction as CoinTransaction};
+use nunchi_authority::AuthorityOperation;
+use nunchi_coins::CoinOperation;
 use nunchi_common::Operation;
 use nunchi_mempool::PoolTransaction;
 
 use commonware_codec::DecodeExt;
 use commonware_cryptography::{ed25519, Hasher, Sha256, Signer as _};
 use nunchi_authority::MultisigPolicy;
-use nunchi_coins::{CoinSpec, PrivateKey, TokenName, TokenSymbol};
-use nunchi_oracle::{IntervalKey, NamespaceId, OracleOperation, Transaction as OracleTransaction};
+use nunchi_coins::{CoinId, CoinSpec, PrivateKey, TokenName, TokenSymbol};
+use nunchi_oracle::{IntervalKey, NamespaceId, OracleOperation};
 
 use crate::transaction::*;
 
+fn fee() -> FeeV1 {
+    FeeV1::new(CoinId(Sha256::hash(b"native-fee")), 1, 0, 1_000)
+}
+
 fn coin_transaction(seed: u64, nonce: u64) -> CoinTransaction {
     let signer = PrivateKey::ed25519_from_seed(seed);
-    CoinTransaction::sign(
+    CoinTransaction::sign_with_fee(
         &signer,
         nonce,
+        fee(),
         CoinOperation::CreateToken {
             spec: CoinSpec::new(
                 TokenSymbol::new("NCH").unwrap(),
@@ -31,9 +36,10 @@ fn coin_transaction(seed: u64, nonce: u64) -> CoinTransaction {
 
 fn authority_transaction(seed: u64, nonce: u64) -> AuthorityTransaction {
     let owner = nunchi_crypto::PrivateKey::ed25519_from_seed(seed);
-    AuthorityTransaction::sign(
+    AuthorityTransaction::sign_with_fee(
         &owner,
         nonce,
+        fee(),
         AuthorityOperation::Configure {
             policy: MultisigPolicy {
                 owners: vec![owner.public_key()],
@@ -47,9 +53,10 @@ fn authority_transaction(seed: u64, nonce: u64) -> AuthorityTransaction {
 
 fn oracle_transaction(seed: u64, nonce: u64) -> OracleTransaction {
     let signer = nunchi_crypto::PrivateKey::ed25519_from_seed(seed);
-    OracleTransaction::sign(
+    OracleTransaction::sign_with_fee(
         &signer,
         nonce,
+        fee(),
         OracleOperation::AppendRecord {
             namespace: NamespaceId(Sha256::hash(b"test-namespace")),
             interval: IntervalKey::new(0),
@@ -85,8 +92,18 @@ fn pool_transaction_forwards_to_inner_transaction() {
 
     assert_eq!(transaction.digest(), inner.digest());
     assert_eq!(transaction.account_id(), &inner.account_id);
+    assert_eq!(transaction.fee_payer(), &inner.account_id);
     assert_eq!(transaction.nonce(), inner.payload.nonce);
     assert!(PoolTransaction::verify(&transaction).is_ok());
+}
+
+#[test]
+fn fee_metadata_is_signed() {
+    let mut inner = coin_transaction(3, 7);
+    inner.payload.fee.max_amount += 1;
+    let transaction = Transaction::from(inner);
+
+    assert!(PoolTransaction::verify(&transaction).is_err());
 }
 
 #[test]

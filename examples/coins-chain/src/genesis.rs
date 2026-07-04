@@ -3,12 +3,13 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_storage::{mmr::Family, qmdb::sync::Target, Context};
 use nunchi_authority::{AuthorityGenesis, AuthorityLedger};
-use nunchi_coins::{CoinsGenesis, Ledger};
+use nunchi_coins::{Address, CoinId, CoinsGenesis, Ledger};
 use nunchi_common::{
     CommitState, Namespace, Overlay, QmdbConfig, QmdbState, StateError, StateStore,
 };
 use nunchi_oracle::{OracleGenesis, OracleLedger};
 use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DisplayFromStr};
 use std::{fs, path::Path};
 use thiserror::Error;
 
@@ -30,10 +31,32 @@ impl From<Table> for u8 {
 pub struct ChainGenesis {
     #[serde(default)]
     pub authority: Option<AuthorityGenesis>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fee: Option<FeeGenesis>,
     #[serde(default)]
     pub coins: Option<CoinsGenesis>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle: Option<OracleGenesis>,
+}
+
+/// Chain-level fee policy seeded at genesis.
+#[serde_as]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct FeeGenesis {
+    pub native_coin: CoinId,
+    #[serde_as(as = "DisplayFromStr")]
+    pub collector: Address,
+    pub burn_bps: u16,
+    pub schedule: FeeSchedule,
+}
+
+/// Static v1 fee schedule.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct FeeSchedule {
+    pub base: u128,
+    pub per_byte: u128,
+    pub per_weight: u128,
+    pub signature: u128,
 }
 
 #[derive(Debug, Error)]
@@ -48,12 +71,22 @@ pub enum GenesisError {
     Coins(#[from] nunchi_coins::LedgerError),
     #[error("oracle genesis error: {0}")]
     Oracle(#[from] nunchi_oracle::OracleError),
+    #[error("invalid fee genesis: {0}")]
+    Fee(#[from] FeeGenesisError),
     #[error("state error: {0}")]
     State(#[from] StateError),
     #[error("existing chain state was initialized with a different genesis")]
     MismatchedGenesis,
     #[error("existing chain state is non-empty but has no genesis marker")]
     UnmarkedState,
+}
+
+#[derive(Debug, Error)]
+pub enum FeeGenesisError {
+    #[error("burn_bps {0} exceeds 10000")]
+    BurnBpsTooHigh(u16),
+    #[error("native fee coin is not present in coin genesis: {0:?}")]
+    MissingNativeCoin(CoinId),
 }
 
 impl ChainGenesis {
@@ -100,6 +133,11 @@ impl ChainGenesis {
             ledger.apply_genesis(coins).await?;
             overlay = ledger.into_inner();
         }
+        if let Some(fee) = &self.fee {
+            let ledger = Ledger::new(overlay);
+            validate_fee_genesis(&ledger, fee).await?;
+            overlay = ledger.into_inner();
+        }
         if let Some(oracle) = &self.oracle {
             let mut ledger = OracleLedger::new(overlay);
             ledger.apply_genesis(oracle).await?;
@@ -110,6 +148,19 @@ impl ChainGenesis {
         state.commit().await?;
         Ok(())
     }
+}
+
+async fn validate_fee_genesis<D>(ledger: &Ledger<D>, fee: &FeeGenesis) -> Result<(), GenesisError>
+where
+    D: nunchi_coins::CoinDB,
+{
+    if fee.burn_bps > 10_000 {
+        return Err(FeeGenesisError::BurnBpsTooHigh(fee.burn_bps).into());
+    }
+    if ledger.token(&fee.native_coin).await?.is_none() {
+        return Err(FeeGenesisError::MissingNativeCoin(fee.native_coin).into());
+    }
+    Ok(())
 }
 
 pub async fn genesis_target<E>(

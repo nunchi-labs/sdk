@@ -1,18 +1,20 @@
 use commonware_consensus::types::Height;
+use commonware_cryptography::{Hasher, Sha256};
 use commonware_glue::stateful::db::DatabaseSet as _;
 use commonware_runtime::{deterministic, Runner as _};
 use commonware_utils::sync::AsyncRwLock;
 use futures::lock::Mutex as AsyncMutex;
 use nunchi_chain::StateCommitment;
 use nunchi_coins::{
-    multisig_account_id, AccountPolicy, CoinOperation, CoinSpec, Ledger, MultisigPolicy,
-    PrivateKey, TokenName, TokenSymbol, Transaction as CoinTransaction,
+    multisig_account_id, AccountPolicy, CoinId, CoinOperation, CoinSpec, Ledger, MultisigPolicy,
+    PrivateKey, TokenName, TokenSymbol,
 };
 use nunchi_common::{QmdbBackend, QmdbBatch, QmdbDatabaseSet, QmdbState};
 use nunchi_mempool::{Mempool, PoolConfig};
 use std::sync::Arc;
 
 use crate::application::*;
+use crate::{CoinTransaction, FeeV1};
 
 fn spec() -> CoinSpec {
     CoinSpec::new(
@@ -22,6 +24,10 @@ fn spec() -> CoinSpec {
         1_000,
         None,
     )
+}
+
+fn fee() -> FeeV1 {
+    FeeV1::new(CoinId(Sha256::hash(b"native-fee")), 1, 0, 1_000)
 }
 
 #[test]
@@ -53,11 +59,12 @@ fn proposal_skips_unregistered_multisig() {
         let policy =
             MultisigPolicy::new(2, vec![alice_a.public_key(), alice_b.public_key()]).unwrap();
         let account_id = multisig_account_id(&policy);
-        let tx = CoinTransaction::sign_multisig(
+        let tx = CoinTransaction::sign_multisig_with_fee(
             account_id.clone(),
             policy.clone(),
             &[&alice_a, &alice_b],
             0,
+            fee(),
             CoinOperation::CreateToken { spec: spec() },
         );
 

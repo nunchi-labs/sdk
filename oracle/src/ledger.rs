@@ -1,10 +1,10 @@
 use crate::{
-    IntervalKey, NamespaceId, OracleDB, OracleOperation, OracleRecord, RecordId, Transaction,
-    MAX_PAYLOAD_SIZE, MAX_PROOF_SIZE, MAX_QUERY_INTERVALS, MAX_RECORDS_PER_BUCKET,
+    IntervalKey, NamespaceId, OracleDB, OracleOperation, OracleRecord, RecordId, MAX_PAYLOAD_SIZE,
+    MAX_PROOF_SIZE, MAX_QUERY_INTERVALS, MAX_RECORDS_PER_BUCKET,
 };
-use commonware_codec::Encode;
+use commonware_codec::{Encode, EncodeSize, Write};
 use commonware_cryptography::{Hasher, Sha256};
-use nunchi_common::{Address, RuntimeContext};
+use nunchi_common::{Address, RuntimeContext, Transaction};
 use nunchi_crypto::SignatureError;
 use thiserror::Error;
 
@@ -62,11 +62,14 @@ impl<D: OracleDB> OracleLedger<D> {
     }
 
     /// Validate and apply a signed oracle transaction.
-    pub async fn apply_transaction(
+    pub async fn apply_transaction<Fee>(
         &mut self,
-        tx: &Transaction,
+        tx: &Transaction<OracleOperation, Fee>,
         context: RuntimeContext,
-    ) -> Result<(), OracleError> {
+    ) -> Result<(), OracleError>
+    where
+        Fee: EncodeSize + Write,
+    {
         tx.verify()?;
 
         let expected = self.db.nonce(&tx.account_id).await?;

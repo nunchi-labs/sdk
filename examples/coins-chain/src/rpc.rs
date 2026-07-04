@@ -3,15 +3,17 @@
 use commonware_cryptography::sha256::Digest;
 use jsonrpsee::{
     core::{RegisterMethodError, RpcResult},
+    types::ErrorObjectOwned,
     RpcModule,
 };
-use nunchi_coins::rpc::{CoinQuery, CoinsMempoolRpc, CoinsRpc, MempoolIngress};
-use nunchi_coins::Transaction as CoinTransaction;
+use nunchi_coins::rpc::{CoinQuery, CoinsRpc};
 use nunchi_mempool::{AdmissionError, MempoolHandle, TxStatus};
-use nunchi_rpc::{encode_hex, module_error, RpcBuildError, RpcRouter};
+use nunchi_rpc::{
+    decode_hex, encode_hex, invalid_params, module_error, params, RpcBuildError, RpcRouter,
+};
 use serde::{Deserialize, Serialize};
 
-use crate::{execution::SharedAppliedHeight, Transaction};
+use crate::{execution::SharedAppliedHeight, CoinTransaction, Transaction};
 
 pub use nunchi_coins::rpc::{
     SubmitTransactionParams, SubmitTransactionResponse, TransactionStatusResponse,
@@ -25,13 +27,19 @@ pub use nunchi_coins::rpc::{
 #[derive(Clone)]
 pub struct RpcContext<Q> {
     query: Q,
+    mempool: MempoolHandle<Transaction>,
     applied_height: SharedAppliedHeight,
 }
 
 impl<Q: CoinQuery> RpcContext<Q> {
-    pub fn new(query: Q, applied_height: SharedAppliedHeight) -> Self {
+    pub fn new(
+        query: Q,
+        mempool: MempoolHandle<Transaction>,
+        applied_height: SharedAppliedHeight,
+    ) -> Self {
         Self {
             query,
+            mempool,
             applied_height,
         }
     }
@@ -47,33 +55,16 @@ pub struct StatusResponse {
     pub state_root: String,
 }
 
-#[derive(Clone)]
-struct ChainMempoolIngress {
-    mempool: MempoolHandle<Transaction>,
-}
-
-impl ChainMempoolIngress {
-    fn new(mempool: MempoolHandle<Transaction>) -> Self {
-        Self { mempool }
-    }
-}
-
-#[jsonrpsee::core::async_trait]
-impl MempoolIngress for ChainMempoolIngress {
-    async fn submit(&self, transaction: CoinTransaction) -> Result<Digest, AdmissionError> {
-        self.mempool.submit(transaction.into()).await
-    }
-
-    async fn status(&self, digest: Digest) -> Option<TxStatus> {
-        self.mempool.status(digest).await
-    }
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TransactionStatusParams {
+    pub hash: String,
 }
 
 /// Build the complete coins-chain RPC module.
 ///
 /// Downstream applications can follow this pattern: create one router over their node context,
-/// merge SDK modules via their `register` entry points (such as [`nunchi_coins::rpc::register`]
-/// and [`nunchi_coins::rpc::register_mempool`]), then merge any app-specific methods.
+/// merge SDK query modules via their `register` entry points (such as
+/// [`nunchi_coins::rpc::register`]), then merge any app-specific methods.
 pub fn module<Q>(
     query: Q,
     mempool: MempoolHandle<Transaction>,
@@ -82,12 +73,8 @@ pub fn module<Q>(
 where
     Q: CoinQuery,
 {
-    let mut router = RpcRouter::new(RpcContext::new(query.clone(), applied_height));
+    let mut router = RpcRouter::new(RpcContext::new(query.clone(), mempool, applied_height));
     nunchi_coins::rpc::register(&mut router, CoinsRpc::new(query))?;
-    nunchi_coins::rpc::register_mempool(
-        &mut router,
-        CoinsMempoolRpc::new(ChainMempoolIngress::new(mempool)),
-    )?;
     router.merge(chain_module(router.context())?)?;
     Ok(router.into_module())
 }
@@ -99,6 +86,24 @@ where
     Q: CoinQuery,
 {
     let mut module = RpcModule::from_arc(context);
+    module.register_async_method("coins.submit_transaction", |raw, context, _| async move {
+        let params: SubmitTransactionParams = params(&raw)?;
+        let transaction: CoinTransaction = decode_hex(&params.transaction, "coin transaction")?;
+        let hash = context
+            .mempool
+            .submit(transaction.into())
+            .await
+            .map_err(admission_error)?;
+        RpcResult::Ok(SubmitTransactionResponse {
+            hash: encode_hex(&hash),
+        })
+    })?;
+    module.register_async_method("coins.transaction_status", |raw, context, _| async move {
+        let params: TransactionStatusParams = params(&raw)?;
+        let digest: Digest = decode_hex(&params.hash, "transaction hash")?;
+        let status = context.mempool.status(digest).await;
+        RpcResult::Ok(transaction_status_response(encode_hex(&digest), status))
+    })?;
     module.register_async_method("chain.status", |_raw, context, _| async move {
         let state_root = context
             .query
@@ -112,4 +117,31 @@ where
         })
     })?;
     Ok(module)
+}
+
+fn transaction_status_response(hash: String, status: Option<TxStatus>) -> TransactionStatusResponse {
+    let (status, height, drop_reason) = match status {
+        Some(TxStatus::Pending) => ("pending", None, None),
+        Some(TxStatus::Finalized { height }) => ("finalized", Some(height), None),
+        Some(TxStatus::Dropped { reason }) => ("dropped", None, Some(reason.as_str())),
+        None => ("unknown", None, None),
+    };
+    TransactionStatusResponse {
+        hash,
+        status: status.to_string(),
+        height,
+        drop_reason: drop_reason.map(str::to_string),
+    }
+}
+
+fn admission_error(error: AdmissionError) -> ErrorObjectOwned {
+    match error {
+        AdmissionError::InvalidSignature(_)
+        | AdmissionError::TxTooLarge { .. }
+        | AdmissionError::Duplicate
+        | AdmissionError::StaleNonce { .. } => invalid_params(error.to_string()),
+        AdmissionError::AccountQueueFull | AdmissionError::PoolFull | AdmissionError::Shutdown => {
+            module_error(error.to_string())
+        }
+    }
 }

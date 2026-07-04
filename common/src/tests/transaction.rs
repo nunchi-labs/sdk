@@ -30,6 +30,29 @@ impl Operation for TestOperation {
     const NAMESPACE: &'static [u8] = b"nunchi-common/test-operation";
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TestFee(u64);
+
+impl Write for TestFee {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.0.write(buf);
+    }
+}
+
+impl Read for TestFee {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+        Ok(Self(u64::read(buf)?))
+    }
+}
+
+impl EncodeSize for TestFee {
+    fn encode_size(&self) -> usize {
+        self.0.encode_size()
+    }
+}
+
 #[test]
 fn ed25519_transaction_signs_verifies_and_roundtrips() {
     let signer = PrivateKey::ed25519_from_seed(7);
@@ -48,6 +71,24 @@ fn secp256r1_transaction_signs_verifies_and_roundtrips() {
     assert_eq!(tx.account_id, Address::external(&signer.public_key()));
     assert_eq!(tx.verify(), Ok(()));
     assert_eq!(Transaction::decode(tx.encode().as_ref()).unwrap(), tx);
+}
+
+#[test]
+fn fee_metadata_is_signed_and_roundtrips() {
+    let signer = PrivateKey::ed25519_from_seed(7);
+    let mut tx = Transaction::sign_with_fee(&signer, 3, TestFee(9), TestOperation(42));
+
+    assert_eq!(tx.verify(), Ok(()));
+    assert_eq!(
+        Transaction::<TestOperation, TestFee>::decode(tx.encode().as_ref()).unwrap(),
+        tx
+    );
+
+    tx.payload.fee = TestFee(10);
+    assert_eq!(
+        tx.verify(),
+        Err(nunchi_crypto::SignatureError::InvalidSignature)
+    );
 }
 
 #[test]

@@ -9,15 +9,12 @@ use commonware_cryptography::{Hasher, Sha256};
 use commonware_macros::{select, test_traced};
 use commonware_p2p::simulated::Link;
 use commonware_runtime::{deterministic, Clock, Runner as _};
-use nunchi_authority::{
-    proposal_id, AuthorityOperation, MultisigPolicy, RegistryChange,
-    Transaction as AuthorityTransaction,
-};
+use nunchi_authority::{proposal_id, AuthorityOperation, MultisigPolicy, RegistryChange};
 use nunchi_coins::{
     Address, CoinId, CoinOperation, CoinSpec, PrivateKey, TokenFactory, TokenName, TokenSymbol,
-    Transaction,
 };
-use nunchi_oracle::{IntervalKey, NamespaceId, OracleOperation, Transaction as OracleTransaction};
+use nunchi_coins_chain::{AuthorityTransaction, CoinTransaction, FeeV1, OracleTransaction};
+use nunchi_oracle::{IntervalKey, NamespaceId, OracleOperation};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::time::Duration;
 use tracing::info;
@@ -55,6 +52,10 @@ fn gold_coin() -> CoinId {
 
 fn oracle_namespace() -> NamespaceId {
     NamespaceId(Sha256::hash(b"coins-chain-integration-oracle-namespace"))
+}
+
+fn fee() -> FeeV1 {
+    FeeV1::new(CoinId(Sha256::hash(b"native-fee")), 1, 0, 1_000)
 }
 
 #[test_traced]
@@ -195,15 +196,22 @@ async fn submit_scenario(
     // Alice: create GOLD, send some to Bob, mint a bit more, burn a bit.
     node0
         .submit(
-            Transaction::sign(&alice, 0, CoinOperation::CreateToken { spec: gold_spec() }).into(),
+            CoinTransaction::sign_with_fee(
+                &alice,
+                0,
+                fee(),
+                CoinOperation::CreateToken { spec: gold_spec() },
+            )
+            .into(),
         )
         .await
         .expect("admit create token");
     node0
         .submit(
-            Transaction::sign(
+            CoinTransaction::sign_with_fee(
                 &alice,
                 1,
+                fee(),
                 CoinOperation::Transfer {
                     coin,
                     from: alice_id.clone(),
@@ -217,9 +225,10 @@ async fn submit_scenario(
         .expect("admit transfer");
     node0
         .submit(
-            Transaction::sign(
+            CoinTransaction::sign_with_fee(
                 &alice,
                 2,
+                fee(),
                 CoinOperation::Mint {
                     coin,
                     to: alice_id.clone(),
@@ -232,9 +241,10 @@ async fn submit_scenario(
         .expect("admit mint");
     node0
         .submit(
-            Transaction::sign(
+            CoinTransaction::sign_with_fee(
                 &alice,
                 3,
+                fee(),
                 CoinOperation::Burn {
                     coin,
                     from: alice_id.clone(),
@@ -249,9 +259,10 @@ async fn submit_scenario(
     // Bob: forward some of what he received to Carol.
     node1
         .submit(
-            Transaction::sign(
+            CoinTransaction::sign_with_fee(
                 &bob,
                 0,
+                fee(),
                 CoinOperation::Transfer {
                     coin,
                     from: bob_id.clone(),
@@ -371,9 +382,10 @@ fn authority_registry_updates_onchain() {
 
         submitter
             .submit(
-                AuthorityTransaction::sign(
+                AuthorityTransaction::sign_with_fee(
                     &owners[0],
                     0,
+                    fee(),
                     AuthorityOperation::Configure {
                         policy: MultisigPolicy {
                             owners: owner_ids,
@@ -389,9 +401,10 @@ fn authority_registry_updates_onchain() {
             .expect("admit configure");
         submitter
             .submit(
-                AuthorityTransaction::sign(
+                AuthorityTransaction::sign_with_fee(
                     &owners[0],
                     1,
+                    fee(),
                     AuthorityOperation::Propose {
                         change,
                         effective_epoch: 3,
@@ -403,15 +416,25 @@ fn authority_registry_updates_onchain() {
             .expect("admit propose");
         submitter
             .submit(
-                AuthorityTransaction::sign(&owners[1], 0, AuthorityOperation::Approve { proposal })
-                    .into(),
+                AuthorityTransaction::sign_with_fee(
+                    &owners[1],
+                    0,
+                    fee(),
+                    AuthorityOperation::Approve { proposal },
+                )
+                .into(),
             )
             .await
             .expect("admit approve");
         submitter
             .submit(
-                AuthorityTransaction::sign(&owners[2], 0, AuthorityOperation::Execute { proposal })
-                    .into(),
+                AuthorityTransaction::sign_with_fee(
+                    &owners[2],
+                    0,
+                    fee(),
+                    AuthorityOperation::Execute { proposal },
+                )
+                .into(),
             )
             .await
             .expect("admit execute");
@@ -445,9 +468,10 @@ fn oracle_updates_finalize_across_validators() {
         let submitter = network.submitter(0);
         submitter
             .submit(
-                OracleTransaction::sign(
+                OracleTransaction::sign_with_fee(
                     &updater,
                     0,
+                    fee(),
                     OracleOperation::AppendRecord {
                         namespace: oracle_namespace(),
                         interval: IntervalKey::new(3),
@@ -507,8 +531,13 @@ fn mempool_tracks_status_through_finalization() {
         digests.push(
             node0
                 .submit(
-                    Transaction::sign(&alice, 0, CoinOperation::CreateToken { spec: gold_spec() })
-                        .into(),
+                    CoinTransaction::sign_with_fee(
+                        &alice,
+                        0,
+                        fee(),
+                        CoinOperation::CreateToken { spec: gold_spec() },
+                    )
+                    .into(),
                 )
                 .await
                 .expect("admit create token"),
@@ -517,9 +546,10 @@ fn mempool_tracks_status_through_finalization() {
             digests.push(
                 node0
                     .submit(
-                        Transaction::sign(
+                        CoinTransaction::sign_with_fee(
                             &alice,
                             nonce,
+                            fee(),
                             CoinOperation::Mint {
                                 coin,
                                 to: alice_id.clone(),
@@ -535,9 +565,10 @@ fn mempool_tracks_status_through_finalization() {
         // Nonce 5 leaves a gap at 3 and 4: admitted, but never proposable.
         let gapped = node0
             .submit(
-                Transaction::sign(
+                CoinTransaction::sign_with_fee(
                     &alice,
                     5,
+                    fee(),
                     CoinOperation::Mint {
                         coin,
                         to: alice_id.clone(),
@@ -587,16 +618,22 @@ fn mempool_replaces_same_nonce_resubmission() {
 
         let original = node0
             .submit(
-                Transaction::sign(&alice, 0, CoinOperation::CreateToken { spec: gold_spec() })
-                    .into(),
+                CoinTransaction::sign_with_fee(
+                    &alice,
+                    0,
+                    fee(),
+                    CoinOperation::CreateToken { spec: gold_spec() },
+                )
+                .into(),
             )
             .await
             .expect("admit original");
         let replacement = node0
             .submit(
-                Transaction::sign(
+                CoinTransaction::sign_with_fee(
                     &alice,
                     0,
+                    fee(),
                     CoinOperation::CreateToken {
                         spec: CoinSpec::new(
                             TokenSymbol::new("SILV").expect("valid token symbol"),

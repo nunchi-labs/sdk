@@ -4,6 +4,7 @@
 //! connection tasks, exercising the same server path an operator would run.
 
 use commonware_consensus::types::Height;
+use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{tokio, Runner as _, Supervisor as _};
 use futures::lock::Mutex as AsyncMutex;
 use jsonrpsee::{
@@ -11,13 +12,12 @@ use jsonrpsee::{
     types::error::INVALID_PARAMS_CODE,
 };
 use nunchi_coins::{
-    rpc::SharedLedger, CoinOperation, CoinSpec, Ledger, PrivateKey, TokenName, TokenSymbol,
-    Transaction as CoinTransaction,
+    rpc::SharedLedger, CoinId, CoinOperation, CoinSpec, Ledger, PrivateKey, TokenName, TokenSymbol,
 };
 use nunchi_coins_chain::rpc::{
     self, StatusResponse, SubmitTransactionResponse, TransactionStatusResponse,
 };
-use nunchi_coins_chain::Transaction;
+use nunchi_coins_chain::{CoinTransaction, FeeV1, Transaction};
 use nunchi_common::QmdbState;
 use nunchi_mempool::{Mempool, PoolConfig};
 use nunchi_rpc::{encode_hex, ServerBuilder};
@@ -29,6 +29,10 @@ fn submit_params(transaction: &str) -> ObjectParams {
         .insert("transaction", transaction)
         .expect("serialize transaction param");
     params
+}
+
+fn fee() -> FeeV1 {
+    FeeV1::new(CoinId(Sha256::hash(b"native-fee")), 1, 0, 1_000)
 }
 
 #[test]
@@ -67,9 +71,10 @@ fn rpc_serves_status_and_filters_submissions_over_http() {
 
         // A well-signed transaction is accepted and lands in the pool.
         let alice = PrivateKey::from_seed(100);
-        let transaction = CoinTransaction::sign(
+        let transaction = CoinTransaction::sign_with_fee(
             &alice,
             0,
+            fee(),
             CoinOperation::CreateToken {
                 spec: CoinSpec::new(
                     TokenSymbol::new("GOLD").expect("valid token symbol"),

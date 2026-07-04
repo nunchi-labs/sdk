@@ -1,14 +1,15 @@
 use super::{
     multisig_account_id, Account, AccountPolicy, AccountType, Address, Authorization, CoinId,
-    CoinOperation, TokenDefinition, TokenFactory, Transaction,
+    CoinOperation, TokenDefinition, TokenFactory,
 };
 use crate::db::CoinDB;
 use crate::events::{
     account_policy_registered_event, burned_event, minted_event, token_created_event,
     transferred_event, AccountPolicyRegistered, Burned, Minted, TokenCreated, Transferred,
 };
+use commonware_codec::{EncodeSize, Write};
 use commonware_cryptography::sha256::Digest;
-use nunchi_common::{CommitState, Event, EventSink};
+use nunchi_common::{CommitState, Event, EventSink, Transaction as CommonTransaction};
 use nunchi_crypto::SignatureError;
 use thiserror::Error;
 
@@ -107,12 +108,13 @@ impl<D: CoinDB> Ledger<D> {
         self.db.balance(account, coin).await
     }
 
-    pub async fn apply_transaction<Events>(
+    pub async fn apply_transaction<Fee, Events>(
         &mut self,
-        tx: &Transaction,
+        tx: &CommonTransaction<CoinOperation, Fee>,
         mut events: Events,
     ) -> Result<(), LedgerError>
     where
+        Fee: EncodeSize + Write,
         Events: EventSink + Send,
     {
         self.ensure_authorized(tx).await?;
@@ -135,7 +137,13 @@ impl<D: CoinDB> Ledger<D> {
         Ok(())
     }
 
-    pub async fn validate_authorization(&self, tx: &Transaction) -> Result<(), LedgerError> {
+    pub async fn validate_authorization<Fee>(
+        &self,
+        tx: &CommonTransaction<CoinOperation, Fee>,
+    ) -> Result<(), LedgerError>
+    where
+        Fee: EncodeSize + Write,
+    {
         self.ensure_authorized(tx).await
     }
 
@@ -188,7 +196,13 @@ impl<D: CoinDB> Ledger<D> {
         Ok(token)
     }
 
-    async fn ensure_authorized(&self, tx: &Transaction) -> Result<(), LedgerError> {
+    async fn ensure_authorized<Fee>(
+        &self,
+        tx: &CommonTransaction<CoinOperation, Fee>,
+    ) -> Result<(), LedgerError>
+    where
+        Fee: EncodeSize + Write,
+    {
         tx.verify()?;
 
         match (&tx.authorization, &tx.payload.operation) {

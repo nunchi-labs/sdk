@@ -1,11 +1,11 @@
 use crate::{
     types::{normalize, sorted_unique, OwnerId},
     AuthorityDB, AuthorityOperation, EpochNumber, EpochRegistry, MultisigPolicy, Proposal,
-    ProposalId, RegistryChange, Transaction, ValidatorId, ValidatorSchedule,
+    ProposalId, RegistryChange, ValidatorId, ValidatorSchedule,
 };
-use commonware_codec::Encode;
+use commonware_codec::{Encode, EncodeSize, Write};
 use commonware_cryptography::{Hasher, Sha256};
-use nunchi_common::Authorization;
+use nunchi_common::{Authorization, Transaction};
 use nunchi_crypto::SignatureError;
 use thiserror::Error;
 
@@ -77,11 +77,14 @@ impl<D: AuthorityDB> AuthorityLedger<D> {
         self.db
     }
 
-    pub async fn apply_transaction(
+    pub async fn apply_transaction<Fee>(
         &mut self,
-        tx: &Transaction,
+        tx: &Transaction<AuthorityOperation, Fee>,
         current_epoch: EpochNumber,
-    ) -> Result<(), AuthorityError> {
+    ) -> Result<(), AuthorityError>
+    where
+        Fee: EncodeSize + Write,
+    {
         tx.verify()?;
 
         // Authority approvals are collected on-chain through Propose/Approve/Execute, so each

@@ -21,6 +21,6 @@ pub use state_db::{
     StateStore,
 };
 pub use transaction::{
-    AccountSignature, Authorization, Operation, Transaction, TransactionPayload,
+    AccountSignature, Authorization, NoFee, Operation, Transaction, TransactionPayload,
 };
 });

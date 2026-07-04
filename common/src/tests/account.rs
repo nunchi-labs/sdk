@@ -35,6 +35,19 @@ fn address_derivation_separates_external_and_multisig_accounts() {
 }
 
 #[test]
+fn module_address_derivation_is_stable_and_domain_separated() {
+    let signer = PrivateKey::ed25519_from_seed(1).public_key();
+    let policy = MultisigPolicy::new(1, vec![signer.clone()]).unwrap();
+    let module = Address::module(b"test/module", b"collector");
+
+    assert_eq!(module, Address::module(b"test/module", b"collector"));
+    assert_ne!(module, Address::module(b"test/module", b"issuer"));
+    assert_ne!(module, Address::module(b"other/module", b"collector"));
+    assert_ne!(module, Address::external(&signer));
+    assert_ne!(module, Address::multisig(&policy));
+}
+
+#[test]
 fn external_address_roundtrips_through_bech32() {
     let signer = PrivateKey::ed25519_from_seed(1).public_key();
     let address = Address::external(&signer);

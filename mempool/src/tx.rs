@@ -1,4 +1,4 @@
-use commonware_codec::EncodeSize;
+use commonware_codec::{EncodeSize, Write};
 use commonware_cryptography::sha256::Digest;
 use nunchi_common::{Address, Operation, Transaction};
 use nunchi_crypto::SignatureError;
@@ -46,7 +46,11 @@ pub trait PoolTransaction: Clone + Send + 'static {
     fn verify(&self) -> Result<(), Self::VerifyError>;
 }
 
-impl<Op: Operation + Clone + Send + 'static> PoolTransaction for Transaction<Op> {
+impl<Op, Fee> PoolTransaction for Transaction<Op, Fee>
+where
+    Op: Operation + Clone + Send + 'static,
+    Fee: EncodeSize + Write + Clone + Send + 'static,
+{
     type NonceKey = NonceKey;
     type VerifyError = SignatureError;
 

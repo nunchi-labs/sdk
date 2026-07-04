@@ -1,9 +1,10 @@
 use super::Address;
 use commonware_codec::{
-    EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
+    DecodeExt, Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
 };
 use commonware_cryptography::sha256::Digest;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use commonware_formatting::{from_hex, hex};
+use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 pub const MAX_SYMBOL_BYTES: usize = 32;
@@ -41,6 +42,27 @@ impl Read for CoinId {
 
 impl FixedSize for CoinId {
     const SIZE: usize = Digest::SIZE;
+}
+
+impl Serialize for CoinId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&hex(self.encode().as_ref()))
+    }
+}
+
+impl<'de> Deserialize<'de> for CoinId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let bytes =
+            from_hex(&value).ok_or_else(|| D::Error::custom("expected hex-encoded coin id"))?;
+        Self::decode(bytes.as_ref()).map_err(D::Error::custom)
+    }
 }
 
 #[derive(Debug, Error, Clone, Eq, PartialEq)]

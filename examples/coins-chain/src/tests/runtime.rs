@@ -1,15 +1,20 @@
 use nunchi_authority::AuthorityError;
 use nunchi_coins::{
-    CoinOperation, CoinSpec, LedgerError, TokenCreated, TokenName, TokenSymbol,
+    CoinId, CoinOperation, CoinSpec, LedgerError, TokenCreated, TokenName, TokenSymbol,
     TOKEN_CREATED_EVENT,
 };
 use nunchi_common::{QmdbState, Runtime, RuntimeContext, VecEventSink};
 use nunchi_crypto::PrivateKey;
 
 use crate::runtime::*;
-use crate::Transaction;
+use crate::{CoinTransaction, FeeV1, Transaction};
 use commonware_codec::DecodeExt;
+use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{deterministic, Runner as _};
+
+fn fee() -> FeeV1 {
+    FeeV1::new(CoinId(Sha256::hash(b"native-fee")), 1, 0, 1_000)
+}
 
 #[test]
 fn runtime_error_classifies_storage_errors() {
@@ -27,9 +32,10 @@ fn runtime_apply_forwards_coin_events() {
             .await
             .unwrap();
         let key = PrivateKey::ed25519_from_seed(1);
-        let tx = nunchi_coins::Transaction::sign(
+        let tx = CoinTransaction::sign_with_fee(
             &key,
             0,
+            fee(),
             CoinOperation::CreateToken {
                 spec: CoinSpec::new(
                     TokenSymbol::new("NCH").unwrap(),
@@ -63,9 +69,10 @@ fn runtime_validate_has_no_event_sink_surface() {
             .await
             .unwrap();
         let key = PrivateKey::ed25519_from_seed(1);
-        let tx = Transaction::from(nunchi_coins::Transaction::sign(
+        let tx = Transaction::from(CoinTransaction::sign_with_fee(
             &key,
             0,
+            fee(),
             CoinOperation::CreateToken {
                 spec: CoinSpec::new(
                     TokenSymbol::new("NCH").unwrap(),

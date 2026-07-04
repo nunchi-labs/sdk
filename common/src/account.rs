@@ -9,6 +9,7 @@ use thiserror::Error;
 const ADDRESS_DOMAIN: &[u8] = b"nunchi/account/v1";
 const ADDRESS_EXTERNAL: u8 = 0;
 const ADDRESS_MULTISIG: u8 = 1;
+const ADDRESS_MODULE: u8 = 2;
 
 /// Bech32 human-readable prefix for account addresses.
 pub const ADDRESS_HRP: &str = "nch";
@@ -29,6 +30,13 @@ impl Address {
     /// Derive a multisig account's bootstrap address from its initial policy.
     pub fn multisig(policy: &MultisigPolicy) -> Self {
         Self::derive(ADDRESS_MULTISIG, &policy.encode())
+    }
+
+    /// Derive a protocol/module-owned address.
+    pub fn module(domain: &'static [u8], label: &[u8]) -> Self {
+        let mut material = domain.encode().as_ref().to_vec();
+        material.extend_from_slice(label.encode().as_ref());
+        Self::derive(ADDRESS_MODULE, &material)
     }
 
     /// Encode this address using Nunchi's Bech32 human-facing format.

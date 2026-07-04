@@ -14,11 +14,22 @@
     ],
     "epoch": 0
   },
+  "fee": {
+    "native_coin": "3c21c8107710833b580bede3e1819dab84ce03068292b3b0f74f6a78bf9bcf4e",
+    "collector": "nch1wmpqac9t6740cznqhewd3pg5hzdzts6gm543hnng56j8k7u3unxs56flhg",
+    "burn_bps": 0,
+    "schedule": {
+      "base": 1,
+      "per_byte": 0,
+      "per_weight": 0,
+      "signature": 0
+    }
+  },
   "coins": {
     "account_policies": [],
     "tokens": [
       {
-        "issuer": "nch1jse7wvv4fhj7r7rg307a9nn5fsum4gv23pnudva725w7mhcpu2tsk096jm",
+        "issuer": "nch1tg2f260w34xyyz0u620ssf3e4p9x50yq3hlfewrfdlh23g0d7knq60xw2j",
         "spec": {
           "symbol": "NCH",
           "name": "Nunchi",

@@ -33,7 +33,8 @@ pub use nunchi_dkg::{
     PublicKey, Scheme, Seed, Seedable, Signature, ThresholdScheme,
 };
 pub use runtime::{CoinsRuntime, RuntimeError};
-pub use transaction::Transaction;
+pub use genesis::{FeeGenesis, FeeSchedule};
+pub use transaction::{AuthorityTransaction, CoinTransaction, FeeV1, OracleTransaction, Transaction};
 
 pub type Block<Tx = Transaction> = nunchi_chain::Block<Tx>;
 pub type Notarized<Tx = Transaction> = nunchi_chain::Notarized<Tx>;

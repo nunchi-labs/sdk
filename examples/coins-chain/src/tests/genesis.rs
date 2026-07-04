@@ -3,7 +3,7 @@ use nunchi_authority::{AuthorityGenesis, AuthorityLedger};
 use nunchi_coins::{CoinsGenesis, Ledger};
 use nunchi_common::{CommitState, QmdbState};
 
-use commonware_cryptography::{ed25519, Signer as _};
+use commonware_cryptography::{ed25519, Hasher, Sha256, Signer as _};
 use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
 use nunchi_authority::{AuthorityDB, AuthorityOperation, Transaction as AuthorityTransaction};
 use nunchi_coins::{Address, CoinDB, CoinSpec, TokenFactory, TokenName, TokenSymbol};
@@ -26,10 +26,32 @@ fn external(seed: u64) -> Address {
     Address::external(&owner(seed).public_key())
 }
 
+fn native_issuer() -> Address {
+    Address::module(b"nunchi/coins-chain/fees/v1", b"native-issuer")
+}
+
+fn fee_collector() -> Address {
+    Address::module(b"nunchi/coins-chain/fees/v1", b"collector")
+}
+
+fn native_spec() -> CoinSpec {
+    CoinSpec::new(
+        TokenSymbol::new("NCH").unwrap(),
+        TokenName::new("Nunchi").unwrap(),
+        9,
+        1_000,
+        Some(2_000),
+    )
+}
+
+fn native_coin() -> nunchi_coins::CoinId {
+    TokenFactory::derive_coin_id(&native_issuer(), 0, &native_spec())
+}
+
 fn sample_genesis() -> ChainGenesis {
     let owners = [owner(1), owner(2), owner(3)];
     let validators = [validator(10), validator(11)];
-    let issuer = external(100);
+    let issuer = native_issuer();
     let alice = external(101);
     let bob = external(102);
 
@@ -45,17 +67,22 @@ fn sample_genesis() -> ChainGenesis {
                 .collect(),
             epoch: 0,
         }),
+        fee: Some(FeeGenesis {
+            native_coin: native_coin(),
+            collector: fee_collector(),
+            burn_bps: 0,
+            schedule: FeeSchedule {
+                base: 1,
+                per_byte: 0,
+                per_weight: 0,
+                signature: 0,
+            },
+        }),
         coins: Some(CoinsGenesis {
             account_policies: Vec::new(),
             tokens: vec![nunchi_coins::TokenGenesis {
                 issuer,
-                spec: CoinSpec::new(
-                    TokenSymbol::new("NCH").unwrap(),
-                    TokenName::new("Nunchi").unwrap(),
-                    9,
-                    1_000,
-                    Some(2_000),
-                ),
+                spec: native_spec(),
                 allocations: vec![
                     nunchi_coins::AllocationGenesis {
                         account: alice,
@@ -75,6 +102,24 @@ fn sample_genesis() -> ChainGenesis {
 async fn empty_commitment(context: deterministic::Context, partition: &str) -> StateCommitment {
     let state = QmdbState::init(context, partition).await.unwrap();
     state_commitment(state.sync_target().await)
+}
+
+#[test]
+fn fee_genesis_rejects_missing_native_coin() {
+    deterministic::Runner::default().start(|context| async move {
+        let mut genesis = sample_genesis();
+        genesis.fee.as_mut().unwrap().native_coin =
+            nunchi_coins::CoinId(Sha256::hash(b"missing"));
+        let empty = empty_commitment(context.child("empty"), "genesis-fee-missing-empty").await;
+        let mut state = QmdbState::init(context.child("state"), "genesis-fee-missing")
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            genesis.apply_to_state(&mut state, &empty).await,
+            Err(GenesisError::Fee(FeeGenesisError::MissingNativeCoin(_)))
+        ));
+    });
 }
 
 #[test]
@@ -258,16 +303,10 @@ fn coins_genesis_creates_token_and_initial_balances() {
             .unwrap();
         genesis.apply_to_state(&mut state, &empty).await.unwrap();
 
-        let issuer = external(100);
+        let issuer = native_issuer();
         let alice = external(101);
         let bob = external(102);
-        let spec = CoinSpec::new(
-            TokenSymbol::new("NCH").unwrap(),
-            TokenName::new("Nunchi").unwrap(),
-            9,
-            1_000,
-            Some(2_000),
-        );
+        let spec = native_spec();
         let ledger = Ledger::new(state);
         let factory_nonce = CoinDB::factory_nonce(ledger.db())
             .await
