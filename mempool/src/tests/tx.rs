@@ -1,6 +1,6 @@
 use crate::tx::{NonceKey, PoolTransaction};
 use commonware_codec::{DecodeExt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
-use nunchi_common::{Address, Operation, Transaction, TransactionPayload};
+use nunchi_common::{Address, NoFee, Operation, Transaction, TransactionPayload};
 use nunchi_crypto::PrivateKey;
 
 /// Minimal [`Operation`] so the blanket `PoolTransaction for Transaction<Op>`
@@ -33,7 +33,7 @@ impl Operation for TestOp {
 }
 
 fn signed_tx(seed: u64, nonce: u64) -> Transaction<TestOp> {
-    Transaction::sign(&PrivateKey::ed25519_from_seed(seed), nonce, TestOp(7))
+    Transaction::sign(&PrivateKey::ed25519_from_seed(seed), nonce, NoFee, TestOp(7))
 }
 
 // ----- NonceKey -----
@@ -80,7 +80,7 @@ fn pool_transaction_nonce_key_carries_namespace_and_account() {
 fn pool_transaction_nonce_matches_payload() {
     let tx = signed_tx(42, 9);
     assert_eq!(PoolTransaction::nonce(&tx), 9);
-    assert_eq!(tx.payload, TransactionPayload::new(9, TestOp(7)));
+    assert_eq!(tx.payload, TransactionPayload::new(9, NoFee, TestOp(7)));
 }
 
 #[test]

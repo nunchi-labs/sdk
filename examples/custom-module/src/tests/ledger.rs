@@ -1,6 +1,6 @@
 use super::MemoryState;
 use crate::{CustomLedger, CustomOperation, Transaction};
-use nunchi_common::{Address, NoopEventSink};
+use nunchi_common::{Address, NoFee, NoopEventSink};
 use nunchi_crypto::PrivateKey;
 
 #[test]
@@ -9,8 +9,8 @@ fn ledger_applies_signed_transactions() {
     futures::executor::block_on(async {
         let signer = PrivateKey::ed25519_from_seed(1);
         let account = Address::external(&signer.public_key());
-        let set = Transaction::sign(&signer, 0, CustomOperation::SetValue { value: 42 });
-        let clear = Transaction::sign(&signer, 1, CustomOperation::ClearValue);
+        let set = Transaction::sign(&signer, 0, NoFee, CustomOperation::SetValue { value: 42 });
+        let clear = Transaction::sign(&signer, 1, NoFee, CustomOperation::ClearValue);
 
         let mut ledger = CustomLedger::new(&mut state);
         ledger.apply_transaction(&set, NoopEventSink).await.unwrap();

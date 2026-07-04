@@ -1,7 +1,7 @@
 use crate::StateCommitment;
 use nunchi_authority::{AuthorityGenesis, AuthorityLedger};
 use nunchi_coins::{CoinsGenesis, Ledger};
-use nunchi_common::{CommitState, QmdbState};
+use nunchi_common::{CommitState, NoFee, QmdbState};
 
 use commonware_cryptography::{ed25519, Hasher, Sha256, Signer as _};
 use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
@@ -275,8 +275,7 @@ fn authority_configure_bootstrap_is_closed_by_genesis() {
             .unwrap();
         let configure = AuthorityTransaction::sign(
             &attacker,
-            attacker_nonce,
-            AuthorityOperation::Configure {
+            attacker_nonce, NoFee,             AuthorityOperation::Configure {
                 policy: nunchi_authority::MultisigPolicy {
                     owners: vec![attacker.public_key()],
                     threshold: 1,

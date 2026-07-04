@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, future::Future};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_runtime::{deterministic, Runner as _};
-use nunchi_common::{Address, RuntimeContext, StateError, StateStore};
+use nunchi_common::{Address, NoFee, RuntimeContext, StateError, StateStore};
 use nunchi_crypto::PrivateKey;
 
 use crate::{
@@ -60,7 +60,7 @@ fn context(timestamp_ms: u64) -> RuntimeContext {
 }
 
 fn sign(signer: &PrivateKey, nonce: u64, operation: OracleOperation) -> Transaction {
-    Transaction::sign(signer, nonce, operation)
+    Transaction::sign(signer, nonce, NoFee, operation)
 }
 
 fn append_tx(

@@ -6,7 +6,7 @@ use crate::{
     CoinSpec, Ledger, LedgerError, Transaction,
 };
 use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
-use nunchi_common::{NoopEventSink, QmdbState};
+use nunchi_common::{NoFee, NoopEventSink, QmdbState};
 use nunchi_crypto::SignatureError;
 
 async fn ledger(context: deterministic::Context) -> Ledger<QmdbState<deterministic::Context>> {
@@ -84,8 +84,7 @@ fn mint_respects_max_supply() {
 
         let mint = Transaction::sign(
             &alice_key,
-            nonce,
-            crate::CoinOperation::Mint {
+            nonce, NoFee,             crate::CoinOperation::Mint {
                 coin,
                 to: bob.clone(),
                 amount: 200,
@@ -100,8 +99,7 @@ fn mint_respects_max_supply() {
 
         let mint = Transaction::sign(
             &alice_key,
-            nonce.checked_add(1).expect("nonce overflow"),
-            crate::CoinOperation::Mint {
+            nonce.checked_add(1).expect("nonce overflow"), NoFee,             crate::CoinOperation::Mint {
                 coin,
                 to: bob,
                 amount: 1,
@@ -134,8 +132,7 @@ fn transfer_via_signed_transaction_moves_balance_and_bumps_nonce() {
 
         let tx = Transaction::sign(
             &alice_key,
-            0,
-            crate::CoinOperation::Transfer {
+            0, NoFee,             crate::CoinOperation::Transfer {
                 coin,
                 from: alice.clone(),
                 to: bob.clone(),
@@ -166,8 +163,7 @@ fn rejects_transaction_with_wrong_nonce() {
 
         let tx = Transaction::sign(
             &alice_key,
-            5,
-            crate::CoinOperation::Transfer {
+            5, NoFee,             crate::CoinOperation::Transfer {
                 coin,
                 from: alice.clone(),
                 to: bob,
@@ -202,8 +198,7 @@ fn rejects_transaction_with_bad_signature() {
 
         let mut tx = Transaction::sign(
             &alice_key,
-            0,
-            crate::CoinOperation::Transfer {
+            0, NoFee,             crate::CoinOperation::Transfer {
                 coin,
                 from: alice.clone(),
                 to: bob,
@@ -278,9 +273,7 @@ fn multisig_transaction_moves_balance_and_bumps_account_nonce_once() {
         let tx = Transaction::sign_multisig(
             alice.clone(),
             policy,
-            &[&alice_a, &alice_b],
-            0,
-            crate::CoinOperation::Transfer {
+            &[&alice_a, &alice_b], 0, NoFee, crate::CoinOperation::Transfer {
                 coin,
                 from: alice.clone(),
                 to: bob.clone(),
@@ -319,9 +312,7 @@ fn rejects_multisig_transaction_below_threshold() {
         let tx = Transaction::sign_multisig(
             alice.clone(),
             policy,
-            &[&alice_a],
-            0,
-            crate::CoinOperation::Transfer {
+            &[&alice_a], 0, NoFee, crate::CoinOperation::Transfer {
                 coin,
                 from: alice,
                 to: address(&PrivateKey::ed25519_from_seed(3)),
@@ -350,9 +341,7 @@ fn rejects_unregistered_multisig_policy() {
         let tx = Transaction::sign_multisig(
             alice.clone(),
             policy,
-            &[&alice_a, &alice_b],
-            0,
-            crate::CoinOperation::CreateToken {
+            &[&alice_a, &alice_b], 0, NoFee, crate::CoinOperation::CreateToken {
                 spec: spec(1_000, None).expect("valid coin spec"),
             },
         );
@@ -403,9 +392,7 @@ fn register_account_policy_operation_initializes_multisig_on_chain() {
         let tx = Transaction::sign_multisig(
             alice.clone(),
             policy.clone(),
-            &[&alice_a, &alice_b],
-            0,
-            crate::CoinOperation::RegisterAccountPolicy {
+            &[&alice_a, &alice_b], 0, NoFee, crate::CoinOperation::RegisterAccountPolicy {
                 account_id: alice.clone(),
                 policy: policy.clone(),
             },
@@ -427,9 +414,7 @@ fn register_account_policy_operation_initializes_multisig_on_chain() {
         let tx = Transaction::sign_multisig(
             alice.clone(),
             policy,
-            &[&alice_a, &alice_b],
-            1,
-            crate::CoinOperation::Transfer {
+            &[&alice_a, &alice_b], 1, NoFee, crate::CoinOperation::Transfer {
                 coin,
                 from: alice.clone(),
                 to: address(&alice_a),
@@ -457,8 +442,7 @@ fn register_account_policy_operation_rejects_external_registration() {
 
         let tx = Transaction::sign(
             &attacker,
-            0,
-            crate::CoinOperation::RegisterAccountPolicy {
+            0, NoFee,             crate::CoinOperation::RegisterAccountPolicy {
                 account_id: alice,
                 policy,
             },
@@ -488,9 +472,7 @@ fn register_account_policy_operation_cannot_hijack_external_account() {
         let tx = Transaction::sign_multisig(
             alice.clone(),
             policy.clone(),
-            &[&attacker],
-            0,
-            crate::CoinOperation::RegisterAccountPolicy {
+            &[&attacker], 0, NoFee, crate::CoinOperation::RegisterAccountPolicy {
                 account_id: alice.clone(),
                 policy,
             },
@@ -523,9 +505,7 @@ fn register_account_policy_operation_rejects_policy_witness_mismatch() {
         let tx = Transaction::sign_multisig(
             alice.clone(),
             authorized,
-            &[&alice_a, &alice_b],
-            0,
-            crate::CoinOperation::RegisterAccountPolicy {
+            &[&alice_a, &alice_b], 0, NoFee, crate::CoinOperation::RegisterAccountPolicy {
                 account_id: alice.clone(),
                 policy: registered,
             },
@@ -563,9 +543,7 @@ fn rejects_cross_account_multisig_replay() {
         let mut tx = Transaction::sign_multisig(
             account_a,
             policy_a,
-            &[&alice_a, &alice_b],
-            0,
-            crate::CoinOperation::CreateToken {
+            &[&alice_a, &alice_b], 0, NoFee, crate::CoinOperation::CreateToken {
                 spec: spec(1_000, None).expect("valid coin spec"),
             },
         );
@@ -595,8 +573,7 @@ fn burn_reduces_balance_and_total_supply() {
 
         let burn = Transaction::sign(
             &alice_key,
-            0,
-            crate::CoinOperation::Burn {
+            0, NoFee,             crate::CoinOperation::Burn {
                 coin,
                 from: alice.clone(),
                 amount: 400,
@@ -628,8 +605,7 @@ fn burn_rejects_zero_amount() {
 
         let burn = Transaction::sign(
             &alice_key,
-            0,
-            crate::CoinOperation::Burn {
+            0, NoFee,             crate::CoinOperation::Burn {
                 coin,
                 from: alice,
                 amount: 0,
@@ -659,8 +635,7 @@ fn burn_rejects_unauthorized_signer() {
         // alice signs a burn drawn from bob's account.
         let burn = Transaction::sign(
             &alice_key,
-            0,
-            crate::CoinOperation::Burn {
+            0, NoFee,             crate::CoinOperation::Burn {
                 coin,
                 from: bob,
                 amount: 100,
@@ -688,8 +663,7 @@ fn burn_rejects_insufficient_balance() {
 
         let burn = Transaction::sign(
             &alice_key,
-            0,
-            crate::CoinOperation::Burn {
+            0, NoFee,             crate::CoinOperation::Burn {
                 coin,
                 from: alice,
                 amount: 2_000,
@@ -725,8 +699,7 @@ fn mint_rejects_non_issuer() {
         // bob is not the issuer, so he cannot mint new supply.
         let mint = Transaction::sign(
             &bob_key,
-            0,
-            crate::CoinOperation::Mint {
+            0, NoFee,             crate::CoinOperation::Mint {
                 coin,
                 to: bob.clone(),
                 amount: 100,
@@ -754,8 +727,7 @@ fn mint_rejects_zero_amount() {
 
         let mint = Transaction::sign(
             &alice_key,
-            0,
-            crate::CoinOperation::Mint {
+            0, NoFee,             crate::CoinOperation::Mint {
                 coin,
                 to: alice,
                 amount: 0,
@@ -780,8 +752,7 @@ fn mint_rejects_unknown_token() {
             crate::TokenFactory::derive_coin_id(&alice, 7, &spec(1, None).expect("valid coin spec"));
         let mint = Transaction::sign(
             &alice_key,
-            0,
-            crate::CoinOperation::Mint {
+            0, NoFee,             crate::CoinOperation::Mint {
                 coin: unknown,
                 to: alice,
                 amount: 100,
@@ -811,8 +782,7 @@ fn mint_rejects_supply_overflow() {
 
         let mint = Transaction::sign(
             &alice_key,
-            0,
-            crate::CoinOperation::Mint {
+            0, NoFee,             crate::CoinOperation::Mint {
                 coin,
                 to: bob,
                 amount: 1,
@@ -843,8 +813,7 @@ fn transfer_rejects_insufficient_balance() {
 
         let tx = Transaction::sign(
             &alice_key,
-            0,
-            crate::CoinOperation::Transfer {
+            0, NoFee,             crate::CoinOperation::Transfer {
                 coin,
                 from: alice,
                 to: bob,
@@ -878,8 +847,7 @@ fn transfer_rejects_zero_amount() {
 
         let tx = Transaction::sign(
             &alice_key,
-            0,
-            crate::CoinOperation::Transfer {
+            0, NoFee,             crate::CoinOperation::Transfer {
                 coin,
                 from: alice,
                 to: bob,
@@ -910,8 +878,7 @@ fn transfer_rejects_unauthorized_signer() {
         // alice signs a transfer drawn from bob's account.
         let tx = Transaction::sign(
             &alice_key,
-            0,
-            crate::CoinOperation::Transfer {
+            0, NoFee,             crate::CoinOperation::Transfer {
                 coin,
                 from: bob,
                 to: alice,
@@ -940,8 +907,7 @@ fn transfer_to_self_preserves_balance() {
 
         let tx = Transaction::sign(
             &alice_key,
-            0,
-            crate::CoinOperation::Transfer {
+            0, NoFee,             crate::CoinOperation::Transfer {
                 coin,
                 from: alice.clone(),
                 to: alice.clone(),

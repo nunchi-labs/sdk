@@ -7,7 +7,7 @@ use crate::{
 };
 use commonware_codec::DecodeExt;
 use commonware_runtime::{deterministic, Runner as _};
-use nunchi_common::{QmdbState, VecEventSink};
+use nunchi_common::{NoFee, QmdbState, VecEventSink};
 use nunchi_crypto::SignatureError;
 
 async fn ledger(context: deterministic::Context) -> Ledger<QmdbState<deterministic::Context>> {
@@ -47,9 +47,7 @@ fn register_account_policy_emits_event() {
         let tx = Transaction::sign_multisig(
             alice.clone(),
             policy.clone(),
-            &[&alice_a, &alice_b],
-            0,
-            CoinOperation::RegisterAccountPolicy {
+            &[&alice_a, &alice_b], 0, NoFee, CoinOperation::RegisterAccountPolicy {
                 account_id: alice.clone(),
                 policy: policy.clone(),
             },
@@ -82,8 +80,7 @@ fn create_token_emits_event() {
         let alice = address(&alice_key);
         let tx = Transaction::sign(
             &alice_key,
-            0,
-            CoinOperation::CreateToken {
+            0, NoFee,             CoinOperation::CreateToken {
                 spec: spec(1_000, Some(2_000)).expect("valid coin spec"),
             },
         );
@@ -121,8 +118,7 @@ fn mint_emits_event() {
             .expect("create token");
         let tx = Transaction::sign(
             &alice_key,
-            0,
-            CoinOperation::Mint {
+            0, NoFee,             CoinOperation::Mint {
                 coin,
                 to: bob.clone(),
                 amount: 250,
@@ -159,8 +155,7 @@ fn burn_emits_event() {
             .expect("create token");
         let tx = Transaction::sign(
             &alice_key,
-            0,
-            CoinOperation::Burn {
+            0, NoFee,             CoinOperation::Burn {
                 coin,
                 from: alice.clone(),
                 amount: 250,
@@ -198,8 +193,7 @@ fn transfer_emits_event() {
             .expect("create token");
         let tx = Transaction::sign(
             &alice_key,
-            0,
-            CoinOperation::Transfer {
+            0, NoFee,             CoinOperation::Transfer {
                 coin,
                 from: alice.clone(),
                 to: bob.clone(),
@@ -241,8 +235,7 @@ fn failed_transactions_emit_no_events() {
 
         let mut bad_signature = Transaction::sign(
             &alice_key,
-            0,
-            CoinOperation::Transfer {
+            0, NoFee,             CoinOperation::Transfer {
                 coin,
                 from: alice.clone(),
                 to: bob.clone(),
@@ -264,8 +257,7 @@ fn failed_transactions_emit_no_events() {
 
         let wrong_nonce = Transaction::sign(
             &alice_key,
-            5,
-            CoinOperation::Transfer {
+            5, NoFee,             CoinOperation::Transfer {
                 coin,
                 from: alice.clone(),
                 to: bob.clone(),
@@ -285,8 +277,7 @@ fn failed_transactions_emit_no_events() {
 
         let zero_amount = Transaction::sign(
             &alice_key,
-            0,
-            CoinOperation::Transfer {
+            0, NoFee,             CoinOperation::Transfer {
                 coin,
                 from: alice.clone(),
                 to: bob.clone(),
@@ -297,8 +288,7 @@ fn failed_transactions_emit_no_events() {
 
         let unauthorized = Transaction::sign(
             &alice_key,
-            0,
-            CoinOperation::Transfer {
+            0, NoFee,             CoinOperation::Transfer {
                 coin,
                 from: bob.clone(),
                 to: carol,
@@ -309,8 +299,7 @@ fn failed_transactions_emit_no_events() {
 
         let insufficient = Transaction::sign(
             &bob_key,
-            0,
-            CoinOperation::Transfer {
+            0, NoFee,             CoinOperation::Transfer {
                 coin,
                 from: bob.clone(),
                 to: alice,

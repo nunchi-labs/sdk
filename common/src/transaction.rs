@@ -43,14 +43,8 @@ pub struct TransactionPayload<Operation, Fee = NoFee> {
     pub operation: Operation,
 }
 
-impl<Operation> TransactionPayload<Operation> {
-    pub fn new(nonce: u64, operation: Operation) -> Self {
-        Self::with_fee(nonce, NoFee, operation)
-    }
-}
-
 impl<Operation, Fee> TransactionPayload<Operation, Fee> {
-    pub fn with_fee(nonce: u64, fee: Fee, operation: Operation) -> Self {
+    pub fn new(nonce: u64, fee: Fee, operation: Operation) -> Self {
         Self {
             nonce,
             fee,
@@ -93,15 +87,7 @@ pub struct AccountSignature {
 }
 
 impl AccountSignature {
-    pub fn sign<Operation: self::Operation>(
-        signer: &PrivateKey,
-        account_id: &Address,
-        payload: &TransactionPayload<Operation>,
-    ) -> Self {
-        Self::sign_with_fee(signer, account_id, payload)
-    }
-
-    pub fn sign_with_fee<Operation, Fee>(
+    pub fn sign<Operation, Fee>(
         signer: &PrivateKey,
         account_id: &Address,
         payload: &TransactionPayload<Operation, Fee>,
@@ -119,15 +105,7 @@ impl AccountSignature {
         }
     }
 
-    pub fn verify<Operation: self::Operation>(
-        &self,
-        account_id: &Address,
-        payload: &TransactionPayload<Operation>,
-    ) -> Result<(), SignatureError> {
-        self.verify_with_fee(account_id, payload)
-    }
-
-    pub fn verify_with_fee<Operation, Fee>(
+    pub fn verify<Operation, Fee>(
         &self,
         account_id: &Address,
         payload: &TransactionPayload<Operation, Fee>,
@@ -189,15 +167,7 @@ pub enum Authorization {
 }
 
 impl Authorization {
-    pub fn verify<Operation: self::Operation>(
-        &self,
-        account_id: &Address,
-        payload: &TransactionPayload<Operation>,
-    ) -> Result<(), SignatureError> {
-        self.verify_with_fee(account_id, payload)
-    }
-
-    pub fn verify_with_fee<Operation, Fee>(
+    pub fn verify<Operation, Fee>(
         &self,
         account_id: &Address,
         payload: &TransactionPayload<Operation, Fee>,
@@ -234,7 +204,7 @@ impl Authorization {
                     if !seen.insert(signature.signer.clone()) {
                         return Err(SignatureError::IncompatibleKey);
                     }
-                    signature.verify_with_fee(account_id, payload)?;
+                    signature.verify(account_id, payload)?;
                     previous_signer_key = Some(signer_key);
                 }
 
@@ -315,11 +285,11 @@ pub struct Transaction<Operation, Fee = NoFee> {
     pub authorization: Authorization,
 }
 
-impl<Operation: self::Operation> Transaction<Operation> {
-    pub fn sign(signer: &PrivateKey, nonce: u64, operation: Operation) -> Self {
+impl<Operation: self::Operation, Fee: EncodeSize + Write> Transaction<Operation, Fee> {
+    pub fn sign(signer: &PrivateKey, nonce: u64, fee: Fee, operation: Operation) -> Self {
         let signer_public = signer.public_key();
         let account_id = Address::external(&signer_public);
-        let payload = TransactionPayload::new(nonce, operation);
+        let payload = TransactionPayload::new(nonce, fee, operation);
         let authorization = Authorization::Single {
             signer: Box::new(signer_public),
             signature: signer.sign(
@@ -339,9 +309,13 @@ impl<Operation: self::Operation> Transaction<Operation> {
         policy: MultisigPolicy,
         signers: &[&PrivateKey],
         nonce: u64,
+        fee: Fee,
         operation: Operation,
-    ) -> Self {
-        let payload = TransactionPayload::new(nonce, operation);
+    ) -> Self
+    where
+        Fee: Clone,
+    {
+        let payload = TransactionPayload::new(nonce, fee, operation);
         let mut signatures: Vec<AccountSignature> = signers
             .iter()
             .map(|signer| AccountSignature::sign(signer, &account_id, &payload))
@@ -353,54 +327,9 @@ impl<Operation: self::Operation> Transaction<Operation> {
             authorization: Authorization::Multisig { policy, signatures },
         }
     }
-}
-
-impl<Operation: self::Operation, Fee: EncodeSize + Write> Transaction<Operation, Fee> {
-    pub fn sign_with_fee(signer: &PrivateKey, nonce: u64, fee: Fee, operation: Operation) -> Self {
-        let signer_public = signer.public_key();
-        let account_id = Address::external(&signer_public);
-        let payload = TransactionPayload::with_fee(nonce, fee, operation);
-        let authorization = Authorization::Single {
-            signer: Box::new(signer_public),
-            signature: signer.sign(
-                Operation::NAMESPACE,
-                &signing_bytes(&account_id, AUTH_SINGLE, &payload),
-            ),
-        };
-        Self {
-            account_id,
-            payload,
-            authorization,
-        }
-    }
-
-    pub fn sign_multisig_with_fee(
-        account_id: Address,
-        policy: MultisigPolicy,
-        signers: &[&PrivateKey],
-        nonce: u64,
-        fee: Fee,
-        operation: Operation,
-    ) -> Self
-    where
-        Fee: Clone,
-    {
-        let payload = TransactionPayload::with_fee(nonce, fee, operation);
-        let mut signatures: Vec<AccountSignature> = signers
-            .iter()
-            .map(|signer| AccountSignature::sign_with_fee(signer, &account_id, &payload))
-            .collect();
-        signatures.sort_by_cached_key(|signature| signature.signer.encode().as_ref().to_vec());
-        Self {
-            account_id,
-            payload,
-            authorization: Authorization::Multisig { policy, signatures },
-        }
-    }
 
     pub fn verify(&self) -> Result<(), SignatureError> {
-        self.authorization
-            .verify_with_fee(&self.account_id, &self.payload)
+        self.authorization.verify(&self.account_id, &self.payload)
     }
 
     pub fn digest(&self) -> Digest {

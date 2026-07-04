@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use commonware_runtime::Runner as _;
 use nunchi_mempool::DropReason;
+use nunchi_common::NoFee;
 use nunchi_rpc::{encode_hex, RpcRouter};
 
 use crate::{
@@ -45,8 +46,7 @@ fn sample_transaction() -> Transaction {
     let signer = PrivateKey::ed25519_from_seed(1);
     Transaction::sign(
         &signer,
-        0,
-        CoinOperation::CreateToken {
+        0, NoFee,         CoinOperation::CreateToken {
             spec: CoinSpec::new(
                 TokenSymbol::new("GOLD").unwrap(),
                 TokenName::new("Gold").unwrap(),

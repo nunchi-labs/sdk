@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use commonware_cryptography::{ed25519, sha256::Digest, Signer as _};
 use commonware_runtime::Runner as _;
-use nunchi_common::{state_db::StateStore, StateError};
+use nunchi_common::{state_db::StateStore, NoFee, StateError};
 use nunchi_crypto::PrivateKey;
 
 use crate::{
@@ -53,8 +53,7 @@ async fn configured() -> (
     let validators = vec![validator(10), validator(11)];
     let configure = Transaction::sign(
         &owners[0],
-        0,
-        AuthorityOperation::Configure {
+        0, NoFee,         AuthorityOperation::Configure {
             policy: policy(&owners, 2),
             initial_validators: validators.clone(),
             epoch: 0,
@@ -73,7 +72,7 @@ async fn submit(
 ) -> Result<(), AuthorityError> {
     let nonce = ledger.db().nonce(&owner.public_key()).await.unwrap();
     ledger
-        .apply_transaction(&Transaction::sign(owner, nonce, operation), current_epoch)
+        .apply_transaction(&Transaction::sign(owner, nonce, NoFee, operation), current_epoch)
         .await
 }
 
@@ -353,8 +352,7 @@ fn nonce_mismatch_is_rejected() {
             .apply_transaction(
                 &Transaction::sign(
                     &owners[0],
-                    5,
-                    AuthorityOperation::Propose {
+                    5, NoFee,                     AuthorityOperation::Propose {
                         change: RegistryChange::AddValidator {
                             validator: validator(12),
                         },

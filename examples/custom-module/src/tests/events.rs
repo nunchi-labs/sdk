@@ -4,7 +4,7 @@ use crate::{
     VALUE_CLEARED_EVENT, VALUE_SET_EVENT,
 };
 use commonware_codec::DecodeExt;
-use nunchi_common::{Address, NoopEventSink, VecEventSink};
+use nunchi_common::{Address, NoFee, NoopEventSink, VecEventSink};
 use nunchi_crypto::{PrivateKey, SignatureError};
 
 fn address(key: &PrivateKey) -> Address {
@@ -21,7 +21,7 @@ fn set_value_emits_event() {
     futures::executor::block_on(async {
         let signer = PrivateKey::ed25519_from_seed(1);
         let account = address(&signer);
-        let tx = Transaction::sign(&signer, 0, CustomOperation::SetValue { value: 42 });
+        let tx = Transaction::sign(&signer, 0, NoFee, CustomOperation::SetValue { value: 42 });
         let mut ledger = CustomLedger::new(&mut state);
         let mut events = event_sink();
 
@@ -46,8 +46,8 @@ fn clear_value_emits_event() {
     futures::executor::block_on(async {
         let signer = PrivateKey::ed25519_from_seed(1);
         let account = address(&signer);
-        let set = Transaction::sign(&signer, 0, CustomOperation::SetValue { value: 42 });
-        let clear = Transaction::sign(&signer, 1, CustomOperation::ClearValue);
+        let set = Transaction::sign(&signer, 0, NoFee, CustomOperation::SetValue { value: 42 });
+        let clear = Transaction::sign(&signer, 1, NoFee, CustomOperation::ClearValue);
         let mut ledger = CustomLedger::new(&mut state);
         let mut events = event_sink();
 
@@ -74,8 +74,8 @@ fn events_are_recorded_in_application_order() {
     let mut state = MemoryState::default();
     futures::executor::block_on(async {
         let signer = PrivateKey::ed25519_from_seed(1);
-        let set = Transaction::sign(&signer, 0, CustomOperation::SetValue { value: 42 });
-        let clear = Transaction::sign(&signer, 1, CustomOperation::ClearValue);
+        let set = Transaction::sign(&signer, 0, NoFee, CustomOperation::SetValue { value: 42 });
+        let clear = Transaction::sign(&signer, 1, NoFee, CustomOperation::ClearValue);
         let mut ledger = CustomLedger::new(&mut state);
         let mut events = event_sink();
 
@@ -100,7 +100,7 @@ fn failed_transactions_emit_no_events() {
         let mut ledger = CustomLedger::new(&mut state);
 
         let mut bad_signature =
-            Transaction::sign(&signer, 0, CustomOperation::SetValue { value: 1 });
+            Transaction::sign(&signer, 0, NoFee, CustomOperation::SetValue { value: 1 });
         bad_signature.payload.operation = CustomOperation::SetValue { value: 2 };
         assert_no_event(
             &mut ledger,
@@ -109,7 +109,7 @@ fn failed_transactions_emit_no_events() {
         )
         .await;
 
-        let wrong_nonce = Transaction::sign(&signer, 5, CustomOperation::SetValue { value: 1 });
+        let wrong_nonce = Transaction::sign(&signer, 5, NoFee, CustomOperation::SetValue { value: 1 });
         let mut events = event_sink();
         assert!(matches!(
             ledger.apply_transaction(&wrong_nonce, &mut events).await,
@@ -132,8 +132,7 @@ fn nonce_overflow_emits_no_event_and_leaves_value_unchanged() {
         let account = address(&signer);
         let tx = Transaction::sign(
             &signer,
-            u64::MAX,
-            CustomOperation::SetValue { value: 99 },
+            u64::MAX, NoFee,             CustomOperation::SetValue { value: 99 },
         );
         let mut ledger = CustomLedger::new(&mut state);
         ledger.db.set_nonce(&account, u64::MAX);
@@ -156,7 +155,7 @@ fn none_event_sink_applies_transaction() {
     futures::executor::block_on(async {
         let signer = PrivateKey::ed25519_from_seed(1);
         let account = address(&signer);
-        let tx = Transaction::sign(&signer, 0, CustomOperation::SetValue { value: 42 });
+        let tx = Transaction::sign(&signer, 0, NoFee, CustomOperation::SetValue { value: 42 });
         let mut ledger = CustomLedger::new(&mut state);
 
         ledger.apply_transaction(&tx, NoopEventSink).await.unwrap();

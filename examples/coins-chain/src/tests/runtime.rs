@@ -32,7 +32,7 @@ fn runtime_apply_forwards_coin_events() {
             .await
             .unwrap();
         let key = PrivateKey::ed25519_from_seed(1);
-        let tx = CoinTransaction::sign_with_fee(
+        let tx = CoinTransaction::sign(
             &key,
             0,
             fee(),
@@ -69,7 +69,7 @@ fn runtime_validate_has_no_event_sink_surface() {
             .await
             .unwrap();
         let key = PrivateKey::ed25519_from_seed(1);
-        let tx = Transaction::from(CoinTransaction::sign_with_fee(
+        let tx = Transaction::from(CoinTransaction::sign(
             &key,
             0,
             fee(),

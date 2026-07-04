@@ -18,7 +18,7 @@ fn fee() -> FeeV1 {
 
 fn coin_transaction(seed: u64, nonce: u64) -> CoinTransaction {
     let signer = PrivateKey::ed25519_from_seed(seed);
-    CoinTransaction::sign_with_fee(
+    CoinTransaction::sign(
         &signer,
         nonce,
         fee(),
@@ -36,7 +36,7 @@ fn coin_transaction(seed: u64, nonce: u64) -> CoinTransaction {
 
 fn authority_transaction(seed: u64, nonce: u64) -> AuthorityTransaction {
     let owner = nunchi_crypto::PrivateKey::ed25519_from_seed(seed);
-    AuthorityTransaction::sign_with_fee(
+    AuthorityTransaction::sign(
         &owner,
         nonce,
         fee(),
@@ -53,7 +53,7 @@ fn authority_transaction(seed: u64, nonce: u64) -> AuthorityTransaction {
 
 fn oracle_transaction(seed: u64, nonce: u64) -> OracleTransaction {
     let signer = nunchi_crypto::PrivateKey::ed25519_from_seed(seed);
-    OracleTransaction::sign_with_fee(
+    OracleTransaction::sign(
         &signer,
         nonce,
         fee(),

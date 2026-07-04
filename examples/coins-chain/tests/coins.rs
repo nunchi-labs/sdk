@@ -196,7 +196,7 @@ async fn submit_scenario(
     // Alice: create GOLD, send some to Bob, mint a bit more, burn a bit.
     node0
         .submit(
-            CoinTransaction::sign_with_fee(
+            CoinTransaction::sign(
                 &alice,
                 0,
                 fee(),
@@ -208,7 +208,7 @@ async fn submit_scenario(
         .expect("admit create token");
     node0
         .submit(
-            CoinTransaction::sign_with_fee(
+            CoinTransaction::sign(
                 &alice,
                 1,
                 fee(),
@@ -225,7 +225,7 @@ async fn submit_scenario(
         .expect("admit transfer");
     node0
         .submit(
-            CoinTransaction::sign_with_fee(
+            CoinTransaction::sign(
                 &alice,
                 2,
                 fee(),
@@ -241,7 +241,7 @@ async fn submit_scenario(
         .expect("admit mint");
     node0
         .submit(
-            CoinTransaction::sign_with_fee(
+            CoinTransaction::sign(
                 &alice,
                 3,
                 fee(),
@@ -259,7 +259,7 @@ async fn submit_scenario(
     // Bob: forward some of what he received to Carol.
     node1
         .submit(
-            CoinTransaction::sign_with_fee(
+            CoinTransaction::sign(
                 &bob,
                 0,
                 fee(),
@@ -382,7 +382,7 @@ fn authority_registry_updates_onchain() {
 
         submitter
             .submit(
-                AuthorityTransaction::sign_with_fee(
+                AuthorityTransaction::sign(
                     &owners[0],
                     0,
                     fee(),
@@ -401,7 +401,7 @@ fn authority_registry_updates_onchain() {
             .expect("admit configure");
         submitter
             .submit(
-                AuthorityTransaction::sign_with_fee(
+                AuthorityTransaction::sign(
                     &owners[0],
                     1,
                     fee(),
@@ -416,7 +416,7 @@ fn authority_registry_updates_onchain() {
             .expect("admit propose");
         submitter
             .submit(
-                AuthorityTransaction::sign_with_fee(
+                AuthorityTransaction::sign(
                     &owners[1],
                     0,
                     fee(),
@@ -428,7 +428,7 @@ fn authority_registry_updates_onchain() {
             .expect("admit approve");
         submitter
             .submit(
-                AuthorityTransaction::sign_with_fee(
+                AuthorityTransaction::sign(
                     &owners[2],
                     0,
                     fee(),
@@ -468,7 +468,7 @@ fn oracle_updates_finalize_across_validators() {
         let submitter = network.submitter(0);
         submitter
             .submit(
-                OracleTransaction::sign_with_fee(
+                OracleTransaction::sign(
                     &updater,
                     0,
                     fee(),
@@ -531,7 +531,7 @@ fn mempool_tracks_status_through_finalization() {
         digests.push(
             node0
                 .submit(
-                    CoinTransaction::sign_with_fee(
+                    CoinTransaction::sign(
                         &alice,
                         0,
                         fee(),
@@ -546,7 +546,7 @@ fn mempool_tracks_status_through_finalization() {
             digests.push(
                 node0
                     .submit(
-                        CoinTransaction::sign_with_fee(
+                        CoinTransaction::sign(
                             &alice,
                             nonce,
                             fee(),
@@ -565,7 +565,7 @@ fn mempool_tracks_status_through_finalization() {
         // Nonce 5 leaves a gap at 3 and 4: admitted, but never proposable.
         let gapped = node0
             .submit(
-                CoinTransaction::sign_with_fee(
+                CoinTransaction::sign(
                     &alice,
                     5,
                     fee(),
@@ -618,7 +618,7 @@ fn mempool_replaces_same_nonce_resubmission() {
 
         let original = node0
             .submit(
-                CoinTransaction::sign_with_fee(
+                CoinTransaction::sign(
                     &alice,
                     0,
                     fee(),
@@ -630,7 +630,7 @@ fn mempool_replaces_same_nonce_resubmission() {
             .expect("admit original");
         let replacement = node0
             .submit(
-                CoinTransaction::sign_with_fee(
+                CoinTransaction::sign(
                     &alice,
                     0,
                     fee(),

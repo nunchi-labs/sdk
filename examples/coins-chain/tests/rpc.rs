@@ -71,7 +71,7 @@ fn rpc_serves_status_and_filters_submissions_over_http() {
 
         // A well-signed transaction is accepted and lands in the pool.
         let alice = PrivateKey::from_seed(100);
-        let transaction = CoinTransaction::sign_with_fee(
+        let transaction = CoinTransaction::sign(
             &alice,
             0,
             fee(),

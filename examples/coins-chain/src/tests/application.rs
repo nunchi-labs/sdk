@@ -59,7 +59,7 @@ fn proposal_skips_unregistered_multisig() {
         let policy =
             MultisigPolicy::new(2, vec![alice_a.public_key(), alice_b.public_key()]).unwrap();
         let account_id = multisig_account_id(&policy);
-        let tx = CoinTransaction::sign_multisig_with_fee(
+        let tx = CoinTransaction::sign_multisig(
             account_id.clone(),
             policy.clone(),
             &[&alice_a, &alice_b],

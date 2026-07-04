@@ -1,7 +1,9 @@
 use commonware_codec::{DecodeExt, Encode, EncodeSize, Error, Read, ReadExt, Write};
 use nunchi_crypto::PrivateKey;
 
-use crate::{AccountSignature, Address, Authorization, MultisigPolicy, Operation, Transaction};
+use crate::{
+    AccountSignature, Address, Authorization, MultisigPolicy, NoFee, Operation, Transaction,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TestOperation(u8);
@@ -56,7 +58,7 @@ impl EncodeSize for TestFee {
 #[test]
 fn ed25519_transaction_signs_verifies_and_roundtrips() {
     let signer = PrivateKey::ed25519_from_seed(7);
-    let tx = Transaction::sign(&signer, 3, TestOperation(42));
+    let tx = Transaction::sign(&signer, 3, NoFee, TestOperation(42));
 
     assert_eq!(tx.account_id, Address::external(&signer.public_key()));
     assert_eq!(tx.verify(), Ok(()));
@@ -66,7 +68,7 @@ fn ed25519_transaction_signs_verifies_and_roundtrips() {
 #[test]
 fn secp256r1_transaction_signs_verifies_and_roundtrips() {
     let signer = PrivateKey::secp256r1_from_seed(7);
-    let tx = Transaction::sign(&signer, 3, TestOperation(42));
+    let tx = Transaction::sign(&signer, 3, NoFee, TestOperation(42));
 
     assert_eq!(tx.account_id, Address::external(&signer.public_key()));
     assert_eq!(tx.verify(), Ok(()));
@@ -76,7 +78,7 @@ fn secp256r1_transaction_signs_verifies_and_roundtrips() {
 #[test]
 fn fee_metadata_is_signed_and_roundtrips() {
     let signer = PrivateKey::ed25519_from_seed(7);
-    let mut tx = Transaction::sign_with_fee(&signer, 3, TestFee(9), TestOperation(42));
+    let mut tx = Transaction::sign(&signer, 3, TestFee(9), TestOperation(42));
 
     assert_eq!(tx.verify(), Ok(()));
     assert_eq!(
@@ -94,7 +96,7 @@ fn fee_metadata_is_signed_and_roundtrips() {
 #[test]
 fn transaction_verification_rejects_tampered_payload() {
     let signer = PrivateKey::ed25519_from_seed(7);
-    let mut tx = Transaction::sign(&signer, 3, TestOperation(42));
+    let mut tx = Transaction::sign(&signer, 3, NoFee, TestOperation(42));
     tx.payload.operation = TestOperation(43);
 
     assert_eq!(
@@ -107,7 +109,7 @@ fn transaction_verification_rejects_tampered_payload() {
 fn transaction_verification_rejects_mismatched_signature_curve() {
     let signer = PrivateKey::ed25519_from_seed(7);
     let other = PrivateKey::secp256r1_from_seed(9);
-    let mut tx = Transaction::sign(&signer, 3, TestOperation(42));
+    let mut tx = Transaction::sign(&signer, 3, NoFee, TestOperation(42));
     tx.authorization = Authorization::Single {
         signer: Box::new(signer.public_key()),
         signature: other.sign(TestOperation::NAMESPACE, &tx.payload.encode()),
@@ -123,7 +125,7 @@ fn transaction_verification_rejects_mismatched_signature_curve() {
 fn transaction_decode_rejects_mismatched_signature_curve() {
     let signer = PrivateKey::ed25519_from_seed(7);
     let other = PrivateKey::secp256r1_from_seed(9);
-    let mut tx = Transaction::sign(&signer, 3, TestOperation(42));
+    let mut tx = Transaction::sign(&signer, 3, NoFee, TestOperation(42));
     tx.authorization = Authorization::Single {
         signer: Box::new(signer.public_key()),
         signature: other.sign(TestOperation::NAMESPACE, &tx.payload.encode()),
@@ -138,7 +140,7 @@ fn multisig_transaction_signs_verifies_and_roundtrips() {
     let bob = PrivateKey::secp256r1_from_seed(2);
     let policy = MultisigPolicy::new(2, vec![alice.public_key(), bob.public_key()]).unwrap();
     let account_id = Address::multisig(&policy);
-    let tx = Transaction::sign_multisig(account_id, policy, &[&alice, &bob], 0, TestOperation(42));
+    let tx = Transaction::sign_multisig(account_id, policy, &[&alice, &bob], 0, NoFee, TestOperation(42));
 
     assert_eq!(tx.verify(), Ok(()));
     assert_eq!(Transaction::decode(tx.encode().as_ref()).unwrap(), tx);
@@ -151,7 +153,7 @@ fn multisig_authorization_rejects_non_canonical_signature_order() {
     let policy = MultisigPolicy::new(2, vec![alice.public_key(), bob.public_key()]).unwrap();
     let account_id = Address::multisig(&policy);
     let mut tx =
-        Transaction::sign_multisig(account_id, policy, &[&alice, &bob], 0, TestOperation(42));
+        Transaction::sign_multisig(account_id, policy, &[&alice, &bob], 0, NoFee, TestOperation(42));
 
     let Authorization::Multisig { signatures, .. } = &mut tx.authorization else {
         panic!("expected multisig authorization");
@@ -168,7 +170,7 @@ fn multisig_authorization_rejects_non_canonical_signature_order() {
 fn single_authorization_rejects_wrong_address() {
     let alice = PrivateKey::ed25519_from_seed(1);
     let bob = PrivateKey::ed25519_from_seed(2);
-    let mut tx = Transaction::sign(&alice, 0, TestOperation(42));
+    let mut tx = Transaction::sign(&alice, 0, NoFee, TestOperation(42));
     tx.account_id = Address::external(&bob.public_key());
 
     assert_eq!(
@@ -180,7 +182,7 @@ fn single_authorization_rejects_wrong_address() {
 #[test]
 fn single_signature_cannot_be_repackaged_as_multisig_authorization() {
     let alice = PrivateKey::ed25519_from_seed(1);
-    let mut tx = Transaction::sign(&alice, 0, TestOperation(42));
+    let mut tx = Transaction::sign(&alice, 0, NoFee, TestOperation(42));
     let Authorization::Single { signer, signature } = tx.authorization else {
         panic!("expected single authorization");
     };
@@ -207,7 +209,7 @@ fn multisig_authorization_supports_policy_rotation_under_stable_address() {
     let rotated = MultisigPolicy::new(1, vec![bob.public_key()]).unwrap();
     let account_id = Address::multisig(&initial);
 
-    let tx = Transaction::sign_multisig(account_id, rotated, &[&bob], 0, TestOperation(42));
+    let tx = Transaction::sign_multisig(account_id, rotated, &[&bob], 0, NoFee, TestOperation(42));
 
     assert_eq!(tx.verify(), Ok(()));
 }

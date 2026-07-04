@@ -486,7 +486,7 @@ impl NunchiServer {
                 .parse::<u128>()
                 .map_err(|_| anyhow::anyhow!("amount is not a valid u128"))?;
             let fee = build_fee(&p.fee_coin, &p.max_fee, p.tip.as_deref(), p.weight_limit)?;
-            let tx = CoinTransaction::sign_with_fee(
+            let tx = CoinTransaction::sign(
                 &signer,
                 p.nonce,
                 fee,
@@ -523,7 +523,7 @@ impl NunchiServer {
                 .parse::<u128>()
                 .map_err(|_| anyhow::anyhow!("amount is not a valid u128"))?;
             let fee = build_fee(&p.fee_coin, &p.max_fee, p.tip.as_deref(), p.weight_limit)?;
-            let tx = CoinTransaction::sign_with_fee(
+            let tx = CoinTransaction::sign(
                 &signer,
                 p.nonce,
                 fee,
@@ -555,7 +555,7 @@ impl NunchiServer {
                 .parse::<u128>()
                 .map_err(|_| anyhow::anyhow!("amount is not a valid u128"))?;
             let fee = build_fee(&p.fee_coin, &p.max_fee, p.tip.as_deref(), p.weight_limit)?;
-            let tx = CoinTransaction::sign_with_fee(
+            let tx = CoinTransaction::sign(
                 &signer,
                 p.nonce,
                 fee,
@@ -594,12 +594,8 @@ impl NunchiServer {
                 p.max_supply.as_deref(),
             )?;
             let fee = build_fee(&p.fee_coin, &p.max_fee, p.tip.as_deref(), p.weight_limit)?;
-            let tx = CoinTransaction::sign_with_fee(
-                &signer,
-                p.nonce,
-                fee,
-                CoinOperation::CreateToken { spec },
-            );
+            let tx =
+                CoinTransaction::sign(&signer, p.nonce, fee, CoinOperation::CreateToken { spec });
             Ok(encode_value(&tx))
         })() {
             Ok(hex) => hex,
@@ -627,7 +623,7 @@ impl NunchiServer {
             let account_id = decode_value::<nunchi_coins::Address>(&p.account_id, "account_id")?;
             let policy = build_multisig_policy(p.threshold, &p.signer_public_keys_hex)?;
             let fee = build_fee(&p.fee_coin, &p.max_fee, p.tip.as_deref(), p.weight_limit)?;
-            let tx = CoinTransaction::sign_with_fee(
+            let tx = CoinTransaction::sign(
                 &signer,
                 p.nonce,
                 fee,
