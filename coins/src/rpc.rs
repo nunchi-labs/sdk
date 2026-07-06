@@ -5,7 +5,8 @@ mod mempool;
 #[cfg(feature = "mempool")]
 pub use mempool::{
     register_mempool, CoinMempoolServer, CoinsMempoolRpc, MempoolIngress, SubmitTransactionParams,
-    SubmitTransactionResponse, TransactionStatusResponse,
+    SubmitTransactionResponse, SubmitTransactionResult, SubmitTransactionsParams,
+    SubmitTransactionsResponse, TransactionStatusResponse,
 };
 
 use std::sync::Arc;

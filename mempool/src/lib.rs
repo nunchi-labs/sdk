@@ -11,6 +11,7 @@ commonware_macros::stability_scope!(ALPHA {
 mod actor;
 mod config;
 mod error;
+mod metrics;
 mod pool;
 mod status;
 #[cfg(test)]
