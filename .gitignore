@@ -1,10 +1,11 @@
 *.swp
 *.DS_Store
-target
+/target
 /testnet
 *.vscode
 /assets
 /test
 /types/pkg
-.idea
-.local
+/.idea
+/.local
+/devnet
