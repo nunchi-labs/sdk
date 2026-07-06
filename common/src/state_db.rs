@@ -10,6 +10,7 @@
 //! layer their own typed accessors on top (see `nunchi-coins`' `LedgerDB` for an example).
 
 use std::future::Future;
+use std::num::NonZeroU64;
 use std::{collections::BTreeMap, sync::Arc};
 
 use commonware_codec::Read;
@@ -24,7 +25,7 @@ use commonware_storage::{
     index::unordered::Index as UnorderedIndex,
     journal::contiguous::variable::Config as JournalConfig,
     journal::contiguous::variable::Journal as VariableJournal,
-    merkle::{full::Config as MerkleConfig, Location},
+    merkle::{full::Config as MerkleConfig, hasher::Standard, Bagging, Location, Proof},
     mmr::Family,
     qmdb::{
         any::{
@@ -32,7 +33,7 @@ use commonware_storage::{
             VariableConfig,
         },
         sync::Target,
-        Error as QmdbError,
+        verify_proof, Error as QmdbError,
     },
     translator::TwoCap,
     Context,
@@ -250,6 +251,63 @@ impl<E: Context> CommitState for QmdbState<E> {
     }
 }
 
+/// An inclusion proof over a contiguous range of authenticated operations, verifiable against a
+/// committed [`CommitState::root`].
+///
+/// This is the low-level proof surface: it authenticates that a set of QMDB operations is committed
+/// under a given root, and [`StateProof::operations`] exposes those operations so a verifier can
+/// confirm a specific key/value is among them. Targeting a single key directly (key -> operation
+/// location) and proving against a historical finalized root (via a block's state range) are
+/// follow-ups, not yet covered here.
+pub struct StateProof {
+    proof: Proof<Family, Digest>,
+    start: Location<Family>,
+    operations: Vec<QmdbOperation>,
+}
+
+impl StateProof {
+    /// The authenticated operations covered by this proof.
+    pub fn operations(&self) -> &[QmdbOperation] {
+        &self.operations
+    }
+}
+
+impl<E: Context> QmdbState<E> {
+    /// The active operation range in the committed authenticated log.
+    pub async fn operation_bounds(&self) -> std::ops::Range<Location<Family>> {
+        self.db.bounds().await
+    }
+
+    /// Generate an inclusion proof for up to `max_ops` operations starting at `start`, verifiable
+    /// against the committed [`CommitState::root`] with [`verify_state_proof`].
+    pub async fn proof(
+        &self,
+        start: Location<Family>,
+        max_ops: NonZeroU64,
+    ) -> Result<StateProof, StateError> {
+        let (proof, operations) = self.db.proof(start, max_ops).await.map_err(backend_err)?;
+        Ok(StateProof {
+            proof,
+            start,
+            operations,
+        })
+    }
+}
+
+/// Verify that the operations in `proof` are committed by the authenticated state `root`.
+///
+/// Standalone (no database handle), so a remote verifier can check a proof against a state root it
+/// obtained elsewhere (for example a finalized foreign block).
+pub fn verify_state_proof(proof: &StateProof, root: &Digest) -> bool {
+    verify_proof::<Family, QmdbOperation, Sha256, Digest>(
+        &Standard::new(Bagging::ForwardFold),
+        &proof.proof,
+        proof.start,
+        &proof.operations,
+        root,
+    )
+}
+
 /// A speculative QMDB batch used by `commonware_glue::stateful` execution.
 pub struct QmdbBatch<E: Context> {
     inner: Option<QmdbUnmerkleized<E>>,
@@ -368,5 +426,47 @@ impl<E: Context> StateStore for QmdbReader<E> {
 
     fn remove(&mut self, _key: Digest) {
         panic!("QmdbReader is read-only");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_runtime::{deterministic, Runner as _};
+
+    #[test]
+    fn state_proof_roundtrips_and_rejects_wrong_root() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut state = QmdbState::init(context, "state-proof-test")
+                .await
+                .expect("init state");
+
+            // Write a namespaced key, then commit to obtain the authenticated root.
+            let ns = Namespace::new(b"test-ns");
+            state.set(ns.key(0u8, b"account-1"), b"balance".to_vec());
+            let root = state.commit().await.expect("commit");
+
+            // Prove the committed operations and verify against the root.
+            let bounds = state.operation_bounds().await;
+            let proof = state
+                .proof(bounds.start, NonZeroU64::new(1024).unwrap())
+                .await
+                .expect("generate proof");
+
+            // Positive: the proof verifies against the committed root, over a non-empty
+            // authenticated operation set.
+            assert!(verify_state_proof(&proof, &root));
+            assert!(!proof.operations().is_empty());
+
+            // Negative: an unrelated root must not verify.
+            assert!(!verify_state_proof(&proof, &Sha256::hash(b"not-the-root")));
+
+            // Negative: once the state advances, the stale proof no longer verifies against the
+            // new committed root; the proof is bound to the exact committed state.
+            state.set(ns.key(0u8, b"account-2"), b"other".to_vec());
+            let new_root = state.commit().await.expect("second commit");
+            assert_ne!(root, new_root);
+            assert!(!verify_state_proof(&proof, &new_root));
+        });
     }
 }
