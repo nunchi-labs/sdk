@@ -20,7 +20,7 @@ pub struct NodeHandle<E, R, Ext = NoConsensusExtension, Events = NoopEventConsum
 where
     E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
     R: Runtime + Clone + Send + Sync + 'static,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction + Sync,
     Ext: ConsensusExtension + Sync,
     Events: EventConsumer,
 {
@@ -33,7 +33,7 @@ impl<E, R, Ext, Events> NodeHandle<E, R, Ext, Events>
 where
     E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
     R: Runtime + Clone + Send + Sync + 'static,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction + Sync,
     Ext: ConsensusExtension + Sync,
     Events: EventConsumer,
 {
@@ -60,7 +60,7 @@ pub struct StatefulQuery<E, R, Ext = NoConsensusExtension, Events = NoopEventCon
 where
     E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
     R: Runtime + Clone + Send + Sync + 'static,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction + Sync,
     Ext: ConsensusExtension + Sync,
     Events: EventConsumer,
 {
@@ -71,7 +71,7 @@ impl<E, R, Ext, Events> Clone for StatefulQuery<E, R, Ext, Events>
 where
     E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
     R: Runtime + Clone + Send + Sync + 'static,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction + Sync,
     Ext: ConsensusExtension + Sync,
     Events: EventConsumer,
 {
@@ -86,7 +86,7 @@ impl<E, R, Ext, Events> StatefulQuery<E, R, Ext, Events>
 where
     E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
     R: Runtime + Clone + Send + Sync + 'static,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction + Sync,
     Ext: ConsensusExtension + Sync,
     Events: EventConsumer,
 {
