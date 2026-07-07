@@ -34,6 +34,24 @@ fn transfer_record_codec_round_trips() {
 }
 
 #[test]
+fn digest_newtypes_round_trip_through_codec() {
+    let chain = ChainId(Sha256::hash(b"chain-a"));
+    let asset = AssetId::derive(&chain, &Sha256::hash(b"coin"));
+    let record_id = TransferRecordId(Sha256::hash(b"record"));
+
+    assert_eq!(ChainId::decode(chain.encode().as_ref()).unwrap(), chain);
+    let decoded_asset = AssetId::decode(asset.encode().as_ref()).unwrap();
+    assert_eq!(decoded_asset, asset);
+    assert_eq!(
+        TransferRecordId::decode(record_id.encode().as_ref()).unwrap(),
+        record_id
+    );
+
+    // The digest accessor is stable across encode/decode.
+    assert_eq!(decoded_asset.digest(), asset.digest());
+}
+
+#[test]
 fn record_id_is_deterministic() {
     // Same fields -> same id.
     assert_eq!(record().record_id(), record().record_id());
