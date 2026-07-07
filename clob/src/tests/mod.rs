@@ -52,6 +52,13 @@ fn asset(seed: &'static [u8]) -> AssetId {
     AssetId(Sha256::hash(seed))
 }
 
+const MARKET_TICK: u128 = 5;
+const MARKET_LOT: u128 = 2;
+
+fn market() -> crate::MarketId {
+    market_id(&asset(b"base"), &asset(b"quote"), MARKET_TICK, MARKET_LOT)
+}
+
 fn create_market_tx(signer: &PrivateKey, nonce: u64) -> Transaction {
     Transaction::sign(
         signer,
@@ -59,8 +66,8 @@ fn create_market_tx(signer: &PrivateKey, nonce: u64) -> Transaction {
         ClobOperation::CreateMarket {
             base_asset: asset(b"base"),
             quote_asset: asset(b"quote"),
-            tick_size: 5,
-            lot_size: 2,
+            tick_size: MARKET_TICK,
+            lot_size: MARKET_LOT,
         },
     )
 }
@@ -77,7 +84,7 @@ fn place_tx(
         signer,
         nonce,
         ClobOperation::PlaceOrder {
-            market: market_id(&asset(b"base"), &asset(b"quote")),
+            market: market(),
             side,
             price,
             base_quantity,
@@ -120,7 +127,7 @@ fn genesis_seeds_markets() {
 
         let markets = ledger.markets().await.unwrap();
         assert_eq!(markets.len(), 1);
-        assert_eq!(markets[0].id, market_id(&asset(b"base"), &asset(b"quote")));
+        assert_eq!(markets[0].id, market());
         assert_eq!(markets[0].tick_size, 5);
         assert_eq!(markets[0].lot_size, 2);
     });
@@ -131,7 +138,7 @@ fn matching_uses_maker_price_and_leaves_partial_resting_order() {
     run_test(|| async {
         let maker = PrivateKey::from_seed(1);
         let taker = PrivateKey::from_seed(2);
-        let market = market_id(&asset(b"base"), &asset(b"quote"));
+        let market = market();
         let mut ledger = ClobLedger::new(MemoryStore::default());
 
         ledger
@@ -188,7 +195,7 @@ fn best_price_wins_before_time_priority() {
         let first_asker = PrivateKey::from_seed(2);
         let second_asker = PrivateKey::from_seed(3);
         let bidder = PrivateKey::from_seed(4);
-        let market = market_id(&asset(b"base"), &asset(b"quote"));
+        let market = market();
         let mut ledger = ClobLedger::new(MemoryStore::default());
 
         ledger
@@ -242,7 +249,7 @@ fn owner_can_cancel_open_order() {
     run_test(|| async {
         let creator = PrivateKey::from_seed(1);
         let bidder = PrivateKey::from_seed(2);
-        let market = market_id(&asset(b"base"), &asset(b"quote"));
+        let market = market();
         let mut ledger = ClobLedger::new(MemoryStore::default());
 
         ledger
@@ -298,5 +305,95 @@ fn non_owner_cannot_cancel_order() {
             .await
             .unwrap_err();
         assert_eq!(err, ClobError::UnauthorizedCancel);
+    });
+}
+
+#[test]
+fn market_id_is_independent_of_asset_order_and_includes_market_params() {
+    let base = asset(b"base");
+    let quote = asset(b"quote");
+    assert_eq!(
+        market_id(&base, &quote, 5, 2),
+        market_id(&quote, &base, 5, 2)
+    );
+    assert_ne!(market_id(&base, &quote, 5, 2), market_id(&base, &quote, 10, 2));
+}
+
+#[test]
+fn reverse_asset_pair_cannot_create_duplicate_market() {
+    run_test(|| async {
+        let creator = PrivateKey::from_seed(1);
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+
+        ledger
+            .apply_transaction(&create_market_tx(&creator, 0), context(1))
+            .await
+            .unwrap();
+
+        let reverse_market = Transaction::sign(
+            &creator,
+            1,
+            ClobOperation::CreateMarket {
+                base_asset: asset(b"quote"),
+                quote_asset: asset(b"base"),
+                tick_size: MARKET_TICK,
+                lot_size: MARKET_LOT,
+            },
+        );
+        let err = ledger
+            .apply_transaction(&reverse_market, context(2))
+            .await
+            .unwrap_err();
+        assert_eq!(err, ClobError::MarketAlreadyExists);
+    });
+}
+
+#[test]
+fn terminal_orders_are_pruned_from_account_index() {
+    run_test(|| async {
+        let creator = PrivateKey::from_seed(1);
+        let trader = PrivateKey::from_seed(2);
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+
+        ledger
+            .apply_transaction(&create_market_tx(&creator, 0), context(1))
+            .await
+            .unwrap();
+
+        let ask = place_tx(
+            &trader,
+            0,
+            Side::Ask,
+            100,
+            4,
+            TimeInForce::GoodTilCancelled,
+        );
+        let ask_id = OrderId(ask.digest());
+        ledger.apply_transaction(&ask, context(2)).await.unwrap();
+
+        let trader_addr = Address::external(&trader.public_key());
+        assert_eq!(ledger.account_orders(&trader_addr).await.unwrap().len(), 1);
+
+        ledger
+            .apply_transaction(&cancel_tx(&trader, 1, ask_id), context(3))
+            .await
+            .unwrap();
+        assert!(ledger.account_orders(&trader_addr).await.unwrap().is_empty());
+
+        let bid = place_tx(
+            &trader,
+            2,
+            Side::Bid,
+            100,
+            4,
+            TimeInForce::ImmediateOrCancel,
+        );
+        let bid_id = OrderId(bid.digest());
+        ledger.apply_transaction(&bid, context(4)).await.unwrap();
+        assert!(ledger.account_orders(&trader_addr).await.unwrap().is_empty());
+        assert_eq!(
+            ledger.order(&bid_id).await.unwrap().unwrap().status,
+            OrderStatus::Expired
+        );
     });
 }

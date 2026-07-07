@@ -60,6 +60,18 @@ pub struct ClobLedger<D> {
     pub(crate) db: D,
 }
 
+/// Inputs for programmatic order placement by consuming modules such as perps.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlaceOrderParams {
+    pub owner: Address,
+    pub order_id: OrderId,
+    pub market: MarketId,
+    pub side: Side,
+    pub price: u128,
+    pub base_quantity: u128,
+    pub time_in_force: TimeInForce,
+}
+
 impl<D: ClobDB> ClobLedger<D> {
     /// Wrap a database backend as a CLOB ledger.
     pub fn new(db: D) -> Self {
@@ -173,15 +185,19 @@ impl<D: ClobDB> ClobLedger<D> {
                 time_in_force,
             } => {
                 self.place_order(
-                    tx,
-                    *market,
-                    *side,
-                    *price,
-                    *base_quantity,
-                    *time_in_force,
+                    &PlaceOrderParams {
+                        owner: tx.account_id.clone(),
+                        order_id: OrderId(tx.digest()),
+                        market: *market,
+                        side: *side,
+                        price: *price,
+                        base_quantity: *base_quantity,
+                        time_in_force: *time_in_force,
+                    },
                     context,
                 )
                 .await
+                .map(|_| ())
             }
             ClobOperation::CancelOrder { order } => self.cancel_order(&tx.account_id, order).await,
         }
@@ -198,7 +214,8 @@ impl<D: ClobDB> ClobLedger<D> {
     ) -> Result<(), ClobError> {
         validate_market(base_asset, quote_asset, tick_size, lot_size)?;
 
-        let id = market_id(&base_asset, &quote_asset);
+        let (base_asset, quote_asset) = canonical_asset_pair(base_asset, quote_asset);
+        let id = market_id(&base_asset, &quote_asset, tick_size, lot_size);
         if self.db.market(&id).await?.is_some() {
             return Err(ClobError::MarketAlreadyExists);
         }
@@ -225,59 +242,66 @@ impl<D: ClobDB> ClobLedger<D> {
         Ok(())
     }
 
-    async fn place_order(
+    /// Place and match an order against the current book.
+    ///
+    /// Self-trade prevention is intentionally not enforced: orders from the same
+    /// account may match against each other.
+    pub async fn place_order(
         &mut self,
-        tx: &Transaction,
-        market_id: MarketId,
-        side: Side,
-        price: u128,
-        base_quantity: u128,
-        time_in_force: TimeInForce,
+        params: &PlaceOrderParams,
         context: RuntimeContext,
-    ) -> Result<(), ClobError> {
+    ) -> Result<Order, ClobError> {
+        let PlaceOrderParams {
+            owner,
+            order_id,
+            market: market_id,
+            side,
+            price,
+            base_quantity,
+            time_in_force,
+        } = params;
         let market = self
             .db
-            .market(&market_id)
+            .market(market_id)
             .await?
             .ok_or(ClobError::MarketNotFound)?;
-        validate_order(&market, price, base_quantity)?;
+        validate_order(&market, *price, *base_quantity)?;
 
-        let order_id = OrderId(tx.digest());
-        if self.db.order(&order_id).await?.is_some() {
+        if self.db.order(order_id).await?.is_some() {
             return Err(ClobError::InvalidOrder("duplicate order id"));
         }
 
-        let mut account_orders = self.db.account_orders(&tx.account_id).await?;
+        let account_orders = self.db.account_orders(owner).await?;
         if account_orders.len() == MAX_ACCOUNT_ORDERS {
             return Err(ClobError::AccountIndexFull);
         }
 
         let opposite_side = side.opposite();
-        let opposite_ids = self.db.side_book(&market_id, opposite_side).await?;
+        let opposite_ids = self.db.side_book(market_id, opposite_side).await?;
         let opposite_orders = self.load_orders(opposite_ids).await?;
-        let simulation = simulate_matches(side, price, base_quantity, &opposite_orders)?;
+        let simulation = simulate_matches(*side, *price, *base_quantity, &opposite_orders)?;
 
-        let mut market_fill_ids = self.db.market_fills(&market_id).await?;
+        let mut market_fill_ids = self.db.market_fills(market_id).await?;
         if market_fill_ids.len().saturating_add(simulation.fills) > MAX_FILLS_PER_MARKET {
             return Err(ClobError::FillIndexFull);
         }
 
-        if time_in_force == TimeInForce::GoodTilCancelled && simulation.remaining_base > 0 {
-            let same_side_book = self.db.side_book(&market_id, side).await?;
+        if *time_in_force == TimeInForce::GoodTilCancelled && simulation.remaining_base > 0 {
+            let same_side_book = self.db.side_book(market_id, *side).await?;
             if same_side_book.len() == MAX_BOOK_ORDERS {
                 return Err(ClobError::BookFull);
             }
         }
 
-        let sequence = self.next_sequence(&market_id).await?;
+        let sequence = self.next_sequence(market_id).await?;
         let mut taker = Order {
-            id: order_id,
-            owner: tx.account_id.clone(),
-            market: market_id,
-            side,
-            price,
-            original_base: base_quantity,
-            remaining_base: base_quantity,
+            id: *order_id,
+            owner: owner.clone(),
+            market: *market_id,
+            side: *side,
+            price: *price,
+            original_base: *base_quantity,
+            remaining_base: *base_quantity,
             filled_base: 0,
             status: OrderStatus::Open,
             sequence,
@@ -286,16 +310,19 @@ impl<D: ClobDB> ClobLedger<D> {
         };
 
         let mut updated_opposite_book = Vec::with_capacity(opposite_orders.len());
-        for mut maker in opposite_orders {
-            if taker.remaining_base == 0
-                || !maker.status.is_open()
-                || maker.remaining_base == 0
-                || !side.crosses(price, maker.price)
-            {
-                if maker.status.is_open() && maker.remaining_base > 0 {
-                    updated_opposite_book.push(maker.id);
-                }
+        for idx in 0..opposite_orders.len() {
+            if taker.remaining_base == 0 {
+                append_open_orders(&mut updated_opposite_book, &opposite_orders[idx..]);
+                break;
+            }
+
+            let mut maker = opposite_orders[idx].clone();
+            if !maker.status.is_open() || maker.remaining_base == 0 {
                 continue;
+            }
+            if !side.crosses(*price, maker.price) {
+                append_open_orders(&mut updated_opposite_book, &opposite_orders[idx..]);
+                break;
             }
 
             let base = taker.remaining_base.min(maker.remaining_base);
@@ -303,15 +330,15 @@ impl<D: ClobDB> ClobLedger<D> {
                 .price
                 .checked_mul(base)
                 .ok_or(ClobError::QuoteOverflow)?;
-            let fill_sequence = self.next_sequence(&market_id).await?;
+            let fill_sequence = self.next_sequence(market_id).await?;
             let fill = Fill {
                 id: fill_id(&taker.id, &maker.id, fill_sequence),
-                market: market_id,
+                market: *market_id,
                 maker_order: maker.id,
                 taker_order: taker.id,
                 maker: maker.owner.clone(),
                 taker: taker.owner.clone(),
-                taker_side: side,
+                taker_side: *side,
                 price: maker.price,
                 base_quantity: base,
                 quote_quantity: quote,
@@ -335,16 +362,19 @@ impl<D: ClobDB> ClobLedger<D> {
             self.db.set_order(&maker);
             if maker.status.is_open() && maker.remaining_base > 0 {
                 updated_opposite_book.push(maker.id);
+            } else {
+                self.remove_from_account_orders(&maker.owner, &maker.id)
+                    .await?;
             }
         }
 
         self.db
-            .set_side_book(&market_id, opposite_side, &updated_opposite_book);
-        self.db.set_market_fills(&market_id, &market_fill_ids);
+            .set_side_book(market_id, opposite_side, &updated_opposite_book);
+        self.db.set_market_fills(market_id, &market_fill_ids);
 
         taker.status = if taker.remaining_base == 0 {
             OrderStatus::Filled
-        } else if time_in_force == TimeInForce::ImmediateOrCancel {
+        } else if *time_in_force == TimeInForce::ImmediateOrCancel {
             OrderStatus::Expired
         } else if taker.filled_base == 0 {
             OrderStatus::Open
@@ -353,13 +383,17 @@ impl<D: ClobDB> ClobLedger<D> {
         };
 
         self.db.set_order(&taker);
-        account_orders.push(taker.id);
-        self.db.set_account_orders(&taker.owner, &account_orders);
-
-        if taker.status.is_open() && taker.remaining_base > 0 {
-            self.insert_resting_order(&taker).await?;
+        if taker.status.is_open() {
+            let mut account_orders = self.db.account_orders(owner).await?;
+            account_orders.push(taker.id);
+            self.db.set_account_orders(owner, &account_orders);
+            if taker.remaining_base > 0 {
+                self.insert_resting_order(&taker).await?;
+            }
+        } else {
+            self.remove_from_account_orders(owner, &taker.id).await?;
         }
-        Ok(())
+        Ok(taker)
     }
 
     async fn cancel_order(
@@ -385,6 +419,21 @@ impl<D: ClobDB> ClobLedger<D> {
 
         order.status = OrderStatus::Cancelled;
         self.db.set_order(&order);
+        self.remove_from_account_orders(&order.owner, order_id).await?;
+        Ok(())
+    }
+
+    async fn remove_from_account_orders(
+        &mut self,
+        owner: &Address,
+        order_id: &OrderId,
+    ) -> Result<(), ClobError> {
+        let mut orders = self.db.account_orders(owner).await?;
+        let before = orders.len();
+        orders.retain(|id| id != order_id);
+        if orders.len() != before {
+            self.db.set_account_orders(owner, &orders);
+        }
         Ok(())
     }
 
@@ -427,11 +476,32 @@ impl<D: ClobDB> ClobLedger<D> {
     }
 }
 
-/// Derive the canonical market id for a base/quote pair.
-pub fn market_id(base_asset: &AssetId, quote_asset: &AssetId) -> MarketId {
+/// Return an asset pair in deterministic ascending order.
+pub fn canonical_asset_pair(a: AssetId, b: AssetId) -> (AssetId, AssetId) {
+    if a <= b {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+/// Derive the deterministic market id from a normalized asset pair and market parameters.
+///
+/// Asset ids are sorted before hashing so `A/B` and `B/A` resolve to the same market.
+/// `tick_size` and `lot_size` are included so permissionless creation cannot be
+/// frontrun with incompatible market parameters.
+pub fn market_id(
+    base_asset: &AssetId,
+    quote_asset: &AssetId,
+    tick_size: u128,
+    lot_size: u128,
+) -> MarketId {
+    let (base, quote) = canonical_asset_pair(*base_asset, *quote_asset);
     let mut bytes = CLOB_NAMESPACE.to_vec();
-    bytes.extend_from_slice(base_asset.encode().as_ref());
-    bytes.extend_from_slice(quote_asset.encode().as_ref());
+    bytes.extend_from_slice(base.encode().as_ref());
+    bytes.extend_from_slice(quote.encode().as_ref());
+    bytes.extend_from_slice(tick_size.encode().as_ref());
+    bytes.extend_from_slice(lot_size.encode().as_ref());
     MarketId(Sha256::hash(&bytes))
 }
 
@@ -469,10 +539,10 @@ fn validate_order(market: &Market, price: u128, base_quantity: u128) -> Result<(
     if base_quantity == 0 {
         return Err(ClobError::InvalidOrder("quantity must be non-zero"));
     }
-    if price % market.tick_size != 0 {
+    if !price.is_multiple_of(market.tick_size) {
         return Err(ClobError::InvalidOrder("price is not on the market tick"));
     }
-    if base_quantity % market.lot_size != 0 {
+    if !base_quantity.is_multiple_of(market.lot_size) {
         return Err(ClobError::InvalidOrder(
             "quantity is not on the market lot",
         ));
@@ -498,6 +568,14 @@ struct MatchSimulation {
     remaining_base: u128,
 }
 
+fn append_open_orders(book: &mut Vec<OrderId>, orders: &[Order]) {
+    for order in orders {
+        if order.status.is_open() && order.remaining_base > 0 {
+            book.push(order.id);
+        }
+    }
+}
+
 fn simulate_matches(
     side: Side,
     price: u128,
@@ -510,9 +588,11 @@ fn simulate_matches(
         if remaining == 0 {
             break;
         }
-        if !maker.status.is_open() || maker.remaining_base == 0 || !side.crosses(price, maker.price)
-        {
+        if !maker.status.is_open() || maker.remaining_base == 0 {
             continue;
+        }
+        if !side.crosses(price, maker.price) {
+            break;
         }
         maker
             .price

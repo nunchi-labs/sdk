@@ -3,6 +3,9 @@
 //! The CLOB owns market metadata, price-time order priority, matching, open
 //! order state, and fill records. Settlement, margin, funding, liquidation,
 //! house liquidity, and batch clearing live in consuming modules.
+//!
+//! Self-trade prevention is not enforced: orders from the same account may match
+//! against each other.
 
 commonware_macros::stability_scope!(ALPHA {
 mod db;
@@ -17,7 +20,7 @@ mod types;
 
 pub use db::ClobDB;
 pub use genesis::{ClobGenesis, ClobMarketGenesis};
-pub use ledger::{market_id, ClobError, ClobLedger};
+pub use ledger::{canonical_asset_pair, market_id, ClobError, ClobLedger, PlaceOrderParams};
 pub use nunchi_common::{AccountSignature, Authorization};
 pub use transaction::{ClobOperation, Transaction, TransactionPayload};
 pub use types::{

@@ -1,5 +1,5 @@
 use crate::{
-    ledger::validate_market, market_id, AssetId, ClobDB, ClobError, ClobLedger, Market,
+    ledger::{canonical_asset_pair, validate_market}, market_id, AssetId, ClobDB, ClobError, ClobLedger, Market,
 };
 use commonware_codec::DecodeExt;
 use commonware_formatting::from_hex;
@@ -39,7 +39,9 @@ impl<D: ClobDB> ClobLedger<D> {
                 market.tick_size,
                 market.lot_size,
             )?;
-            let id = market_id(&base_asset, &quote_asset);
+            let (base_asset, quote_asset) =
+                canonical_asset_pair(base_asset, quote_asset);
+            let id = market_id(&base_asset, &quote_asset, market.tick_size, market.lot_size);
             if self.db.market(&id).await?.is_some() {
                 return Err(ClobError::MarketAlreadyExists);
             }
