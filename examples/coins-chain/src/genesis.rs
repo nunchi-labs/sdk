@@ -3,6 +3,7 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_storage::{mmr::Family, qmdb::sync::Target, Context};
 use nunchi_authority::{AuthorityGenesis, AuthorityLedger};
+use nunchi_clob::{ClobGenesis, ClobLedger};
 use nunchi_coins::{CoinsGenesis, Ledger};
 use nunchi_common::{
     CommitState, Namespace, Overlay, QmdbConfig, QmdbState, StateError, StateStore,
@@ -34,6 +35,8 @@ pub struct ChainGenesis {
     pub coins: Option<CoinsGenesis>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle: Option<OracleGenesis>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clob: Option<ClobGenesis>,
 }
 
 #[derive(Debug, Error)]
@@ -48,6 +51,8 @@ pub enum GenesisError {
     Coins(#[from] nunchi_coins::LedgerError),
     #[error("oracle genesis error: {0}")]
     Oracle(#[from] nunchi_oracle::OracleError),
+    #[error("clob genesis error: {0}")]
+    Clob(#[from] nunchi_clob::ClobError),
     #[error("state error: {0}")]
     State(#[from] StateError),
     #[error("existing chain state was initialized with a different genesis")]
@@ -103,6 +108,11 @@ impl ChainGenesis {
         if let Some(oracle) = &self.oracle {
             let mut ledger = OracleLedger::new(overlay);
             ledger.apply_genesis(oracle).await?;
+            overlay = ledger.into_inner();
+        }
+        if let Some(clob) = &self.clob {
+            let mut ledger = ClobLedger::new(overlay);
+            ledger.apply_genesis(clob).await?;
             overlay = ledger.into_inner();
         }
         set_genesis_marker(&mut overlay, fingerprint);

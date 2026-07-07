@@ -455,6 +455,7 @@ async fn start_node(
     let dkg = register(channels::DKG);
     let backfill = register(channels::BACKFILL);
     let mempool = register(channels::MEMPOOL);
+    let memclob = register(channels::MEMCLOB);
     network.start();
 
     let engine_config: EngineConfig<_, _, _> = EngineConfig {
@@ -498,6 +499,7 @@ async fn start_node(
         broadcast,
         dkg,
         mempool,
+        memclob,
         marshal_resolver,
         ContinueOnUpdate::boxed(),
     );

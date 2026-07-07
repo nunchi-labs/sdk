@@ -397,3 +397,57 @@ fn terminal_orders_are_pruned_from_account_index() {
         );
     });
 }
+
+#[test]
+fn commit_fill_records_memclob_produced_match() {
+    run_test(|| async {
+        use crate::{ClobOperation, Fill, FillId};
+
+        let settlement = PrivateKey::from_seed(99);
+        let maker = PrivateKey::from_seed(1);
+        let market = market();
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+
+        ledger
+            .apply_transaction(&create_market_tx(&maker, 0), context(1))
+            .await
+            .unwrap();
+        let ask = place_tx(
+            &maker,
+            1,
+            Side::Ask,
+            100,
+            10,
+            TimeInForce::GoodTilCancelled,
+        );
+        let ask_id = OrderId(ask.digest());
+        ledger.apply_transaction(&ask, context(2)).await.unwrap();
+
+        let fill = Fill {
+            id: FillId(commonware_cryptography::Sha256::hash(b"memclob-fill")),
+            market,
+            maker_order: ask_id,
+            taker_order: OrderId(commonware_cryptography::Sha256::hash(b"taker-order")),
+            maker: Address::external(&maker.public_key()),
+            taker: Address::external(&PrivateKey::from_seed(2).public_key()),
+            taker_side: Side::Bid,
+            price: 100,
+            base_quantity: 4,
+            quote_quantity: 400,
+            sequence: 1,
+            written_at_height: 0,
+            written_at_ms: 0,
+        };
+        let commit = Transaction::sign(
+            &settlement,
+            0,
+            ClobOperation::CommitFill { fill: fill.clone() },
+        );
+        ledger.apply_transaction(&commit, context(3)).await.unwrap();
+
+        let maker_order = ledger.order(&ask_id).await.unwrap().unwrap();
+        assert_eq!(maker_order.remaining_base, 6);
+        assert_eq!(maker_order.status, OrderStatus::PartiallyFilled);
+        assert_eq!(ledger.fill(&fill.id).await.unwrap().unwrap().base_quantity, 4);
+    });
+}

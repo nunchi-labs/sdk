@@ -1,4 +1,4 @@
-use crate::{AssetId, MarketId, OrderId, Side, TimeInForce, CLOB_NAMESPACE};
+use crate::{AssetId, Fill, MarketId, OrderId, Side, TimeInForce, CLOB_NAMESPACE};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use nunchi_common::Operation as CommonOperation;
 
@@ -8,6 +8,7 @@ enum OperationTag {
     CreateMarket = 0,
     PlaceOrder = 1,
     CancelOrder = 2,
+    CommitFill = 3,
 }
 
 impl TryFrom<u8> for OperationTag {
@@ -18,6 +19,7 @@ impl TryFrom<u8> for OperationTag {
             0 => Ok(Self::CreateMarket),
             1 => Ok(Self::PlaceOrder),
             2 => Ok(Self::CancelOrder),
+            3 => Ok(Self::CommitFill),
             tag => Err(Error::InvalidEnum(tag)),
         }
     }
@@ -43,6 +45,8 @@ pub enum ClobOperation {
     },
     /// Cancel one open order owned by the signer.
     CancelOrder { order: OrderId },
+    /// Commit a match produced by an in-memory book for on-chain settlement.
+    CommitFill { fill: Fill },
 }
 
 impl Write for ClobOperation {
@@ -78,6 +82,10 @@ impl Write for ClobOperation {
                 (OperationTag::CancelOrder as u8).write(buf);
                 order.write(buf);
             }
+            Self::CommitFill { fill } => {
+                (OperationTag::CommitFill as u8).write(buf);
+                fill.write(buf);
+            }
         }
     }
 }
@@ -102,6 +110,9 @@ impl Read for ClobOperation {
             }),
             OperationTag::CancelOrder => Ok(Self::CancelOrder {
                 order: OrderId::read(buf)?,
+            }),
+            OperationTag::CommitFill => Ok(Self::CommitFill {
+                fill: Fill::read(buf)?,
             }),
         }
     }
@@ -135,6 +146,7 @@ impl EncodeSize for ClobOperation {
                     + time_in_force.encode_size()
             }
             Self::CancelOrder { order } => order.encode_size(),
+            Self::CommitFill { fill } => fill.encode_size(),
         }
     }
 }

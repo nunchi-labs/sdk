@@ -44,6 +44,9 @@ use nunchi_chain::engine::*;
 use nunchi_common::{QmdbBackend, QmdbState};
 use nunchi_dkg::{self as dkg, orchestrator, PeerConfig, UpdateCallBack, MAX_SUPPORTED_MODE};
 use nunchi_mempool::{Mempool, PoolConfig};
+use nunchi_memclob::{MemClob, MemClobConfig};
+use nunchi_crypto::PrivateKey;
+use crate::settlement::{SettlementBridge, SettlementConfig};
 use rand::{CryptoRng, Rng};
 use rand_core::CryptoRngCore;
 use std::{
@@ -134,6 +137,8 @@ where
     orchestrator: Orchestrator<E, B, S>,
     orchestrator_mailbox: orchestrator::Mailbox<MinSig, PublicKey>,
     mempool: Mempool<Transaction>,
+    memclob: MemClob,
+    settlement: SettlementBridge,
     stateful: StatefulApp<E>,
     stateful_mailbox: StatefulAppMailbox<E>,
 }
@@ -161,6 +166,13 @@ where
     /// Create a new [Engine].
     pub async fn new(context: E, config: Config<B, P, S>) -> (Self, NodeHandle<E>) {
         let (mempool, submitter) = Mempool::<Transaction>::new(config.pool_config.clone());
+        let (memclob, memclob_handle) = MemClob::new(MemClobConfig::default());
+        let settlement = SettlementBridge::new(
+            PrivateKey::Ed25519(config.signer.clone()),
+            memclob_handle.clone(),
+            submitter.clone(),
+            SettlementConfig::default(),
+        );
 
         let page_cache = CacheRef::from_pooler(&context, PAGE_CACHE_PAGE_SIZE, PAGE_CACHE_CAPACITY);
         let consensus_namespace = union(NAMESPACE, b"_CONSENSUS");
@@ -398,7 +410,12 @@ where
                 sync_config: state_sync_config(),
             },
         );
-        let node_handle = NodeHandle::new(submitter, stateful_mailbox.clone(), applied_height);
+        let node_handle = NodeHandle::new(
+            submitter,
+            memclob_handle,
+            stateful_mailbox.clone(),
+            applied_height,
+        );
 
         let application = Deferred::new(
             context.child("application"),
@@ -437,6 +454,8 @@ where
             orchestrator,
             orchestrator_mailbox,
             mempool,
+            memclob,
+            settlement,
             stateful,
             stateful_mailbox,
         };
@@ -470,6 +489,10 @@ where
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
+        memclob: (
+            impl Sender<PublicKey = PublicKey>,
+            impl Receiver<PublicKey = PublicKey>,
+        ),
         marshal: (
             resolver::handler::Receiver<Digest>,
             resolver::p2p::Mailbox<Digest, PublicKey>,
@@ -485,6 +508,7 @@ where
                 broadcast,
                 dkg,
                 mempool,
+                memclob,
                 marshal,
                 callback
             )
@@ -518,6 +542,10 @@ where
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
+        memclob: (
+            impl Sender<PublicKey = PublicKey>,
+            impl Receiver<PublicKey = PublicKey>,
+        ),
         marshal: (
             resolver::handler::Receiver<Digest>,
             resolver::p2p::Mailbox<Digest, PublicKey>,
@@ -541,6 +569,12 @@ where
         let mempool_handle = self
             .mempool
             .start_p2p(self.context.child("mempool"), mempool);
+        let memclob_handle = self
+            .memclob
+            .start_p2p(self.context.child("memclob"), memclob);
+        let settlement_handle = self
+            .settlement
+            .start(self.context.child("settlement"));
 
         let mut shutdown = self.context.stopped();
         commonware_macros::select! {
@@ -558,6 +592,8 @@ where
             result = stateful_handle => unexpected_exit("stateful", result),
             result = orchestrator_handle => unexpected_exit("orchestrator", result),
             result = mempool_handle => unexpected_exit("mempool", result),
+            result = memclob_handle => unexpected_exit("memclob", result),
+            result = settlement_handle => unexpected_exit("settlement", result),
         }
     }
 }

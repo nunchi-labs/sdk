@@ -9,6 +9,7 @@ use jsonrpsee::core::async_trait;
 use nunchi_coins::{rpc::CoinQuery, Address, CoinId, Ledger, LedgerError, TokenDefinition};
 use nunchi_common::QmdbReader;
 use nunchi_mempool::MempoolHandle;
+use nunchi_memclob::MemClobHandle;
 
 pub use nunchi_chain::SharedAppliedHeight;
 
@@ -19,6 +20,7 @@ where
     E: Context + Spawner + Metrics + Clock + rand::Rng,
 {
     pub submitter: MempoolHandle<Transaction>,
+    pub memclob: MemClobHandle,
     pub stateful: StatefulMailbox<E, Application>,
     pub applied_height: SharedAppliedHeight,
 }
@@ -29,11 +31,13 @@ where
 {
     pub fn new(
         submitter: MempoolHandle<Transaction>,
+        memclob: MemClobHandle,
         stateful: StatefulMailbox<E, Application>,
         applied_height: SharedAppliedHeight,
     ) -> Self {
         Self {
             submitter,
+            memclob,
             stateful,
             applied_height,
         }

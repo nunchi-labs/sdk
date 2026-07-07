@@ -21,6 +21,7 @@ pub mod execution;
 pub mod genesis;
 pub mod rpc;
 pub mod runtime;
+pub mod settlement;
 pub mod testnet;
 pub mod transaction;
 
@@ -54,6 +55,7 @@ pub mod channels {
     pub const DKG: u64 = 4;
     pub const BACKFILL: u64 = 5;
     pub const MEMPOOL: u64 = 6;
+    pub const MEMCLOB: u64 = 7;
 }
 
 /// The consensus epoch. The demo chain never reconfigures, so the epoch is hardcoded to 0.

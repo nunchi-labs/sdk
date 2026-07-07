@@ -2815,10 +2815,12 @@ dependencies = [
  "jsonrpsee",
  "nunchi-authority",
  "nunchi-chain",
+ "nunchi-clob",
  "nunchi-coins",
  "nunchi-common",
  "nunchi-crypto",
  "nunchi-dkg",
+ "nunchi-memclob",
  "nunchi-mempool",
  "nunchi-oracle",
  "nunchi-rpc",
@@ -2928,6 +2930,26 @@ dependencies = [
  "tracing",
  "tracing-subscriber 0.3.23",
  "walkdir",
+]
+
+[[package]]
+name = "nunchi-memclob"
+version = "2026.6.0"
+dependencies = [
+ "bytes",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-runtime",
+ "commonware-utils",
+ "futures",
+ "governor",
+ "nunchi-clob",
+ "nunchi-common",
+ "nunchi-crypto",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
