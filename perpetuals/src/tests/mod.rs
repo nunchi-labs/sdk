@@ -11,8 +11,9 @@ use nunchi_oracle::{
 };
 
 use crate::{
-    collateral_escrow_account, CoinId, OraclePricePayload, PerpetualDB, PerpetualError,
-    PerpetualLedger, PositionId, Side, BPS_DENOMINATOR,
+    collateral_escrow_account, insurance_fund_account, CoinId, OraclePricePayload, PerpetualDB,
+    PerpetualError, PerpetualLedger, PositionId, Side, BPS_DENOMINATOR,
+    DEFAULT_LIQUIDATION_REWARD_BPS,
 };
 
 #[derive(Default)]
@@ -88,12 +89,18 @@ fn append_price(
     block_on(oracle.apply_transaction(&append, context(timestamp_ms))).unwrap();
 }
 
+fn oracle_writer() -> PrivateKey {
+    PrivateKey::from_seed(2)
+}
+
 fn create_market(ledger: &mut PerpetualLedger<MemoryStore>) -> Digest {
     block_on(ledger.create_market(
         coin(b"btc"),
         coin(b"usd"),
         coin(b"usdc"),
         namespace(),
+        address(&oracle_writer()),
+        None,
         1_000,
         10_000,
         2,
@@ -101,6 +108,7 @@ fn create_market(ledger: &mut PerpetualLedger<MemoryStore>) -> Digest {
         500,
         3_600_000,
         100,
+        DEFAULT_LIQUIDATION_REWARD_BPS,
     ))
     .unwrap()
 }
@@ -130,10 +138,10 @@ fn escrow_balance(ledger: &PerpetualLedger<MemoryStore>) -> u128 {
     balance(ledger, &collateral_escrow_account())
 }
 
-fn set_escrow_balance(ledger: &mut PerpetualLedger<MemoryStore>, amount: u128) {
+fn set_insurance_balance(ledger: &mut PerpetualLedger<MemoryStore>, amount: u128) {
     ledger
         .db_mut()
-        .set_balance(&collateral_escrow_account(), &coin(b"usdc"), amount);
+        .set_balance(&insurance_fund_account(), &coin(b"usdc"), amount);
 }
 
 fn skew_market_prices(
@@ -185,7 +193,7 @@ fn open_short(
 
 #[test]
 fn refresh_market_from_oracle_decodes_mock_price_payload() {
-    let writer = PrivateKey::from_seed(2);
+    let writer = oracle_writer();
     let mut ledger = PerpetualLedger::new(MemoryStore::default());
     let market = create_market(&mut ledger);
 
@@ -199,8 +207,35 @@ fn refresh_market_from_oracle_decodes_mock_price_payload() {
 }
 
 #[test]
+fn refresh_market_skips_malformed_and_untrusted_oracle_records() {
+    let writer = oracle_writer();
+    let untrusted = PrivateKey::from_seed(99);
+    let mut ledger = PerpetualLedger::new(MemoryStore::default());
+    let market = create_market(&mut ledger);
+
+    append_price(&mut ledger, &untrusted, 0, market, 900_000_000, 4, 1_000);
+    let append = OracleTransaction::sign(
+        &writer,
+        0,
+        OracleOperation::AppendRecord {
+            namespace: namespace(),
+            interval: IntervalKey::new(1),
+            payload: b"not-a-price-payload".to_vec(),
+            proof: None,
+        },
+    );
+    let mut oracle = OracleLedger::new(ledger.db_mut());
+    block_on(oracle.apply_transaction(&append, context(1_000))).unwrap();
+    append_price(&mut ledger, &writer, 1, market, 500_000_000, 4, 1_500);
+
+    block_on(ledger.refresh_market_from_oracle(market, context(2_000))).unwrap();
+    let market = block_on(ledger.market(&market)).unwrap().unwrap();
+    assert_eq!(market.index_price, 5_000_000);
+}
+
+#[test]
 fn long_position_blocks_unsafe_withdrawal_then_liquidates_after_price_drop() {
-    let writer = PrivateKey::from_seed(11);
+    let writer = oracle_writer();
     let trader = PrivateKey::from_seed(12);
     let trader_address = address(&trader);
     let mut ledger = PerpetualLedger::new(MemoryStore::default());
@@ -226,15 +261,19 @@ fn long_position_blocks_unsafe_withdrawal_then_liquidates_after_price_drop() {
 
     append_price(&mut ledger, &writer, 2, market, 400_000_000, 4, 3_000);
     block_on(ledger.refresh_market_from_oracle(market, context(3_500))).unwrap();
-    block_on(ledger.liquidate(position, context(3_600))).unwrap();
+    let liquidator = address(&PrivateKey::from_seed(13));
+    let reward = block_on(ledger.liquidate(&liquidator, position, context(3_600))).unwrap();
+    assert_eq!(reward, 50);
     assert!(block_on(ledger.position(&position)).unwrap().is_none());
     assert_eq!(balance(&ledger, &trader_address), 9_000);
-    assert_eq!(escrow_balance(&ledger), 1_000);
+    assert_eq!(balance(&ledger, &liquidator), reward);
+    assert_eq!(escrow_balance(&ledger), 0);
+    assert_eq!(balance(&ledger, &insurance_fund_account()), 950);
 }
 
 #[test]
 fn collateral_moves_through_escrow_on_open_adjust_and_close() {
-    let writer = PrivateKey::from_seed(31);
+    let writer = oracle_writer();
     let trader = PrivateKey::from_seed(32);
     let trader_address = address(&trader);
     let mut ledger = PerpetualLedger::new(MemoryStore::default());
@@ -265,16 +304,20 @@ fn collateral_moves_through_escrow_on_open_adjust_and_close() {
 
 #[test]
 fn funding_accrual_is_capped_and_interval_based() {
-    let writer = PrivateKey::from_seed(41);
-    let trader = PrivateKey::from_seed(42);
-    let trader_address = address(&trader);
+    let writer = oracle_writer();
+    let long_trader = PrivateKey::from_seed(42);
+    let short_trader = PrivateKey::from_seed(43);
+    let long_address = address(&long_trader);
+    let short_address = address(&short_trader);
     let mut ledger = PerpetualLedger::new(MemoryStore::default());
     let market = create_market(&mut ledger);
-    seed_collateral(&mut ledger, &trader_address, 5_000);
+    seed_collateral(&mut ledger, &long_address, 5_000);
+    seed_collateral(&mut ledger, &short_address, 5_000);
 
     append_price(&mut ledger, &writer, 0, market, 500_000_000, 4, 1_000);
     block_on(ledger.refresh_market_from_oracle(market, context(1_500))).unwrap();
-    let _position = open_long(&mut ledger, &trader, market, 1_600);
+    open_long(&mut ledger, &long_trader, market, 1_600);
+    open_short(&mut ledger, &short_trader, market, 1_600);
     skew_market_prices(&mut ledger, market, 5_000_000, 4_000_000);
 
     block_on(ledger.settle_funding(market, context(7_201_500))).unwrap();
@@ -287,52 +330,101 @@ fn funding_accrual_is_capped_and_interval_based() {
 
 #[test]
 fn funding_reduces_long_close_payout_when_mark_exceeds_index() {
-    let writer = PrivateKey::from_seed(51);
-    let trader = PrivateKey::from_seed(52);
-    let trader_address = address(&trader);
+    let writer = oracle_writer();
+    let long_trader = PrivateKey::from_seed(52);
+    let short_trader = PrivateKey::from_seed(53);
+    let long_address = address(&long_trader);
+    let short_address = address(&short_trader);
     let mut ledger = PerpetualLedger::new(MemoryStore::default());
     let market = create_market(&mut ledger);
-    seed_collateral(&mut ledger, &trader_address, 10_000);
+    seed_collateral(&mut ledger, &long_address, 10_000);
+    seed_collateral(&mut ledger, &short_address, 10_000);
 
     append_price(&mut ledger, &writer, 0, market, 500_000_000, 4, 1_000);
     block_on(ledger.refresh_market_from_oracle(market, context(1_500))).unwrap();
-    let position = open_long(&mut ledger, &trader, market, 1_600);
+    let position = open_long(&mut ledger, &long_trader, market, 1_600);
+    open_short(&mut ledger, &short_trader, market, 1_600);
     skew_market_prices(&mut ledger, market, 5_000_000, 4_000_000);
 
     let payout =
-        block_on(ledger.close_position(&trader_address, position, context(3_601_500))).unwrap();
+        block_on(ledger.close_position(&long_address, position, context(3_601_500))).unwrap();
 
     assert_eq!(payout, 950);
-    assert_eq!(balance(&ledger, &trader_address), 9_950);
-    assert_eq!(escrow_balance(&ledger), 50);
+    assert_eq!(balance(&ledger, &long_address), 9_950);
+    assert_eq!(balance(&ledger, &short_address), 9_000);
+    assert_eq!(escrow_balance(&ledger), 1_050);
 }
 
 #[test]
 fn funding_increases_short_close_payout_when_mark_exceeds_index() {
-    let writer = PrivateKey::from_seed(61);
-    let trader = PrivateKey::from_seed(62);
-    let trader_address = address(&trader);
+    let writer = oracle_writer();
+    let long_trader = PrivateKey::from_seed(61);
+    let short_trader = PrivateKey::from_seed(62);
+    let long_address = address(&long_trader);
+    let short_address = address(&short_trader);
     let mut ledger = PerpetualLedger::new(MemoryStore::default());
     let market = create_market(&mut ledger);
-    seed_collateral(&mut ledger, &trader_address, 10_000);
-    set_escrow_balance(&mut ledger, 1_000);
+    seed_collateral(&mut ledger, &long_address, 10_000);
+    seed_collateral(&mut ledger, &short_address, 10_000);
 
     append_price(&mut ledger, &writer, 0, market, 500_000_000, 4, 1_000);
     block_on(ledger.refresh_market_from_oracle(market, context(1_500))).unwrap();
-    let position = open_short(&mut ledger, &trader, market, 1_600);
+    open_long(&mut ledger, &long_trader, market, 1_600);
+    let position = open_short(&mut ledger, &short_trader, market, 1_600);
     skew_market_prices(&mut ledger, market, 5_000_000, 4_000_000);
 
     let payout =
-        block_on(ledger.close_position(&trader_address, position, context(3_601_500))).unwrap();
+        block_on(ledger.close_position(&short_address, position, context(3_601_500))).unwrap();
 
     assert_eq!(payout, 1_050);
-    assert_eq!(balance(&ledger, &trader_address), 10_050);
+    assert_eq!(balance(&ledger, &short_address), 10_050);
+    assert_eq!(balance(&ledger, &long_address), 9_000);
     assert_eq!(escrow_balance(&ledger), 950);
 }
 
 #[test]
+fn update_mark_price_keeps_index_from_oracle() {
+    let writer = oracle_writer();
+    let mut ledger = PerpetualLedger::new(MemoryStore::default());
+    let market = create_market(&mut ledger);
+
+    append_price(&mut ledger, &writer, 0, market, 500_000_000, 4, 1_000);
+    block_on(ledger.refresh_market_from_oracle(market, context(1_500))).unwrap();
+    block_on(ledger.update_mark_price(market, 4_500_000, context(1_600))).unwrap();
+
+    let market = block_on(ledger.market(&market)).unwrap().unwrap();
+    assert_eq!(market.index_price, 5_000_000);
+    assert_eq!(market.mark_price, 4_500_000);
+}
+
+#[test]
+fn profitable_close_draws_from_insurance_when_escrow_is_insufficient() {
+    let writer = oracle_writer();
+    let winner = PrivateKey::from_seed(71);
+    let loser = PrivateKey::from_seed(72);
+    let winner_address = address(&winner);
+    let loser_address = address(&loser);
+    let mut ledger = PerpetualLedger::new(MemoryStore::default());
+    let market = create_market(&mut ledger);
+    seed_collateral(&mut ledger, &winner_address, 10_000);
+    seed_collateral(&mut ledger, &loser_address, 10_000);
+    set_insurance_balance(&mut ledger, 500);
+
+    append_price(&mut ledger, &writer, 0, market, 500_000_000, 4, 1_000);
+    block_on(ledger.refresh_market_from_oracle(market, context(1_500))).unwrap();
+    open_short(&mut ledger, &loser, market, 1_600);
+    let winner_position = open_long(&mut ledger, &winner, market, 1_600);
+    skew_market_prices(&mut ledger, market, 6_000_000, 5_000_000);
+
+    let payout =
+        block_on(ledger.close_position(&winner_address, winner_position, context(1_700))).unwrap();
+    assert!(payout > 1_000);
+    assert_eq!(balance(&ledger, &winner_address), 10_000 - 1_000 + payout);
+}
+
+#[test]
 fn stale_oracle_price_blocks_trading() {
-    let writer = PrivateKey::from_seed(21);
+    let writer = oracle_writer();
     let trader = PrivateKey::from_seed(22);
     let mut ledger = PerpetualLedger::new(MemoryStore::default());
     let market = create_market(&mut ledger);

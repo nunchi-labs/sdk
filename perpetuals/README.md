@@ -4,11 +4,22 @@
 
 ## Current model
 
-- Markets define base, quote, and collateral assets, plus their Oracle namespace and risk parameters.
-- Oracle records remain opaque to `nunchi-oracle`; this module decodes `OraclePricePayload`, scales/truncates prices, and owns freshness checks.
+- Markets define base, quote, and collateral assets, plus their Oracle namespace, trusted `oracle_writer`, and risk parameters.
+- Oracle records remain opaque to `nunchi-oracle`; this module decodes `OraclePricePayload`, scales/truncates prices, and owns freshness checks. Malformed or untrusted-writer records are skipped rather than aborting refresh.
+- `index_price` comes from the trusted oracle writer. `mark_price` is bootstrapped from the first oracle refresh and can diverge via `UpdateMarkPrice` or the optional `actor` mailbox wired to the CLOB module.
 - Positions use isolated margin. Collateral is escrowed in a deterministic perps account backed by `nunchi-coins` balances.
-- Funding accrues into cumulative long and short indices and is applied when closing or liquidating positions.
-- Liquidation removes positions whose equity is below maintenance margin. Residual collateral stays in escrow as an insurance-style reserve.
+- Funding accrues only when both long and short open interest are non-zero, keeping index deltas zero-sum across sides.
+- Liquidation pays a configurable reward to the liquidator, returns residual equity to the owner when possible, and routes the remainder to an insurance fund account.
+- Underwater positions cannot be closed voluntarily; they must be liquidated.
+
+## CLOB integration (PR #117)
+
+Enable the `actor` feature to expose:
+
+- `nunchi_perpetuals::ingress::Mailbox` — send `UpdateMarkPrice` from the CLOB actor after matching.
+- `nunchi_perpetuals::actor::Actor` — drain mailbox messages into `PerpetualLedger` state.
+
+Markets may optionally store a linked `clob_market` id at creation time so operators can wire the two modules deterministically.
 
 ## Mock Oracle payload
 

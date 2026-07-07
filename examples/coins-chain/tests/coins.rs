@@ -21,7 +21,7 @@ use nunchi_coins::{
 use nunchi_oracle::{IntervalKey, NamespaceId, OracleOperation, Transaction as OracleTransaction};
 use nunchi_perpetuals::{
     collateral_escrow_account, derive_market_id, derive_position_id, OraclePricePayload,
-    PerpetualOperation, Side, Transaction as PerpetualTransaction,
+    PerpetualOperation, Side, Transaction as PerpetualTransaction, DEFAULT_LIQUIDATION_REWARD_BPS,
 };
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::time::Duration;
@@ -537,6 +537,7 @@ fn perps_oracle_flow_finalizes_across_validators() {
         let issuer = key(COLLATERAL_ISSUER);
         let trader = key(PERPS_TRADER);
         let oracle_writer = authority_key(PERPS_ORACLE_WRITER);
+        let oracle_writer_id = Address::from(oracle_writer.public_key());
         let issuer_id = Address::from(issuer.public_key());
         let trader_id = Address::from(trader.public_key());
         let market_id = derive_market_id(btc_coin(), usd_coin(), usdc_coin(), 0);
@@ -628,6 +629,8 @@ fn perps_oracle_flow_finalizes_across_validators() {
                         quote_asset: usd_coin(),
                         collateral_asset: usdc_coin(),
                         oracle_namespace: perps_oracle_namespace(),
+                        oracle_writer: oracle_writer_id.clone(),
+                        clob_market: None,
                         oracle_interval_ms: u64::MAX,
                         max_oracle_staleness_ms: u64::MAX,
                         price_decimals: 2,
@@ -635,6 +638,7 @@ fn perps_oracle_flow_finalizes_across_validators() {
                         maintenance_margin_bps: 1_000,
                         funding_interval_ms: 3_600_000,
                         max_funding_rate_bps: 100,
+                        liquidation_reward_bps: DEFAULT_LIQUIDATION_REWARD_BPS,
                     },
                 )
                 .into(),
@@ -770,6 +774,9 @@ fn perps_oracle_flow_finalizes_across_validators() {
 
         for ledger in network.perpetual_ledgers().await {
             assert!(ledger.position(&position_id).await.unwrap().is_none());
+        }
+        for ledger in network.ledgers().await {
+            assert!(ledger.balance(&trader_id, &usdc_coin()).await.unwrap() > 99_000);
         }
     });
 }

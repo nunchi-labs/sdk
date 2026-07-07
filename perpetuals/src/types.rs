@@ -23,6 +23,9 @@ pub enum Side {
     Short,
 }
 
+/// Default liquidator reward when a market is created without an explicit value.
+pub const DEFAULT_LIQUIDATION_REWARD_BPS: u32 = 500;
+
 /// Market-level state and configuration owned by the perps module.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Market {
@@ -31,6 +34,10 @@ pub struct Market {
     pub quote_asset: CoinId,
     pub collateral_asset: CoinId,
     pub oracle_namespace: NamespaceId,
+    /// Trusted oracle writer for index-price records in `oracle_namespace`.
+    pub oracle_writer: Address,
+    /// Optional linked CLOB market id used by off-chain actors to publish mark prices.
+    pub clob_market: Option<MarketId>,
     pub oracle_interval_ms: u64,
     pub max_oracle_staleness_ms: u64,
     pub price_decimals: u8,
@@ -38,14 +45,24 @@ pub struct Market {
     pub maintenance_margin_bps: u32,
     pub funding_interval_ms: u64,
     pub max_funding_rate_bps: u32,
+    /// Reward paid to the liquidator as a fraction of position collateral.
+    pub liquidation_reward_bps: u32,
     pub mark_price: u128,
     pub index_price: u128,
-    pub open_interest: u128,
+    pub long_open_interest: u128,
+    pub short_open_interest: u128,
     pub last_oracle_interval: u64,
     pub last_oracle_update_ms: u64,
     pub last_funding_ms: u64,
     pub cumulative_funding_long: i128,
     pub cumulative_funding_short: i128,
+}
+
+impl Market {
+    /// Open interest matched between long and short sides.
+    pub fn matched_open_interest(&self) -> u128 {
+        self.long_open_interest.min(self.short_open_interest)
+    }
 }
 
 /// Isolated-margin position state.
@@ -132,6 +149,14 @@ impl Write for Market {
         self.quote_asset.write(buf);
         self.collateral_asset.write(buf);
         self.oracle_namespace.write(buf);
+        self.oracle_writer.write(buf);
+        match &self.clob_market {
+            Some(id) => {
+                1u8.write(buf);
+                id.write(buf);
+            }
+            None => 0u8.write(buf),
+        }
         self.oracle_interval_ms.write(buf);
         self.max_oracle_staleness_ms.write(buf);
         self.price_decimals.write(buf);
@@ -139,9 +164,11 @@ impl Write for Market {
         self.maintenance_margin_bps.write(buf);
         self.funding_interval_ms.write(buf);
         self.max_funding_rate_bps.write(buf);
+        self.liquidation_reward_bps.write(buf);
         self.mark_price.write(buf);
         self.index_price.write(buf);
-        self.open_interest.write(buf);
+        self.long_open_interest.write(buf);
+        self.short_open_interest.write(buf);
         self.last_oracle_interval.write(buf);
         self.last_oracle_update_ms.write(buf);
         self.last_funding_ms.write(buf);
@@ -160,6 +187,12 @@ impl Read for Market {
             quote_asset: CoinId::read(buf)?,
             collateral_asset: CoinId::read(buf)?,
             oracle_namespace: NamespaceId::read(buf)?,
+            oracle_writer: Address::read(buf)?,
+            clob_market: match u8::read(buf)? {
+                0 => None,
+                1 => Some(MarketId::read(buf)?),
+                tag => return Err(Error::InvalidEnum(tag)),
+            },
             oracle_interval_ms: u64::read(buf)?,
             max_oracle_staleness_ms: u64::read(buf)?,
             price_decimals: u8::read(buf)?,
@@ -167,9 +200,11 @@ impl Read for Market {
             maintenance_margin_bps: u32::read(buf)?,
             funding_interval_ms: u64::read(buf)?,
             max_funding_rate_bps: u32::read(buf)?,
+            liquidation_reward_bps: u32::read(buf)?,
             mark_price: u128::read(buf)?,
             index_price: u128::read(buf)?,
-            open_interest: u128::read(buf)?,
+            long_open_interest: u128::read(buf)?,
+            short_open_interest: u128::read(buf)?,
             last_oracle_interval: u64::read(buf)?,
             last_oracle_update_ms: u64::read(buf)?,
             last_funding_ms: u64::read(buf)?,
@@ -186,6 +221,13 @@ impl EncodeSize for Market {
             + self.quote_asset.encode_size()
             + self.collateral_asset.encode_size()
             + self.oracle_namespace.encode_size()
+            + self.oracle_writer.encode_size()
+            + 1
+            + self
+                .clob_market
+                .as_ref()
+                .map(MarketId::encode_size)
+                .unwrap_or(0)
             + self.oracle_interval_ms.encode_size()
             + self.max_oracle_staleness_ms.encode_size()
             + self.price_decimals.encode_size()
@@ -193,9 +235,11 @@ impl EncodeSize for Market {
             + self.maintenance_margin_bps.encode_size()
             + self.funding_interval_ms.encode_size()
             + self.max_funding_rate_bps.encode_size()
+            + self.liquidation_reward_bps.encode_size()
             + self.mark_price.encode_size()
             + self.index_price.encode_size()
-            + self.open_interest.encode_size()
+            + self.long_open_interest.encode_size()
+            + self.short_open_interest.encode_size()
             + self.last_oracle_interval.encode_size()
             + self.last_oracle_update_ms.encode_size()
             + self.last_funding_ms.encode_size()

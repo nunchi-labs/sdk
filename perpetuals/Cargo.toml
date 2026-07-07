@@ -11,6 +11,7 @@ workspace = true
 default = ["rpc"]
 rpc = ["dep:futures", "dep:jsonrpsee", "dep:nunchi-rpc"]
 mempool = ["dep:nunchi-mempool"]
+actor = ["dep:commonware-actor", "dep:commonware-macros", "dep:commonware-runtime", "dep:commonware-utils", "dep:tracing"]
 
 [dependencies]
 async-trait = { workspace = true }
@@ -22,13 +23,21 @@ nunchi-crypto = { workspace = true }
 nunchi-mempool = { workspace = true, optional = true }
 nunchi-oracle = { workspace = true }
 nunchi-rpc = { workspace = true, optional = true }
+commonware-actor = { workspace = true, optional = true }
 commonware-codec = { workspace = true }
 commonware-cryptography = { workspace = true }
 commonware-formatting = { workspace = true }
+commonware-macros = { workspace = true, optional = true }
+commonware-runtime = { workspace = true, optional = true }
+commonware-utils = { workspace = true, optional = true }
 jsonrpsee = { workspace = true, optional = true }
 serde = { workspace = true }
 futures = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
 
 [dev-dependencies]
+commonware-actor = { workspace = true }
 commonware-runtime = { workspace = true }
+commonware-utils = { workspace = true }
+tracing = { workspace = true }
 serde_json = { workspace = true }

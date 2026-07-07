@@ -1,7 +1,7 @@
 use crate::{MarketId, PositionId, Side, PERPETUALS_NAMESPACE};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use nunchi_coins::CoinId;
-use nunchi_common::Operation;
+use nunchi_common::{Address, Operation};
 use nunchi_oracle::NamespaceId;
 
 #[repr(u8)]
@@ -15,6 +15,7 @@ enum OperationTag {
     ReduceCollateral = 5,
     ClosePosition = 6,
     Liquidate = 7,
+    UpdateMarkPrice = 8,
 }
 
 impl TryFrom<u8> for OperationTag {
@@ -30,6 +31,7 @@ impl TryFrom<u8> for OperationTag {
             5 => Ok(Self::ReduceCollateral),
             6 => Ok(Self::ClosePosition),
             7 => Ok(Self::Liquidate),
+            8 => Ok(Self::UpdateMarkPrice),
             tag => Err(Error::InvalidEnum(tag)),
         }
     }
@@ -43,6 +45,8 @@ pub enum PerpetualOperation {
         quote_asset: CoinId,
         collateral_asset: CoinId,
         oracle_namespace: NamespaceId,
+        oracle_writer: Address,
+        clob_market: Option<MarketId>,
         oracle_interval_ms: u64,
         max_oracle_staleness_ms: u64,
         price_decimals: u8,
@@ -50,6 +54,7 @@ pub enum PerpetualOperation {
         maintenance_margin_bps: u32,
         funding_interval_ms: u64,
         max_funding_rate_bps: u32,
+        liquidation_reward_bps: u32,
     },
     RefreshMarketFromOracle {
         market: MarketId,
@@ -77,6 +82,10 @@ pub enum PerpetualOperation {
     Liquidate {
         position: PositionId,
     },
+    UpdateMarkPrice {
+        market: MarketId,
+        mark_price: u128,
+    },
 }
 
 impl Write for PerpetualOperation {
@@ -87,6 +96,8 @@ impl Write for PerpetualOperation {
                 quote_asset,
                 collateral_asset,
                 oracle_namespace,
+                oracle_writer,
+                clob_market,
                 oracle_interval_ms,
                 max_oracle_staleness_ms,
                 price_decimals,
@@ -94,12 +105,21 @@ impl Write for PerpetualOperation {
                 maintenance_margin_bps,
                 funding_interval_ms,
                 max_funding_rate_bps,
+                liquidation_reward_bps,
             } => {
                 (OperationTag::CreateMarket as u8).write(buf);
                 base_asset.write(buf);
                 quote_asset.write(buf);
                 collateral_asset.write(buf);
                 oracle_namespace.write(buf);
+                oracle_writer.write(buf);
+                match clob_market {
+                    Some(id) => {
+                        1u8.write(buf);
+                        id.write(buf);
+                    }
+                    None => 0u8.write(buf),
+                }
                 oracle_interval_ms.write(buf);
                 max_oracle_staleness_ms.write(buf);
                 price_decimals.write(buf);
@@ -107,6 +127,7 @@ impl Write for PerpetualOperation {
                 maintenance_margin_bps.write(buf);
                 funding_interval_ms.write(buf);
                 max_funding_rate_bps.write(buf);
+                liquidation_reward_bps.write(buf);
             }
             Self::RefreshMarketFromOracle { market } => {
                 (OperationTag::RefreshMarketFromOracle as u8).write(buf);
@@ -146,6 +167,11 @@ impl Write for PerpetualOperation {
                 (OperationTag::Liquidate as u8).write(buf);
                 position.write(buf);
             }
+            Self::UpdateMarkPrice { market, mark_price } => {
+                (OperationTag::UpdateMarkPrice as u8).write(buf);
+                market.write(buf);
+                mark_price.write(buf);
+            }
         }
     }
 }
@@ -160,6 +186,12 @@ impl Read for PerpetualOperation {
                 quote_asset: CoinId::read(buf)?,
                 collateral_asset: CoinId::read(buf)?,
                 oracle_namespace: NamespaceId::read(buf)?,
+                oracle_writer: Address::read(buf)?,
+                clob_market: match u8::read(buf)? {
+                    0 => None,
+                    1 => Some(MarketId::read(buf)?),
+                    tag => return Err(Error::InvalidEnum(tag)),
+                },
                 oracle_interval_ms: u64::read(buf)?,
                 max_oracle_staleness_ms: u64::read(buf)?,
                 price_decimals: u8::read(buf)?,
@@ -167,6 +199,7 @@ impl Read for PerpetualOperation {
                 maintenance_margin_bps: u32::read(buf)?,
                 funding_interval_ms: u64::read(buf)?,
                 max_funding_rate_bps: u32::read(buf)?,
+                liquidation_reward_bps: u32::read(buf)?,
             }),
             OperationTag::RefreshMarketFromOracle => Ok(Self::RefreshMarketFromOracle {
                 market: MarketId::read(buf)?,
@@ -194,6 +227,10 @@ impl Read for PerpetualOperation {
             OperationTag::Liquidate => Ok(Self::Liquidate {
                 position: PositionId::read(buf)?,
             }),
+            OperationTag::UpdateMarkPrice => Ok(Self::UpdateMarkPrice {
+                market: MarketId::read(buf)?,
+                mark_price: u128::read(buf)?,
+            }),
         }
     }
 }
@@ -206,6 +243,8 @@ impl EncodeSize for PerpetualOperation {
                 quote_asset,
                 collateral_asset,
                 oracle_namespace,
+                oracle_writer,
+                clob_market,
                 oracle_interval_ms,
                 max_oracle_staleness_ms,
                 price_decimals,
@@ -213,11 +252,15 @@ impl EncodeSize for PerpetualOperation {
                 maintenance_margin_bps,
                 funding_interval_ms,
                 max_funding_rate_bps,
+                liquidation_reward_bps,
             } => {
                 base_asset.encode_size()
                     + quote_asset.encode_size()
                     + collateral_asset.encode_size()
                     + oracle_namespace.encode_size()
+                    + oracle_writer.encode_size()
+                    + 1
+                    + clob_market.as_ref().map(MarketId::encode_size).unwrap_or(0)
                     + oracle_interval_ms.encode_size()
                     + max_oracle_staleness_ms.encode_size()
                     + price_decimals.encode_size()
@@ -225,6 +268,7 @@ impl EncodeSize for PerpetualOperation {
                     + maintenance_margin_bps.encode_size()
                     + funding_interval_ms.encode_size()
                     + max_funding_rate_bps.encode_size()
+                    + liquidation_reward_bps.encode_size()
             }
             Self::RefreshMarketFromOracle { market } | Self::SettleFunding { market } => {
                 market.encode_size()
@@ -246,6 +290,9 @@ impl EncodeSize for PerpetualOperation {
             }
             Self::ClosePosition { position } | Self::Liquidate { position } => {
                 position.encode_size()
+            }
+            Self::UpdateMarkPrice { market, mark_price } => {
+                market.encode_size() + mark_price.encode_size()
             }
         }
     }

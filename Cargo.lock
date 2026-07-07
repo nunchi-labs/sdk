@@ -2950,10 +2950,13 @@ version = "2026.6.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "commonware-actor",
  "commonware-codec",
  "commonware-cryptography",
  "commonware-formatting",
+ "commonware-macros",
  "commonware-runtime",
+ "commonware-utils",
  "futures",
  "jsonrpsee",
  "nunchi-coins",
@@ -2965,6 +2968,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
