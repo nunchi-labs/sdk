@@ -72,6 +72,10 @@ fn historical_proof_verifies_against_past_root() {
             .historical_proof(size1, bounds1.start, NonZeroU64::new(1024).unwrap())
             .await
             .expect("historical proof");
+
+        // The proof reports the operation range it starts at, so a caller can line it up against a
+        // block's state range.
+        assert_eq!(proof.start(), bounds1.start);
         assert!(verify_state_proof(&proof, &root1));
 
         // It authenticates the account-1 update that existed as of R1...
