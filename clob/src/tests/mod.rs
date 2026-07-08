@@ -4,7 +4,7 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_formatting::hex;
 use commonware_runtime::{deterministic, Runner as _};
-use nunchi_common::{Address, RuntimeContext, StateError, StateStore};
+use nunchi_common::{Address, CommitState, RuntimeContext, StateError, StateStore};
 use nunchi_crypto::PrivateKey;
 
 use crate::{
@@ -29,6 +29,16 @@ impl StateStore for MemoryStore {
 
     fn remove(&mut self, key: Digest) {
         self.values.insert(key, None);
+    }
+}
+
+impl CommitState for MemoryStore {
+    async fn commit(&mut self) -> Result<Digest, StateError> {
+        Ok(self.root())
+    }
+
+    fn root(&self) -> Digest {
+        Sha256::hash(b"clob-test-root")
     }
 }
 
@@ -62,6 +72,10 @@ fn market() -> crate::MarketId {
 
 fn fake_fill_id(seed: u64) -> FillId {
     FillId(Sha256::hash(seed.encode().as_ref()))
+}
+
+fn encoded_id<T: Encode>(id: &T) -> String {
+    hex(id.encode().as_ref())
 }
 
 fn create_market_tx(signer: &PrivateKey, nonce: u64) -> Transaction {
@@ -454,5 +468,107 @@ fn full_market_fill_index_retains_recent_fills_without_blocking() {
         assert_eq!(recent_fill.market, market);
         assert_eq!(recent_fill.price, 100);
         assert_eq!(recent_fill.base_quantity, 2);
+    });
+}
+
+#[cfg(feature = "rpc")]
+#[test]
+fn rpc_queries_ledger_state() {
+    use crate::rpc::{register, ClobRpc, ClobServer, SharedLedger};
+    use nunchi_rpc::RpcRouter;
+
+    run_test(|| async {
+        let maker = PrivateKey::from_seed(1);
+        let taker = PrivateKey::from_seed(2);
+        let maker_addr = Address::external(&maker.public_key());
+        let taker_addr = Address::external(&taker.public_key());
+        let market = market();
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+
+        ledger
+            .apply_transaction(&create_market_tx(&maker, 0), context(1))
+            .await
+            .unwrap();
+        let ask = place_tx(
+            &maker,
+            1,
+            Side::Ask,
+            100,
+            2,
+            TimeInForce::GoodTilCancelled,
+        );
+        let ask_id = OrderId(ask.digest());
+        ledger.apply_transaction(&ask, context(2)).await.unwrap();
+
+        let bid = place_tx(
+            &taker,
+            0,
+            Side::Bid,
+            100,
+            2,
+            TimeInForce::ImmediateOrCancel,
+        );
+        let bid_id = OrderId(bid.digest());
+        ledger.apply_transaction(&bid, context(3)).await.unwrap();
+        let fill = ledger.market_fills(&market).await.unwrap().remove(0);
+
+        let rpc = ClobRpc::new(SharedLedger::new(ledger));
+        let market_hex = encoded_id(&market);
+
+        let nonce = rpc.nonce(maker_addr.to_bech32()).await.unwrap();
+        assert_eq!(nonce.account, maker_addr.to_bech32());
+        assert_eq!(nonce.nonce, 2);
+
+        let markets = rpc.markets().await.unwrap();
+        assert_eq!(markets.markets.len(), 1);
+        assert_eq!(markets.markets[0].id, market_hex);
+        assert_eq!(markets.markets[0].tick_size, MARKET_TICK.to_string());
+        assert_eq!(markets.markets[0].lot_size, MARKET_LOT.to_string());
+
+        let market_response = rpc.market(market_hex.clone()).await.unwrap().unwrap();
+        let (canonical_base, _) = crate::canonical_asset_pair(asset(b"base"), asset(b"quote"));
+        assert_eq!(market_response.base_asset, encoded_id(&canonical_base));
+
+        let ask_order = rpc.order(encoded_id(&ask_id)).await.unwrap().unwrap();
+        assert_eq!(ask_order.status, "filled");
+        assert_eq!(ask_order.side, "ask");
+
+        let bid_order = rpc.order(encoded_id(&bid_id)).await.unwrap().unwrap();
+        assert_eq!(bid_order.owner, taker_addr.to_bech32());
+        assert_eq!(bid_order.status, "filled");
+
+        let asks = rpc.book(market_hex.clone(), "ask".to_string()).await.unwrap();
+        assert_eq!(asks.market, market_hex);
+        assert_eq!(asks.side, "ask");
+        assert!(asks.orders.is_empty());
+
+        let open_orders = rpc.account_orders(maker_addr.to_bech32()).await.unwrap();
+        assert!(open_orders.orders.is_empty());
+
+        let fills = rpc.fills(market_hex.clone()).await.unwrap();
+        assert_eq!(fills.market, market_hex);
+        assert_eq!(fills.fills.len(), 1);
+        assert_eq!(fills.fills[0].id, encoded_id(&fill.id));
+        assert_eq!(fills.fills[0].taker_side, "bid");
+        assert_eq!(fills.fills[0].quote_quantity, "200");
+
+        let fill_response = rpc.fill(encoded_id(&fill.id)).await.unwrap().unwrap();
+        assert_eq!(fill_response.maker_order, encoded_id(&ask_id));
+        assert_eq!(fill_response.taker_order, encoded_id(&bid_id));
+
+        let root = rpc.state_root().await.unwrap();
+        assert_eq!(root.root, encoded_id(&Sha256::hash(b"clob-test-root")));
+
+        assert!(rpc
+            .book(encoded_id(&market), "crossed".to_string())
+            .await
+            .is_err());
+        assert!(rpc.market("not-hex".to_string()).await.is_err());
+
+        let mut router = RpcRouter::new(());
+        register(&mut router, rpc).unwrap();
+        let methods = router.method_names();
+        assert!(methods.contains(&"clob.nonce"));
+        assert!(methods.contains(&"clob.fills"));
     });
 }
