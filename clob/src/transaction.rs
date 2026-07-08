@@ -77,7 +77,7 @@ pub enum ClobOperation {
         tick_size: u128,
         lot_size: u128,
     },
-    /// Place a limit order and match it against the opposite side if possible.
+    /// Signed limit-order intent for the off-chain matcher.
     PlaceOrder {
         market: MarketId,
         side: Side,
@@ -85,7 +85,7 @@ pub enum ClobOperation {
         base_quantity: u128,
         time_in_force: TimeInForce,
     },
-    /// Cancel one open order owned by the signer.
+    /// Signed cancellation intent for validator-local books.
     CancelOrder { order: OrderId },
     /// Apply one proposer match batch after validators replay signed orders.
     ApplyMatchBatch { batch: MatchBatch },

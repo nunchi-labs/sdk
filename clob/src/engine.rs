@@ -92,18 +92,20 @@ impl MatchEngine {
         let book = self.books.entry(taker.market).or_default();
         let opposite = book.side_mut(taker.side.opposite());
         let mut remaining_makers = Vec::with_capacity(opposite.len());
+        let makers = std::mem::take(opposite);
 
-        for mut maker in opposite.drain(..) {
+        for idx in 0..makers.len() {
             if taker.remaining_base == 0 {
-                remaining_makers.push(maker);
-                continue;
+                append_open_orders(&mut remaining_makers, &makers[idx..]);
+                break;
             }
+            let mut maker = makers[idx].clone();
             if !maker.status.is_open() || maker.remaining_base == 0 {
                 continue;
             }
             if !taker.side.crosses(taker.price, maker.price) {
-                remaining_makers.push(maker);
-                continue;
+                append_open_orders(&mut remaining_makers, &makers[idx..]);
+                break;
             }
 
             let base = taker.remaining_base.min(maker.remaining_base);
@@ -167,6 +169,14 @@ impl Book {
         match side {
             Side::Bid => &mut self.bids,
             Side::Ask => &mut self.asks,
+        }
+    }
+}
+
+fn append_open_orders(book: &mut Vec<Order>, orders: &[Order]) {
+    for order in orders {
+        if order.status.is_open() && order.remaining_base > 0 {
+            book.push(order.clone());
         }
     }
 }

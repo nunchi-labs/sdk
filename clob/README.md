@@ -5,7 +5,7 @@
 The module owns:
 
 - market metadata for base/quote pairs
-- signed place/cancel order intents for the validator-local book
+- signed order intents for the validator-local book
 - deterministic price-time matching and validator replay
 - proposer match batches carried as a consensus extension
 - fill records queryable by market
@@ -15,7 +15,8 @@ It intentionally does not own settlement, balances, margin, funding, PnL, liquid
 ## v1 operations
 
 - `CreateMarket`
-- `PlaceOrder` / `CancelOrder` as off-chain signed intents
+- `PlaceOrder` as an off-chain signed intent
+- `CancelOrder` remains an off-chain intent boundary and is not a direct on-chain matcher entry point
 - `ApplyMatchBatch` as a batch payload verified from signed order inputs
 
 `PlaceOrder` supports `GoodTilCancelled` and `ImmediateOrCancel` time-in-force, but it is not an on-chain matcher entry point. Validators accept fills because they re-run deterministic matching over signed order inputs, not because a validator signed the fill output. Fills execute at the resting maker price. Asset ids are opaque `Digest`-backed identifiers so the CLOB can be wired to `nunchi-coins`, perps market ids, or other settlement domains later without changing the matching primitive.

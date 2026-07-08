@@ -643,7 +643,6 @@ fn rpc_queries_ledger_state() {
         let maker = PrivateKey::from_seed(2);
         let taker = PrivateKey::from_seed(3);
         let maker_addr = Address::external(&maker.public_key());
-        let taker_addr = Address::external(&taker.public_key());
         let market = market();
         let mut ledger = ClobLedger::new(MemoryStore::default());
 
