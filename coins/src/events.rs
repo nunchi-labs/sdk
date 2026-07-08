@@ -7,6 +7,7 @@ pub const TOKEN_CREATED_EVENT: &[u8] = b"coins.token_created.v1";
 pub const MINTED_EVENT: &[u8] = b"coins.minted.v1";
 pub const BURNED_EVENT: &[u8] = b"coins.burned.v1";
 pub const TRANSFERRED_EVENT: &[u8] = b"coins.transferred.v1";
+pub const FEE_CHARGED_EVENT: &[u8] = b"coins.fee_charged.v1";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AccountPolicyRegistered {
@@ -182,6 +183,45 @@ impl EncodeSize for Transferred {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeCharged {
+    pub coin: CoinId,
+    pub payer: Address,
+    pub collector: Address,
+    pub amount: u128,
+}
+
+impl Write for FeeCharged {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.coin.write(buf);
+        self.payer.write(buf);
+        self.collector.write(buf);
+        self.amount.write(buf);
+    }
+}
+
+impl Read for FeeCharged {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+        Ok(Self {
+            coin: CoinId::read(buf)?,
+            payer: Address::read(buf)?,
+            collector: Address::read(buf)?,
+            amount: u128::read(buf)?,
+        })
+    }
+}
+
+impl EncodeSize for FeeCharged {
+    fn encode_size(&self) -> usize {
+        self.coin.encode_size()
+            + self.payer.encode_size()
+            + self.collector.encode_size()
+            + self.amount.encode_size()
+    }
+}
+
 pub fn account_policy_registered_event(value: AccountPolicyRegistered) -> Event {
     Event::new(
         bytes::Bytes::from_static(ACCOUNT_POLICY_REGISTERED_EVENT),
@@ -203,4 +243,8 @@ pub fn burned_event(value: Burned) -> Event {
 
 pub fn transferred_event(value: Transferred) -> Event {
     Event::new(bytes::Bytes::from_static(TRANSFERRED_EVENT), value.encode())
+}
+
+pub fn fee_charged_event(value: FeeCharged) -> Event {
+    Event::new(bytes::Bytes::from_static(FEE_CHARGED_EVENT), value.encode())
 }

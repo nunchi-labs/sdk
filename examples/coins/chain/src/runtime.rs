@@ -1,5 +1,6 @@
 //! Coins-chain runtime execution dispatch.
 
+use commonware_codec::EncodeSize;
 use nunchi_authority::{AuthorityError, AuthorityLedger};
 use nunchi_coins::{Ledger, LedgerError};
 use nunchi_common::{EventSink, NoopEventSink, Runtime, RuntimeContext, StateStore};
@@ -68,12 +69,22 @@ async fn apply_transaction<S, Events>(
     state: &mut S,
     context: RuntimeContext,
     transaction: &Transaction,
-    events: Events,
+    mut events: Events,
 ) -> Result<(), RuntimeError>
 where
     S: StateStore + Send + Sync,
     Events: EventSink + Send,
 {
+    // Fee ante: charge the authorizing account before module dispatch. The fee is staged in the
+    // same overlay as the operation, so a failed transaction reverts its fee.
+    let mut fees = Ledger::new(&mut *state);
+    fees.charge_fee(
+        transaction.account_id(),
+        transaction.encode_size(),
+        &mut events,
+    )
+    .await?;
+
     match transaction {
         Transaction::Coin(transaction) => {
             let mut ledger = Ledger::new(state);
