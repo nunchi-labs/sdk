@@ -8,6 +8,11 @@ commonware_macros::stability_scope!(ALPHA {
 #[cfg(feature = "rpc")]
 pub mod rpc;
 
+pub mod record;
+pub use record::{
+    AssetId, BridgeTransferRecord, ChainId, TransferRecordId, BRIDGE_NAMESPACE,
+};
+
 use std::future::Future;
 
 use commonware_consensus::Viewable;

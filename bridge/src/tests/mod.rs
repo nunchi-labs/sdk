@@ -1,3 +1,5 @@
+mod record;
+
 use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{
     simplex::{

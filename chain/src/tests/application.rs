@@ -3,7 +3,7 @@ use std::{panic::AssertUnwindSafe, sync::Arc};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::types::{Epoch, Height, Round, View};
-use commonware_cryptography::{ed25519, sha256, Digestible as _, Hasher, Sha256, Signer};
+use commonware_cryptography::{ed25519, sha256::Digest, Digestible as _, Hasher, Sha256, Signer};
 use commonware_glue::stateful::{
     db::{DatabaseSet as _, Merkleized as _},
     Application as StatefulApplication,
@@ -71,11 +71,10 @@ impl EncodeSize for TestTx {
 struct BadSignature;
 
 impl PoolTransaction for TestTx {
-    type Digest = sha256::Digest;
     type NonceKey = u8;
     type VerifyError = BadSignature;
 
-    fn digest(&self) -> Self::Digest {
+    fn digest(&self) -> Digest {
         Sha256::hash(&self.id.to_be_bytes())
     }
 

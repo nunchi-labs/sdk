@@ -516,6 +516,7 @@ async fn start_validator(
         blocks_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
         finalized_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
         signer: signer.clone(),
+        dkg_storage_key: [9u8; 32],
         output,
         share: Some(share),
         peer_config,

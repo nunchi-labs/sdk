@@ -36,6 +36,18 @@ fn submit_params(transaction: &str) -> ObjectParams {
     params
 }
 
+fn assert_pending_contains_only(mut pending: Vec<Transaction>, expected: Vec<Transaction>) {
+    assert_eq!(pending.len(), expected.len());
+    for transaction in expected {
+        let index = pending
+            .iter()
+            .position(|pending| pending == &transaction)
+            .expect("expected pending transaction");
+        pending.remove(index);
+    }
+    assert!(pending.is_empty());
+}
+
 #[derive(Clone)]
 struct TestQuery {
     root: Digest,
@@ -159,9 +171,9 @@ fn rpc_serves_status_and_filters_submissions_over_http() {
             .await
             .expect("submit valid perpetuals transaction");
         assert_eq!(accepted_perp.hash, encode_hex(&perpetual.digest()));
-        assert_eq!(
+        assert_pending_contains_only(
             submitter.pending(usize::MAX).await,
-            vec![transaction.clone().into(), perpetual.clone().into()]
+            vec![transaction.clone().into(), perpetual.clone().into()],
         );
 
         // The pool reports the admitted transaction as pending.
@@ -218,9 +230,9 @@ fn rpc_serves_status_and_filters_submissions_over_http() {
             other => panic!("expected invalid-params call error, got {other:?}"),
         }
         // The pool still only holds the valid submission.
-        assert_eq!(
+        assert_pending_contains_only(
             submitter.pending(usize::MAX).await,
-            vec![transaction.into(), perpetual.into()]
+            vec![transaction.into(), perpetual.into()],
         );
 
         server.stop().expect("stop RPC server");

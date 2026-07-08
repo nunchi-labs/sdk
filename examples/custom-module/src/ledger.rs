@@ -1,5 +1,8 @@
-use crate::{CustomDB, CustomOperation, Transaction};
-use nunchi_common::Address;
+use crate::{
+    value_cleared_event, value_set_event, CustomDB, CustomOperation, Transaction, ValueCleared,
+    ValueSet,
+};
+use nunchi_common::{Address, Event, EventSink};
 use nunchi_crypto::SignatureError;
 use thiserror::Error;
 
@@ -50,7 +53,14 @@ impl<D: CustomDB> CustomLedger<D> {
         self.db.value(account).await
     }
 
-    pub async fn apply_transaction(&mut self, tx: &Transaction) -> Result<(), CustomError> {
+    pub async fn apply_transaction<Events>(
+        &mut self,
+        tx: &Transaction,
+        mut events: Events,
+    ) -> Result<(), CustomError>
+    where
+        Events: EventSink + Send,
+    {
         tx.verify()?;
 
         let expected = self.db.nonce(&tx.account_id).await?;
@@ -62,17 +72,28 @@ impl<D: CustomDB> CustomLedger<D> {
             });
         }
 
-        match &tx.payload.operation {
+        let next_nonce = expected.checked_add(1).ok_or(CustomError::NonceOverflow)?;
+        let event = self.apply_operation(&tx.account_id, &tx.payload.operation);
+        self.db.set_nonce(&tx.account_id, next_nonce);
+        events.emit(event);
+        Ok(())
+    }
+
+    fn apply_operation(&mut self, account_id: &Address, operation: &CustomOperation) -> Event {
+        match operation {
             CustomOperation::SetValue { value } => {
-                self.db.set_value(&tx.account_id, *value);
+                self.db.set_value(account_id, *value);
+                value_set_event(ValueSet {
+                    account_id: account_id.clone(),
+                    value: *value,
+                })
             }
             CustomOperation::ClearValue => {
-                self.db.remove_value(&tx.account_id);
+                self.db.remove_value(account_id);
+                value_cleared_event(ValueCleared {
+                    account_id: account_id.clone(),
+                })
             }
         }
-
-        let next_nonce = expected.checked_add(1).ok_or(CustomError::NonceOverflow)?;
-        self.db.set_nonce(&tx.account_id, next_nonce);
-        Ok(())
     }
 }

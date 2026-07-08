@@ -8,13 +8,14 @@ members = [
     "crypto",
     "dkg",
     "narae",
+    "xtask",
     "mempool",
     "oracle",
     "perpetuals",
     "rpc",
     "mcp",
     "examples/bridge-chain",
-    "examples/coins-chain",
+    "examples/coins/chain",
     "examples/custom-module",
 ]
 resolver = "2"
@@ -46,8 +47,9 @@ nunchi-mempool = { version = "2026.5.0", path = "mempool" }
 nunchi-oracle = { version = "2026.5.0", path = "oracle" }
 nunchi-perpetuals = { version = "2026.5.0", path = "perpetuals" }
 nunchi-rpc = { version = "2026.5.0", path = "rpc" }
-nunchi-coins-chain = { version = "2026.5.0", path = "examples/coins-chain" }
+nunchi-coins-chain = { version = "2026.5.0", path = "examples/coins/chain" }
 nunchi-bridge-chain = { version = "2026.5.0", path = "examples/bridge-chain" }
+nunchi-xtask = { version = "2026.5.0", package = "xtask", path = "xtask" }
 commonware-actor = "2026.5.0"
 commonware-broadcast = "2026.5.0"
 commonware-codec = "2026.5.0"
@@ -66,6 +68,7 @@ commonware-math = "2026.5.0"
 commonware-parallel = "2026.5.0"
 thiserror = "2.0.12"
 bytes = "1.7.1"
+chacha20poly1305 = "0.10.1"
 rand = "0.8.5"
 rand_core = "0.6.4"
 futures = "0.3.31"

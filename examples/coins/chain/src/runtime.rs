@@ -2,7 +2,7 @@
 
 use nunchi_authority::{AuthorityError, AuthorityLedger};
 use nunchi_coins::{Ledger, LedgerError};
-use nunchi_common::{EventSink, Runtime, RuntimeContext, StateStore};
+use nunchi_common::{EventSink, NoopEventSink, Runtime, RuntimeContext, StateStore};
 use nunchi_oracle::{OracleError, OracleLedger};
 use nunchi_perpetuals::{PerpetualError, PerpetualLedger};
 
@@ -48,20 +48,20 @@ impl Runtime for CoinsRuntime {
     where
         S: StateStore + Send + Sync,
     {
-        apply_transaction(state, context, transaction).await
+        apply_transaction(state, context, transaction, NoopEventSink).await
     }
 
     async fn apply<S, Events>(
         state: &mut S,
         context: RuntimeContext,
         transaction: &Self::Transaction,
-        _events: &mut Events,
+        events: &mut Events,
     ) -> Result<(), Self::Error>
     where
         S: StateStore + Send + Sync,
         Events: EventSink + Send,
     {
-        apply_transaction(state, context, transaction).await
+        apply_transaction(state, context, transaction, events).await
     }
 
     fn is_storage_error(error: &Self::Error) -> bool {
@@ -69,18 +69,20 @@ impl Runtime for CoinsRuntime {
     }
 }
 
-async fn apply_transaction<S>(
+async fn apply_transaction<S, Events>(
     state: &mut S,
     context: RuntimeContext,
     transaction: &Transaction,
+    events: Events,
 ) -> Result<(), RuntimeError>
 where
     S: StateStore + Send + Sync,
+    Events: EventSink + Send,
 {
     match transaction {
         Transaction::Coin(transaction) => {
             let mut ledger = Ledger::new(state);
-            ledger.apply_transaction(transaction).await?;
+            ledger.apply_transaction(transaction, events).await?;
         }
         Transaction::Authority(transaction) => {
             let mut ledger = AuthorityLedger::new(state);

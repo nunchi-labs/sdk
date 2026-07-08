@@ -2536,6 +2536,7 @@ dependencies = [
  "serde",
  "thiserror 2.0.18",
  "toml",
+ "xtask",
 ]
 
 [[package]]
@@ -2665,6 +2666,7 @@ dependencies = [
 name = "nunchi-bridge"
 version = "2026.6.0"
 dependencies = [
+ "bytes",
  "commonware-codec",
  "commonware-consensus",
  "commonware-cryptography",
@@ -2676,6 +2678,8 @@ dependencies = [
  "futures",
  "jsonrpsee",
  "nunchi-chain",
+ "nunchi-common",
+ "nunchi-crypto",
  "nunchi-dkg",
  "nunchi-rpc",
  "rand 0.8.6",
@@ -2866,6 +2870,7 @@ name = "nunchi-dkg"
 version = "2026.6.0"
 dependencies = [
  "bytes",
+ "chacha20poly1305",
  "commonware-actor",
  "commonware-codec",
  "commonware-consensus",
@@ -2883,6 +2888,7 @@ dependencies = [
  "rand 0.8.6",
  "rand_core 0.6.4",
  "serde",
+ "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber 0.3.23",
 ]
@@ -5427,6 +5433,14 @@ dependencies = [
  "rand_core 0.6.4",
  "serde",
  "zeroize",
+]
+
+[[package]]
+name = "xtask"
+version = "2026.6.0"
+dependencies = [
+ "clap",
+ "nunchi-coins-chain",
 ]
 
 [[package]]

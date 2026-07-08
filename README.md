@@ -14,6 +14,12 @@
   <a href="https://x.com/nunchi"><strong>X</strong></a>
 </p>
 
+<p align="center">
+  <a href="https://app.codecov.io/gh/nunchi-labs/sdk">
+    <img src="https://codecov.io/gh/nunchi-labs/sdk/graph/badge.svg" alt="Codecov" />
+  </a>
+</p>
+
 ---
 
 
@@ -59,6 +65,6 @@ This repository will contain modules for building public and private blockchains
 
 ### Chain Examples
 
-* [`coins-chain`](examples/coins-chain) - default PoA chain
+* [`coins-chain`](examples/coins/chain) - default PoA chain
 * [`bridge-chain`](examples/bridge-chain) - two chains bridging consensus certificates
 * [`custom-module`](examples/custom-module) - starter template for creating a custom nunchi module
