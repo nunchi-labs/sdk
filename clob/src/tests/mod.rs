@@ -8,9 +8,9 @@ use nunchi_common::{Address, CommitState, RuntimeContext, StateError, StateStore
 use nunchi_crypto::PrivateKey;
 
 use crate::{
-    market_id, AssetId, ClobDB, ClobError, ClobGenesis, ClobLedger, ClobMarketGenesis,
-    ClobOperation, FillId, MatchBatch, MatchEngine, OrderId, Side, TimeInForce, Transaction,
-    MAX_FILLS_PER_MARKET,
+    market_id, AssetId, ClobActor, ClobConfig, ClobDB, ClobError, ClobGenesis, ClobLedger,
+    ClobMarketGenesis, ClobOperation, FillId, MatchBatch, MatchEngine, OrderId, Side, TimeInForce,
+    Transaction, MAX_FILLS_PER_MARKET,
 };
 
 #[derive(Default)]
@@ -291,6 +291,138 @@ fn best_price_wins_during_validator_replay() {
 }
 
 #[test]
+fn matcher_returns_no_fills_for_non_crossing_orders() {
+    run_test(|| async {
+        let creator = PrivateKey::from_seed(1);
+        let maker = PrivateKey::from_seed(2);
+        let taker = PrivateKey::from_seed(3);
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        seed_market(&mut ledger, &creator).await;
+
+        let batch = batch_from_orders(
+            &ledger,
+            vec![
+                place_tx(
+                    &maker,
+                    0,
+                    Side::Ask,
+                    100,
+                    2,
+                    TimeInForce::GoodTilCancelled,
+                ),
+                place_tx(
+                    &taker,
+                    0,
+                    Side::Bid,
+                    90,
+                    2,
+                    TimeInForce::ImmediateOrCancel,
+                ),
+            ],
+            context(2),
+        )
+        .await;
+
+        assert!(batch.fills.is_empty());
+    });
+}
+
+#[test]
+fn matcher_rejects_invalid_price_and_sequence_overflow() {
+    run_test(|| async {
+        let creator = PrivateKey::from_seed(1);
+        let trader = PrivateKey::from_seed(2);
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        seed_market(&mut ledger, &creator).await;
+        let market_info = ledger.market(&market()).await.unwrap().unwrap();
+        let mut markets = BTreeMap::new();
+        markets.insert(market_info.id, market_info);
+
+        let err = MatchEngine::replay(
+            &[place_tx(
+                &trader,
+                0,
+                Side::Bid,
+                101,
+                2,
+                TimeInForce::ImmediateOrCancel,
+            )],
+            &markets,
+            BTreeMap::new(),
+            context(2),
+        )
+        .unwrap_err();
+        assert_eq!(err, ClobError::InvalidOrder("price is not on the market tick"));
+
+        let mut sequences = BTreeMap::new();
+        sequences.insert(market(), u64::MAX);
+        let err = MatchEngine::replay(
+            &[place_tx(
+                &trader,
+                0,
+                Side::Bid,
+                100,
+                2,
+                TimeInForce::ImmediateOrCancel,
+            )],
+            &markets,
+            sequences,
+            context(2),
+        )
+        .unwrap_err();
+        assert_eq!(err, ClobError::SequenceOverflow);
+    });
+}
+
+#[test]
+fn partially_filled_taker_rests_for_later_match() {
+    run_test(|| async {
+        let creator = PrivateKey::from_seed(1);
+        let first_asker = PrivateKey::from_seed(2);
+        let bidder = PrivateKey::from_seed(3);
+        let second_asker = PrivateKey::from_seed(4);
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        seed_market(&mut ledger, &creator).await;
+
+        let batch = batch_from_orders(
+            &ledger,
+            vec![
+                place_tx(
+                    &first_asker,
+                    0,
+                    Side::Ask,
+                    100,
+                    2,
+                    TimeInForce::GoodTilCancelled,
+                ),
+                place_tx(
+                    &bidder,
+                    0,
+                    Side::Bid,
+                    100,
+                    4,
+                    TimeInForce::GoodTilCancelled,
+                ),
+                place_tx(
+                    &second_asker,
+                    0,
+                    Side::Ask,
+                    100,
+                    2,
+                    TimeInForce::ImmediateOrCancel,
+                ),
+            ],
+            context(2),
+        )
+        .await;
+
+        assert_eq!(batch.fills.len(), 2);
+        assert_eq!(batch.fills[0].base_quantity, 2);
+        assert_eq!(batch.fills[1].base_quantity, 2);
+    });
+}
+
+#[test]
 fn tampered_match_batch_is_rejected() {
     run_test(|| async {
         let creator = PrivateKey::from_seed(1);
@@ -317,6 +449,97 @@ fn tampered_match_batch_is_rejected() {
         );
         let mut batch = batch_from_orders(&ledger, vec![ask, bid], context(2)).await;
         batch.fills[0].price = 95;
+
+        let err = ledger.apply_match_batch(&batch, context(2)).await.unwrap_err();
+        assert_eq!(err, ClobError::MatchBatchMismatch);
+    });
+}
+
+#[test]
+fn empty_match_batch_is_noop() {
+    run_test(|| async {
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+
+        ledger
+            .apply_match_batch(&MatchBatch::default(), context(1))
+            .await
+            .unwrap();
+
+        assert!(ledger.markets().await.unwrap().is_empty());
+    });
+}
+
+#[test]
+fn match_batch_rejects_non_place_order_inputs() {
+    run_test(|| async {
+        let creator = PrivateKey::from_seed(1);
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        seed_market(&mut ledger, &creator).await;
+
+        let batch = MatchBatch {
+            orders: vec![create_market_tx(&creator, 1)],
+            fills: Vec::new(),
+        };
+
+        let err = ledger.apply_match_batch(&batch, context(2)).await.unwrap_err();
+        assert_eq!(
+            err,
+            ClobError::InvalidOrder("match batches may only carry signed place-order intents")
+        );
+    });
+}
+
+#[test]
+fn match_batch_rejects_unknown_market() {
+    run_test(|| async {
+        let trader = PrivateKey::from_seed(1);
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        let batch = MatchBatch {
+            orders: vec![place_tx(
+                &trader,
+                0,
+                Side::Bid,
+                100,
+                2,
+                TimeInForce::ImmediateOrCancel,
+            )],
+            fills: Vec::new(),
+        };
+
+        let err = ledger.apply_match_batch(&batch, context(1)).await.unwrap_err();
+        assert_eq!(err, ClobError::MarketNotFound);
+    });
+}
+
+#[test]
+fn match_batch_rejects_missing_proposed_fill() {
+    run_test(|| async {
+        let creator = PrivateKey::from_seed(1);
+        let maker = PrivateKey::from_seed(2);
+        let taker = PrivateKey::from_seed(3);
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        seed_market(&mut ledger, &creator).await;
+
+        let ask = place_tx(
+            &maker,
+            0,
+            Side::Ask,
+            100,
+            4,
+            TimeInForce::GoodTilCancelled,
+        );
+        let bid = place_tx(
+            &taker,
+            0,
+            Side::Bid,
+            100,
+            4,
+            TimeInForce::ImmediateOrCancel,
+        );
+        let batch = MatchBatch {
+            orders: vec![ask, bid],
+            fills: Vec::new(),
+        };
 
         let err = ledger.apply_match_batch(&batch, context(2)).await.unwrap_err();
         assert_eq!(err, ClobError::MatchBatchMismatch);
@@ -501,5 +724,75 @@ fn rpc_queries_ledger_state() {
         let methods = router.method_names();
         assert!(methods.contains(&"clob.nonce"));
         assert!(methods.contains(&"clob.fills"));
+    });
+}
+
+#[test]
+fn clob_actor_proposes_empty_batch_without_orders() {
+    deterministic::Runner::default().start(|context| async move {
+        let (actor, mailbox) = ClobActor::new(ClobConfig::default());
+        let _actor_handle = actor.start(context);
+
+        let batch = mailbox.propose().await;
+
+        assert!(batch.is_empty());
+    });
+}
+
+#[test]
+fn clob_actor_drops_batch_when_market_metadata_is_missing() {
+    deterministic::Runner::default().start(|context| async move {
+        let (actor, mailbox) = ClobActor::new(ClobConfig::default());
+        let _actor_handle = actor.start(context);
+        let trader = PrivateKey::from_seed(9);
+
+        mailbox
+            .submit_order(place_tx(
+                &trader,
+                0,
+                Side::Bid,
+                100,
+                2,
+                TimeInForce::ImmediateOrCancel,
+            ))
+            .await
+            .unwrap();
+
+        let batch = mailbox.propose().await;
+        assert!(batch.is_empty());
+    });
+}
+
+#[test]
+fn clob_mailbox_reports_stopped_actor() {
+    deterministic::Runner::default().start(|_| async move {
+        let (actor, mailbox) = ClobActor::new(ClobConfig::default());
+        drop(actor);
+        let trader = PrivateKey::from_seed(9);
+
+        let err = mailbox
+            .submit_order(place_tx(
+                &trader,
+                0,
+                Side::Bid,
+                100,
+                2,
+                TimeInForce::ImmediateOrCancel,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err, ClobError::ActorStopped);
+        assert!(mailbox.propose().await.is_empty());
+
+        mailbox.upsert_market(crate::Market {
+            id: market(),
+            base_asset: asset(b"base"),
+            quote_asset: asset(b"quote"),
+            tick_size: MARKET_TICK,
+            lot_size: MARKET_LOT,
+            created_by: Address::external(&trader.public_key()),
+            created_at_height: 0,
+            created_at_ms: 0,
+        });
     });
 }

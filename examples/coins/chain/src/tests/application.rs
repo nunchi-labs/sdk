@@ -124,13 +124,14 @@ fn clob_mailbox_extension_records_verified_fill() {
                 lot_size: 2,
             },
         );
-        let mut ledger = ClobLedger::new(&mut state);
-        ledger
-            .apply_transaction(&market_tx, Default::default())
-            .await
-            .unwrap();
-        let market = ledger.market(&clob_market()).await.unwrap().unwrap();
-        drop(ledger);
+        let market = {
+            let mut ledger = ClobLedger::new(&mut state);
+            ledger
+                .apply_transaction(&market_tx, Default::default())
+                .await
+                .unwrap();
+            ledger.market(&clob_market()).await.unwrap().unwrap()
+        };
 
         let (actor, mailbox) = ClobActor::new(ClobConfig::default());
         let _actor_handle = actor.start(context.child("clob"));
