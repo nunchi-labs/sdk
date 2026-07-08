@@ -164,6 +164,17 @@ where
     pub async fn new(context: E, config: Config<B, P, S>) -> (Self, NodeHandle<E>) {
         let (mempool, submitter) = Mempool::<Transaction>::new(config.pool_config.clone());
         let (clob, clob_mailbox) = ClobActor::new(ClobConfig::default());
+        if let Some(clob_genesis) = config.genesis.as_ref().and_then(|genesis| genesis.clob.as_ref())
+        {
+            for market in &clob_genesis.markets {
+                clob_mailbox.upsert_market_state(
+                    market
+                        .market()
+                        .expect("invalid CLOB genesis market should fail genesis validation"),
+                    0,
+                );
+            }
+        }
 
         let page_cache = CacheRef::from_pooler(&context, PAGE_CACHE_PAGE_SIZE, PAGE_CACHE_CAPACITY);
         let consensus_namespace = union(NAMESPACE, b"_CONSENSUS");

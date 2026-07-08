@@ -9,8 +9,8 @@ use nunchi_crypto::PrivateKey;
 
 use crate::{
     market_id, AssetId, ClobActor, ClobConfig, ClobDB, ClobError, ClobGenesis, ClobLedger,
-    ClobMarketGenesis, ClobOperation, FillId, MatchBatch, MatchEngine, OrderId, Side, TimeInForce,
-    Transaction, MAX_FILLS_PER_MARKET,
+    ClobMailbox, ClobMarketGenesis, ClobOperation, FillId, Market, MatchBatch, MatchEngine,
+    OrderId, Side, TimeInForce, Transaction, MAX_FILLS_PER_MARKET,
 };
 
 #[derive(Default)]
@@ -137,6 +137,23 @@ async fn batch_from_orders(
     }
 }
 
+async fn sync_actor_from_ledger(
+    mailbox: &ClobMailbox,
+    ledger: &ClobLedger<MemoryStore>,
+    market: Market,
+    accepted_orders: Vec<OrderId>,
+) {
+    let mut order_updates = Vec::new();
+    for order_id in &accepted_orders {
+        order_updates.push((*order_id, ledger.order(order_id).await.unwrap()));
+    }
+    let sequence = ledger.market_sequence(&market.id).await.unwrap();
+    mailbox
+        .sync_accepted(market, sequence, accepted_orders, order_updates, Vec::new())
+        .await
+        .unwrap();
+}
+
 #[test]
 fn transaction_codec_round_trips() {
     let signer = PrivateKey::from_seed(1);
@@ -207,7 +224,7 @@ fn place_order_is_offchain_only_for_ledger_transactions() {
 }
 
 #[test]
-fn apply_match_batch_records_replayed_fills_without_resting_onchain_orders() {
+fn apply_match_batch_records_replayed_fills_and_residual_orders() {
     run_test(|| async {
         let creator = PrivateKey::from_seed(1);
         let maker = PrivateKey::from_seed(2);
@@ -241,7 +258,17 @@ fn apply_match_batch_records_replayed_fills_without_resting_onchain_orders() {
         assert_eq!(fills[0].price, 100);
         assert_eq!(fills[0].base_quantity, 4);
         assert_eq!(fills[0].quote_quantity, 400);
-        assert!(ledger.book(&market(), Side::Ask).await.unwrap().is_empty());
+        let resting_asks = ledger.book(&market(), Side::Ask).await.unwrap();
+        assert_eq!(resting_asks.len(), 1);
+        assert_eq!(resting_asks[0].id, OrderId(ask.digest()));
+        assert_eq!(resting_asks[0].remaining_base, 6);
+
+        let maker_orders = ledger
+            .account_orders(&Address::external(&maker.public_key()))
+            .await
+            .unwrap();
+        assert_eq!(maker_orders.len(), 1);
+        assert_eq!(maker_orders[0].id, OrderId(ask.digest()));
     });
 }
 
@@ -551,6 +578,33 @@ fn match_batch_rejects_missing_proposed_fill() {
 }
 
 #[test]
+fn match_batch_rejects_no_fill_order_only_payload() {
+    run_test(|| async {
+        let creator = PrivateKey::from_seed(1);
+        let maker = PrivateKey::from_seed(2);
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        seed_market(&mut ledger, &creator).await;
+
+        let ask = place_tx(
+            &maker,
+            0,
+            Side::Ask,
+            100,
+            2,
+            TimeInForce::GoodTilCancelled,
+        );
+        let batch = batch_from_orders(&ledger, vec![ask], context(2)).await;
+        assert!(batch.fills.is_empty());
+
+        let err = ledger
+            .apply_match_batch(&batch, context(2))
+            .await
+            .unwrap_err();
+        assert_eq!(err, ClobError::MatchBatchMismatch);
+    });
+}
+
+#[test]
 fn duplicate_fill_commit_is_rejected() {
     run_test(|| async {
         let creator = PrivateKey::from_seed(1);
@@ -633,6 +687,9 @@ fn full_market_fill_index_retains_recent_fills_without_blocking() {
         assert_eq!(recent_fill.market, market);
         assert_eq!(recent_fill.price, 100);
         assert_eq!(recent_fill.base_quantity, 2);
+
+        let queryable_fills = ledger.market_fills(&market).await.unwrap();
+        assert_eq!(queryable_fills, vec![recent_fill]);
     });
 }
 
@@ -718,13 +775,24 @@ fn actor_uses_committed_resting_order_and_current_sequence_for_later_batch() {
         mailbox.submit_order(ask.clone()).await.unwrap();
         mailbox.submit_order(first_bid.clone()).await.unwrap();
         let first_batch = mailbox.propose().await;
+        assert_eq!(
+            mailbox.propose().await,
+            first_batch,
+            "proposal generation should not mutate actor state before acceptance"
+        );
         assert_eq!(first_batch.fills.len(), 1);
         ledger
             .apply_match_batch(&first_batch, context(2))
             .await
             .unwrap();
+        sync_actor_from_ledger(
+            &mailbox,
+            &ledger,
+            market_info.clone(),
+            vec![OrderId(ask.digest()), OrderId(first_bid.digest())],
+        )
+        .await;
 
-        mailbox.upsert_market_state(market_info, ledger.market_sequence(&market()).await.unwrap());
         let second_bid = place_tx(
             &second_taker,
             0,
@@ -735,7 +803,7 @@ fn actor_uses_committed_resting_order_and_current_sequence_for_later_batch() {
         );
         mailbox.submit_order(second_bid.clone()).await.unwrap();
         let second_batch = mailbox.propose().await;
-        assert_eq!(second_batch.resting_orders, vec![OrderId(ask.digest())]);
+        assert!(second_batch.resting_orders.is_empty());
         assert_eq!(second_batch.orders, vec![second_bid.clone()]);
         assert_eq!(second_batch.fills.len(), 1);
 
@@ -747,6 +815,120 @@ fn actor_uses_committed_resting_order_and_current_sequence_for_later_batch() {
         assert_eq!(fills.len(), 2);
         assert_eq!(fills[1].maker_order, OrderId(ask.digest()));
         assert_eq!(fills[1].taker_order, OrderId(second_bid.digest()));
+    });
+}
+
+#[test]
+fn actor_drops_unmatchable_ioc_without_dropping_pending_gtc() {
+    deterministic::Runner::default().start(|runtime| async move {
+        let creator = PrivateKey::from_seed(1);
+        let maker = PrivateKey::from_seed(2);
+        let stale_taker = PrivateKey::from_seed(3);
+        let live_taker = PrivateKey::from_seed(4);
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        seed_market(&mut ledger, &creator).await;
+        let market_info = ledger.market(&market()).await.unwrap().unwrap();
+
+        let (actor, mailbox) = ClobActor::new(ClobConfig::default());
+        let _actor_handle = actor.start(runtime);
+        mailbox.upsert_market_state(market_info, ledger.market_sequence(&market()).await.unwrap());
+
+        let ask = place_tx(
+            &maker,
+            0,
+            Side::Ask,
+            100,
+            2,
+            TimeInForce::GoodTilCancelled,
+        );
+        let stale_bid = place_tx(
+            &stale_taker,
+            0,
+            Side::Bid,
+            95,
+            2,
+            TimeInForce::ImmediateOrCancel,
+        );
+        mailbox.submit_order(ask.clone()).await.unwrap();
+        mailbox.submit_order(stale_bid.clone()).await.unwrap();
+        assert!(
+            mailbox.propose().await.is_empty(),
+            "non-crossing IOC should not produce an accepted batch"
+        );
+
+        let live_bid = place_tx(
+            &live_taker,
+            0,
+            Side::Bid,
+            100,
+            2,
+            TimeInForce::ImmediateOrCancel,
+        );
+        mailbox.submit_order(live_bid.clone()).await.unwrap();
+        let batch = mailbox.propose().await;
+        assert_eq!(batch.orders, vec![ask.clone(), live_bid.clone()]);
+        assert_eq!(batch.fills.len(), 1);
+        assert_eq!(batch.fills[0].maker_order, OrderId(ask.digest()));
+        assert_eq!(batch.fills[0].taker_order, OrderId(live_bid.digest()));
+    });
+}
+
+#[test]
+fn actor_drops_stale_intents_after_nonce_sync() {
+    deterministic::Runner::default().start(|runtime| async move {
+        let creator = PrivateKey::from_seed(1);
+        let maker = PrivateKey::from_seed(2);
+        let stale_taker = PrivateKey::from_seed(3);
+        let live_taker = PrivateKey::from_seed(4);
+        let stale_addr = Address::external(&stale_taker.public_key());
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        seed_market(&mut ledger, &creator).await;
+        let market_info = ledger.market(&market()).await.unwrap().unwrap();
+
+        let (actor, mailbox) = ClobActor::new(ClobConfig::default());
+        let _actor_handle = actor.start(runtime);
+        mailbox.upsert_market_state(market_info, ledger.market_sequence(&market()).await.unwrap());
+        mailbox.sync_nonce(stale_addr.clone(), 1).await.unwrap();
+
+        let ask = place_tx(
+            &maker,
+            0,
+            Side::Ask,
+            100,
+            2,
+            TimeInForce::GoodTilCancelled,
+        );
+        let stale_bid = place_tx(
+            &stale_taker,
+            0,
+            Side::Bid,
+            100,
+            2,
+            TimeInForce::ImmediateOrCancel,
+        );
+        mailbox.submit_order(ask.clone()).await.unwrap();
+        assert_eq!(
+            mailbox.submit_order(stale_bid).await.unwrap_err(),
+            ClobError::NonceMismatch {
+                account: Box::new(stale_addr),
+                expected: 1,
+                actual: 0,
+            }
+        );
+
+        let live_bid = place_tx(
+            &live_taker,
+            0,
+            Side::Bid,
+            100,
+            2,
+            TimeInForce::ImmediateOrCancel,
+        );
+        mailbox.submit_order(live_bid.clone()).await.unwrap();
+        let batch = mailbox.propose().await;
+        assert_eq!(batch.orders, vec![ask, live_bid.clone()]);
+        assert_eq!(batch.fills.len(), 1);
+        assert_eq!(batch.fills[0].taker_order, OrderId(live_bid.digest()));
     });
 }
 
@@ -857,7 +1039,7 @@ fn clob_actor_proposes_empty_batch_without_orders() {
 }
 
 #[test]
-fn clob_actor_drops_batch_when_market_metadata_is_missing() {
+fn clob_actor_holds_order_when_market_metadata_is_missing() {
     deterministic::Runner::default().start(|context| async move {
         let (actor, mailbox) = ClobActor::new(ClobConfig::default());
         let _actor_handle = actor.start(context);
@@ -877,6 +1059,36 @@ fn clob_actor_drops_batch_when_market_metadata_is_missing() {
 
         let batch = mailbox.propose().await;
         assert!(batch.is_empty());
+    });
+}
+
+#[test]
+fn clob_actor_rejects_gap_nonce_for_unknown_account() {
+    deterministic::Runner::default().start(|context| async move {
+        let (actor, mailbox) = ClobActor::new(ClobConfig::default());
+        let _actor_handle = actor.start(context);
+        let trader = PrivateKey::from_seed(9);
+
+        let err = mailbox
+            .submit_order(place_tx(
+                &trader,
+                999,
+                Side::Bid,
+                100,
+                2,
+                TimeInForce::ImmediateOrCancel,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            ClobError::NonceMismatch {
+                account: Box::new(Address::external(&trader.public_key())),
+                expected: 0,
+                actual: 999,
+            }
+        );
+        assert!(mailbox.propose().await.is_empty());
     });
 }
 

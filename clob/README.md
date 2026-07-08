@@ -20,7 +20,7 @@ It intentionally does not own settlement, balances, margin, funding, PnL, liquid
 - `CancelOrder` remains an off-chain intent boundary and is not a direct on-chain matcher entry point
 - `ApplyMatchBatch` as a batch payload verified from signed order inputs
 
-`PlaceOrder` supports `GoodTilCancelled` and `ImmediateOrCancel` time-in-force, but it is not an on-chain matcher entry point. Validators accept fills because they seed deterministic replay from committed active order snapshots, then re-run matching over fresh signed order inputs. Batches name any committed resting order ids they depend on and carry only the fresh signed intents whose nonces should advance. Fills execute at the resting maker price. Asset ids are opaque `Digest`-backed identifiers so the CLOB can be wired to `nunchi-coins`, perps market ids, or other settlement domains later without changing the matching primitive.
+`PlaceOrder` supports `GoodTilCancelled` and `ImmediateOrCancel` time-in-force, but it is not an on-chain matcher entry point. Validators accept fills because they seed deterministic replay from committed active order snapshots, then re-run matching over fresh signed order inputs. Batches carry only the fresh signed intents whose nonces should advance; resting liquidity is derived from committed book indexes. Fills execute at the resting maker price. Asset ids are opaque `Digest`-backed identifiers so the CLOB can be wired to `nunchi-coins`, perps market ids, or other settlement domains later without changing the matching primitive.
 
 ## Current integration boundary
 

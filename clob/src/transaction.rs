@@ -31,11 +31,11 @@ impl TryFrom<u8> for OperationTag {
 /// Proposer-supplied CLOB match batch carried in a block extension.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MatchBatch {
-    /// Already-committed active resting orders validators should seed before replay.
+    /// Legacy hint field. Validators derive resting orders from committed book indexes.
     pub resting_orders: Vec<OrderId>,
     /// Fresh signed owner order intents whose nonces should advance if replay succeeds.
     pub orders: Vec<Transaction>,
-    /// Fills derived from seeding `resting_orders` and replaying `orders`.
+    /// Fills derived from committed resting orders and replaying `orders`.
     pub fills: Vec<Fill>,
 }
 

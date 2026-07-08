@@ -13,7 +13,7 @@ use nunchi_coins::{
     multisig_account_id, AccountPolicy, CoinOperation, CoinSpec, Ledger, MultisigPolicy,
     PrivateKey, TokenName, TokenSymbol, Transaction as CoinTransaction,
 };
-use nunchi_common::{QmdbBackend, QmdbBatch, QmdbDatabaseSet, QmdbState};
+use nunchi_common::{QmdbBackend, QmdbBatch, QmdbDatabaseSet, QmdbState, RuntimeContext};
 use nunchi_mempool::{Mempool, PoolConfig};
 use std::sync::Arc;
 
@@ -35,6 +35,15 @@ fn clob_asset(seed: &'static [u8]) -> AssetId {
 
 fn clob_market() -> nunchi_clob::MarketId {
     market_id(&clob_asset(b"base"), &clob_asset(b"quote"), 5, 2)
+}
+
+fn committed_context(height: u64) -> RuntimeContext {
+    RuntimeContext {
+        epoch: 0,
+        height,
+        timestamp_ms: height * 1_000,
+        block_digest: Some(Sha256::hash(&height.to_be_bytes())),
+    }
 }
 
 #[test]
@@ -165,9 +174,13 @@ fn clob_mailbox_extension_records_verified_fill() {
         let mut extension = ClobExtension::new(mailbox);
         let payload = extension.propose().await;
         assert_eq!(payload.fills.len(), 1);
+        let first_context = committed_context(2);
         assert!(extension
-            .apply_payload(&mut state, Default::default(), &payload)
+            .apply_payload(&mut state, first_context, &payload)
             .await);
+        extension
+            .commit_payload(&mut state, first_context, &payload)
+            .await;
 
         {
             let ledger = ClobLedger::new(&mut state);
@@ -194,11 +207,15 @@ fn clob_mailbox_extension_records_verified_fill() {
             .await
             .unwrap();
         let second_payload = extension.propose().await;
-        assert_eq!(second_payload.resting_orders, vec![OrderId(ask.digest())]);
+        assert!(second_payload.resting_orders.is_empty());
         assert_eq!(second_payload.fills.len(), 1);
+        let second_context = committed_context(3);
         assert!(extension
-            .apply_payload(&mut state, Default::default(), &second_payload)
+            .apply_payload(&mut state, second_context, &second_payload)
             .await);
+        extension
+            .commit_payload(&mut state, second_context, &second_payload)
+            .await;
 
         let ledger = ClobLedger::new(&mut state);
         let fills = ledger.market_fills(&clob_market()).await.unwrap();

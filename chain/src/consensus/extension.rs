@@ -48,6 +48,19 @@ pub trait ConsensusExtension: BlockExtension + Clone + Send + 'static {
     {
         std::future::ready(true)
     }
+
+    /// Run extension side effects that should happen only for a certified block.
+    fn commit_payload<S>(
+        &mut self,
+        _state: &mut S,
+        _context: RuntimeContext,
+        _payload: &Self::Payload,
+    ) -> impl Future<Output = ()> + Send
+    where
+        S: StateStore + Send + Sync,
+    {
+        std::future::ready(())
+    }
 }
 
 /// Pair of extra consensus extensions carried in one block extension slot.
@@ -99,6 +112,18 @@ where
     {
         self.0.apply_payload(state, context, &payload.0).await
             && self.1.apply_payload(state, context, &payload.1).await
+    }
+
+    async fn commit_payload<S>(
+        &mut self,
+        state: &mut S,
+        context: RuntimeContext,
+        payload: &Self::Payload,
+    ) where
+        S: StateStore + Send + Sync,
+    {
+        self.0.commit_payload(state, context, &payload.0).await;
+        self.1.commit_payload(state, context, &payload.1).await;
     }
 }
 

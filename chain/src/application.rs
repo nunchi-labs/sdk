@@ -344,6 +344,7 @@ where
         transactions: &[R::Transaction],
         extension: &Ext::Payload,
         events: &EventHandler,
+        commit_extension: bool,
     ) -> Option<QmdbMerkleized<E>>
     where
         E: Storage + Clock + Metrics,
@@ -382,6 +383,11 @@ where
                 events.discard_block(digest).await;
             }
             return None;
+        }
+        if commit_extension {
+            self.consensus
+                .commit_payload(&mut batch, context, extension)
+                .await;
         }
         metrics
             .apply_transactions_duration
@@ -701,6 +707,7 @@ where
                 &block.transactions,
                 &block.extension,
                 &NoopEventConsumer,
+                false,
             )
             .await?;
         let state_range = Self::state_range(&merkleized);
@@ -728,6 +735,7 @@ where
                 &block.transactions,
                 &block.extension,
                 &events,
+                true,
             )
             .await
             .expect("certified block failed deterministic execution");
