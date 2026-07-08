@@ -6,6 +6,7 @@ use nunchi_coins::{
 };
 use nunchi_common::{QmdbState, Runtime, RuntimeContext, VecEventSink};
 use nunchi_crypto::PrivateKey;
+use nunchi_oracle::OracleError;
 
 use crate::runtime::*;
 use crate::Transaction;
@@ -16,9 +17,11 @@ use commonware_runtime::{deterministic, Runner as _};
 fn runtime_error_classifies_storage_errors() {
     assert!(RuntimeError::Coins(LedgerError::Storage("disk".into())).is_storage());
     assert!(RuntimeError::Authority(AuthorityError::Storage("disk".into())).is_storage());
+    assert!(RuntimeError::Oracle(OracleError::Storage("disk".into())).is_storage());
 
     assert!(!RuntimeError::Authority(AuthorityError::NotConfigured).is_storage());
     assert!(!RuntimeError::Coins(LedgerError::InvalidTokenSpec("bad")).is_storage());
+    assert!(!RuntimeError::Oracle(OracleError::PayloadTooLarge).is_storage());
 }
 
 #[test]
