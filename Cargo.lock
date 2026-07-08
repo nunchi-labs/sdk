@@ -2666,6 +2666,7 @@ dependencies = [
 name = "nunchi-bridge"
 version = "2026.6.0"
 dependencies = [
+ "bytes",
  "commonware-codec",
  "commonware-consensus",
  "commonware-cryptography",
@@ -2677,6 +2678,8 @@ dependencies = [
  "futures",
  "jsonrpsee",
  "nunchi-chain",
+ "nunchi-common",
+ "nunchi-crypto",
  "nunchi-dkg",
  "nunchi-rpc",
  "rand 0.8.6",
