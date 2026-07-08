@@ -109,6 +109,8 @@ pub trait ClobDB {
 
     fn set_fill(&mut self, fill: &Fill);
 
+    fn remove_fill(&mut self, fill: &FillId);
+
     async fn market_fills(&self, market: &MarketId) -> Result<Vec<FillId>, ClobError>;
 
     fn set_market_fills(&mut self, market: &MarketId, fills: &[FillId]);
@@ -232,6 +234,10 @@ impl<S: StateStore + Send + Sync> ClobDB for S {
 
     fn set_fill(&mut self, fill: &Fill) {
         StateStore::set(self, fill_key(&fill.id), encoded(fill));
+    }
+
+    fn remove_fill(&mut self, fill: &FillId) {
+        StateStore::remove(self, fill_key(fill));
     }
 
     async fn market_fills(&self, market: &MarketId) -> Result<Vec<FillId>, ClobError> {

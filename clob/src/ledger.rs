@@ -1,7 +1,7 @@
 use crate::{
     AssetId, ClobDB, ClobOperation, Fill, FillId, Market, MarketId, Order, OrderId, OrderStatus,
-    Side, TimeInForce, Transaction, MAX_ACCOUNT_ORDERS, MAX_BOOK_ORDERS, MAX_FILLS_PER_MARKET,
-    MAX_MARKETS, CLOB_NAMESPACE,
+    Side, TimeInForce, Transaction, MAX_ACCOUNT_ORDERS, MAX_BOOK_ORDERS, MAX_MARKETS,
+    MAX_FILLS_PER_MARKET, CLOB_NAMESPACE,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{Hasher, Sha256};
@@ -282,9 +282,6 @@ impl<D: ClobDB> ClobLedger<D> {
         let simulation = simulate_matches(*side, *price, *base_quantity, &opposite_orders)?;
 
         let mut market_fill_ids = self.db.market_fills(market_id).await?;
-        if market_fill_ids.len().saturating_add(simulation.fills) > MAX_FILLS_PER_MARKET {
-            return Err(ClobError::FillIndexFull);
-        }
 
         if *time_in_force == TimeInForce::GoodTilCancelled && simulation.remaining_base > 0 {
             let same_side_book = self.db.side_book(market_id, *side).await?;
@@ -366,6 +363,11 @@ impl<D: ClobDB> ClobLedger<D> {
                 self.remove_from_account_orders(&maker.owner, &maker.id)
                     .await?;
             }
+        }
+
+        let pruned_fill_ids = prune_oldest_fill_ids(&mut market_fill_ids);
+        for fill_id in pruned_fill_ids {
+            self.db.remove_fill(&fill_id);
         }
 
         self.db
@@ -564,7 +566,6 @@ fn has_better_priority(candidate: &Order, resting: &Order) -> bool {
 }
 
 struct MatchSimulation {
-    fills: usize,
     remaining_base: u128,
 }
 
@@ -576,6 +577,15 @@ fn append_open_orders(book: &mut Vec<OrderId>, orders: &[Order]) {
     }
 }
 
+fn prune_oldest_fill_ids(fill_ids: &mut Vec<FillId>) -> Vec<FillId> {
+    let excess = fill_ids.len().saturating_sub(MAX_FILLS_PER_MARKET);
+    if excess == 0 {
+        Vec::new()
+    } else {
+        fill_ids.drain(..excess).collect()
+    }
+}
+
 fn simulate_matches(
     side: Side,
     price: u128,
@@ -583,7 +593,6 @@ fn simulate_matches(
     opposite_orders: &[Order],
 ) -> Result<MatchSimulation, ClobError> {
     let mut remaining = base_quantity;
-    let mut fills = 0;
     for maker in opposite_orders {
         if remaining == 0 {
             break;
@@ -599,10 +608,8 @@ fn simulate_matches(
             .checked_mul(remaining.min(maker.remaining_base))
             .ok_or(ClobError::QuoteOverflow)?;
         remaining -= remaining.min(maker.remaining_base);
-        fills += 1;
     }
     Ok(MatchSimulation {
-        fills,
         remaining_base: remaining,
     })
 }

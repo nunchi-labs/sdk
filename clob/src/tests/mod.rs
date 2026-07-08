@@ -8,8 +8,9 @@ use nunchi_common::{Address, RuntimeContext, StateError, StateStore};
 use nunchi_crypto::PrivateKey;
 
 use crate::{
-    market_id, AssetId, ClobError, ClobGenesis, ClobLedger, ClobMarketGenesis, ClobOperation,
-    OrderId, OrderStatus, Side, TimeInForce, Transaction,
+    market_id, AssetId, ClobDB, ClobError, ClobGenesis, ClobLedger, ClobMarketGenesis,
+    ClobOperation, FillId, OrderId, OrderStatus, Side, TimeInForce, Transaction,
+    MAX_FILLS_PER_MARKET,
 };
 
 #[derive(Default)]
@@ -57,6 +58,10 @@ const MARKET_LOT: u128 = 2;
 
 fn market() -> crate::MarketId {
     market_id(&asset(b"base"), &asset(b"quote"), MARKET_TICK, MARKET_LOT)
+}
+
+fn fake_fill_id(seed: u64) -> FillId {
+    FillId(Sha256::hash(seed.encode().as_ref()))
 }
 
 fn create_market_tx(signer: &PrivateKey, nonce: u64) -> Transaction {
@@ -395,5 +400,59 @@ fn terminal_orders_are_pruned_from_account_index() {
             ledger.order(&bid_id).await.unwrap().unwrap().status,
             OrderStatus::Expired
         );
+    });
+}
+
+#[test]
+fn full_market_fill_index_retains_recent_fills_without_blocking() {
+    run_test(|| async {
+        let maker = PrivateKey::from_seed(1);
+        let taker = PrivateKey::from_seed(2);
+        let market = market();
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+
+        ledger
+            .apply_transaction(&create_market_tx(&maker, 0), context(1))
+            .await
+            .unwrap();
+
+        let stale_fill_ids = (0..MAX_FILLS_PER_MARKET as u64)
+            .map(fake_fill_id)
+            .collect::<Vec<_>>();
+        ledger.db.set_market_fills(&market, &stale_fill_ids);
+
+        let ask = place_tx(
+            &maker,
+            1,
+            Side::Ask,
+            100,
+            2,
+            TimeInForce::GoodTilCancelled,
+        );
+        ledger.apply_transaction(&ask, context(2)).await.unwrap();
+
+        ledger
+            .apply_transaction(
+                &place_tx(
+                    &taker,
+                    0,
+                    Side::Bid,
+                    100,
+                    2,
+                    TimeInForce::ImmediateOrCancel,
+                ),
+                context(3),
+            )
+            .await
+            .expect("a full market fill index should not block matching");
+
+        let retained = ledger.db.market_fills(&market).await.unwrap();
+        assert_eq!(retained.len(), MAX_FILLS_PER_MARKET);
+        assert_eq!(retained[0], stale_fill_ids[1]);
+
+        let recent_fill = ledger.fill(retained.last().unwrap()).await.unwrap().unwrap();
+        assert_eq!(recent_fill.market, market);
+        assert_eq!(recent_fill.price, 100);
+        assert_eq!(recent_fill.base_quantity, 2);
     });
 }
