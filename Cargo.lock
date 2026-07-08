@@ -2763,12 +2763,14 @@ dependencies = [
  "commonware-runtime",
  "futures",
  "jsonrpsee",
+ "nunchi-chain",
  "nunchi-common",
  "nunchi-crypto",
  "nunchi-rpc",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -2819,6 +2821,7 @@ dependencies = [
  "jsonrpsee",
  "nunchi-authority",
  "nunchi-chain",
+ "nunchi-clob",
  "nunchi-coins",
  "nunchi-common",
  "nunchi-crypto",

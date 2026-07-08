@@ -1,6 +1,7 @@
 use std::{fmt::Debug, future::Future};
 
 use commonware_codec::{EncodeSize, Read, Write};
+use nunchi_common::{RuntimeContext, StateStore};
 
 /// Consensus-side payload carried by blocks but driven outside ordinary runtime transactions.
 pub trait BlockExtension: 'static {
@@ -32,6 +33,19 @@ pub trait ConsensusExtension: BlockExtension + Clone + Send + 'static {
 
     /// Verify an extension payload included in a proposed block.
     fn verify_payload(&mut self, _payload: &Self::Payload) -> impl Future<Output = bool> + Send {
+        std::future::ready(true)
+    }
+
+    /// Apply the extension payload to the same authenticated state as runtime transactions.
+    fn apply_payload<S>(
+        &mut self,
+        _state: &mut S,
+        _context: RuntimeContext,
+        _payload: &Self::Payload,
+    ) -> impl Future<Output = bool> + Send
+    where
+        S: StateStore + Send + Sync,
+    {
         std::future::ready(true)
     }
 }
@@ -72,6 +86,19 @@ where
 
     async fn verify_payload(&mut self, payload: &Self::Payload) -> bool {
         self.0.verify_payload(&payload.0).await && self.1.verify_payload(&payload.1).await
+    }
+
+    async fn apply_payload<S>(
+        &mut self,
+        state: &mut S,
+        context: RuntimeContext,
+        payload: &Self::Payload,
+    ) -> bool
+    where
+        S: StateStore + Send + Sync,
+    {
+        self.0.apply_payload(state, context, &payload.0).await
+            && self.1.apply_payload(state, context, &payload.1).await
     }
 }
 

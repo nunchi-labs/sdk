@@ -1,9 +1,14 @@
 use commonware_consensus::types::Height;
+use commonware_cryptography::{Hasher, Sha256};
 use commonware_glue::stateful::db::DatabaseSet as _;
-use commonware_runtime::{deterministic, Runner as _};
+use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
 use commonware_utils::sync::AsyncRwLock;
 use futures::lock::Mutex as AsyncMutex;
-use nunchi_chain::StateCommitment;
+use nunchi_chain::{ConsensusExtension, StateCommitment};
+use nunchi_clob::{
+    market_id, AssetId, ClobActor, ClobConfig, ClobExtension, ClobLedger, ClobOperation, OrderId,
+    Side, TimeInForce, Transaction as ClobTransaction,
+};
 use nunchi_coins::{
     multisig_account_id, AccountPolicy, CoinOperation, CoinSpec, Ledger, MultisigPolicy,
     PrivateKey, TokenName, TokenSymbol, Transaction as CoinTransaction,
@@ -22,6 +27,14 @@ fn spec() -> CoinSpec {
         1_000,
         None,
     )
+}
+
+fn clob_asset(seed: &'static [u8]) -> AssetId {
+    AssetId(Sha256::hash(seed))
+}
+
+fn clob_market() -> nunchi_clob::MarketId {
+    market_id(&clob_asset(b"base"), &clob_asset(b"quote"), 5, 2)
 }
 
 #[test]
@@ -87,5 +100,77 @@ fn proposal_skips_unregistered_multisig() {
             .await
             .expect("build_valid_transactions should succeed");
         assert_eq!(included, vec![tx.into()]);
+    });
+}
+
+#[test]
+fn clob_mailbox_extension_records_verified_fill() {
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let mut state = QmdbState::init(context.child("state"), "clob-extension-state")
+            .await
+            .unwrap();
+        let creator = nunchi_crypto::PrivateKey::ed25519_from_seed(10);
+        let maker = nunchi_crypto::PrivateKey::ed25519_from_seed(11);
+        let taker = nunchi_crypto::PrivateKey::ed25519_from_seed(12);
+
+        let market_tx = ClobTransaction::sign(
+            &creator,
+            0,
+            ClobOperation::CreateMarket {
+                base_asset: clob_asset(b"base"),
+                quote_asset: clob_asset(b"quote"),
+                tick_size: 5,
+                lot_size: 2,
+            },
+        );
+        let mut ledger = ClobLedger::new(&mut state);
+        ledger
+            .apply_transaction(&market_tx, Default::default())
+            .await
+            .unwrap();
+        let market = ledger.market(&clob_market()).await.unwrap().unwrap();
+        drop(ledger);
+
+        let (actor, mailbox) = ClobActor::new(ClobConfig::default());
+        let _actor_handle = actor.start(context.child("clob"));
+        mailbox.upsert_market(market);
+        let ask = ClobTransaction::sign(
+            &maker,
+            0,
+            ClobOperation::PlaceOrder {
+                market: clob_market(),
+                side: Side::Ask,
+                price: 100,
+                base_quantity: 4,
+                time_in_force: TimeInForce::GoodTilCancelled,
+            },
+        );
+        let bid = ClobTransaction::sign(
+            &taker,
+            0,
+            ClobOperation::PlaceOrder {
+                market: clob_market(),
+                side: Side::Bid,
+                price: 100,
+                base_quantity: 4,
+                time_in_force: TimeInForce::ImmediateOrCancel,
+            },
+        );
+        mailbox.submit_order(ask.clone()).await.unwrap();
+        mailbox.submit_order(bid.clone()).await.unwrap();
+
+        let mut extension = ClobExtension::new(mailbox);
+        let payload = extension.propose().await;
+        assert_eq!(payload.fills.len(), 1);
+        assert!(extension
+            .apply_payload(&mut state, Default::default(), &payload)
+            .await);
+
+        let ledger = ClobLedger::new(&mut state);
+        let fills = ledger.market_fills(&clob_market()).await.unwrap();
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].maker_order, OrderId(ask.digest()));
+        assert_eq!(fills[0].taker_order, OrderId(bid.digest()));
     });
 }

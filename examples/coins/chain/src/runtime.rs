@@ -1,6 +1,7 @@
 //! Coins-chain runtime execution dispatch.
 
 use nunchi_authority::{AuthorityError, AuthorityLedger};
+use nunchi_clob::{ClobError, ClobLedger};
 use nunchi_coins::{Ledger, LedgerError};
 use nunchi_common::{EventSink, NoopEventSink, Runtime, RuntimeContext, StateStore};
 use nunchi_oracle::{OracleError, OracleLedger};
@@ -18,6 +19,8 @@ pub enum RuntimeError {
     Authority(#[from] AuthorityError),
     #[error("oracle module error: {0}")]
     Oracle(#[from] OracleError),
+    #[error("clob module error: {0}")]
+    Clob(#[from] ClobError),
 }
 
 impl RuntimeError {
@@ -27,6 +30,7 @@ impl RuntimeError {
             Self::Coins(LedgerError::Storage(_))
                 | Self::Authority(AuthorityError::Storage(_))
                 | Self::Oracle(OracleError::Storage(_))
+                | Self::Clob(ClobError::Storage(_))
         )
     }
 }
@@ -85,6 +89,10 @@ where
         }
         Transaction::Oracle(transaction) => {
             let mut ledger = OracleLedger::new(state);
+            ledger.apply_transaction(transaction, context).await?;
+        }
+        Transaction::Clob(transaction) => {
+            let mut ledger = ClobLedger::new(state);
             ledger.apply_transaction(transaction, context).await?;
         }
     }
