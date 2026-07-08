@@ -131,6 +131,7 @@ async fn batch_from_orders(
     sequences.insert(market(), ledger.db.market_sequence(&market()).await.unwrap());
     let replay = MatchEngine::replay(&orders, &markets, sequences, context).unwrap();
     MatchBatch {
+        resting_orders: Vec::new(),
         orders,
         fills: replay.fills,
     }
@@ -477,6 +478,7 @@ fn match_batch_rejects_non_place_order_inputs() {
         seed_market(&mut ledger, &creator).await;
 
         let batch = MatchBatch {
+            resting_orders: Vec::new(),
             orders: vec![create_market_tx(&creator, 1)],
             fills: Vec::new(),
         };
@@ -495,6 +497,7 @@ fn match_batch_rejects_unknown_market() {
         let trader = PrivateKey::from_seed(1);
         let mut ledger = ClobLedger::new(MemoryStore::default());
         let batch = MatchBatch {
+            resting_orders: Vec::new(),
             orders: vec![place_tx(
                 &trader,
                 0,
@@ -537,6 +540,7 @@ fn match_batch_rejects_missing_proposed_fill() {
             TimeInForce::ImmediateOrCancel,
         );
         let batch = MatchBatch {
+            resting_orders: Vec::new(),
             orders: vec![ask, bid],
             fills: Vec::new(),
         };
@@ -629,6 +633,120 @@ fn full_market_fill_index_retains_recent_fills_without_blocking() {
         assert_eq!(recent_fill.market, market);
         assert_eq!(recent_fill.price, 100);
         assert_eq!(recent_fill.base_quantity, 2);
+    });
+}
+
+#[test]
+fn actor_keeps_non_crossing_gtc_until_later_crossing_order() {
+    deterministic::Runner::default().start(|runtime| async move {
+        let creator = PrivateKey::from_seed(1);
+        let maker = PrivateKey::from_seed(2);
+        let taker = PrivateKey::from_seed(3);
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        seed_market(&mut ledger, &creator).await;
+        let market_info = ledger.market(&market()).await.unwrap().unwrap();
+
+        let (actor, mailbox) = ClobActor::new(ClobConfig::default());
+        let _actor_handle = actor.start(runtime);
+        mailbox.upsert_market_state(market_info, ledger.market_sequence(&market()).await.unwrap());
+
+        let ask = place_tx(
+            &maker,
+            0,
+            Side::Ask,
+            100,
+            2,
+            TimeInForce::GoodTilCancelled,
+        );
+        mailbox.submit_order(ask.clone()).await.unwrap();
+        assert!(mailbox.propose().await.is_empty());
+        assert_eq!(ledger.nonce(&Address::external(&maker.public_key())).await.unwrap(), 0);
+
+        let bid = place_tx(
+            &taker,
+            0,
+            Side::Bid,
+            100,
+            2,
+            TimeInForce::ImmediateOrCancel,
+        );
+        mailbox.submit_order(bid.clone()).await.unwrap();
+        let batch = mailbox.propose().await;
+        assert!(batch.resting_orders.is_empty());
+        assert_eq!(batch.orders, vec![ask.clone(), bid.clone()]);
+        assert_eq!(batch.fills.len(), 1);
+
+        ledger.apply_match_batch(&batch, context(2)).await.unwrap();
+        let fills = ledger.market_fills(&market()).await.unwrap();
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].maker_order, OrderId(ask.digest()));
+        assert_eq!(fills[0].taker_order, OrderId(bid.digest()));
+    });
+}
+
+#[test]
+fn actor_uses_committed_resting_order_and_current_sequence_for_later_batch() {
+    deterministic::Runner::default().start(|runtime| async move {
+        let creator = PrivateKey::from_seed(1);
+        let maker = PrivateKey::from_seed(2);
+        let first_taker = PrivateKey::from_seed(3);
+        let second_taker = PrivateKey::from_seed(4);
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        seed_market(&mut ledger, &creator).await;
+        let market_info = ledger.market(&market()).await.unwrap().unwrap();
+
+        let (actor, mailbox) = ClobActor::new(ClobConfig::default());
+        let _actor_handle = actor.start(runtime);
+        mailbox.upsert_market_state(market_info.clone(), ledger.market_sequence(&market()).await.unwrap());
+
+        let ask = place_tx(
+            &maker,
+            0,
+            Side::Ask,
+            100,
+            4,
+            TimeInForce::GoodTilCancelled,
+        );
+        let first_bid = place_tx(
+            &first_taker,
+            0,
+            Side::Bid,
+            100,
+            2,
+            TimeInForce::ImmediateOrCancel,
+        );
+        mailbox.submit_order(ask.clone()).await.unwrap();
+        mailbox.submit_order(first_bid.clone()).await.unwrap();
+        let first_batch = mailbox.propose().await;
+        assert_eq!(first_batch.fills.len(), 1);
+        ledger
+            .apply_match_batch(&first_batch, context(2))
+            .await
+            .unwrap();
+
+        mailbox.upsert_market_state(market_info, ledger.market_sequence(&market()).await.unwrap());
+        let second_bid = place_tx(
+            &second_taker,
+            0,
+            Side::Bid,
+            100,
+            2,
+            TimeInForce::ImmediateOrCancel,
+        );
+        mailbox.submit_order(second_bid.clone()).await.unwrap();
+        let second_batch = mailbox.propose().await;
+        assert_eq!(second_batch.resting_orders, vec![OrderId(ask.digest())]);
+        assert_eq!(second_batch.orders, vec![second_bid.clone()]);
+        assert_eq!(second_batch.fills.len(), 1);
+
+        ledger
+            .apply_match_batch(&second_batch, context(3))
+            .await
+            .expect("actor-proposed second batch should use committed market sequence");
+        let fills = ledger.market_fills(&market()).await.unwrap();
+        assert_eq!(fills.len(), 2);
+        assert_eq!(fills[1].maker_order, OrderId(ask.digest()));
+        assert_eq!(fills[1].taker_order, OrderId(second_bid.digest()));
     });
 }
 

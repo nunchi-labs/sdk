@@ -97,6 +97,8 @@ pub trait ClobDB {
 
     fn set_order(&mut self, order: &Order);
 
+    fn remove_order(&mut self, order: &OrderId);
+
     async fn side_book(&self, market: &MarketId, side: Side) -> Result<Vec<OrderId>, ClobError>;
 
     fn set_side_book(&mut self, market: &MarketId, side: Side, orders: &[OrderId]);
@@ -180,6 +182,10 @@ impl<S: StateStore + Send + Sync> ClobDB for S {
 
     fn set_order(&mut self, order: &Order) {
         StateStore::set(self, order_key(&order.id), encoded(order));
+    }
+
+    fn remove_order(&mut self, order: &OrderId) {
+        StateStore::remove(self, order_key(order));
     }
 
     async fn side_book(&self, market: &MarketId, side: Side) -> Result<Vec<OrderId>, ClobError> {

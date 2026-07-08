@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{btree_map::Entry, BTreeMap};
 
 use crate::{
     fills_equivalent, AssetId, ClobDB, ClobOperation, Fill, FillId, Market, MarketId, MatchBatch,
@@ -92,6 +92,10 @@ impl<D: ClobDB> ClobLedger<D> {
 
     pub async fn market(&self, id: &MarketId) -> Result<Option<Market>, ClobError> {
         self.db.market(id).await
+    }
+
+    pub async fn market_sequence(&self, id: &MarketId) -> Result<u64, ClobError> {
+        self.db.market_sequence(id).await
     }
 
     pub async fn markets(&self) -> Result<Vec<Market>, ClobError> {
@@ -233,6 +237,28 @@ impl<D: ClobDB> ClobLedger<D> {
 
         let mut markets = BTreeMap::new();
         let mut starting_sequences = BTreeMap::new();
+        let mut resting_orders = Vec::with_capacity(batch.resting_orders.len());
+        for order_id in &batch.resting_orders {
+            let order = self
+                .db
+                .order(order_id)
+                .await?
+                .ok_or(ClobError::OrderNotFound)?;
+            if !order.status.is_open() || order.remaining_base == 0 {
+                return Err(ClobError::OrderClosed);
+            }
+            if let Entry::Vacant(entry) = markets.entry(order.market) {
+                let market_info = self
+                    .db
+                    .market(&order.market)
+                    .await?
+                    .ok_or(ClobError::MarketNotFound)?;
+                entry.insert(market_info);
+                starting_sequences.insert(order.market, self.db.market_sequence(&order.market).await?);
+            }
+            resting_orders.push(order);
+        }
+
         let mut expected_nonces = BTreeMap::<Address, u64>::new();
         for tx in &batch.orders {
             tx.verify()?;
@@ -241,6 +267,9 @@ impl<D: ClobDB> ClobLedger<D> {
                     "match batches may only carry signed place-order intents",
                 ));
             };
+            if self.db.order(&OrderId(tx.digest())).await?.is_some() {
+                return Err(ClobError::InvalidOrder("duplicate order id"));
+            }
             let expected = match expected_nonces.get(&tx.account_id) {
                 Some(expected) => *expected,
                 None => self.db.nonce(&tx.account_id).await?,
@@ -267,7 +296,13 @@ impl<D: ClobDB> ClobLedger<D> {
             }
         }
 
-        let replay = MatchEngine::replay(&batch.orders, &markets, starting_sequences, context)?;
+        let replay = MatchEngine::replay_with_resting(
+            &resting_orders,
+            &batch.orders,
+            &markets,
+            starting_sequences,
+            context,
+        )?;
         if replay.fills.len() != batch.fills.len() {
             return Err(ClobError::MatchBatchMismatch);
         }
@@ -289,6 +324,13 @@ impl<D: ClobDB> ClobLedger<D> {
                 self.db.remove_fill(&fill_id);
             }
             self.db.set_market_fills(&fill.market, &market_fills);
+        }
+        for (order_id, order) in replay.orders {
+            if order.status.is_open() && order.remaining_base > 0 {
+                self.db.set_order(&order);
+            } else {
+                self.db.remove_order(&order_id);
+            }
         }
         for (market, sequence) in replay.sequences {
             self.db.set_market_sequence(&market, sequence);

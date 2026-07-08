@@ -1,4 +1,6 @@
-use crate::{ClobLedger, ClobMailbox, MatchBatch};
+use std::collections::BTreeSet;
+
+use crate::{ClobLedger, ClobMailbox, ClobOperation, MatchBatch, MarketId};
 use nunchi_chain::{BlockExtension, ConsensusExtension};
 use nunchi_common::{RuntimeContext, StateStore};
 
@@ -49,6 +51,31 @@ impl ConsensusExtension for ClobExtension {
             return true;
         }
         let mut ledger = ClobLedger::new(state);
-        ledger.apply_match_batch(payload, context).await.is_ok()
+        if ledger.apply_match_batch(payload, context).await.is_err() {
+            return false;
+        }
+        for market in affected_markets(payload) {
+            let Ok(Some(market_info)) = ledger.market(&market).await else {
+                continue;
+            };
+            let Ok(sequence) = ledger.market_sequence(&market).await else {
+                continue;
+            };
+            self.mailbox.upsert_market_state(market_info, sequence);
+        }
+        true
     }
+}
+
+fn affected_markets(payload: &MatchBatch) -> BTreeSet<MarketId> {
+    let mut markets = BTreeSet::new();
+    for tx in &payload.orders {
+        if let ClobOperation::PlaceOrder { market, .. } = &tx.payload.operation {
+            markets.insert(*market);
+        }
+    }
+    for fill in &payload.fills {
+        markets.insert(fill.market);
+    }
+    markets
 }

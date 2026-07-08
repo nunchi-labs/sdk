@@ -31,20 +31,23 @@ impl TryFrom<u8> for OperationTag {
 /// Proposer-supplied CLOB match batch carried in a block extension.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MatchBatch {
-    /// Signed owner order intents used as matcher input.
+    /// Already-committed active resting orders validators should seed before replay.
+    pub resting_orders: Vec<OrderId>,
+    /// Fresh signed owner order intents whose nonces should advance if replay succeeds.
     pub orders: Vec<Transaction>,
-    /// Fills derived from replaying `orders` with deterministic price-time priority.
+    /// Fills derived from seeding `resting_orders` and replaying `orders`.
     pub fills: Vec<Fill>,
 }
 
 impl MatchBatch {
     pub fn is_empty(&self) -> bool {
-        self.orders.is_empty() && self.fills.is_empty()
+        self.resting_orders.is_empty() && self.orders.is_empty() && self.fills.is_empty()
     }
 }
 
 impl Write for MatchBatch {
     fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.resting_orders.write(buf);
         self.orders.write(buf);
         self.fills.write(buf);
     }
@@ -55,6 +58,7 @@ impl Read for MatchBatch {
 
     fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
+            resting_orders: Vec::read_cfg(buf, &(RangeCfg::new(0..=MAX_MATCH_BATCH_ORDERS), ()))?,
             orders: Vec::read_cfg(buf, &(RangeCfg::new(0..=MAX_MATCH_BATCH_ORDERS), ()))?,
             fills: Vec::read_cfg(buf, &(RangeCfg::new(0..=MAX_MATCH_BATCH_FILLS), ()))?,
         })
@@ -63,7 +67,7 @@ impl Read for MatchBatch {
 
 impl EncodeSize for MatchBatch {
     fn encode_size(&self) -> usize {
-        self.orders.encode_size() + self.fills.encode_size()
+        self.resting_orders.encode_size() + self.orders.encode_size() + self.fills.encode_size()
     }
 }
 

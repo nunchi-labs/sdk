@@ -24,6 +24,7 @@ struct Book {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ReplayResult {
     pub fills: Vec<Fill>,
+    pub orders: BTreeMap<OrderId, Order>,
     pub sequences: BTreeMap<MarketId, u64>,
 }
 
@@ -39,46 +40,106 @@ impl MatchEngine {
         sequences: BTreeMap<MarketId, u64>,
         context: RuntimeContext,
     ) -> Result<ReplayResult, ClobError> {
+        Self::replay_with_resting(&[], orders, markets, sequences, context)
+    }
+
+    /// Replay signed order intents after seeding already-active resting orders.
+    pub fn replay_with_resting(
+        resting_orders: &[Order],
+        orders: &[Transaction],
+        markets: &BTreeMap<MarketId, Market>,
+        sequences: BTreeMap<MarketId, u64>,
+        context: RuntimeContext,
+    ) -> Result<ReplayResult, ClobError> {
         let mut engine = Self::new();
         let mut sequences = sequences;
         let mut fills = Vec::new();
+        let mut order_updates = BTreeMap::new();
+
+        engine.seed_resting_orders(resting_orders, markets)?;
 
         for tx in orders {
-            tx.verify()?;
-            let order_id = OrderId(tx.digest());
-            let ClobOperation::PlaceOrder {
-                market,
-                side,
-                price,
-                base_quantity,
-                time_in_force,
-            } = &tx.payload.operation
-            else {
-                return Err(ClobError::InvalidOrder(
-                    "match batches may only carry signed place-order intents",
-                ));
-            };
-            let market_info = markets.get(market).ok_or(ClobError::MarketNotFound)?;
-            validate_order(market_info, *price, *base_quantity)?;
-            let sequence = next_sequence(&mut sequences, market)?;
-            let order = Order {
-                id: order_id,
-                owner: tx.account_id.clone(),
-                market: *market,
-                side: *side,
-                price: *price,
-                original_base: *base_quantity,
-                remaining_base: *base_quantity,
-                filled_base: 0,
-                status: OrderStatus::Open,
-                sequence,
-                created_at_height: context.height,
-                created_at_ms: context.timestamp_ms,
-            };
-            engine.place_order(order, *time_in_force, context, &mut sequences, &mut fills)?;
+            engine.apply_order_tx(
+                tx,
+                markets,
+                context,
+                &mut sequences,
+                &mut fills,
+                &mut order_updates,
+            )?;
         }
 
-        Ok(ReplayResult { fills, sequences })
+        Ok(ReplayResult {
+            fills,
+            orders: order_updates,
+            sequences,
+        })
+    }
+
+    fn seed_resting_orders(
+        &mut self,
+        resting_orders: &[Order],
+        markets: &BTreeMap<MarketId, Market>,
+    ) -> Result<(), ClobError> {
+        for order in resting_orders {
+            let market = markets.get(&order.market).ok_or(ClobError::MarketNotFound)?;
+            validate_order(market, order.price, order.original_base)?;
+            if order.status.is_open() && order.remaining_base > 0 {
+                let book = self.books.entry(order.market).or_default();
+                insert_resting(book.side_mut(order.side), order.clone());
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_order_tx(
+        &mut self,
+        tx: &Transaction,
+        markets: &BTreeMap<MarketId, Market>,
+        context: RuntimeContext,
+        sequences: &mut BTreeMap<MarketId, u64>,
+        fills: &mut Vec<Fill>,
+        order_updates: &mut BTreeMap<OrderId, Order>,
+    ) -> Result<(), ClobError> {
+        tx.verify()?;
+        let order_id = OrderId(tx.digest());
+        let ClobOperation::PlaceOrder {
+            market,
+            side,
+            price,
+            base_quantity,
+            time_in_force,
+        } = &tx.payload.operation
+        else {
+            return Err(ClobError::InvalidOrder(
+                "match batches may only carry signed place-order intents",
+            ));
+        };
+        let market_info = markets.get(market).ok_or(ClobError::MarketNotFound)?;
+        validate_order(market_info, *price, *base_quantity)?;
+        let sequence = next_sequence(sequences, market)?;
+        let order = Order {
+            id: order_id,
+            owner: tx.account_id.clone(),
+            market: *market,
+            side: *side,
+            price: *price,
+            original_base: *base_quantity,
+            remaining_base: *base_quantity,
+            filled_base: 0,
+            status: OrderStatus::Open,
+            sequence,
+            created_at_height: context.height,
+            created_at_ms: context.timestamp_ms,
+        };
+        self.place_order(
+            order,
+            *time_in_force,
+            context,
+            sequences,
+            fills,
+            order_updates,
+        )
     }
 
     fn place_order(
@@ -88,6 +149,7 @@ impl MatchEngine {
         context: RuntimeContext,
         sequences: &mut BTreeMap<MarketId, u64>,
         fills: &mut Vec<Fill>,
+        order_updates: &mut BTreeMap<OrderId, Order>,
     ) -> Result<(), ClobError> {
         let book = self.books.entry(taker.market).or_default();
         let opposite = book.side_mut(taker.side.opposite());
@@ -140,6 +202,7 @@ impl MatchEngine {
                 OrderStatus::PartiallyFilled
             };
             fills.push(fill);
+            order_updates.insert(maker.id, maker.clone());
 
             if maker.status.is_open() && maker.remaining_base > 0 {
                 remaining_makers.push(maker);
@@ -158,8 +221,12 @@ impl MatchEngine {
         };
         if taker.status.is_open() && taker.remaining_base > 0 {
             let same_side = book.side_mut(taker.side);
-            insert_resting(same_side, taker);
+            insert_resting(same_side, taker.clone());
+        } else {
+            order_updates.insert(taker.id, taker);
+            return Ok(());
         }
+        order_updates.insert(taker.id, taker);
         Ok(())
     }
 }

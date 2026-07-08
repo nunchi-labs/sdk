@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::{ClobError, MatchBatch, MatchEngine, Market, MarketId, Transaction};
+use crate::{ClobError, MatchBatch, MatchEngine, Market, MarketId, Order, OrderId, Transaction};
 use commonware_runtime::{Handle, Spawner};
 use futures::{
     channel::{mpsc, oneshot},
@@ -28,6 +28,7 @@ enum Message {
     },
     UpsertMarket {
         market: Market,
+        sequence: u64,
     },
     Propose {
         responder: oneshot::Sender<MatchBatch>,
@@ -53,8 +54,16 @@ impl ClobMailbox {
 
     /// Make market metadata available to local proposer matching.
     pub fn upsert_market(&self, market: Market) {
+        self.upsert_market_state(market, 0);
+    }
+
+    /// Make market metadata and the current committed sequence available locally.
+    pub fn upsert_market_state(&self, market: Market, sequence: u64) {
         let mut sender = self.sender.clone();
-        if sender.try_send(Message::UpsertMarket { market }).is_err() {
+        if sender
+            .try_send(Message::UpsertMarket { market, sequence })
+            .is_err()
+        {
             warn!("clob mailbox unavailable; dropping market update");
         }
     }
@@ -74,7 +83,9 @@ impl ClobMailbox {
 pub struct ClobActor {
     receiver: mpsc::Receiver<Message>,
     pending_orders: Vec<Transaction>,
+    active_orders: BTreeMap<OrderId, Order>,
     markets: BTreeMap<MarketId, Market>,
+    sequences: BTreeMap<MarketId, u64>,
 }
 
 impl ClobActor {
@@ -84,7 +95,9 @@ impl ClobActor {
             Self {
                 receiver,
                 pending_orders: Vec::new(),
+                active_orders: BTreeMap::new(),
                 markets: BTreeMap::new(),
+                sequences: BTreeMap::new(),
             },
             ClobMailbox { sender },
         )
@@ -106,7 +119,8 @@ impl ClobActor {
                     });
                     let _ = responder.send(result);
                 }
-                Message::UpsertMarket { market } => {
+                Message::UpsertMarket { market, sequence } => {
+                    self.sequences.insert(market.id, sequence);
                     self.markets.insert(market.id, market);
                 }
                 Message::Propose { responder } => {
@@ -120,17 +134,36 @@ impl ClobActor {
         if self.pending_orders.is_empty() {
             return MatchBatch::default();
         }
-        let orders = std::mem::take(&mut self.pending_orders);
-        let replay = MatchEngine::replay(
+        let orders = self.pending_orders.clone();
+        let resting_orders = self.active_orders.keys().copied().collect::<Vec<_>>();
+        let resting_snapshots = self
+            .active_orders
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let replay = MatchEngine::replay_with_resting(
+            &resting_snapshots,
             &orders,
             &self.markets,
-            BTreeMap::new(),
+            self.sequences.clone(),
             RuntimeContext::default(),
         );
         match replay {
+            Ok(result) if result.fills.is_empty() => MatchBatch::default(),
             Ok(result) => MatchBatch {
-                orders,
-                fills: result.fills,
+                resting_orders,
+                orders: std::mem::take(&mut self.pending_orders),
+                fills: {
+                    self.sequences = result.sequences;
+                    for (order_id, order) in result.orders {
+                        if order.status.is_open() && order.remaining_base > 0 {
+                            self.active_orders.insert(order_id, order);
+                        } else {
+                            self.active_orders.remove(&order_id);
+                        }
+                    }
+                    result.fills
+                },
             },
             Err(error) => {
                 warn!(?error, "dropping invalid local clob proposal batch");

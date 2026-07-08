@@ -113,6 +113,7 @@ fn clob_mailbox_extension_records_verified_fill() {
         let creator = nunchi_crypto::PrivateKey::ed25519_from_seed(10);
         let maker = nunchi_crypto::PrivateKey::ed25519_from_seed(11);
         let taker = nunchi_crypto::PrivateKey::ed25519_from_seed(12);
+        let second_taker = nunchi_crypto::PrivateKey::ed25519_from_seed(13);
 
         let market_tx = ClobTransaction::sign(
             &creator,
@@ -143,7 +144,7 @@ fn clob_mailbox_extension_records_verified_fill() {
                 market: clob_market(),
                 side: Side::Ask,
                 price: 100,
-                base_quantity: 4,
+                base_quantity: 6,
                 time_in_force: TimeInForce::GoodTilCancelled,
             },
         );
@@ -168,10 +169,41 @@ fn clob_mailbox_extension_records_verified_fill() {
             .apply_payload(&mut state, Default::default(), &payload)
             .await);
 
+        {
+            let ledger = ClobLedger::new(&mut state);
+            let fills = ledger.market_fills(&clob_market()).await.unwrap();
+            assert_eq!(fills.len(), 1);
+            assert_eq!(fills[0].maker_order, OrderId(ask.digest()));
+            assert_eq!(fills[0].taker_order, OrderId(bid.digest()));
+        }
+
+        let second_bid = ClobTransaction::sign(
+            &second_taker,
+            0,
+            ClobOperation::PlaceOrder {
+                market: clob_market(),
+                side: Side::Bid,
+                price: 100,
+                base_quantity: 2,
+                time_in_force: TimeInForce::ImmediateOrCancel,
+            },
+        );
+        extension
+            .mailbox()
+            .submit_order(second_bid.clone())
+            .await
+            .unwrap();
+        let second_payload = extension.propose().await;
+        assert_eq!(second_payload.resting_orders, vec![OrderId(ask.digest())]);
+        assert_eq!(second_payload.fills.len(), 1);
+        assert!(extension
+            .apply_payload(&mut state, Default::default(), &second_payload)
+            .await);
+
         let ledger = ClobLedger::new(&mut state);
         let fills = ledger.market_fills(&clob_market()).await.unwrap();
-        assert_eq!(fills.len(), 1);
-        assert_eq!(fills[0].maker_order, OrderId(ask.digest()));
-        assert_eq!(fills[0].taker_order, OrderId(bid.digest()));
+        assert_eq!(fills.len(), 2);
+        assert_eq!(fills[1].maker_order, OrderId(ask.digest()));
+        assert_eq!(fills[1].taker_order, OrderId(second_bid.digest()));
     });
 }

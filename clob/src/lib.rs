@@ -1,9 +1,10 @@
 //! Central limit order book module for spot and derivatives execution.
 //!
-//! The CLOB owns market metadata, signed order intents, deterministic matcher
-//! replay, and fill records. Open order books live in validator-local runtime
-//! state; settlement, margin, funding, liquidation, house liquidity, and batch
-//! clearing live in consuming modules.
+//! The CLOB owns market metadata, signed order intents, active order snapshots
+//! needed for replay, deterministic matcher replay, and fill records. Full open
+//! order books live in validator-local runtime state; settlement, margin,
+//! funding, liquidation, house liquidity, and batch clearing live in consuming
+//! modules.
 //!
 //! Self-trade prevention is not enforced: orders from the same account may match
 //! against each other.
