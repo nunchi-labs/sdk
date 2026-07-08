@@ -180,16 +180,6 @@ impl<D: PerpetualDB + CoinDB + StateStore + Send + Sync> PerpetualLedger<D> {
         max_funding_rate_bps: u32,
         liquidation_reward_bps: u32,
     ) -> Result<MarketId, PerpetualError> {
-        validate_market_params(
-            oracle_interval_ms,
-            max_oracle_staleness_ms,
-            price_decimals,
-            max_leverage_bps,
-            maintenance_margin_bps,
-            funding_interval_ms,
-            max_funding_rate_bps,
-            liquidation_reward_bps,
-        )?;
         let nonce = self.db.market_nonce().await?;
         let market_id = derive_market_id(base_asset, quote_asset, collateral_asset, nonce);
         if self.db.market(&market_id).await?.is_some() {
@@ -221,6 +211,7 @@ impl<D: PerpetualDB + CoinDB + StateStore + Send + Sync> PerpetualLedger<D> {
             cumulative_funding_long: 0,
             cumulative_funding_short: 0,
         };
+        validate_market_params(&market)?;
         self.db.set_market(&market);
         self.db.set_market_nonce(
             nonce
@@ -981,38 +972,29 @@ fn decode_oracle_payload(bytes: &[u8]) -> Result<OraclePricePayload, PerpetualEr
     OraclePricePayload::read(&mut buf).map_err(|err| PerpetualError::OraclePayload(err.to_string()))
 }
 
-fn validate_market_params(
-    oracle_interval_ms: u64,
-    max_oracle_staleness_ms: u64,
-    price_decimals: u8,
-    max_leverage_bps: u32,
-    maintenance_margin_bps: u32,
-    funding_interval_ms: u64,
-    max_funding_rate_bps: u32,
-    liquidation_reward_bps: u32,
-) -> Result<(), PerpetualError> {
-    if oracle_interval_ms == 0 {
+fn validate_market_params(market: &Market) -> Result<(), PerpetualError> {
+    if market.oracle_interval_ms == 0 {
         return Err(PerpetualError::InvalidOracleInterval);
     }
-    if max_oracle_staleness_ms == 0 {
+    if market.max_oracle_staleness_ms == 0 {
         return Err(PerpetualError::InvalidOracleStaleness);
     }
-    if price_decimals > MAX_PRICE_DECIMALS {
+    if market.price_decimals > MAX_PRICE_DECIMALS {
         return Err(PerpetualError::InvalidPriceDecimals);
     }
-    if max_leverage_bps < BPS_DENOMINATOR {
+    if market.max_leverage_bps < BPS_DENOMINATOR {
         return Err(PerpetualError::InvalidLeverage);
     }
-    if maintenance_margin_bps == 0 || maintenance_margin_bps >= BPS_DENOMINATOR {
+    if market.maintenance_margin_bps == 0 || market.maintenance_margin_bps >= BPS_DENOMINATOR {
         return Err(PerpetualError::InvalidMaintenanceMargin);
     }
-    if funding_interval_ms == 0 {
+    if market.funding_interval_ms == 0 {
         return Err(PerpetualError::InvalidFundingInterval);
     }
-    if max_funding_rate_bps > BPS_DENOMINATOR {
+    if market.max_funding_rate_bps > BPS_DENOMINATOR {
         return Err(PerpetualError::InvalidFundingRate);
     }
-    if liquidation_reward_bps == 0 || liquidation_reward_bps >= BPS_DENOMINATOR {
+    if market.liquidation_reward_bps == 0 || market.liquidation_reward_bps >= BPS_DENOMINATOR {
         return Err(PerpetualError::InvalidLiquidationReward);
     }
     Ok(())
