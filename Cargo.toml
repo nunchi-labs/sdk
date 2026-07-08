@@ -2,6 +2,7 @@
 members = [
     "authority",
     "bridge",
+    "cbc",
     "common",
     "chain",
     "clob",
@@ -39,6 +40,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
 nunchi-coins = { version = "2026.5.0", path = "coins" }
 nunchi-authority = { version = "2026.5.0", path = "authority" }
 nunchi-bridge = { version = "2026.5.0", path = "bridge" }
+nunchi-cbc = { version = "2026.5.0", path = "cbc" }
 nunchi-chain = { version = "2026.5.0", path = "chain" }
 nunchi-clob = { version = "2026.5.0", path = "clob" }
 nunchi-common = { version = "2026.5.0", path = "common" }

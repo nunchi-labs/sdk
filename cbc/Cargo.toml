@@ -1,0 +1,34 @@
+[package]
+name = "nunchi-cbc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cooperative batch clearing module for Nunchi hybrid AMM liquidity: uniform-price batches over house vault intents."
+
+[lints]
+workspace = true
+
+[features]
+default = ["rpc"]
+rpc = ["dep:futures", "dep:jsonrpsee", "dep:nunchi-rpc"]
+
+[dependencies]
+async-trait = { workspace = true }
+bytes = { workspace = true }
+commonware-codec = { workspace = true }
+commonware-cryptography = { workspace = true }
+commonware-formatting = { workspace = true }
+commonware-macros = { workspace = true }
+futures = { workspace = true, optional = true }
+jsonrpsee = { workspace = true, optional = true }
+nunchi-clob = { workspace = true }
+nunchi-common = { workspace = true }
+nunchi-crypto = { workspace = true }
+nunchi-house = { workspace = true }
+nunchi-rpc = { workspace = true, optional = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+commonware-runtime = { workspace = true }
+serde_json = { workspace = true }
