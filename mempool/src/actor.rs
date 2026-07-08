@@ -480,7 +480,7 @@ where
                 if let Some(metrics) = self.mempool.metrics.get() {
                     metrics.submitted(SubmitSource::P2p, 1);
                 }
-                let result = Pool::check_stateless(&tx, &self.mempool.pool.config())
+                let result = Pool::check_stateless(&tx, self.mempool.pool.config())
                     .and_then(|()| self.mempool.pool.admit_verified(tx));
                 self.record_submission_result(&result);
                 match result {

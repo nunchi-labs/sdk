@@ -305,8 +305,7 @@ fn spam(args: SpamArgs) -> Result<(), Box<dyn Error>> {
     };
     let mut next_nonces = accounts
         .iter()
-        .enumerate()
-        .map(|(_, account)| {
+        .map(|account| {
             rpc_id += 1;
             let response: NonceResponse = rpc(
                 &client,
@@ -369,7 +368,7 @@ fn spam(args: SpamArgs) -> Result<(), Box<dyn Error>> {
 
         next_nonces[index] += 1;
         submitted += 1;
-        if submitted == 1 || submitted % 100 == 0 {
+        if submitted == 1 || submitted.is_multiple_of(100) {
             println!("submitted {submitted} latest={}", response.hash);
         }
         if !interval.is_zero() {
