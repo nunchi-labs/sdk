@@ -2910,6 +2910,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "nunchi-house"
+version = "2026.6.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-formatting",
+ "commonware-macros",
+ "commonware-runtime",
+ "futures",
+ "jsonrpsee",
+ "nunchi-clob",
+ "nunchi-common",
+ "nunchi-crypto",
+ "nunchi-rpc",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "nunchi-mcp"
 version = "2026.6.0"
 dependencies = [
