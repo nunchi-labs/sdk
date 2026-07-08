@@ -9,12 +9,13 @@ members = [
     "crypto",
     "dkg",
     "narae",
+    "xtask",
     "mempool",
     "oracle",
     "rpc",
     "mcp",
     "examples/bridge-chain",
-    "examples/coins-chain",
+    "examples/coins/chain",
     "examples/custom-module",
 ]
 resolver = "2"
@@ -46,8 +47,9 @@ nunchi-dkg = { version = "2026.5.0", path = "dkg" }
 nunchi-mempool = { version = "2026.5.0", path = "mempool" }
 nunchi-oracle = { version = "2026.5.0", path = "oracle" }
 nunchi-rpc = { version = "2026.5.0", path = "rpc" }
-nunchi-coins-chain = { version = "2026.5.0", path = "examples/coins-chain" }
+nunchi-coins-chain = { version = "2026.5.0", path = "examples/coins/chain" }
 nunchi-bridge-chain = { version = "2026.5.0", path = "examples/bridge-chain" }
+nunchi-xtask = { version = "2026.5.0", package = "xtask", path = "xtask" }
 commonware-actor = "2026.5.0"
 commonware-broadcast = "2026.5.0"
 commonware-codec = "2026.5.0"
