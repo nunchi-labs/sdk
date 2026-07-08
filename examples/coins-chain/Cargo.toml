@@ -12,6 +12,7 @@ workspace = true
 nunchi-coins = { workspace = true, features = ["mempool"] }
 nunchi-authority = { workspace = true }
 nunchi-chain = { workspace = true }
+nunchi-clob = { workspace = true }
 nunchi-common = { workspace = true }
 nunchi-crypto = { workspace = true }
 nunchi-dkg = { workspace = true }

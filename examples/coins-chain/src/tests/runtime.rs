@@ -1,4 +1,5 @@
 use nunchi_authority::AuthorityError;
+use nunchi_clob::ClobError;
 use nunchi_coins::{
     CoinOperation, CoinSpec, LedgerError, TokenCreated, TokenName, TokenSymbol,
     TOKEN_CREATED_EVENT,
@@ -15,9 +16,11 @@ use commonware_runtime::{deterministic, Runner as _};
 fn runtime_error_classifies_storage_errors() {
     assert!(RuntimeError::Coins(LedgerError::Storage("disk".into())).is_storage());
     assert!(RuntimeError::Authority(AuthorityError::Storage("disk".into())).is_storage());
+    assert!(RuntimeError::Clob(ClobError::Storage("disk".into())).is_storage());
 
     assert!(!RuntimeError::Authority(AuthorityError::NotConfigured).is_storage());
     assert!(!RuntimeError::Coins(LedgerError::InvalidTokenSpec("bad")).is_storage());
+    assert!(!RuntimeError::Clob(ClobError::OffchainOnly).is_storage());
 }
 
 #[test]

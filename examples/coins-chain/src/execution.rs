@@ -6,6 +6,7 @@ use commonware_glue::stateful::Mailbox as StatefulMailbox;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_storage::Context;
 use jsonrpsee::core::async_trait;
+use nunchi_clob::ClobMailbox;
 use nunchi_coins::{rpc::CoinQuery, Address, CoinId, Ledger, LedgerError, TokenDefinition};
 use nunchi_common::QmdbReader;
 use nunchi_mempool::MempoolHandle;
@@ -19,6 +20,7 @@ where
     E: Context + Spawner + Metrics + Clock + rand::Rng,
 {
     pub submitter: MempoolHandle<Transaction>,
+    pub clob: ClobMailbox,
     pub stateful: StatefulMailbox<E, Application>,
     pub applied_height: SharedAppliedHeight,
 }
@@ -29,11 +31,13 @@ where
 {
     pub fn new(
         submitter: MempoolHandle<Transaction>,
+        clob: ClobMailbox,
         stateful: StatefulMailbox<E, Application>,
         applied_height: SharedAppliedHeight,
     ) -> Self {
         Self {
             submitter,
+            clob,
             stateful,
             applied_height,
         }

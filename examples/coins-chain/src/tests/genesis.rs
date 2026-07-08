@@ -69,6 +69,7 @@ fn sample_genesis() -> ChainGenesis {
             }],
         }),
         oracle: Some(OracleGenesis {}),
+        clob: None,
     }
 }
 

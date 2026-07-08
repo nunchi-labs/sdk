@@ -1,5 +1,8 @@
-use crate::{AssetId, MarketId, OrderId, Side, TimeInForce, CLOB_NAMESPACE};
-use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
+use crate::{
+    AssetId, Fill, MarketId, OrderId, Side, TimeInForce, MAX_MATCH_BATCH_FILLS,
+    MAX_MATCH_BATCH_ORDERS, CLOB_NAMESPACE,
+};
+use commonware_codec::{EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
 use nunchi_common::Operation as CommonOperation;
 
 #[repr(u8)]
@@ -8,6 +11,7 @@ enum OperationTag {
     CreateMarket = 0,
     PlaceOrder = 1,
     CancelOrder = 2,
+    ApplyMatchBatch = 3,
 }
 
 impl TryFrom<u8> for OperationTag {
@@ -18,8 +22,48 @@ impl TryFrom<u8> for OperationTag {
             0 => Ok(Self::CreateMarket),
             1 => Ok(Self::PlaceOrder),
             2 => Ok(Self::CancelOrder),
+            3 => Ok(Self::ApplyMatchBatch),
             tag => Err(Error::InvalidEnum(tag)),
         }
+    }
+}
+
+/// Proposer-supplied CLOB match batch carried in a block extension.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MatchBatch {
+    /// Signed owner order intents used as matcher input.
+    pub orders: Vec<Transaction>,
+    /// Fills derived from replaying `orders` with deterministic price-time priority.
+    pub fills: Vec<Fill>,
+}
+
+impl MatchBatch {
+    pub fn is_empty(&self) -> bool {
+        self.orders.is_empty() && self.fills.is_empty()
+    }
+}
+
+impl Write for MatchBatch {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.orders.write(buf);
+        self.fills.write(buf);
+    }
+}
+
+impl Read for MatchBatch {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+        Ok(Self {
+            orders: Vec::read_cfg(buf, &(RangeCfg::new(0..=MAX_MATCH_BATCH_ORDERS), ()))?,
+            fills: Vec::read_cfg(buf, &(RangeCfg::new(0..=MAX_MATCH_BATCH_FILLS), ()))?,
+        })
+    }
+}
+
+impl EncodeSize for MatchBatch {
+    fn encode_size(&self) -> usize {
+        self.orders.encode_size() + self.fills.encode_size()
     }
 }
 
@@ -43,6 +87,8 @@ pub enum ClobOperation {
     },
     /// Cancel one open order owned by the signer.
     CancelOrder { order: OrderId },
+    /// Apply one proposer match batch after validators replay signed orders.
+    ApplyMatchBatch { batch: MatchBatch },
 }
 
 impl Write for ClobOperation {
@@ -78,6 +124,10 @@ impl Write for ClobOperation {
                 (OperationTag::CancelOrder as u8).write(buf);
                 order.write(buf);
             }
+            Self::ApplyMatchBatch { batch } => {
+                (OperationTag::ApplyMatchBatch as u8).write(buf);
+                batch.write(buf);
+            }
         }
     }
 }
@@ -102,6 +152,9 @@ impl Read for ClobOperation {
             }),
             OperationTag::CancelOrder => Ok(Self::CancelOrder {
                 order: OrderId::read(buf)?,
+            }),
+            OperationTag::ApplyMatchBatch => Ok(Self::ApplyMatchBatch {
+                batch: MatchBatch::read(buf)?,
             }),
         }
     }
@@ -135,6 +188,7 @@ impl EncodeSize for ClobOperation {
                     + time_in_force.encode_size()
             }
             Self::CancelOrder { order } => order.encode_size(),
+            Self::ApplyMatchBatch { batch } => batch.encode_size(),
         }
     }
 }

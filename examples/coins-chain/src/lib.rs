@@ -35,9 +35,9 @@ pub use nunchi_dkg::{
 pub use runtime::{CoinsRuntime, RuntimeError};
 pub use transaction::Transaction;
 
-pub type Block<Tx = Transaction> = nunchi_chain::Block<Tx>;
-pub type Notarized<Tx = Transaction> = nunchi_chain::Notarized<Tx>;
-pub type Finalized<Tx = Transaction> = nunchi_chain::Finalized<Tx>;
+pub type Block<Tx = Transaction> = nunchi_chain::Block<Tx, nunchi_clob::ClobExtension>;
+pub type Notarized<Tx = Transaction> = nunchi_chain::Notarized<Tx, nunchi_clob::ClobExtension>;
+pub type Finalized<Tx = Transaction> = nunchi_chain::Finalized<Tx, nunchi_clob::ClobExtension>;
 
 /// Namespace prefix used in all consensus signing operations to prevent signature replay attacks.
 pub const NAMESPACE: &[u8] = b"_NUNCHI_COINS_CHAIN";
@@ -54,6 +54,7 @@ pub mod channels {
     pub const DKG: u64 = 4;
     pub const BACKFILL: u64 = 5;
     pub const MEMPOOL: u64 = 6;
+    pub const CLOB: u64 = 7;
 }
 
 /// The consensus epoch. The demo chain never reconfigures, so the epoch is hardcoded to 0.
