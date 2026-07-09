@@ -2685,6 +2685,7 @@ dependencies = [
  "rand 0.8.6",
  "rand_core 0.6.4",
  "serde",
+ "thiserror 2.0.18",
  "tracing",
 ]
 
@@ -2797,6 +2798,7 @@ dependencies = [
  "governor",
  "jsonrpsee",
  "nunchi-authority",
+ "nunchi-bridge",
  "nunchi-chain",
  "nunchi-coins",
  "nunchi-common",
