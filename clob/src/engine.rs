@@ -306,6 +306,11 @@ pub(crate) fn validate_order(
             "quantity is not on the market lot",
         ));
     }
+    if price.checked_mul(base_quantity).is_none() {
+        return Err(ClobError::InvalidOrder(
+            "price times quantity overflows u128",
+        ));
+    }
     Ok(())
 }
 

@@ -403,6 +403,63 @@ fn matcher_rejects_invalid_price_and_sequence_overflow() {
 }
 
 #[test]
+fn matcher_rejects_orders_whose_quote_would_overflow() {
+    run_test(|| async {
+        let creator = PrivateKey::from_seed(1);
+        let maker = PrivateKey::from_seed(2);
+        let taker = PrivateKey::from_seed(3);
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        seed_market(&mut ledger, &creator).await;
+        let market_info = ledger.market(&market()).await.unwrap().unwrap();
+        let mut markets = BTreeMap::new();
+        markets.insert(market_info.id, market_info);
+
+        let overflow_price = u128::MAX - (u128::MAX % MARKET_TICK);
+        assert!(overflow_price.is_multiple_of(MARKET_TICK));
+        assert!(overflow_price.checked_mul(MARKET_LOT).is_none());
+
+        let resting_bid = place_tx(
+            &maker,
+            0,
+            Side::Bid,
+            overflow_price,
+            MARKET_LOT,
+            TimeInForce::GoodTilCancelled,
+        );
+        let crossing_ask = place_tx(
+            &taker,
+            0,
+            Side::Ask,
+            overflow_price,
+            MARKET_LOT,
+            TimeInForce::ImmediateOrCancel,
+        );
+
+        let overflow = ClobError::InvalidOrder("price times quantity overflows u128");
+        assert_eq!(
+            MatchEngine::replay(
+                std::slice::from_ref(&resting_bid),
+                &markets,
+                BTreeMap::new(),
+                context(2),
+            )
+            .unwrap_err(),
+            overflow
+        );
+        assert_eq!(
+            MatchEngine::replay(
+                &[resting_bid, crossing_ask],
+                &markets,
+                BTreeMap::new(),
+                context(2),
+            )
+            .unwrap_err(),
+            overflow
+        );
+    });
+}
+
+#[test]
 fn partially_filled_taker_rests_for_later_match() {
     run_test(|| async {
         let creator = PrivateKey::from_seed(1);
