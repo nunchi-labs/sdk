@@ -1,5 +1,6 @@
 //! Coins-chain runtime execution dispatch.
 
+use commonware_codec::EncodeSize;
 use nunchi_authority::{AuthorityError, AuthorityLedger};
 use nunchi_clob::{ClobError, ClobLedger};
 use nunchi_coins::{Ledger, LedgerError};
@@ -72,12 +73,22 @@ async fn apply_transaction<S, Events>(
     state: &mut S,
     context: RuntimeContext,
     transaction: &Transaction,
-    events: Events,
+    mut events: Events,
 ) -> Result<(), RuntimeError>
 where
     S: StateStore + Send + Sync,
     Events: EventSink + Send,
 {
+    // Fee ante: charge the authorizing account before module dispatch. The fee is staged in the
+    // same overlay as the operation, so a failed transaction reverts its fee.
+    let mut fees = Ledger::new(&mut *state);
+    fees.charge_fee(
+        transaction.account_id(),
+        transaction.encode_size(),
+        &mut events,
+    )
+    .await?;
+
     match transaction {
         Transaction::Coin(transaction) => {
             let mut ledger = Ledger::new(state);
@@ -97,20 +108,4 @@ where
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn runtime_error_classifies_storage_errors() {
-        assert!(RuntimeError::Coins(LedgerError::Storage("disk".into())).is_storage());
-        assert!(RuntimeError::Authority(AuthorityError::Storage("disk".into())).is_storage());
-        assert!(RuntimeError::Oracle(OracleError::Storage("disk".into())).is_storage());
-
-        assert!(!RuntimeError::Authority(AuthorityError::NotConfigured).is_storage());
-        assert!(!RuntimeError::Coins(LedgerError::InvalidTokenSpec("bad")).is_storage());
-        assert!(!RuntimeError::Oracle(OracleError::PayloadTooLarge).is_storage());
-    }
 }

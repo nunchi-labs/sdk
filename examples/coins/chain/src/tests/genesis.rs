@@ -46,6 +46,7 @@ fn sample_genesis() -> ChainGenesis {
             epoch: 0,
         }),
         coins: Some(CoinsGenesis {
+            fees: None,
             account_policies: Vec::new(),
             tokens: vec![nunchi_coins::TokenGenesis {
                 issuer,

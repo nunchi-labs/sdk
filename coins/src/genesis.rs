@@ -1,6 +1,6 @@
 use crate::{
-    multisig_account_id, AccountPolicy, Address, CoinDB, CoinId, CoinSpec, Ledger, LedgerError,
-    MultisigPolicy,
+    multisig_account_id, AccountPolicy, Address, CoinDB, CoinId, CoinSpec, FeeConfig, Ledger,
+    LedgerError, MultisigPolicy,
 };
 use commonware_codec::{DecodeExt, Encode};
 use commonware_formatting::{from_hex, hex};
@@ -17,6 +17,24 @@ pub struct CoinsGenesis {
     /// Tokens to create and optionally distribute at genesis.
     #[serde(default)]
     pub tokens: Vec<TokenGenesis>,
+    /// Optional transaction fee policy. Chains without one charge no fees.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fees: Option<FeeGenesis>,
+}
+
+/// JSON-facing transaction fee policy.
+#[serde_as]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct FeeGenesis {
+    /// Index into [`CoinsGenesis::tokens`] selecting the coin fees are paid in.
+    pub token: usize,
+    /// Bech32-encoded [`Address`] credited with collected fees.
+    #[serde_as(as = "DisplayFromStr")]
+    pub collector: Address,
+    /// Flat fee charged per transaction.
+    pub base: u128,
+    /// Fee charged per canonical encoded transaction byte.
+    pub per_byte: u128,
 }
 
 /// JSON-facing account policy registration.
@@ -88,6 +106,7 @@ impl<D: CoinDB> Ledger<D> {
             .await?;
         }
 
+        let mut coins = Vec::with_capacity(genesis.tokens.len());
         for token in &genesis.tokens {
             let coin = self
                 .create_token(token.issuer.clone(), token.spec.clone())
@@ -99,6 +118,23 @@ impl<D: CoinDB> Ledger<D> {
                 &token.allocations,
             )
             .await?;
+            coins.push(coin);
+        }
+
+        if let Some(fees) = &genesis.fees {
+            let coin = coins.get(fees.token).ok_or_else(|| {
+                LedgerError::InvalidGenesis(format!(
+                    "fee token index {} out of range ({} tokens)",
+                    fees.token,
+                    coins.len()
+                ))
+            })?;
+            self.set_fee_config(&FeeConfig {
+                coin: *coin,
+                collector: fees.collector.clone(),
+                base: fees.base,
+                per_byte: fees.per_byte,
+            });
         }
 
         Ok(())
