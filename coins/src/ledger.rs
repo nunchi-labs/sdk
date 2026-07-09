@@ -1,11 +1,12 @@
 use super::{
     multisig_account_id, Account, AccountPolicy, AccountType, Address, Authorization, CoinId,
-    CoinOperation, TokenDefinition, TokenFactory, Transaction,
+    CoinOperation, FeeConfig, TokenDefinition, TokenFactory, Transaction,
 };
 use crate::db::CoinDB;
 use crate::events::{
-    account_policy_registered_event, burned_event, minted_event, token_created_event,
-    transferred_event, AccountPolicyRegistered, Burned, Minted, TokenCreated, Transferred,
+    account_policy_registered_event, burned_event, fee_charged_event, minted_event,
+    token_created_event, transferred_event, AccountPolicyRegistered, Burned, FeeCharged, Minted,
+    TokenCreated, Transferred,
 };
 use commonware_cryptography::sha256::Digest;
 use nunchi_common::{CommitState, Event, EventSink};
@@ -49,6 +50,8 @@ pub enum LedgerError {
     },
     #[error("balance overflow")]
     BalanceOverflow,
+    #[error("fee overflow")]
+    FeeOverflow,
     #[error("supply overflow")]
     SupplyOverflow,
     #[error("allocation sum mismatch: expected {expected}, got {actual}")]
@@ -105,6 +108,48 @@ impl<D: CoinDB> Ledger<D> {
 
     pub async fn balance(&self, account: &Address, coin: &CoinId) -> Result<u128, LedgerError> {
         self.db.balance(account, coin).await
+    }
+
+    /// The chain's fee configuration (`None` if the chain charges no fees).
+    pub async fn fee_config(&self) -> Result<Option<FeeConfig>, LedgerError> {
+        self.db.fee_config().await
+    }
+
+    /// Stage the chain's fee configuration.
+    pub fn set_fee_config(&mut self, config: &FeeConfig) {
+        self.db.set_fee_config(config);
+    }
+
+    /// Charge the deterministic fee for a transaction of `encoded_size` canonical bytes to
+    /// `payer`, crediting the configured collector. A no-op when no [`FeeConfig`] is stored.
+    ///
+    /// Callers stage this alongside the rest of the transaction's writes so a failed
+    /// transaction reverts its fee.
+    pub async fn charge_fee<Events>(
+        &mut self,
+        payer: &Address,
+        encoded_size: usize,
+        mut events: Events,
+    ) -> Result<(), LedgerError>
+    where
+        Events: EventSink + Send,
+    {
+        let Some(config) = self.db.fee_config().await? else {
+            return Ok(());
+        };
+        let amount = config.quote(encoded_size)?;
+        if amount == 0 {
+            return Ok(());
+        }
+        self.debit(payer, config.coin, amount).await?;
+        self.credit(&config.collector, config.coin, amount).await?;
+        events.emit(fee_charged_event(FeeCharged {
+            coin: config.coin,
+            payer: payer.clone(),
+            collector: config.collector,
+            amount,
+        }));
+        Ok(())
     }
 
     pub async fn apply_transaction<Events>(

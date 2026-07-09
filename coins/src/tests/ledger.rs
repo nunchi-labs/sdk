@@ -3,10 +3,11 @@ use crate::{
         multisig_account_id, AccountPolicy, AccountType, Address, MultisigPolicy, PrivateKey,
     },
     asset::{TokenError, TokenName, TokenSymbol},
-    CoinSpec, Ledger, LedgerError, Transaction,
+    CoinSpec, FeeCharged, FeeConfig, Ledger, LedgerError, Transaction,
 };
+use commonware_codec::DecodeExt;
 use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
-use nunchi_common::{NoopEventSink, QmdbState};
+use nunchi_common::{NoopEventSink, QmdbState, VecEventSink};
 use nunchi_crypto::SignatureError;
 
 async fn ledger(context: deterministic::Context) -> Ledger<QmdbState<deterministic::Context>> {
@@ -1019,5 +1020,165 @@ fn credit_and_debit_reject_unknown_token() {
             ledger.debit(&alice, unknown, 1).await.unwrap_err(),
             LedgerError::UnknownToken(unknown)
         );
+    });
+}
+
+// ----- fees -----
+
+fn fee_config(coin: crate::CoinId, collector: Address, base: u128, per_byte: u128) -> FeeConfig {
+    FeeConfig {
+        coin,
+        collector,
+        base,
+        per_byte,
+    }
+}
+
+#[test]
+fn charge_fee_moves_fee_to_collector_and_emits_event() {
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let mut ledger = ledger(context).await;
+        let alice = address(&PrivateKey::ed25519_from_seed(1));
+        let collector = address(&PrivateKey::ed25519_from_seed(9));
+
+        let coin = ledger
+            .create_token(alice.clone(), spec(1_000, None).expect("valid coin spec"))
+            .await
+            .expect("create token");
+        ledger.set_fee_config(&fee_config(coin, collector.clone(), 10, 2));
+
+        let mut events = VecEventSink::new();
+        ledger
+            .charge_fee(&alice, 5, &mut events)
+            .await
+            .expect("charge fee");
+
+        assert_eq!(ledger.balance(&alice, &coin).await.unwrap(), 980);
+        assert_eq!(ledger.balance(&collector, &coin).await.unwrap(), 20);
+        // Fees move balances between accounts and never change supply.
+        assert_eq!(
+            ledger.token(&coin).await.unwrap().unwrap().total_supply,
+            1_000
+        );
+
+        assert_eq!(events.len(), 1);
+        let event = &events.events()[0];
+        assert_eq!(event.name.as_ref(), crate::FEE_CHARGED_EVENT);
+        let payload = FeeCharged::decode(event.value.as_ref()).expect("decode event");
+        assert_eq!(
+            payload,
+            FeeCharged {
+                coin,
+                payer: alice,
+                collector,
+                amount: 20,
+            }
+        );
+    });
+}
+
+#[test]
+fn charge_fee_without_config_is_a_noop() {
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let mut ledger = ledger(context).await;
+        let alice = address(&PrivateKey::ed25519_from_seed(1));
+
+        let mut events = VecEventSink::new();
+        ledger
+            .charge_fee(&alice, 100, &mut events)
+            .await
+            .expect("free chain charges nothing");
+        assert!(events.is_empty());
+    });
+}
+
+#[test]
+fn charge_fee_rejects_insufficient_balance() {
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let mut ledger = ledger(context).await;
+        let alice = address(&PrivateKey::ed25519_from_seed(1));
+        let collector = address(&PrivateKey::ed25519_from_seed(9));
+
+        let coin = ledger
+            .create_token(alice.clone(), spec(100, None).expect("valid coin spec"))
+            .await
+            .expect("create token");
+        ledger.set_fee_config(&fee_config(coin, collector.clone(), 200, 0));
+
+        let err = ledger
+            .charge_fee(&alice, 1, NoopEventSink)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            LedgerError::InsufficientBalance {
+                account: Box::new(alice.clone()),
+                coin: Box::new(coin),
+                available: 100,
+                required: 200,
+            }
+        );
+        assert_eq!(ledger.balance(&alice, &coin).await.unwrap(), 100);
+        assert_eq!(ledger.balance(&collector, &coin).await.unwrap(), 0);
+    });
+}
+
+#[test]
+fn charge_fee_rejects_quote_overflow() {
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let mut ledger = ledger(context).await;
+        let alice = address(&PrivateKey::ed25519_from_seed(1));
+        let collector = address(&PrivateKey::ed25519_from_seed(9));
+
+        let coin = ledger
+            .create_token(alice.clone(), spec(100, None).expect("valid coin spec"))
+            .await
+            .expect("create token");
+
+        ledger.set_fee_config(&fee_config(coin, collector.clone(), 0, u128::MAX));
+        assert_eq!(
+            ledger
+                .charge_fee(&alice, 2, NoopEventSink)
+                .await
+                .unwrap_err(),
+            LedgerError::FeeOverflow
+        );
+
+        ledger.set_fee_config(&fee_config(coin, collector, 1, u128::MAX));
+        assert_eq!(
+            ledger
+                .charge_fee(&alice, 1, NoopEventSink)
+                .await
+                .unwrap_err(),
+            LedgerError::FeeOverflow
+        );
+    });
+}
+
+#[test]
+fn charge_fee_of_zero_stages_no_writes() {
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let mut ledger = ledger(context).await;
+        let alice = address(&PrivateKey::ed25519_from_seed(1));
+        let collector = address(&PrivateKey::ed25519_from_seed(9));
+
+        let coin = ledger
+            .create_token(alice.clone(), spec(100, None).expect("valid coin spec"))
+            .await
+            .expect("create token");
+        ledger.set_fee_config(&fee_config(coin, collector.clone(), 0, 0));
+
+        let mut events = VecEventSink::new();
+        ledger
+            .charge_fee(&alice, 100, &mut events)
+            .await
+            .expect("zero fee");
+        assert!(events.is_empty());
+        assert_eq!(ledger.balance(&alice, &coin).await.unwrap(), 100);
     });
 }
