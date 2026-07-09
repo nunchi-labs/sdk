@@ -152,6 +152,24 @@ impl<D: CoinDB> Ledger<D> {
         Ok(())
     }
 
+    /// Move `amount` of `coin` from `from` to `to`, preserving total supply.
+    ///
+    /// This is an unauthenticated ledger primitive: it performs no signature or policy check, so
+    /// the caller is responsible for authorization. It exists for chain-level integrations (such as
+    /// moving a locked asset into bridge escrow) that authorize the movement through another
+    /// module's signed transaction and stage it in the same overlay.
+    pub async fn transfer(
+        &mut self,
+        from: &Address,
+        to: &Address,
+        coin: CoinId,
+        amount: u128,
+    ) -> Result<(), LedgerError> {
+        self.debit(from, coin, amount).await?;
+        self.credit(to, coin, amount).await?;
+        Ok(())
+    }
+
     pub async fn apply_transaction<Events>(
         &mut self,
         tx: &Transaction,

@@ -2,9 +2,10 @@
 
 use commonware_codec::EncodeSize;
 use nunchi_authority::{AuthorityError, AuthorityLedger};
+use nunchi_bridge::{escrow_address, BridgeError, BridgeLedger, BridgeOperation};
 use nunchi_clob::{ClobError, ClobLedger};
-use nunchi_coins::{Ledger, LedgerError};
-use nunchi_common::{EventSink, NoopEventSink, Runtime, RuntimeContext, StateStore};
+use nunchi_coins::{CoinId, Ledger, LedgerError};
+use nunchi_common::{EventSink, NoopEventSink, Overlay, Runtime, RuntimeContext, StateStore};
 use nunchi_oracle::{OracleError, OracleLedger};
 
 use crate::Transaction;
@@ -20,6 +21,8 @@ pub enum RuntimeError {
     Authority(#[from] AuthorityError),
     #[error("oracle module error: {0}")]
     Oracle(#[from] OracleError),
+    #[error("bridge module error: {0}")]
+    Bridge(#[from] BridgeError),
     #[error("clob module error: {0}")]
     Clob(#[from] ClobError),
 }
@@ -31,6 +34,7 @@ impl RuntimeError {
             Self::Coins(LedgerError::Storage(_))
                 | Self::Authority(AuthorityError::Storage(_))
                 | Self::Oracle(OracleError::Storage(_))
+                | Self::Bridge(BridgeError::Storage(_))
                 | Self::Clob(ClobError::Storage(_))
         )
     }
@@ -101,6 +105,34 @@ where
         Transaction::Oracle(transaction) => {
             let mut ledger = OracleLedger::new(state);
             ledger.apply_transaction(transaction, context).await?;
+        }
+        Transaction::Bridge(transaction) => {
+            // Escrow the locked source coins and record the transfer atomically. Both writes go
+            // into an inner overlay that is committed only if the whole lock succeeds, so a bridge
+            // validation failure after the escrow move (bad nonce, unconfigured chain, self-bridge,
+            // unsupported authorization, ...) reverts everything, without relying on the caller to
+            // discard partial writes. The bridge crate itself stays decoupled from coins.
+            let mut overlay = Overlay::new(&mut *state);
+            match &transaction.payload.operation {
+                BridgeOperation::Lock {
+                    local_asset,
+                    amount,
+                    ..
+                } => {
+                    let mut coins = Ledger::new(&mut overlay);
+                    coins
+                        .transfer(
+                            &transaction.account_id,
+                            &escrow_address(),
+                            CoinId(*local_asset),
+                            *amount,
+                        )
+                        .await?;
+                }
+            }
+            let mut ledger = BridgeLedger::new(&mut overlay);
+            ledger.apply_transaction(transaction, events).await?;
+            overlay.commit();
         }
         Transaction::Clob(transaction) => {
             let mut ledger = ClobLedger::new(state);
