@@ -38,6 +38,10 @@ enum Table {
     TransferRecord = 0,
     /// Consumed-record markers written on the destination chain (replay guard).
     ConsumedRecord = 1,
+    /// Per-sender lock nonce, giving each of a sender's transfers a distinct record id.
+    Nonce = 2,
+    /// Singleton module configuration (currently just this chain's [`ChainId`]).
+    Config = 3,
 }
 
 impl From<Table> for u8 {
@@ -48,6 +52,19 @@ impl From<Table> for u8 {
 
 /// Non-empty marker value stored for a consumed record (presence = consumed).
 const CONSUMED_MARKER: &[u8] = &[1];
+
+/// Domain label for the bridge-owned escrow address.
+const ESCROW_LABEL: &[u8] = b"nunchi/bridge/escrow/v1";
+
+/// The deterministic bridge-owned account that holds locked source-chain assets.
+///
+/// This is a [reserved](Address::reserved) address, so no key or policy can control it; escrowed
+/// funds can only be moved by the chain's bridge integration. The bridge crate owns this identity
+/// even though the asset movement itself happens in the integration layer, keeping the crate
+/// decoupled from any concrete asset module.
+pub fn escrow_address() -> Address {
+    Address::reserved(ESCROW_LABEL)
+}
 
 /// Opaque, fixed-width identifier of a chain participating in a bridge.
 ///
@@ -238,4 +255,45 @@ pub async fn is_consumed<S: StateStore>(
         .get(&consumed_record_key(source_chain_id, id))
         .await?
         .is_some())
+}
+
+/// Authenticated-state key for `account`'s per-sender lock nonce.
+pub fn nonce_key(account: &Address) -> Digest {
+    NS.key(Table::Nonce, account.encode().as_ref())
+}
+
+/// The next lock nonce for `account` (`0` if the account has never locked).
+pub async fn bridge_nonce<S: StateStore>(store: &S, account: &Address) -> Result<u64, StateError> {
+    match store.get(&nonce_key(account)).await? {
+        Some(bytes) => {
+            u64::decode(bytes.as_ref()).map_err(|err| StateError::Backend(err.to_string()))
+        }
+        None => Ok(0),
+    }
+}
+
+/// Stage `account`'s next lock nonce.
+pub fn set_bridge_nonce<S: StateStore>(store: &mut S, account: &Address, nonce: u64) {
+    store.set(nonce_key(account), nonce.encode().as_ref().to_vec());
+}
+
+/// Authenticated-state key for this chain's configured [`ChainId`].
+fn local_chain_id_key() -> Digest {
+    NS.key(Table::Config, b"local_chain_id")
+}
+
+/// This chain's configured [`ChainId`], if it has been pinned (see the bridge genesis).
+pub async fn local_chain_id<S: StateStore>(store: &S) -> Result<Option<ChainId>, StateError> {
+    match store.get(&local_chain_id_key()).await? {
+        Some(bytes) => ChainId::decode(bytes.as_ref())
+            .map(Some)
+            .map_err(|err| StateError::Backend(err.to_string())),
+        None => Ok(None),
+    }
+}
+
+/// Pin this chain's [`ChainId`]. Written once at genesis; every lock stamps it as the record's
+/// `source_chain_id`.
+pub fn set_local_chain_id<S: StateStore>(store: &mut S, chain_id: &ChainId) {
+    store.set(local_chain_id_key(), chain_id.encode().as_ref().to_vec());
 }
