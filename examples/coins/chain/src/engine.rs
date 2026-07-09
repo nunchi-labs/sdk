@@ -491,6 +491,10 @@ where
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
+        clob: (
+            impl Sender<PublicKey = PublicKey>,
+            impl Receiver<PublicKey = PublicKey>,
+        ),
         marshal: (
             resolver::handler::Receiver<Digest>,
             resolver::p2p::Mailbox<Digest, PublicKey>,
@@ -506,6 +510,7 @@ where
                 broadcast,
                 dkg,
                 mempool,
+                clob,
                 marshal,
                 callback
             )
@@ -539,6 +544,10 @@ where
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
+        clob: (
+            impl Sender<PublicKey = PublicKey>,
+            impl Receiver<PublicKey = PublicKey>,
+        ),
         marshal: (
             resolver::handler::Receiver<Digest>,
             resolver::p2p::Mailbox<Digest, PublicKey>,
@@ -562,7 +571,7 @@ where
         let mempool_handle = self
             .mempool
             .start_p2p(self.context.child("mempool"), mempool);
-        let clob_handle = self.clob.start(self.context.child("clob"));
+        let clob_handle = self.clob.start_p2p(self.context.child("clob"), clob);
 
         let mut shutdown = self.context.stopped();
         commonware_macros::select! {

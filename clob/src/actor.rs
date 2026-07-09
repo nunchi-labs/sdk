@@ -4,13 +4,16 @@ use crate::{
     engine::validate_order, ClobError, ClobOperation, MatchBatch, MatchEngine, Market, MarketId,
     Order, OrderId, Transaction, MAX_MATCH_BATCH_FILLS, MAX_MATCH_BATCH_ORDERS,
 };
+use commonware_codec::{Encode, Read};
+use commonware_cryptography::PublicKey;
+use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Handle, Spawner};
 use futures::{
     channel::{mpsc, oneshot},
-    SinkExt, StreamExt,
+    FutureExt, SinkExt, StreamExt,
 };
 use nunchi_common::{Address, RuntimeContext};
-use tracing::warn;
+use tracing::{debug, warn};
 
 /// Runtime settings for the validator-local CLOB actor.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -174,46 +177,125 @@ impl ClobActor {
         context.spawn(|_| self.run())
     }
 
+    /// Spawn the actor with P2P propagation for signed order intents.
+    ///
+    /// Gossiped intents only enter the validator-local pending book. They do
+    /// not produce fills by themselves; the selected proposer remains the sole
+    /// source of match batches carried through the consensus extension.
+    pub fn start_p2p<E, S, R>(self, context: E, p2p: (S, R)) -> Handle<()>
+    where
+        E: Spawner + Send + 'static,
+        S: Sender + 'static,
+        R: Receiver<PublicKey = S::PublicKey> + 'static,
+    {
+        context.spawn(|_| self.run_p2p(p2p))
+    }
+
     async fn run(mut self) {
         while let Some(message) = self.receiver.next().await {
-            match message {
-                Message::SubmitOrder { tx, responder } => {
-                    let result = self.accept_order(tx);
-                    let _ = responder.send(result);
-                }
-                Message::UpsertMarket { market, sequence } => {
-                    self.sequences.insert(market.id, sequence);
-                    self.markets.insert(market.id, market);
-                }
-                Message::SyncAccepted {
+            self.handle(message);
+        }
+    }
+
+    async fn run_p2p<S, R>(mut self, (mut sender, mut receiver): (S, R))
+    where
+        S: Sender,
+        R: Receiver<PublicKey = S::PublicKey>,
+    {
+        loop {
+            futures::select! {
+                message = self.receiver.next().fuse() => {
+                    let Some(message) = message else {
+                        warn!("clob mailbox closed, stopping p2p actor");
+                        return;
+                    };
+                    self.handle_with_gossip(message, &mut sender);
+                },
+                message = receiver.recv().fuse() => {
+                    match message {
+                        Ok((peer, bytes)) => self.handle_network(peer, bytes),
+                        Err(error) => {
+                            warn!(?error, "clob p2p receiver closed; continuing node-local");
+                            self.run().await;
+                            return;
+                        }
+                    }
+                },
+            }
+        }
+    }
+
+    fn handle(&mut self, message: Message) {
+        match message {
+            Message::SubmitOrder { tx, responder } => {
+                let result = self.accept_order(tx);
+                let _ = responder.send(result);
+            }
+            Message::UpsertMarket { market, sequence } => {
+                self.sequences.insert(market.id, sequence);
+                self.markets.insert(market.id, market);
+            }
+            Message::SyncAccepted {
+                market,
+                sequence,
+                accepted_orders,
+                order_updates,
+                nonce_updates,
+                responder,
+            } => {
+                self.sync_accepted_batch(
                     market,
                     sequence,
                     accepted_orders,
                     order_updates,
                     nonce_updates,
-                    responder,
-                } => {
-                    self.sync_accepted_batch(
-                        market,
-                        sequence,
-                        accepted_orders,
-                        order_updates,
-                        nonce_updates,
-                    );
-                    let _ = responder.send(Ok(()));
-                }
-                Message::SyncNonce {
-                    account,
-                    nonce,
-                    responder,
-                } => {
-                    self.sync_nonce_state(account, nonce);
-                    let _ = responder.send(Ok(()));
-                }
-                Message::Propose { responder } => {
-                    let _ = responder.send(self.propose_batch());
-                }
+                );
+                let _ = responder.send(Ok(()));
             }
+            Message::SyncNonce {
+                account,
+                nonce,
+                responder,
+            } => {
+                self.sync_nonce_state(account, nonce);
+                let _ = responder.send(Ok(()));
+            }
+            Message::Propose { responder } => {
+                let _ = responder.send(self.propose_batch());
+            }
+        }
+    }
+
+    fn handle_with_gossip<S>(&mut self, message: Message, sender: &mut S)
+    where
+        S: Sender,
+    {
+        match message {
+            Message::SubmitOrder { tx, responder } => {
+                let gossip = tx.clone();
+                let result = self.accept_order(tx);
+                if result.is_ok() {
+                    let sent = sender.send(Recipients::All, gossip.encode(), false);
+                    if sent.is_empty() {
+                        debug!("clob p2p broadcast accepted by no peers");
+                    }
+                }
+                let _ = responder.send(result);
+            }
+            message => self.handle(message),
+        }
+    }
+
+    fn handle_network<P>(&mut self, peer: P, mut bytes: commonware_runtime::IoBuf)
+    where
+        P: PublicKey,
+    {
+        match Transaction::read_cfg(&mut bytes, &()) {
+            Ok(tx) => match self.accept_order(tx) {
+                Ok(()) => debug!(?peer, "admitted gossiped clob order intent"),
+                Err(error) => debug!(?peer, ?error, "rejected gossiped clob order intent"),
+            },
+            Err(error) => warn!(?peer, ?error, "invalid gossiped clob order intent"),
         }
     }
 
@@ -257,11 +339,7 @@ impl ClobActor {
                     );
                     return MatchBatch::default();
                 }
-                MatchBatch {
-                    resting_orders: Vec::new(),
-                    orders,
-                    fills: result.fills,
-                }
+                MatchBatch { orders, fills: result.fills }
             }
             Err(error) => {
                 warn!(?error, "dropping invalid local clob proposal batch");

@@ -1,9 +1,12 @@
-use std::{collections::BTreeMap, future::Future};
+use std::{collections::BTreeMap, future::Future, time::Duration};
 
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+use commonware_cryptography::{ed25519, sha256::Digest, Hasher, Sha256, Signer as _};
 use commonware_formatting::hex;
-use commonware_runtime::{deterministic, Runner as _};
+use commonware_p2p::simulated::{self, Link, Network};
+use commonware_runtime::{deterministic, Clock, Runner as _, Supervisor};
+use commonware_utils::{NZUsize, NZU32};
+use governor::Quota;
 use nunchi_common::{Address, CommitState, RuntimeContext, StateError, StateStore};
 use nunchi_crypto::PrivateKey;
 
@@ -131,7 +134,6 @@ async fn batch_from_orders(
     sequences.insert(market(), ledger.db.market_sequence(&market()).await.unwrap());
     let replay = MatchEngine::replay(&orders, &markets, sequences, context).unwrap();
     MatchBatch {
-        resting_orders: Vec::new(),
         orders,
         fills: replay.fills,
     }
@@ -220,6 +222,32 @@ fn place_order_is_offchain_only_for_ledger_transactions() {
             .unwrap_err();
         assert_eq!(err, ClobError::OffchainOnly);
         assert!(ledger.book(&market(), Side::Bid).await.unwrap().is_empty());
+    });
+}
+
+#[test]
+fn apply_match_batch_is_offchain_only_for_ledger_transactions() {
+    run_test(|| async {
+        let signer = PrivateKey::from_seed(1);
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        let tx = Transaction::sign(
+            &signer,
+            0,
+            ClobOperation::ApplyMatchBatch {
+                batch: MatchBatch::default(),
+            },
+        );
+
+        let err = ledger.apply_transaction(&tx, context(1)).await.unwrap_err();
+
+        assert_eq!(err, ClobError::OffchainOnly);
+        assert_eq!(
+            ledger
+                .nonce(&Address::external(&signer.public_key()))
+                .await
+                .unwrap(),
+            0
+        );
     });
 }
 
@@ -562,7 +590,6 @@ fn match_batch_rejects_non_place_order_inputs() {
         seed_market(&mut ledger, &creator).await;
 
         let batch = MatchBatch {
-            resting_orders: Vec::new(),
             orders: vec![create_market_tx(&creator, 1)],
             fills: Vec::new(),
         };
@@ -581,7 +608,6 @@ fn match_batch_rejects_unknown_market() {
         let trader = PrivateKey::from_seed(1);
         let mut ledger = ClobLedger::new(MemoryStore::default());
         let batch = MatchBatch {
-            resting_orders: Vec::new(),
             orders: vec![place_tx(
                 &trader,
                 0,
@@ -624,7 +650,6 @@ fn match_batch_rejects_missing_proposed_fill() {
             TimeInForce::ImmediateOrCancel,
         );
         let batch = MatchBatch {
-            resting_orders: Vec::new(),
             orders: vec![ask, bid],
             fills: Vec::new(),
         };
@@ -786,7 +811,6 @@ fn actor_keeps_non_crossing_gtc_until_later_crossing_order() {
         );
         mailbox.submit_order(bid.clone()).await.unwrap();
         let batch = mailbox.propose().await;
-        assert!(batch.resting_orders.is_empty());
         assert_eq!(batch.orders, vec![ask.clone(), bid.clone()]);
         assert_eq!(batch.fills.len(), 1);
 
@@ -795,6 +819,94 @@ fn actor_keeps_non_crossing_gtc_until_later_crossing_order() {
         assert_eq!(fills.len(), 1);
         assert_eq!(fills[0].maker_order, OrderId(ask.digest()));
         assert_eq!(fills[0].taker_order, OrderId(bid.digest()));
+    });
+}
+
+#[test]
+fn actor_p2p_gossips_submitted_orders_to_peer_books() {
+    deterministic::Runner::default().start(|runtime| async move {
+        let creator = PrivateKey::from_seed(1);
+        let maker = PrivateKey::from_seed(2);
+        let taker = PrivateKey::from_seed(3);
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        seed_market(&mut ledger, &creator).await;
+        let market_info = ledger.market(&market()).await.unwrap().unwrap();
+        let sequence = ledger.market_sequence(&market()).await.unwrap();
+
+        let p2p_key_a = ed25519::PrivateKey::from_seed(11);
+        let p2p_key_b = ed25519::PrivateKey::from_seed(12);
+        let peer_a = p2p_key_a.public_key();
+        let peer_b = p2p_key_b.public_key();
+        let (network, oracle) = Network::<_, ed25519::PublicKey>::new_with_peers(
+            runtime.child("network"),
+            simulated::Config {
+                max_size: 1024 * 1024,
+                disconnect_on_block: true,
+                tracked_peer_sets: NZUsize!(1),
+            },
+            [peer_a.clone(), peer_b.clone()],
+        )
+        .await;
+        network.start();
+        let quota = Quota::per_second(NZU32!(u32::MAX));
+        let p2p_a = oracle
+            .control(peer_a.clone())
+            .register(17, quota)
+            .await
+            .unwrap();
+        let p2p_b = oracle
+            .control(peer_b.clone())
+            .register(17, quota)
+            .await
+            .unwrap();
+        let link = Link {
+            latency: Duration::from_millis(10),
+            jitter: Duration::ZERO,
+            success_rate: 1.0,
+        };
+        oracle
+            .add_link(peer_a.clone(), peer_b.clone(), link.clone())
+            .await
+            .unwrap();
+        oracle.add_link(peer_b, peer_a, link).await.unwrap();
+
+        let (actor_a, mailbox_a) = ClobActor::new(ClobConfig::default());
+        let (actor_b, mailbox_b) = ClobActor::new(ClobConfig::default());
+        let _handle_a = actor_a.start_p2p(runtime.child("clob_a"), p2p_a);
+        let _handle_b = actor_b.start_p2p(runtime.child("clob_b"), p2p_b);
+        mailbox_a.upsert_market_state(market_info.clone(), sequence);
+        mailbox_b.upsert_market_state(market_info, sequence);
+        runtime.sleep(Duration::from_millis(1)).await;
+
+        let ask = place_tx(
+            &maker,
+            0,
+            Side::Ask,
+            100,
+            2,
+            TimeInForce::GoodTilCancelled,
+        );
+        let bid = place_tx(
+            &taker,
+            0,
+            Side::Bid,
+            100,
+            2,
+            TimeInForce::GoodTilCancelled,
+        );
+        mailbox_a.submit_order(ask.clone()).await.unwrap();
+        mailbox_b.submit_order(bid.clone()).await.unwrap();
+
+        for _ in 0..100 {
+            let batch = mailbox_b.propose().await;
+            if batch.fills.len() == 1 {
+                assert!(batch.orders.contains(&ask));
+                assert!(batch.orders.contains(&bid));
+                return;
+            }
+            runtime.sleep(Duration::from_millis(5)).await;
+        }
+        panic!("gossiped clob order did not reach peer proposer");
     });
 }
 
@@ -860,7 +972,6 @@ fn actor_uses_committed_resting_order_and_current_sequence_for_later_batch() {
         );
         mailbox.submit_order(second_bid.clone()).await.unwrap();
         let second_batch = mailbox.propose().await;
-        assert!(second_batch.resting_orders.is_empty());
         assert_eq!(second_batch.orders, vec![second_bid.clone()]);
         assert_eq!(second_batch.fills.len(), 1);
 

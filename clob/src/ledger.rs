@@ -184,10 +184,9 @@ impl<D: ClobDB> ClobLedger<D> {
                 )
                 .await
             }
-            ClobOperation::PlaceOrder { .. } | ClobOperation::CancelOrder { .. } => {
-                Err(ClobError::OffchainOnly)
-            }
-            ClobOperation::ApplyMatchBatch { batch } => self.apply_match_batch(batch, context).await,
+            ClobOperation::PlaceOrder { .. }
+            | ClobOperation::CancelOrder { .. }
+            | ClobOperation::ApplyMatchBatch { .. } => Err(ClobError::OffchainOnly),
         }
     }
 

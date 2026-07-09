@@ -207,7 +207,7 @@ fn clob_mailbox_extension_records_verified_fill() {
             .await
             .unwrap();
         let second_payload = extension.propose().await;
-        assert!(second_payload.resting_orders.is_empty());
+        assert_eq!(second_payload.orders, vec![second_bid.clone()]);
         assert_eq!(second_payload.fills.len(), 1);
         let second_context = committed_context(3);
         assert!(extension

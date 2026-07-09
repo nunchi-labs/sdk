@@ -31,8 +31,6 @@ impl TryFrom<u8> for OperationTag {
 /// Proposer-supplied CLOB match batch carried in a block extension.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MatchBatch {
-    /// Legacy hint field. Validators derive resting orders from committed book indexes.
-    pub resting_orders: Vec<OrderId>,
     /// Fresh signed owner order intents whose nonces should advance if replay succeeds.
     pub orders: Vec<Transaction>,
     /// Fills derived from committed resting orders and replaying `orders`.
@@ -41,13 +39,12 @@ pub struct MatchBatch {
 
 impl MatchBatch {
     pub fn is_empty(&self) -> bool {
-        self.resting_orders.is_empty() && self.orders.is_empty() && self.fills.is_empty()
+        self.orders.is_empty() && self.fills.is_empty()
     }
 }
 
 impl Write for MatchBatch {
     fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.resting_orders.write(buf);
         self.orders.write(buf);
         self.fills.write(buf);
     }
@@ -58,7 +55,6 @@ impl Read for MatchBatch {
 
     fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
-            resting_orders: Vec::read_cfg(buf, &(RangeCfg::new(0..=MAX_MATCH_BATCH_ORDERS), ()))?,
             orders: Vec::read_cfg(buf, &(RangeCfg::new(0..=MAX_MATCH_BATCH_ORDERS), ()))?,
             fills: Vec::read_cfg(buf, &(RangeCfg::new(0..=MAX_MATCH_BATCH_FILLS), ()))?,
         })
@@ -67,7 +63,7 @@ impl Read for MatchBatch {
 
 impl EncodeSize for MatchBatch {
     fn encode_size(&self) -> usize {
-        self.resting_orders.encode_size() + self.orders.encode_size() + self.fills.encode_size()
+        self.orders.encode_size() + self.fills.encode_size()
     }
 }
 
@@ -91,7 +87,8 @@ pub enum ClobOperation {
     },
     /// Signed cancellation intent for validator-local books.
     CancelOrder { order: OrderId },
-    /// Apply one proposer match batch after validators replay signed orders.
+    /// Proposer match batch payload. The transaction runtime rejects this; it is
+    /// only applied through the consensus extension after validator replay.
     ApplyMatchBatch { batch: MatchBatch },
 }
 
