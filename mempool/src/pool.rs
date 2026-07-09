@@ -311,7 +311,7 @@ impl<T: PoolTransaction> Pool<T> {
         };
         let mut count = 0usize;
         let mut expected_nonce = self.committed_nonce(account);
-        for (&nonce, _) in queue.iter() {
+        for &nonce in queue.keys() {
             if nonce != expected_nonce {
                 break;
             }
