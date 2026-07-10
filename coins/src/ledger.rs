@@ -174,7 +174,7 @@ impl<D: CoinDB> Ledger<D> {
         Ok(())
     }
 
-    pub async fn apply_transaction(
+    pub async fn apply_transaction<Events>(
         &mut self,
         tx: &Transaction,
         mut events: Events,

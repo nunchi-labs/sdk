@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use commonware_codec::DecodeExt;
-use commonware_cryptography::bls12381::primitives::variant::MinSig;
+use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519, Signer};
 use commonware_formatting::from_hex;
 use commonware_runtime::{tokio as cw_tokio, Runner as _, Supervisor as _};
 use futures::{stream, StreamExt};
@@ -10,9 +10,9 @@ use nunchi_coins::{
     TokenFactory, TokenGenesis, TokenName, TokenSymbol, Transaction,
 };
 use nunchi_coins_chain::{
-    genesis::ChainGenesis, testnet::NodeConfig, PublicKey, MAX_SUPPORTED_MODE,
+    genesis::ChainGenesis, testnet::NodeConfig, PublicKey, MAX_SUPPORTED_MODE, NAMESPACE,
 };
-use nunchi_dkg::Storage;
+use nunchi_dkg::{Storage, StorageKey, StorageProtector};
 use nunchi_rpc::encode_hex;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
@@ -208,6 +208,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 fn print_dkg_output(args: DkgOutputArgs) -> Result<(), Box<dyn Error>> {
     let config = NodeConfig::read(&args.config)?;
+    let private_key = decode_config_value::<ed25519::PrivateKey>(&config.private_key)?;
+    let public_key = private_key.public_key();
+    let dkg_storage_key = decode_storage_key(&config.dkg_storage_key)?;
     let max_participants = NonZeroU32::new(config.peer_config.max_participants_per_round())
         .ok_or("empty validator set")?;
     let runtime = cw_tokio::Runner::new(
@@ -217,10 +220,13 @@ fn print_dkg_output(args: DkgOutputArgs) -> Result<(), Box<dyn Error>> {
         let storage = Storage::<_, MinSig, PublicKey>::init(
             context.child("dkg_storage"),
             &config.name,
+            StorageProtector::new(dkg_storage_key),
+            NAMESPACE.to_vec(),
+            public_key,
             max_participants,
             MAX_SUPPORTED_MODE,
         )
-        .await;
+        .await?;
         let (epoch, state) = storage.epoch().ok_or("missing dkg epoch")?;
         let output = state.output.ok_or("current dkg epoch has no output")?;
         println!("epoch {}", epoch.get());
@@ -257,6 +263,7 @@ fn write_genesis(args: GenesisArgs) -> Result<(), Box<dyn Error>> {
                 spec,
                 allocations,
             }],
+            fees: None,
         }),
         oracle: None,
     };
@@ -859,7 +866,10 @@ async fn submit_batch_until(
                     break;
                 }
                 if Instant::now() >= retry_deadline {
-                    failed.fetch_add(u64::try_from(requeue.len()).unwrap_or(u64::MAX), Ordering::Relaxed);
+                    failed.fetch_add(
+                        u64::try_from(requeue.len()).unwrap_or(u64::MAX),
+                        Ordering::Relaxed,
+                    );
                     record_sample_error(&sample_error, "gave up on backpressured batch".into());
                     break;
                 }
@@ -1049,6 +1059,21 @@ fn token_spec(
 fn parse_coin(value: &str) -> Result<CoinId, Box<dyn Error>> {
     let bytes = from_hex(value).ok_or("coin id must be hex")?;
     Ok(CoinId::decode(bytes.as_ref())?)
+}
+
+fn decode_config_value<T>(value: &str) -> Result<T, Box<dyn Error>>
+where
+    T: DecodeExt<()>,
+{
+    let bytes = from_hex(value).ok_or("config value must be hex")?;
+    Ok(T::decode(bytes.as_ref())?)
+}
+
+fn decode_storage_key(value: &str) -> Result<StorageKey, Box<dyn Error>> {
+    let bytes = from_hex(value).ok_or("dkg storage key must be hex")?;
+    bytes
+        .try_into()
+        .map_err(|_| "dkg storage key must be 32 bytes".into())
 }
 
 fn next_rpc_id(id: &mut u64) -> u64 {

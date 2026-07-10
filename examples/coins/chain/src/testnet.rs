@@ -32,8 +32,8 @@ use commonware_runtime::{
 use commonware_utils::{ordered::Set, N3f1, NZUsize, NZU32};
 use governor::Quota;
 use nunchi_dkg::{
-    ContinueOnUpdate, PeerConfig, Storage as DkgStorage, UpdateCallBack, StorageKey,
-    MAX_SUPPORTED_MODE,
+    ContinueOnUpdate, PeerConfig, Storage as DkgStorage, StorageKey, StorageProtector,
+    UpdateCallBack, MAX_SUPPORTED_MODE,
 };
 use nunchi_mempool::PoolConfig;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
@@ -514,10 +514,25 @@ async fn start_node(
 
     let indexer_client = config.indexer_url.as_deref().map(indexer::HttpClient::new);
     if let Some(client) = indexer_client.clone() {
-        upload_current_dkg_output(context, &config.name, max_participants, client).await;
+        upload_current_dkg_output(
+            context,
+            &config.name,
+            dkg_storage_key,
+            public_key.clone(),
+            max_participants,
+            client,
+        )
+        .await;
     }
     if let Some(client) = indexer_client.clone() {
-        spawn_current_dkg_output_uploader(context, config.name.clone(), max_participants, client);
+        spawn_current_dkg_output_uploader(
+            context,
+            config.name.clone(),
+            dkg_storage_key,
+            public_key.clone(),
+            max_participants,
+            client,
+        );
     }
     let engine_config: EngineConfig<_, _, _> = EngineConfig {
         blocker: oracle.clone(),
@@ -590,16 +605,28 @@ async fn start_node(
 async fn upload_current_dkg_output(
     context: &tokio::Context,
     node_name: &str,
+    dkg_storage_key: StorageKey,
+    public_key: PublicKey,
     max_participants: NonZeroU32,
     client: indexer::HttpClient,
 ) {
-    let storage = DkgStorage::<_, MinSig, PublicKey>::init(
+    let storage = match DkgStorage::<_, MinSig, PublicKey>::init(
         context.child("dkg_output_seed"),
         node_name,
+        StorageProtector::new(dkg_storage_key),
+        NAMESPACE.to_vec(),
+        public_key,
         max_participants,
         MAX_SUPPORTED_MODE,
     )
-    .await;
+    .await
+    {
+        Ok(storage) => storage,
+        Err(error) => {
+            warn!(%error, "failed to open DKG storage for indexer upload");
+            return;
+        }
+    };
     let Some((epoch, state)) = storage.epoch() else {
         return;
     };
@@ -615,6 +642,8 @@ async fn upload_current_dkg_output(
 fn spawn_current_dkg_output_uploader(
     context: &tokio::Context,
     node_name: String,
+    dkg_storage_key: StorageKey,
+    public_key: PublicKey,
     max_participants: NonZeroU32,
     client: indexer::HttpClient,
 ) {
@@ -623,8 +652,15 @@ fn spawn_current_dkg_output_uploader(
         .spawn(move |context| async move {
             loop {
                 context.sleep(Duration::from_secs(60)).await;
-                upload_current_dkg_output(&context, &node_name, max_participants, client.clone())
-                    .await;
+                upload_current_dkg_output(
+                    &context,
+                    &node_name,
+                    dkg_storage_key,
+                    public_key.clone(),
+                    max_participants,
+                    client.clone(),
+                )
+                .await;
             }
         });
 }

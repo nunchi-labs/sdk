@@ -8,7 +8,7 @@ use nunchi_coins::{
     multisig_account_id, AccountPolicy, CoinOperation, CoinSpec, Ledger, MultisigPolicy,
     PrivateKey, TokenName, TokenSymbol, Transaction as CoinTransaction,
 };
-use nunchi_common::{QmdbBackend, QmdbBatch, QmdbDatabaseSet, QmdbState};
+use nunchi_common::{NoopEventSink, QmdbBackend, QmdbBatch, QmdbDatabaseSet, QmdbState};
 use nunchi_mempool::{Mempool, PoolConfig};
 use std::sync::Arc;
 
@@ -157,7 +157,10 @@ fn profile_block_execution() {
                     amount: 1_000_000,
                 },
             );
-            ledger.apply_transaction(&mint, None).await.expect("mint");
+            ledger
+                .apply_transaction(&mint, NoopEventSink)
+                .await
+                .expect("mint");
         }
         let merkleized = ledger.into_inner().merkleize().await.expect("merkleize");
         databases.finalize(merkleized).await;
