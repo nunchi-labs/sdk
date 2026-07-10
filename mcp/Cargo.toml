@@ -24,7 +24,7 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 reqwest = { version = "0.12", features = ["json"] }
 anyhow = "1"
 walkdir = "2.5"
-nunchi-coins = { workspace = true }
+nunchi-coins = { workspace = true, features = ["rpc", "state"] }
 nunchi-crypto = { workspace = true }
 commonware-codec = { workspace = true }
 commonware-formatting = { workspace = true }

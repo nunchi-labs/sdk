@@ -7,6 +7,16 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["state"]
+state = [
+    "dep:commonware-glue",
+    "dep:commonware-runtime",
+    "dep:commonware-storage",
+    "dep:commonware-parallel",
+    "dep:commonware-utils",
+]
+
 [dependencies]
 bytes = { workspace = true }
 bech32 = { workspace = true }
@@ -14,9 +24,9 @@ thiserror = { workspace = true }
 nunchi-crypto = { workspace = true }
 commonware-codec = { workspace = true }
 commonware-cryptography = { workspace = true }
-commonware-glue = { workspace = true }
+commonware-glue = { workspace = true, optional = true }
 commonware-macros = { workspace = true }
-commonware-runtime = { workspace = true }
-commonware-storage = { workspace = true }
-commonware-parallel = { workspace = true }
-commonware-utils = { workspace = true }
+commonware-runtime = { workspace = true, optional = true }
+commonware-storage = { workspace = true, optional = true }
+commonware-parallel = { workspace = true, optional = true }
+commonware-utils = { workspace = true, optional = true }

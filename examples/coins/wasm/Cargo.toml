@@ -19,8 +19,19 @@ commonware-parallel = { workspace = true }
 commonware-utils = { workspace = true }
 bytes = { workspace = true }
 js-sys = "0.3.103"
+nunchi-authority = { workspace = true, default-features = false }
+nunchi-coins = { workspace = true, default-features = false }
+nunchi-common = { workspace = true, default-features = false }
+nunchi-oracle = { workspace = true, default-features = false }
+rand = { workspace = true }
 wasm-bindgen = "0.2.126"
 
-[target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
-version = "0.3.4"
-features = ["wasm_js"]
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom02 = { package = "getrandom", version = "0.2.16", features = ["js"] }
+getrandom03 = { package = "getrandom", version = "0.3.4", features = ["wasm_js"] }
+
+[dev-dependencies]
+commonware-consensus = { workspace = true, features = ["mocks"] }
+commonware-cryptography = { workspace = true, features = ["mocks"] }
+commonware-storage = { workspace = true }
+nunchi-coins-chain = { workspace = true }

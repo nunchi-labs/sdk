@@ -11,7 +11,7 @@ workspace = true
 [dependencies]
 nunchi-bridge = { workspace = true }
 nunchi-chain = { workspace = true }
-nunchi-common = { workspace = true }
+nunchi-common = { workspace = true, features = ["state"] }
 nunchi-dkg = { workspace = true }
 nunchi-mempool = { workspace = true }
 nunchi-rpc = { workspace = true }

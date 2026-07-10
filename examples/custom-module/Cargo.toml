@@ -20,7 +20,7 @@ commonware-cryptography = { workspace = true }
 commonware-formatting = { workspace = true }
 commonware-macros = { workspace = true }
 jsonrpsee = { workspace = true, optional = true }
-nunchi-common = { workspace = true }
+nunchi-common = { workspace = true, features = ["state"] }
 nunchi-crypto = { workspace = true }
 nunchi-rpc = { workspace = true, optional = true }
 serde = { workspace = true }

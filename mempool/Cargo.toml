@@ -8,7 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-nunchi-common = { workspace = true }
+nunchi-common = { workspace = true, features = ["state"] }
 nunchi-crypto = { workspace = true }
 commonware-codec = { workspace = true }
 commonware-cryptography = { workspace = true }

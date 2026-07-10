@@ -74,6 +74,7 @@ pub(crate) fn sorted_unique<T: Ord>(mut values: Vec<T>) -> Option<Vec<T>> {
     (values.len() == original).then_some(values)
 }
 
+#[cfg(feature = "state")]
 pub(crate) fn normalize<T: Ord>(mut values: Vec<T>) -> Vec<T> {
     values.sort();
     values.dedup();
