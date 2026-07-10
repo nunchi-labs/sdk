@@ -3,6 +3,7 @@
 use commonware_codec::EncodeSize;
 use nunchi_authority::{AuthorityError, AuthorityLedger};
 use nunchi_bridge::{escrow_address, BridgeError, BridgeLedger, BridgeOperation};
+use nunchi_clob::{ClobError, ClobLedger};
 use nunchi_coins::{CoinId, Ledger, LedgerError};
 use nunchi_common::{EventSink, NoopEventSink, Overlay, Runtime, RuntimeContext, StateStore};
 use nunchi_oracle::{OracleError, OracleLedger};
@@ -22,6 +23,8 @@ pub enum RuntimeError {
     Oracle(#[from] OracleError),
     #[error("bridge module error: {0}")]
     Bridge(#[from] BridgeError),
+    #[error("clob module error: {0}")]
+    Clob(#[from] ClobError),
 }
 
 impl RuntimeError {
@@ -32,6 +35,7 @@ impl RuntimeError {
                 | Self::Authority(AuthorityError::Storage(_))
                 | Self::Oracle(OracleError::Storage(_))
                 | Self::Bridge(BridgeError::Storage(_))
+                | Self::Clob(ClobError::Storage(_))
         )
     }
 }
@@ -129,6 +133,10 @@ where
             let mut ledger = BridgeLedger::new(&mut overlay);
             ledger.apply_transaction(transaction, events).await?;
             overlay.commit();
+        }
+        Transaction::Clob(transaction) => {
+            let mut ledger = ClobLedger::new(state);
+            ledger.apply_transaction(transaction, context).await?;
         }
     }
     Ok(())

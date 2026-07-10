@@ -41,6 +41,7 @@ use commonware_utils::union;
 use futures::lock::Mutex as AsyncMutex;
 use governor::clock::Clock as GClock;
 use nunchi_chain::engine::*;
+use nunchi_clob::{ClobActor, ClobConfig, ClobExtension};
 use nunchi_common::{QmdbBackend, QmdbState};
 use nunchi_dkg::{self as dkg, orchestrator, PeerConfig, UpdateCallBack, MAX_SUPPORTED_MODE};
 use nunchi_mempool::{Mempool, PoolConfig};
@@ -86,8 +87,8 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
     pub genesis: Option<ChainGenesis>,
 }
 
-type DkgActor<E, P> = nunchi_chain::DkgActor<E, P, Transaction>;
-type DkgMailbox = nunchi_chain::DkgMailbox<Transaction>;
+type DkgActor<E, P> = nunchi_chain::DkgActor<E, P, Transaction, ClobExtension>;
+type DkgMailbox = nunchi_chain::DkgMailbox<Transaction, ClobExtension>;
 type StatefulApp<E> = StatefulActor<E, Application, Scheme, Standard<Block>, NoStateSyncResolver>;
 type StatefulAppMailbox<E> = StatefulMailbox<E, Application>;
 type Marshaled<E> = Deferred<E, Scheme, StatefulAppMailbox<E>, Block, FixedEpocher>;
@@ -134,6 +135,7 @@ where
     orchestrator: Orchestrator<E, B, S>,
     orchestrator_mailbox: orchestrator::Mailbox<MinSig, PublicKey>,
     mempool: Mempool<Transaction>,
+    clob: ClobActor,
     stateful: StatefulApp<E>,
     stateful_mailbox: StatefulAppMailbox<E>,
 }
@@ -161,6 +163,18 @@ where
     /// Create a new [Engine].
     pub async fn new(context: E, config: Config<B, P, S>) -> (Self, NodeHandle<E>) {
         let (mempool, submitter) = Mempool::<Transaction>::new(config.pool_config.clone());
+        let (clob, clob_mailbox) = ClobActor::new(ClobConfig::default());
+        if let Some(clob_genesis) = config.genesis.as_ref().and_then(|genesis| genesis.clob.as_ref())
+        {
+            for market in &clob_genesis.markets {
+                clob_mailbox.upsert_market_state(
+                    market
+                        .market()
+                        .expect("invalid CLOB genesis market should fail genesis validation"),
+                    0,
+                );
+            }
+        }
 
         let page_cache = CacheRef::from_pooler(&context, PAGE_CACHE_PAGE_SIZE, PAGE_CACHE_CAPACITY);
         let consensus_namespace = union(NAMESPACE, b"_CONSENSUS");
@@ -340,10 +354,11 @@ where
             empty_state
         };
         let applied_height = Arc::new(AsyncMutex::new(Height::zero()));
-        let app = Application::with_dkg(
+        let app = Application::with_consensus(
             submitter.clone(),
             config.max_block_transactions,
-            dkg_mailbox.clone(),
+            ClobExtension::new(clob_mailbox.clone()),
+            Some(dkg_mailbox.clone()),
             applied_height.clone(),
             genesis_state,
             application::genesis_payload(),
@@ -398,7 +413,12 @@ where
                 sync_config: state_sync_config(),
             },
         );
-        let node_handle = NodeHandle::new(submitter, stateful_mailbox.clone(), applied_height);
+        let node_handle = NodeHandle::new(
+            submitter,
+            clob_mailbox.clone(),
+            stateful_mailbox.clone(),
+            applied_height,
+        );
 
         let application = Deferred::new(
             context.child("application"),
@@ -437,6 +457,7 @@ where
             orchestrator,
             orchestrator_mailbox,
             mempool,
+            clob,
             stateful,
             stateful_mailbox,
         };
@@ -470,6 +491,10 @@ where
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
+        clob: (
+            impl Sender<PublicKey = PublicKey>,
+            impl Receiver<PublicKey = PublicKey>,
+        ),
         marshal: (
             resolver::handler::Receiver<Digest>,
             resolver::p2p::Mailbox<Digest, PublicKey>,
@@ -485,6 +510,7 @@ where
                 broadcast,
                 dkg,
                 mempool,
+                clob,
                 marshal,
                 callback
             )
@@ -518,6 +544,10 @@ where
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
+        clob: (
+            impl Sender<PublicKey = PublicKey>,
+            impl Receiver<PublicKey = PublicKey>,
+        ),
         marshal: (
             resolver::handler::Receiver<Digest>,
             resolver::p2p::Mailbox<Digest, PublicKey>,
@@ -541,6 +571,7 @@ where
         let mempool_handle = self
             .mempool
             .start_p2p(self.context.child("mempool"), mempool);
+        let clob_handle = self.clob.start_p2p(self.context.child("clob"), clob);
 
         let mut shutdown = self.context.stopped();
         commonware_macros::select! {
@@ -558,6 +589,7 @@ where
             result = stateful_handle => unexpected_exit("stateful", result),
             result = orchestrator_handle => unexpected_exit("orchestrator", result),
             result = mempool_handle => unexpected_exit("mempool", result),
+            result = clob_handle => unexpected_exit("clob", result),
         }
     }
 }
