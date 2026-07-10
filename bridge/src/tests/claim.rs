@@ -9,7 +9,9 @@ use nunchi_common::{
 };
 use nunchi_crypto::PrivateKey;
 
-use crate::events::{TransferClaimed, TRANSFER_CLAIMED_EVENT};
+use crate::events::{
+    ForeignRootAnchored, TransferClaimed, FOREIGN_ROOT_ANCHORED_EVENT, TRANSFER_CLAIMED_EVENT,
+};
 use crate::genesis::BridgeGenesis;
 use crate::ledger::{BridgeError, BridgeLedger, BridgeReceipt};
 use crate::record::{
@@ -438,6 +440,79 @@ fn anchor_is_monotonic_per_source_chain() {
                 view: 1,
             }
         );
+    });
+}
+
+#[test]
+fn anchor_rejects_when_attestor_not_configured() {
+    deterministic::Runner::default().start(|context| async move {
+        // Destination has a chain id but no configured attestor.
+        let mut dest = QmdbState::init(context.child("dst"), "no-attestor")
+            .await
+            .expect("init dest");
+        BridgeGenesis::new(dest_chain()).apply(&mut dest);
+        let mut ledger = BridgeLedger::new(dest);
+
+        let attestor = signer(1);
+        let err = ledger
+            .apply_transaction(
+                &anchor_tx(&attestor, 0, source_chain(), 7, Sha256::hash(b"root")),
+                NoopEventSink,
+            )
+            .await
+            .expect_err("attestor not configured");
+        assert_eq!(err, BridgeError::AttestorNotConfigured);
+    });
+}
+
+#[test]
+fn claim_rejects_source_chain_mismatch() {
+    deterministic::Runner::default().start(|context| async move {
+        let recipient = addr(&signer(2));
+        let record = sample_record(recipient);
+        let (root, proof) = source_root_and_proof(&context, &record).await;
+
+        let attestor = signer(1);
+        let mut ledger = dest_ledger(&context, &addr(&attestor)).await;
+        ledger
+            .apply_transaction(&anchor_tx(&attestor, 0, source_chain(), 7, root), NoopEventSink)
+            .await
+            .expect("anchor");
+
+        // The claim declares a different source chain than the record carries.
+        let other_source = ChainId(Sha256::hash(b"other-source"));
+        let claimer = signer(3);
+        let err = ledger
+            .apply_transaction(
+                &claim_tx(&claimer, 0, other_source, 7, record, proof),
+                NoopEventSink,
+            )
+            .await
+            .expect_err("source mismatch");
+        assert_eq!(err, BridgeError::ClaimSourceMismatch);
+    });
+}
+
+#[test]
+fn anchor_emits_foreign_root_anchored_event() {
+    deterministic::Runner::default().start(|context| async move {
+        let attestor = signer(1);
+        let mut ledger = dest_ledger(&context, &addr(&attestor)).await;
+
+        let root = Sha256::hash(b"anchored-root");
+        let mut sink = VecEventSink::new();
+        ledger
+            .apply_transaction(&anchor_tx(&attestor, 0, source_chain(), 9, root), &mut sink)
+            .await
+            .expect("anchor");
+
+        assert_eq!(sink.len(), 1);
+        let event = &sink.events()[0];
+        assert_eq!(event.name.as_ref(), FOREIGN_ROOT_ANCHORED_EVENT);
+        let decoded = ForeignRootAnchored::decode(event.value.as_ref()).expect("decode event");
+        assert_eq!(decoded.source_chain_id, source_chain());
+        assert_eq!(decoded.view, 9);
+        assert_eq!(decoded.state_root, root);
     });
 }
 

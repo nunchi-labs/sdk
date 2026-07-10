@@ -5,8 +5,9 @@ use nunchi_common::{state_db::CommitState, Address, QmdbState};
 use nunchi_crypto::PrivateKey;
 
 use crate::record::{
-    consumed_record_key, is_consumed, mark_consumed, put_transfer_record, transfer_record,
-    transfer_record_key, AssetId, BridgeTransferRecord, ChainId, TransferRecordId,
+    attestor, consumed_record_key, foreign_root, is_consumed, latest_foreign_view, mark_consumed,
+    put_foreign_root, put_transfer_record, set_attestor, set_latest_foreign_view, transfer_record,
+    transfer_record_key, AssetId, BridgeTransferRecord, ChainId, ForeignRoot, TransferRecordId,
 };
 
 fn addr(seed: u64) -> Address {
@@ -185,5 +186,45 @@ fn consumed_marker_is_set_and_checked() {
         // A different record id from the same chain is independent.
         let other = TransferRecordId(Sha256::hash(b"other-record"));
         assert!(!is_consumed(&state, &chain, &other).await.expect("read"));
+    });
+}
+
+#[test]
+fn foreign_root_and_config_accessors_roundtrip() {
+    deterministic::Runner::default().start(|context| async move {
+        let mut state = QmdbState::init(context, "bridge-anchor-state-test")
+            .await
+            .expect("init state");
+
+        let source = ChainId(Sha256::hash(b"foreign-chain"));
+        let other = ChainId(Sha256::hash(b"other-chain"));
+
+        // Absent until anchored/configured.
+        assert_eq!(foreign_root(&state, &source, 5).await.expect("read"), None);
+        assert_eq!(latest_foreign_view(&state, &source).await.expect("read"), None);
+        assert_eq!(attestor(&state).await.expect("read"), None);
+
+        let root = ForeignRoot {
+            state_root: Sha256::hash(b"root-5"),
+        };
+        put_foreign_root(&mut state, &source, 5, &root);
+        set_latest_foreign_view(&mut state, &source, 5);
+        let signer = addr(1);
+        set_attestor(&mut state, &signer);
+        state.commit().await.expect("commit");
+
+        // Everything reads back, scoped by (source chain, view).
+        assert_eq!(
+            foreign_root(&state, &source, 5).await.expect("read"),
+            Some(root)
+        );
+        assert_eq!(foreign_root(&state, &source, 6).await.expect("read"), None);
+        assert_eq!(foreign_root(&state, &other, 5).await.expect("read"), None);
+        assert_eq!(
+            latest_foreign_view(&state, &source).await.expect("read"),
+            Some(5)
+        );
+        assert_eq!(latest_foreign_view(&state, &other).await.expect("read"), None);
+        assert_eq!(attestor(&state).await.expect("read"), Some(signer));
     });
 }
