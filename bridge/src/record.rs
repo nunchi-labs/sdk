@@ -5,9 +5,12 @@
 //! consumed exactly once. This module defines the record schema, its content-addressed id, the
 //! state keys, and minimal read/write accessors.
 //!
-//! Deliberately out of scope here: proof generation/verification, the source-side lock operation,
-//! the destination claim operation, the escrow balance table, and coins integration. Those build on
-//! this schema in later PRs.
+//! This module also holds the destination-side anchoring state (attested foreign roots keyed by
+//! `(source_chain_id, view)`) and the consumed-record replay guard the claim uses.
+//!
+//! Deliberately out of scope here: proof generation/verification (lives in `nunchi-common`), the
+//! signed operations themselves (see `transaction`/`ledger`), and the asset movement / settlement,
+//! which stays in the chain's coins integration layer so this crate remains decoupled from coins.
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -40,8 +43,12 @@ enum Table {
     ConsumedRecord = 1,
     /// Per-sender lock nonce, giving each of a sender's transfers a distinct record id.
     Nonce = 2,
-    /// Singleton module configuration (currently just this chain's [`ChainId`]).
+    /// Singleton module configuration (this chain's [`ChainId`] and the anchor attestor).
     Config = 3,
+    /// Attested foreign state roots, keyed by `(source_chain_id, view)`.
+    ForeignRoot = 4,
+    /// Latest anchored view per source chain, enforcing monotonic anchoring.
+    ForeignLatestView = 5,
 }
 
 impl From<Table> for u8 {
@@ -296,4 +303,120 @@ pub async fn local_chain_id<S: StateStore>(store: &S) -> Result<Option<ChainId>,
 /// `source_chain_id`.
 pub fn set_local_chain_id<S: StateStore>(store: &mut S, chain_id: &ChainId) {
     store.set(local_chain_id_key(), chain_id.encode().as_ref().to_vec());
+}
+
+/// An attested foreign state root: a snapshot of another chain's authenticated state that a
+/// destination claim verifies transfer records against. In this MVP it is written by a trusted
+/// attestor (see the bridge genesis), not derived from a cryptographic finalization proof.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ForeignRoot {
+    /// The foreign chain's authenticated state root.
+    pub state_root: Digest,
+}
+
+impl Write for ForeignRoot {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.state_root.write(buf);
+    }
+}
+
+impl Read for ForeignRoot {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            state_root: Digest::read(buf)?,
+        })
+    }
+}
+
+impl FixedSize for ForeignRoot {
+    const SIZE: usize = Digest::SIZE;
+}
+
+/// Authenticated-state key for the attested root of `source_chain_id` at `view`.
+pub fn foreign_root_key(source_chain_id: &ChainId, view: u64) -> Digest {
+    let mut logical = source_chain_id.encode().as_ref().to_vec();
+    logical.extend_from_slice(view.encode().as_ref());
+    NS.key(Table::ForeignRoot, &logical)
+}
+
+/// Stage the attested foreign `root` for `source_chain_id` at `view`. Roots are kept per view (not
+/// latest-only) so an in-flight claim built against an earlier root still verifies.
+pub fn put_foreign_root<S: StateStore>(
+    store: &mut S,
+    source_chain_id: &ChainId,
+    view: u64,
+    root: &ForeignRoot,
+) {
+    store.set(
+        foreign_root_key(source_chain_id, view),
+        root.encode().as_ref().to_vec(),
+    );
+}
+
+/// Read the attested foreign root for `source_chain_id` at `view`, if anchored.
+pub async fn foreign_root<S: StateStore>(
+    store: &S,
+    source_chain_id: &ChainId,
+    view: u64,
+) -> Result<Option<ForeignRoot>, StateError> {
+    match store.get(&foreign_root_key(source_chain_id, view)).await? {
+        Some(bytes) => ForeignRoot::decode(bytes.as_ref())
+            .map(Some)
+            .map_err(|err| StateError::Backend(err.to_string())),
+        None => Ok(None),
+    }
+}
+
+/// Authenticated-state key for the latest anchored view of `source_chain_id`.
+fn latest_foreign_view_key(source_chain_id: &ChainId) -> Digest {
+    NS.key(Table::ForeignLatestView, source_chain_id.encode().as_ref())
+}
+
+/// The latest anchored view for `source_chain_id`, if any root has been anchored. Monotonicity is
+/// tracked per source chain so different source chains never block one another.
+pub async fn latest_foreign_view<S: StateStore>(
+    store: &S,
+    source_chain_id: &ChainId,
+) -> Result<Option<u64>, StateError> {
+    match store.get(&latest_foreign_view_key(source_chain_id)).await? {
+        Some(bytes) => {
+            u64::decode(bytes.as_ref()).map(Some).map_err(|err| StateError::Backend(err.to_string()))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Stage the latest anchored view for `source_chain_id`.
+pub fn set_latest_foreign_view<S: StateStore>(
+    store: &mut S,
+    source_chain_id: &ChainId,
+    view: u64,
+) {
+    store.set(
+        latest_foreign_view_key(source_chain_id),
+        view.encode().as_ref().to_vec(),
+    );
+}
+
+/// Authenticated-state key for the configured anchor attestor.
+fn attestor_key() -> Digest {
+    NS.key(Table::Config, b"attestor")
+}
+
+/// The configured anchor attestor, if the chain pins one (see the bridge genesis). Only this account
+/// may anchor foreign roots.
+pub async fn attestor<S: StateStore>(store: &S) -> Result<Option<Address>, StateError> {
+    match store.get(&attestor_key()).await? {
+        Some(bytes) => Address::decode(bytes.as_ref())
+            .map(Some)
+            .map_err(|err| StateError::Backend(err.to_string())),
+        None => Ok(None),
+    }
+}
+
+/// Pin the anchor attestor. Written once at genesis.
+pub fn set_attestor<S: StateStore>(store: &mut S, attestor: &Address) {
+    store.set(attestor_key(), attestor.encode().as_ref().to_vec());
 }

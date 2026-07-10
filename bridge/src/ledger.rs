@@ -1,17 +1,26 @@
-//! Deterministic bridge state machine for source-chain lock operations.
+//! Deterministic bridge state machine for lock, anchor, and claim operations.
 //!
-//! The ledger stays decoupled from any asset module: a lock records an authenticated
-//! [`BridgeTransferRecord`] and advances the sender's bridge nonce, but the actual movement of the
-//! locked asset into escrow is performed by the chain's integration layer alongside this call, in
-//! the same overlay.
+//! The ledger stays decoupled from any asset module. A **lock** records an authenticated
+//! [`BridgeTransferRecord`]; an **anchor** pins an attested foreign state root; a **claim** proves a
+//! record against an anchored root and marks it consumed exactly once. The actual asset movement
+//! (escrow on lock, mint on claim) is performed by the chain's integration layer alongside these
+//! calls, in the same overlay, keyed off the returned [`BridgeReceipt`].
 
-use crate::events::{transfer_locked_event, TransferLocked};
+use crate::events::{
+    foreign_root_anchored_event, transfer_claimed_event, transfer_locked_event, ForeignRootAnchored,
+    TransferClaimed, TransferLocked,
+};
 use crate::record::{
-    bridge_nonce, local_chain_id, put_transfer_record, set_bridge_nonce, AssetId,
-    BridgeTransferRecord, TransferRecordId,
+    attestor, bridge_nonce, foreign_root, is_consumed, latest_foreign_view, local_chain_id,
+    mark_consumed, put_foreign_root, put_transfer_record, set_bridge_nonce, set_latest_foreign_view,
+    transfer_record_key, AssetId, BridgeTransferRecord, ChainId, ForeignRoot, TransferRecordId,
 };
 use crate::transaction::{BridgeOperation, Transaction};
-use nunchi_common::{state_db::StateError, Authorization, EventSink, StateStore};
+use commonware_codec::Encode;
+use nunchi_common::{
+    state_db::{verify_state_update, StateError},
+    Address, Authorization, EventSink, StateStore,
+};
 use nunchi_crypto::SignatureError;
 use thiserror::Error;
 
@@ -32,6 +41,22 @@ pub enum BridgeError {
     SelfBridge,
     #[error("bridge chain id is not configured")]
     ChainNotConfigured,
+    #[error("anchor attestor is not configured")]
+    AttestorNotConfigured,
+    #[error("only the configured attestor may anchor foreign roots")]
+    NotAttestor,
+    #[error("stale anchor: latest view is {latest}, got {submitted}")]
+    StaleAnchor { latest: u64, submitted: u64 },
+    #[error("claim record does not belong to the claimed source chain")]
+    ClaimSourceMismatch,
+    #[error("claim record is not destined for this chain")]
+    WrongDestination,
+    #[error("no anchored foreign root for the claimed (source chain, view)")]
+    MissingAnchor,
+    #[error("claim proof does not authenticate the record under the anchored root")]
+    InvalidProof,
+    #[error("transfer record has already been claimed")]
+    AlreadyClaimed,
     #[error("state storage error: {0}")]
     Storage(String),
 }
@@ -40,6 +65,24 @@ impl From<StateError> for BridgeError {
     fn from(err: StateError) -> Self {
         Self::Storage(err.to_string())
     }
+}
+
+/// The validated outcome of a bridge operation. The integration layer performs the matching asset
+/// movement in the same overlay: escrow the locked coins on [`BridgeReceipt::Locked`], mint the
+/// mapped asset to the recipient on [`BridgeReceipt::Claimed`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BridgeReceipt {
+    /// A source-chain lock recorded `record_id`.
+    Locked(TransferRecordId),
+    /// An attested foreign root was anchored for `source_chain_id` at `view`.
+    Anchored { source_chain_id: ChainId, view: u64 },
+    /// A transfer was claimed and marked consumed; the recipient must be credited `amount` of the
+    /// coin mapped from `source_asset`.
+    Claimed {
+        source_asset: AssetId,
+        recipient: Address,
+        amount: u128,
+    },
 }
 
 /// Deterministic state machine for bridge operations over a [`StateStore`] backend.
@@ -63,16 +106,15 @@ impl<S: StateStore> BridgeLedger<S> {
         self.store
     }
 
-    /// Verify, authorize, and apply a signed bridge transaction, returning the id of the recorded
-    /// transfer.
+    /// Verify, authorize, and apply a signed bridge transaction, returning a [`BridgeReceipt`] the
+    /// integration layer uses to perform the matching asset movement in the same overlay.
     ///
-    /// Records are content-addressed and append-only; the sender's monotonic bridge nonce gives
-    /// each of their transfers a distinct id even when the other fields are identical.
+    /// All operations share single-key authorization and a per-account monotonic bridge nonce.
     pub async fn apply_transaction<Events>(
         &mut self,
         tx: &Transaction,
         mut events: Events,
-    ) -> Result<TransferRecordId, BridgeError>
+    ) -> Result<BridgeReceipt, BridgeError>
     where
         Events: EventSink + Send,
     {
@@ -96,7 +138,7 @@ impl<S: StateStore> BridgeLedger<S> {
         }
         let next_nonce = expected.checked_add(1).ok_or(BridgeError::NonceOverflow)?;
 
-        let record_id = match &tx.payload.operation {
+        let receipt = match &tx.payload.operation {
             BridgeOperation::Lock {
                 destination_chain_id,
                 local_asset,
@@ -134,11 +176,94 @@ impl<S: StateStore> BridgeLedger<S> {
                     recipient: recipient.clone(),
                     nonce: tx.payload.nonce,
                 }));
-                record_id
+                BridgeReceipt::Locked(record_id)
+            }
+
+            BridgeOperation::AnchorForeignRoot {
+                source_chain_id,
+                view,
+                state_root,
+            } => {
+                let attestor = attestor(&self.store)
+                    .await?
+                    .ok_or(BridgeError::AttestorNotConfigured)?;
+                if tx.account_id != attestor {
+                    return Err(BridgeError::NotAttestor);
+                }
+                // Monotonic per source chain so distinct source chains never block one another.
+                if let Some(latest) = latest_foreign_view(&self.store, source_chain_id).await? {
+                    if *view <= latest {
+                        return Err(BridgeError::StaleAnchor {
+                            latest,
+                            submitted: *view,
+                        });
+                    }
+                }
+                let root = ForeignRoot {
+                    state_root: *state_root,
+                };
+                put_foreign_root(&mut self.store, source_chain_id, *view, &root);
+                set_latest_foreign_view(&mut self.store, source_chain_id, *view);
+                events.emit(foreign_root_anchored_event(ForeignRootAnchored {
+                    source_chain_id: *source_chain_id,
+                    view: *view,
+                    state_root: *state_root,
+                }));
+                BridgeReceipt::Anchored {
+                    source_chain_id: *source_chain_id,
+                    view: *view,
+                }
+            }
+
+            BridgeOperation::Claim {
+                source_chain_id,
+                source_view,
+                record,
+                proof,
+            } => {
+                // The record must belong to the claimed source chain and target this chain.
+                if record.source_chain_id != *source_chain_id {
+                    return Err(BridgeError::ClaimSourceMismatch);
+                }
+                let local = local_chain_id(&self.store)
+                    .await?
+                    .ok_or(BridgeError::ChainNotConfigured)?;
+                if record.destination_chain_id != local {
+                    return Err(BridgeError::WrongDestination);
+                }
+                // The foreign root for (source_chain_id, source_view) must be anchored.
+                let anchored = foreign_root(&self.store, source_chain_id, *source_view)
+                    .await?
+                    .ok_or(BridgeError::MissingAnchor)?;
+                // The proof must authenticate this exact (content-addressed) record under the root.
+                let record_id = record.record_id();
+                let key = transfer_record_key(&record_id);
+                if !verify_state_update(proof, &anchored.state_root, &key, record.encode().as_ref())
+                {
+                    return Err(BridgeError::InvalidProof);
+                }
+                // Exactly-once: a record consumed under its source chain can never be claimed again.
+                if is_consumed(&self.store, source_chain_id, &record_id).await? {
+                    return Err(BridgeError::AlreadyClaimed);
+                }
+                mark_consumed(&mut self.store, source_chain_id, &record_id);
+                events.emit(transfer_claimed_event(TransferClaimed {
+                    record_id,
+                    source_chain_id: *source_chain_id,
+                    source_view: *source_view,
+                    source_asset: record.source_asset,
+                    recipient: record.recipient.clone(),
+                    amount: record.amount,
+                }));
+                BridgeReceipt::Claimed {
+                    source_asset: record.source_asset,
+                    recipient: record.recipient.clone(),
+                    amount: record.amount,
+                }
             }
         };
 
         set_bridge_nonce(&mut self.store, &tx.account_id, next_nonce);
-        Ok(record_id)
+        Ok(receipt)
     }
 }

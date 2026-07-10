@@ -1,3 +1,4 @@
+mod claim;
 mod genesis;
 mod ledger;
 mod record;

@@ -8,7 +8,7 @@ use nunchi_crypto::PrivateKey;
 
 use crate::events::{TransferLocked, TRANSFER_LOCKED_EVENT};
 use crate::genesis::BridgeGenesis;
-use crate::ledger::{BridgeError, BridgeLedger};
+use crate::ledger::{BridgeError, BridgeLedger, BridgeReceipt};
 use crate::record::{bridge_nonce, transfer_record, AssetId, BridgeTransferRecord, ChainId};
 use crate::transaction::{BridgeOperation, Transaction};
 
@@ -66,20 +66,26 @@ fn lock_writes_record_and_advances_nonce() {
 
         // Two identical transfers from the same sender differ only by nonce, and so get distinct
         // content-addressed record ids.
-        let id0 = ledger
+        let BridgeReceipt::Locked(id0) = ledger
             .apply_transaction(
                 &lock_tx(&alice, 0, dest_chain(), coin(), 1_000, recipient.clone()),
                 NoopEventSink,
             )
             .await
-            .expect("first lock");
-        let id1 = ledger
+            .expect("first lock")
+        else {
+            panic!("expected Locked receipt");
+        };
+        let BridgeReceipt::Locked(id1) = ledger
             .apply_transaction(
                 &lock_tx(&alice, 1, dest_chain(), coin(), 1_000, recipient.clone()),
                 NoopEventSink,
             )
             .await
-            .expect("second lock");
+            .expect("second lock")
+        else {
+            panic!("expected Locked receipt");
+        };
         assert_ne!(id0, id1);
 
         let expected = BridgeTransferRecord {
@@ -118,13 +124,16 @@ fn lock_emits_transfer_locked_event() {
         let mut ledger = BridgeLedger::new(state);
 
         let mut sink = VecEventSink::new();
-        let record_id = ledger
+        let BridgeReceipt::Locked(record_id) = ledger
             .apply_transaction(
                 &lock_tx(&alice, 0, dest_chain(), coin(), 500, recipient.clone()),
                 &mut sink,
             )
             .await
-            .expect("lock");
+            .expect("lock")
+        else {
+            panic!("expected Locked receipt");
+        };
 
         assert_eq!(sink.len(), 1);
         let event = &sink.events()[0];
@@ -247,8 +256,9 @@ fn lock_rejects_bad_signature() {
 
         // Tamper the operation after signing so the signature no longer matches.
         let mut tx = lock_tx(&alice, 0, dest_chain(), coin(), 1_000, addr(&signer(2)));
-        let BridgeOperation::Lock { amount, .. } = &mut tx.payload.operation;
-        *amount += 1;
+        if let BridgeOperation::Lock { amount, .. } = &mut tx.payload.operation {
+            *amount += 1;
+        }
         let err = ledger
             .apply_transaction(&tx, NoopEventSink)
             .await
