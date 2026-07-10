@@ -1,21 +1,15 @@
 //! Generic interval-aware oracle data store for Nunchi chains.
 
-#[cfg(feature = "state")]
 mod db;
-#[cfg(feature = "state")]
 mod genesis;
-#[cfg(feature = "state")]
 mod ledger;
 #[cfg(test)]
 mod tests;
 mod transaction;
 mod types;
 
-#[cfg(feature = "state")]
 pub use db::OracleDB;
-#[cfg(feature = "state")]
 pub use genesis::OracleGenesis;
-#[cfg(feature = "state")]
 pub use ledger::{OracleError, OracleLedger};
 pub use nunchi_common::{AccountSignature, Authorization};
 pub use transaction::{OracleOperation, Transaction, TransactionPayload};

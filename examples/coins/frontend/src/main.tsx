@@ -1,16 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Activity, CircleAlert, PlugZap, RefreshCw, Search, Server, Wifi, WifiOff } from "lucide-react";
-import initWasm, { parse_consensus_message, parse_finalized } from "./coins_wasm/coins_wasm.js";
-import { asRecord, bytesField, bytesToHex, compactHex, hexToBytes, httpBase, numberField, wsBase } from "./utils";
+import { compactHex, httpBase, wsBase } from "./utils";
 import "./styles.css";
 
 type Connection = "offline" | "connecting" | "online";
 
 type Settings = {
   backendUrl: string;
-  identity: string;
-  participants: string;
 };
 
 type EventRow = {
@@ -55,17 +52,7 @@ const DEFAULT_BACKEND_URL =
   import.meta.env.VITE_INDEXER_URL ?? (window.location.port === "5173" ? LOCAL_INDEXER_URL : window.location.origin);
 const DEFAULT_SETTINGS: Settings = {
   backendUrl: DEFAULT_BACKEND_URL,
-  identity: import.meta.env.VITE_INDEXER_IDENTITY ?? "",
-  participants: import.meta.env.VITE_INDEXER_PARTICIPANTS ?? "1",
 };
-let wasmInitialization: Promise<unknown> | null = null;
-
-function initializeWasm(): Promise<unknown> {
-  if (!wasmInitialization) {
-    wasmInitialization = initWasm();
-  }
-  return wasmInitialization;
-}
 
 function readSettings(): Settings {
   const saved = window.localStorage.getItem(STORAGE_KEY);
@@ -136,30 +123,17 @@ function App() {
   }, [backend]);
 
   const updateLatest = useCallback(async () => {
-    const identity = hexToBytes(settings.identity);
-    const participants = Number(settings.participants);
-    if (!identity || !Number.isSafeInteger(participants) || participants <= 0) {
-      setLatest(null);
-      return;
-    }
     try {
-      await initializeWasm();
-      const response = await fetch(`${backend}/finalization/latest`, { cache: "no-store" });
+      const response = await fetch(`${backend}/consensus/summary/latest`, { cache: "no-store" });
       if (!response.ok) {
         setLatest(null);
         return;
       }
-      const finalized = parse_finalized(identity, participants, new Uint8Array(await response.arrayBuffer()));
-      const parsed = normalizeArtifact("finalization", finalized, Date.now());
-      if (!parsed) {
-        setError("rejected an invalid latest finalization");
-        return;
-      }
-      setLatest(parsed);
+      setLatest(normalizeSummary(await response.json()));
     } catch (err) {
       setError(String(err));
     }
-  }, [backend, settings.identity, settings.participants]);
+  }, [backend]);
 
   useEffect(() => {
     updateHealth();
@@ -177,33 +151,13 @@ function App() {
     let stopped = false;
     let socket: WebSocket | null = null;
     let retry: number | undefined;
-    const identity = hexToBytes(settings.identity);
-    const participants = Number(settings.participants);
 
-    if (!identity || !Number.isSafeInteger(participants) || participants <= 0) {
-      setConnection("offline");
-      setError("a valid threshold identity and positive participant count are required");
-      return;
-    }
-
-    const connect = async () => {
-      if (stopped) return;
-      try {
-        await initializeWasm();
-      } catch (err) {
-        setConnection("offline");
-        setError(`WASM initialization failed: ${String(err)}`);
-        return;
-      }
+    const connect = () => {
       if (stopped) return;
       setConnection("connecting");
-      socket = new WebSocket(`${wsBase(backend)}/consensus/ws`);
-      socket.binaryType = "arraybuffer";
+      socket = new WebSocket(`${wsBase(backend)}/consensus/summary/ws`);
 
-      socket.onopen = () => {
-        setConnection("online");
-        setError("");
-      };
+      socket.onopen = () => setConnection("online");
       socket.onerror = () => {
         setConnection("offline");
         setError("websocket connection failed");
@@ -214,16 +168,10 @@ function App() {
           retry = window.setTimeout(connect, 1000);
         }
       };
-      socket.onmessage = async (message) => {
+      socket.onmessage = (message) => {
         const displayAt = Date.now();
-        const bytes = await binaryMessage(message.data);
-        const parsed = bytes
-          ? normalizeConsensusMessage(parse_consensus_message(identity, participants, bytes), displayAt)
-          : null;
-        if (!parsed) {
-          setError("rejected an invalid consensus message");
-          return;
-        }
+        const parsed = parseSummaryMessage(message.data);
+        if (!parsed) return;
         const { kind, view, height, blockTimestamp, transactionCount } = parsed;
         const digestHex = parsed.digest ?? "";
         if ((kind === "notarization" || kind === "finalization") && height !== null && blockTimestamp !== null) {
@@ -267,7 +215,7 @@ function App() {
       }
       socket?.close();
     };
-  }, [backend, scheduleSummaryFlush, settings.identity, settings.participants]);
+  }, [backend, scheduleSummaryFlush]);
 
   function saveSettings() {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(draft));
@@ -313,21 +261,13 @@ function App() {
             <span>Backend</span>
             <input value={draft.backendUrl} onChange={(event) => setDraft({ ...draft, backendUrl: event.target.value })} />
           </label>
-          <label>
-            <span>Threshold identity</span>
-            <input value={draft.identity} onChange={(event) => setDraft({ ...draft, identity: event.target.value })} />
-          </label>
-          <label>
-            <span>Participants</span>
-            <input type="number" min="1" value={draft.participants} onChange={(event) => setDraft({ ...draft, participants: event.target.value })} />
-          </label>
           <button className="primary" onClick={saveSettings}>
             <RefreshCw size={16} />
             Apply
           </button>
           <div className="notice ok">
             <Server size={16} />
-            <span>client-verified binary stream</span>
+            <span>server-verified stream</span>
           </div>
           {error && <div className="notice warn"><CircleAlert size={16} /><span>{error}</span></div>}
         </aside>
@@ -526,47 +466,37 @@ function updateTiming(
   }
 }
 
-async function binaryMessage(data: unknown): Promise<Uint8Array | null> {
-  if (data instanceof ArrayBuffer) return new Uint8Array(data);
-  if (data instanceof Blob) return new Uint8Array(await data.arrayBuffer());
-  return null;
-}
-
-function normalizeConsensusMessage(value: unknown, observedAt: number): SummaryEvent | null {
-  const message = asRecord(value);
-  const kind = message?.kind;
-  const payload = asRecord(message?.payload);
-  if (typeof kind !== "string" || !payload) return null;
-  if (kind === "seed") {
-    return {
-      kind,
-      view: numberField(payload, "view"),
-      height: null,
-      digest: null,
-      transactionCount: null,
-      blockTimestamp: null,
-      observedAt,
-    };
+function parseSummaryMessage(data: unknown): SummaryEvent | null {
+  try {
+    return normalizeSummary(JSON.parse(String(data)));
+  } catch {
+    return null;
   }
-  if (kind !== "notarization" && kind !== "finalization") return null;
-  return normalizeArtifact(kind, payload, observedAt);
 }
 
-function normalizeArtifact(kind: string, value: unknown, observedAt: number): SummaryEvent | null {
-  const artifact = asRecord(value);
-  const block = asRecord(artifact?.block);
-  const proof = asRecord(artifact?.proof);
-  const digest = bytesField(block, "digest");
-  if (!block || !proof || !digest) return null;
+function normalizeSummary(value: unknown): SummaryEvent | null {
+  if (value === null || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.kind !== "string") return null;
+  const view = optionalNumber(record.view);
+  const height = optionalNumber(record.height);
+  const transactionCount = optionalNumber(record.transactionCount);
+  const blockTimestamp = optionalNumber(record.blockTimestamp);
+  const observedAt = optionalNumber(record.observedAt);
+  if (observedAt === null) return null;
   return {
-    kind,
-    view: numberField(proof, "view"),
-    height: numberField(block, "height"),
-    digest: bytesToHex(digest),
-    transactionCount: numberField(block, "transactionCount"),
-    blockTimestamp: numberField(block, "timestamp"),
+    kind: record.kind,
+    view,
+    height,
+    digest: typeof record.digest === "string" ? record.digest : null,
+    transactionCount,
+    blockTimestamp,
     observedAt,
   };
+}
+
+function optionalNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function median(values: Array<number | undefined>): number | undefined {

@@ -13,7 +13,7 @@ rpc = ["dep:jsonrpsee", "dep:nunchi-rpc", "dep:serde"]
 
 [dependencies]
 nunchi-chain = { workspace = true }
-nunchi-common = { workspace = true, features = ["state"] }
+nunchi-common = { workspace = true }
 nunchi-crypto = { workspace = true }
 nunchi-dkg = { workspace = true }
 nunchi-rpc = { workspace = true, optional = true }

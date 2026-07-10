@@ -8,16 +8,15 @@ license.workspace = true
 workspace = true
 
 [features]
-default = ["rpc", "state"]
-rpc = ["state", "dep:nunchi-rpc", "dep:jsonrpsee", "dep:futures"]
-state = ["nunchi-common/state"]
-mempool = ["state", "dep:nunchi-mempool"]
+default = ["rpc"]
+rpc = ["dep:nunchi-rpc", "dep:jsonrpsee", "dep:futures"]
+mempool = ["dep:nunchi-mempool"]
 
 [dependencies]
 async-trait = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
-nunchi-common = { workspace = true, default-features = false }
+nunchi-common = { workspace = true }
 nunchi-crypto = { workspace = true }
 nunchi-mempool = { workspace = true, optional = true }
 nunchi-rpc = { workspace = true, optional = true }

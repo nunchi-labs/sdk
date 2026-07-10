@@ -4,9 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "npm run build:wasm && vite --host 0.0.0.0",
-    "build:wasm": "wasm-pack build ../wasm --target web --out-dir ../frontend/src/coins_wasm --out-name coins_wasm",
-    "build": "npm run build:wasm && tsc && vite build",
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc && vite build",
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {

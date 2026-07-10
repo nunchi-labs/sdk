@@ -4,15 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[features]
-default = ["state"]
-state = ["nunchi-common/state"]
-
 [dependencies]
 async-trait = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
-nunchi-common = { workspace = true, default-features = false }
+nunchi-common = { workspace = true }
 nunchi-crypto = { workspace = true }
 commonware-codec = { workspace = true }
 commonware-cryptography = { workspace = true }
