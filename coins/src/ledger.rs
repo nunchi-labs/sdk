@@ -182,6 +182,7 @@ impl<D: CoinDB> Ledger<D> {
     where
         Events: EventSink + Send,
     {
+        tx.verify()?;
         self.ensure_authorized(tx).await?;
 
         let expected = self.db.nonce(&tx.account_id).await?;
