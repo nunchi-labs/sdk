@@ -99,6 +99,7 @@ impl<E: Spawner + Metrics, C: Client> Pusher<E, C> {
         view: View,
         round: Round,
         digest: Digest,
+        mark_finalized: bool,
         upload_fn: F,
     ) where
         F: Fn(C, Block) -> Fut + Send + 'static,
@@ -126,7 +127,9 @@ impl<E: Spawner + Metrics, C: Client> Pusher<E, C> {
                     return;
                 }
 
-                guard.mark_uploaded(height);
+                if mark_finalized {
+                    guard.mark_uploaded(height);
+                }
                 debug!(%view, label, "certificate uploaded to indexer");
             }
         });
@@ -146,6 +149,7 @@ impl<E: Spawner + Metrics, C: Client> Reporter for Pusher<E, C> {
                     view,
                     notarization.round(),
                     notarization.proposal.payload,
+                    false,
                     move |indexer, block| {
                         let notarization = notarization.clone();
                         async move {
@@ -164,6 +168,7 @@ impl<E: Spawner + Metrics, C: Client> Reporter for Pusher<E, C> {
                     view,
                     finalization.round(),
                     finalization.proposal.payload,
+                    true,
                     move |indexer, block| {
                         let finalization = finalization.clone();
                         async move {

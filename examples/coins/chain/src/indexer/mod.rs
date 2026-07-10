@@ -9,10 +9,8 @@ use commonware_cryptography::bls12381::{
 use commonware_runtime::{Clock, Metrics, Spawner, Storage};
 use commonware_storage::queue;
 use commonware_utils::sync::Mutex;
-use nunchi_dkg::{PostUpdate, Update, UpdateCallBack};
-use std::{future::Future, num::NonZeroUsize, pin::Pin, sync::Arc, time::Duration};
+use std::{future::Future, num::NonZeroUsize, sync::Arc, time::Duration};
 use thiserror::Error;
-use tracing::{info, warn};
 
 mod backfiller;
 mod pusher;
@@ -20,6 +18,9 @@ mod pusher;
 pub(crate) use backfiller::{Consumer, Entry, Producer};
 use backfiller::{SharedState, State};
 pub(crate) use pusher::Pusher;
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Errors returned by the HTTP indexer client.
 #[derive(Debug, Error)]
@@ -51,8 +52,6 @@ pub trait Client: Clone + Send + Sync + 'static {
         &self,
         finalized: Finalized,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
-
-    fn block_upload(&self, block: Block) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 
 /// HTTP client for an Alto-compatible coins-chain indexer API.
@@ -66,7 +65,11 @@ impl HttpClient {
     pub fn new(uri: impl Into<String>) -> Self {
         Self {
             uri: uri.into(),
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .timeout(REQUEST_TIMEOUT)
+                .build()
+                .expect("valid indexer HTTP client configuration"),
         }
     }
 
@@ -118,44 +121,6 @@ impl Client for HttpClient {
             commonware_codec::Encode::encode(&finalized).to_vec(),
         )
         .await
-    }
-
-    async fn block_upload(&self, block: Block) -> Result<(), Self::Error> {
-        self.post("/block", commonware_codec::Encode::encode(&block).to_vec())
-            .await
-    }
-}
-
-pub(crate) struct DkgOutputPusher<C> {
-    client: C,
-}
-
-impl<C: Client> DkgOutputPusher<C> {
-    pub(crate) fn boxed(client: C) -> Box<Self> {
-        Box::new(Self { client })
-    }
-}
-
-impl<C: Client> UpdateCallBack<MinSig, crate::PublicKey> for DkgOutputPusher<C> {
-    fn on_update(
-        &mut self,
-        update: Update<MinSig, crate::PublicKey>,
-    ) -> Pin<Box<dyn Future<Output = PostUpdate> + Send>> {
-        let client = self.client.clone();
-        Box::pin(async move {
-            if let Update::Success { epoch, output, .. } = update {
-                let next_epoch = epoch.next();
-                match client.dkg_output_upload(next_epoch, output).await {
-                    Ok(()) => {
-                        info!(%next_epoch, "uploaded DKG output to indexer");
-                    }
-                    Err(error) => {
-                        warn!(%next_epoch, %error, "failed to upload DKG output to indexer");
-                    }
-                }
-            }
-            PostUpdate::Continue
-        })
     }
 }
 

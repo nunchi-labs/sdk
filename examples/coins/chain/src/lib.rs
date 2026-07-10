@@ -57,7 +57,9 @@ pub mod channels {
     pub const MEMPOOL: u64 = 6;
 }
 
-/// The consensus epoch. The demo chain never reconfigures, so the epoch is hardcoded to 0.
+/// The initial consensus epoch used by genesis and test helpers.
+///
+/// Live consensus derives later epochs from [`BLOCKS_PER_EPOCH`].
 pub const EPOCH: Epoch = Epoch::zero();
 
 /// The number of blocks in an epoch.
