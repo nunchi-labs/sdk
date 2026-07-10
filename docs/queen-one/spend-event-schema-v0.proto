@@ -1,0 +1,227 @@
+// Queen One spend event, canonical schema v0 (DRAFT, design artifact).
+//
+// This is OUR canonical record, produced by the qone-normalize library from
+// Queen One's CloudEvents and consumed by the transactor and the meter-module.
+// It is NOT one of their schemas: their event schemas live in their central
+// schema project and evolve under their code review. Any new event they emit
+// for us goes through that process; this file only defines what we derive.
+//
+// Versioning rules:
+//   - Additive (minor) changes to their protos are absorbed safely: unknown
+//     fields are ignored by proto semantics and quantities/identifiers here
+//     are open, not enumerated.
+//   - A new event type or a breaking major bump routes to the DLQ, is fixed
+//     by a normalizer release, and replayed. Replays are idempotent through
+//     event_id.
+//   - Their BigQuery raw events table is the permanent re-normalization
+//     archive; history can always be re-derived under a newer derivation_v.
+//
+// Privacy: no user-level identifiers appear anywhere in this schema, by
+// decision (2026-06-29, no PII on the ledger; V1 scope is task/product/site).
+// site_id is an opaque post-enrichment identifier.
+//
+// Money: all monetary amounts are micro USD integers (1_000_000 = 1 USD).
+// No floats on the ledger. Currency conversion happens upstream in their
+// Dataflow enrichment; if a source payload carries a non-USD amount the
+// normalizer must resolve it or mark the record UNTRACKED, never guess.
+
+syntax = "proto3";
+
+package nunchi.qone.v0;
+
+// ---------------------------------------------------------------------------
+// Core record
+// ---------------------------------------------------------------------------
+
+// One metered spend fact. Append-only on the ledger, keyed by event_id.
+message SpendRecord {
+  // SHA256(ce.source || ce.id) of the originating CloudEvent. Content-derived
+  // idempotency key: the ledger deduplicates on this, so redelivery and
+  // stream/backfill overlap can never double count. 32 bytes.
+  bytes event_id = 1;
+
+  // Event occurrence time from the source event, epoch milliseconds.
+  // Parameter versions (cost, token rate) are resolved against this time.
+  uint64 occurred_at_ms = 2;
+
+  // Opaque post-enrichment site identifier. Sites roll up to an agency or a
+  // direct customer via the attribution mapping (off-ledger config in V1).
+  string site_id = 3;
+
+  // Spend source, namespaced, lowercase, dot-separated. Open vocabulary:
+  // new sources require no schema change. Examples: "infobip.sms",
+  // "greenarrow.email", "gemini.llm", "gcp.training_servers".
+  string source = 4;
+
+  // The originating CloudEvent type string, verbatim, for audit and
+  // re-derivation. Open vocabulary.
+  string event_type = 5;
+
+  // Version of the source schema the normalizer decoded (their major version)
+  // and version of the derivation function that produced task/product.
+  uint32 schema_v = 6;
+  uint32 derivation_v = 7;
+
+  // Derived task and product labels. Open vocabulary, derived from
+  // event_type/source/attributes by a versioned pure function in the
+  // normalizer; recomputable because event_type and source are retained.
+  string task = 8;
+  string product = 9;
+
+  // What was consumed, in source units. Unit is an open string, for example
+  // "sms_segment", "email_send", "token_input", "token_output", "token_image",
+  // "token_audio", "token_reasoning", "second", "byte", "row".
+  repeated Quantity quantities = 10;
+
+  // How cost_micro_usd was established.
+  CostBasis cost_basis = 11;
+
+  // Metered cost in micro USD. Zero when cost_basis is UNTRACKED.
+  uint64 cost_micro_usd = 12;
+
+  // CostParams version applied (RATE_CARD records), zero otherwise.
+  uint64 params_version = 13;
+
+  // Token denomination: tokens = cost_micro_usd / micro_usd_per_token,
+  // integer floor. The remainder is retained so token totals reconcile
+  // exactly against cost totals.
+  uint64 tokens = 14;
+  uint64 token_rate_version = 15;
+  uint64 token_remainder_micro = 16;
+
+  // Verbatim passthrough of their enrichment validation metadata (landing
+  // with their Labor Day validation-layer release). Never re-derived by us.
+  UpstreamValidation upstream_validation = 17;
+
+  // Which path produced this record.
+  IngestSource ingest_source = 18;
+
+  // Bounded raw extension payload (at most 512 bytes): source fields we must
+  // retain for audit or later repricing but do not model as columns.
+  // For Infobip this carries the raw combined price and segment count.
+  // "attributable_revenue" is a reserved key for the value-attribution
+  // extension; it is never populated in V1.
+  bytes raw_ext = 19;
+
+  // Adjustment support: an append-only ledger corrects by reference, never by
+  // edit. When set, this record adjusts a prior record (for example backing
+  // out cost for an SMS send that was charged but never delivered).
+  Adjustment adjustment = 20;
+}
+
+message Quantity {
+  string unit = 1;
+  uint64 qty = 2;
+}
+
+enum CostBasis {
+  COST_BASIS_UNSPECIFIED = 0;
+  // Provider-priced on the event itself (example: Infobip delivery payload).
+  COST_BASIS_OBSERVED = 1;
+  // Computed as sum(qty_i x rate_i) from a versioned on-ledger rate card
+  // (example: Green Arrow flat email rates; Gemini token classes once priced).
+  COST_BASIS_RATE_CARD = 2;
+  // Event observed, no price available. Quantities preserved, cost zero,
+  // flagged. Facts only: nothing is ever inferred or estimated on the ledger.
+  COST_BASIS_UNTRACKED = 3;
+}
+
+enum IngestSource {
+  INGEST_SOURCE_UNSPECIFIED = 0;
+  INGEST_SOURCE_STREAM = 1;
+  INGEST_SOURCE_BACKFILL = 2;
+}
+
+message UpstreamValidation {
+  enum Status {
+    STATUS_UNKNOWN = 0;
+    STATUS_PASSED = 1;
+    STATUS_FAILED = 2;
+  }
+  Status status = 1;
+  // Their rule identifier or failure code, verbatim, opaque to us.
+  string code = 2;
+}
+
+message Adjustment {
+  // event_id of the record being adjusted. 32 bytes.
+  bytes adjusts_event_id = 1;
+  // Signed correction applied to the referenced record's cost, micro USD.
+  // Negative values back cost out.
+  sint64 delta_cost_micro_usd = 2;
+  // Why this adjustment exists, namespaced, for example
+  // "infobip.undelivered_send_sweep".
+  string reason = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Source payload contracts
+// ---------------------------------------------------------------------------
+// Typed views the normalizer extracts from specific source events before
+// flattening into SpendRecord. Documented here so the mapping is reviewable;
+// on the ledger they appear as quantities, cost fields, and raw_ext.
+
+// Infobip SMS/MMS delivery notification (the only cost data flowing today).
+// Delivery notifications arrive per delivered message and include a combined
+// price covering the per message price and the number of segments; the
+// carrier fee is backed out arithmetically by the normalizer, and the raw
+// combined price and segments are retained in raw_ext.
+// IMPORTANT: sends are charged even when undelivered, and undelivered sends
+// produce NO delivery notification. They must be looked for: a T+48h sweep
+// flags sends without notifications and emits UNTRACKED or Adjustment
+// records. Whether delivery receipts flow on the event bus (vs webhook only)
+// is an open question that decides that mechanism (see open-questions.md).
+message SmsDeliveryCost {
+  string message_id = 1;
+  uint64 combined_price_micro_usd = 2; // as delivered by Infobip
+  uint32 segments = 3;
+  uint64 per_message_price_micro_usd = 4; // from rate config
+  uint64 carrier_fee_micro_usd = 5; // backed out: combined - per_message
+  bool delivered = 6;
+}
+
+// Green Arrow email sends. No per-event provider cost; priced from the
+// versioned rate card (COST_BASIS_RATE_CARD).
+message EmailSendCost {
+  string message_id = 1;
+  uint64 sends = 2;
+}
+
+// Their llm_inference_call event (partial coverage today; primarily Gemini).
+// Token breakdown classes are open strings because their event distinguishes
+// input, image, audio, and reasoning tokens and may add classes.
+message LlmInferenceCost {
+  string model = 1;
+  repeated TokenCount token_counts = 2;
+}
+
+message TokenCount {
+  string class = 1; // "input", "output", "image", "audio", "reasoning", ...
+  uint64 count = 2;
+}
+
+// Training cost event, exactly as specified by their ML lead: the sites
+// involved, rows per site, duration, data size, and the instance that ran.
+// Does not exist in their stream yet; lands through their schema project and
+// code review. Until then training servers are a registered untracked source.
+message TrainingCost {
+  message SiteRows {
+    string site_id = 1;
+    uint64 rows = 2;
+  }
+  repeated SiteRows sites = 1;
+  uint64 duration_ms = 2;
+  uint64 data_size_bytes = 3;
+  string instance = 4;
+  uint64 started_at_ms = 5;
+  uint64 ended_at_ms = 6;
+}
+
+// Prediction serving (AI decision path). site_id flows today; instance and
+// duration fields are being added on their side.
+message PredictionServing {
+  string site_id = 1;
+  string instance = 2;
+  uint64 duration_ms = 3;
+  repeated string models = 4;
+}
