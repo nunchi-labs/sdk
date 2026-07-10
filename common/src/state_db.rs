@@ -261,11 +261,17 @@ impl<E: Context> CommitState for QmdbState<E> {
 /// against the latest committed root ([`QmdbState::proof`]) or a historical finalized root such as a
 /// foreign block's state root ([`QmdbState::historical_proof`]). Targeting a single key directly
 /// (key -> operation location) is still a follow-up, not covered here.
+#[derive(Clone, Debug, PartialEq)]
 pub struct StateProof {
     proof: Proof<Family, Digest>,
     start: Location<Family>,
     operations: Vec<QmdbOperation>,
 }
+
+// `QmdbOperation` derives only `PartialEq` upstream (not `Eq`), so `StateProof` cannot derive `Eq`.
+// Structural equality here is reflexive (no float fields), so `Eq` holds and is implemented manually
+// to let a `StateProof` be embedded in types that require `Eq` (for example a bridge claim operation).
+impl Eq for StateProof {}
 
 impl StateProof {
     /// The authenticated operations covered by this proof.

@@ -170,6 +170,25 @@ impl<D: CoinDB> Ledger<D> {
         Ok(())
     }
 
+    /// Mint `amount` of `coin` to `to` for bridge claim settlement, increasing total supply.
+    ///
+    /// This is an unauthenticated, supply-increasing primitive intended **only** for the coins-chain
+    /// bridge integration, invoked after a bridge claim has been verified and marked consumed in the
+    /// same overlay. It performs no issuer or signature check — the verified, exactly-once claim is
+    /// the authorization — so it must not be exposed as a general-purpose mint path. On the
+    /// destination chain the minted asset is the wrapped representation of the source asset, backed
+    /// 1:1 by the source-chain escrow.
+    pub async fn bridge_mint(
+        &mut self,
+        to: &Address,
+        coin: CoinId,
+        amount: u128,
+    ) -> Result<(), LedgerError> {
+        self.increase_supply(coin, amount).await?;
+        self.credit(to, coin, amount).await?;
+        Ok(())
+    }
+
     pub async fn apply_transaction<Events>(
         &mut self,
         tx: &Transaction,
