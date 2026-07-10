@@ -235,6 +235,9 @@ impl<D: AuthorityDB> AuthorityLedger<D> {
         }
         let initial_validators =
             sorted_unique(initial_validators).ok_or(AuthorityError::InvalidPolicy)?;
+        if initial_validators.is_empty() {
+            return Err(AuthorityError::InvalidPolicy);
+        }
 
         self.db.set_policy(&policy);
         self.db.set_validator_index(&initial_validators);

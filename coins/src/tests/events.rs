@@ -57,7 +57,7 @@ fn register_account_policy_emits_event() {
         let mut events = event_sink();
 
         ledger
-            .apply_transaction(&tx, Some(&mut events))
+            .apply_transaction(&tx, &mut events)
             .await
             .expect("register policy");
 
@@ -90,7 +90,7 @@ fn create_token_emits_event() {
         let mut events = event_sink();
 
         ledger
-            .apply_transaction(&tx, Some(&mut events))
+            .apply_transaction(&tx, &mut events)
             .await
             .expect("create token");
 
@@ -130,7 +130,7 @@ fn mint_emits_event() {
         );
         let mut events = event_sink();
 
-        ledger.apply_transaction(&tx, Some(&mut events)).await.unwrap();
+        ledger.apply_transaction(&tx, &mut events).await.unwrap();
 
         assert_eq!(events.len(), 1);
         let event = &events.events()[0];
@@ -168,7 +168,7 @@ fn burn_emits_event() {
         );
         let mut events = event_sink();
 
-        ledger.apply_transaction(&tx, Some(&mut events)).await.unwrap();
+        ledger.apply_transaction(&tx, &mut events).await.unwrap();
 
         assert_eq!(events.len(), 1);
         let event = &events.events()[0];
@@ -208,7 +208,7 @@ fn transfer_emits_event() {
         );
         let mut events = event_sink();
 
-        ledger.apply_transaction(&tx, Some(&mut events)).await.unwrap();
+        ledger.apply_transaction(&tx, &mut events).await.unwrap();
 
         assert_eq!(events.len(), 1);
         let event = &events.events()[0];
@@ -274,7 +274,7 @@ fn failed_transactions_emit_no_events() {
         );
         let mut events = event_sink();
         assert!(matches!(
-            ledger.apply_transaction(&wrong_nonce, Some(&mut events)).await,
+            ledger.apply_transaction(&wrong_nonce, &mut events).await,
             Err(LedgerError::NonceMismatch {
                 expected: 0,
                 actual: 5,
@@ -337,6 +337,6 @@ async fn assert_no_event(
     expected: LedgerError,
 ) {
     let mut events = event_sink();
-    assert_eq!(ledger.apply_transaction(tx, Some(&mut events)).await, Err(expected));
+    assert_eq!(ledger.apply_transaction(tx, &mut events).await, Err(expected));
     assert!(events.is_empty());
 }

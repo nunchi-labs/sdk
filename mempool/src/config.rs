@@ -24,9 +24,6 @@ impl Default for PoolConfig {
             max_total_txs: 1_000_000,
             max_per_account_txs: 256,
             max_tx_bytes: 64 * 1024,
-            // Sized against wall-clock view time: at ~25ms views this is
-            // roughly ten minutes. Expiry creates permanent nonce holes for
-            // live senders, so it must comfortably exceed backlog drain time.
             ttl_blocks: 25_000,
             status_cache_capacity: 100_000,
             mailbox_size: 1_024,

@@ -191,7 +191,8 @@ impl<T: PoolTransaction> Pool<T> {
                 let queue = self.queues.get(lane).expect("ready lane has queue");
                 out.extend(
                     queue
-                        .range(from..from + chunk as u64)
+                        .range(from..)
+                        .take(chunk)
                         .map(|(_, entry)| entry.tx.clone()),
                 );
                 taken[index] += chunk;
@@ -309,11 +310,16 @@ impl<T: PoolTransaction> Pool<T> {
             return 0;
         };
         let mut count = 0usize;
-        for (expected_nonce, (&nonce, _)) in (self.committed_nonce(account)..).zip(queue.iter()) {
+        let mut expected_nonce = self.committed_nonce(account);
+        for &nonce in queue.keys() {
             if nonce != expected_nonce {
                 break;
             }
             count += 1;
+            let Some(next_nonce) = expected_nonce.checked_add(1) else {
+                break;
+            };
+            expected_nonce = next_nonce;
         }
         count
     }
@@ -415,7 +421,8 @@ impl<T: PoolTransaction> Pool<T> {
         }
         self.index.remove(&entry.digest);
         self.total_count -= 1;
-        self.status.insert(entry.digest, TxStatus::Dropped { reason });
+        self.status
+            .insert(entry.digest, TxStatus::Dropped { reason });
         self.refresh_ready(account);
         self.record_drop(reason);
     }

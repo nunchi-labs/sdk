@@ -4,6 +4,7 @@ use super::{
 };
 use crate::{
     orchestrator::{self, EpochTransition},
+    protector::StorageProtector,
     setup::PeerConfig,
     ReshareBlock,
 };
@@ -38,7 +39,7 @@ use commonware_runtime::{
 use commonware_utils::{ordered::Set, Acknowledgement as _, N3f1, NZU32};
 use rand_core::CryptoRngCore;
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Per-peer label.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeStruct)]
@@ -108,6 +109,7 @@ pub struct Config<P> {
     pub peer_config: PeerConfig<ed25519::PublicKey>,
     pub max_supported_mode: ModeVersion,
     pub namespace: Vec<u8>,
+    pub storage_protector: StorageProtector,
     pub epoch_length: NonZeroU64,
 }
 
@@ -136,6 +138,7 @@ where
     partition_prefix: String,
     max_supported_mode: ModeVersion,
     namespace: Vec<u8>,
+    storage_protector: StorageProtector,
     epoch_length: NonZeroU64,
 
     successful_epochs: Counter,
@@ -183,6 +186,7 @@ where
                 partition_prefix: config.partition_prefix,
                 max_supported_mode: config.max_supported_mode,
                 namespace: config.namespace,
+                storage_protector: config.storage_protector,
                 epoch_length: config.epoch_length,
 
                 successful_epochs,
@@ -236,15 +240,26 @@ where
     ) {
         let max_read_size = NZU32!(self.peer_config.max_participants_per_round());
         let epocher = FixedEpocher::new(self.epoch_length);
+        let self_pk = self.signer.public_key();
 
         // Initialize persistent state
-        let mut storage = Storage::init(
+        let mut storage = match Storage::init(
             self.context.child("storage"),
             &self.partition_prefix,
+            self.storage_protector.clone(),
+            self.namespace.clone(),
+            self_pk.clone(),
             max_read_size,
             self.max_supported_mode,
         )
-        .await;
+        .await
+        {
+            Ok(storage) => storage,
+            Err(err) => {
+                error!(%err, "failed to initialize DKG storage");
+                return;
+            }
+        };
         if storage.epoch().is_none() {
             let initial_state = EpochState {
                 round: 0,
@@ -252,7 +267,10 @@ where
                 output,
                 share,
             };
-            storage.set_epoch(Epoch::zero(), initial_state).await;
+            if let Err(err) = storage.set_epoch(Epoch::zero(), initial_state).await {
+                error!(%err, "failed to persist initial DKG epoch");
+                return;
+            }
         }
 
         // Start a muxer for the physical channel used by DKG/reshare
@@ -266,7 +284,10 @@ where
 
             // Prune everything older than the previous epoch
             if let Some(prev) = epoch.previous() {
-                storage.prune(prev).await;
+                if let Err(err) = storage.prune(prev).await {
+                    error!(%epoch, %prev, %err, "failed to prune DKG storage");
+                    break 'actor;
+                }
             }
 
             // Initialize dealer and player sets
@@ -315,7 +336,6 @@ where
                 ),
             );
 
-            let self_pk = self.signer.public_key();
             let am_dealer = dealers.position(&self_pk).is_some();
             let am_player = players.position(&self_pk).is_some();
 
@@ -485,7 +505,12 @@ where
                                         ds.take_finalized();
                                     }
                                 }
-                                storage.append_log(epoch, dealer, dealer_log).await;
+                                if let Err(err) =
+                                    storage.append_log(epoch, dealer, dealer_log).await
+                                {
+                                    error!(%epoch, %err, "failed to persist DKG log");
+                                    break 'actor;
+                                }
                             }
                         }
 
@@ -575,7 +600,7 @@ where
                             warn!(?epoch, "epoch failed");
                             self.failed_epochs.inc();
                         }
-                        storage
+                        if let Err(err) = storage
                             .set_epoch(
                                 epoch.next(),
                                 EpochState {
@@ -585,7 +610,11 @@ where
                                     share: next_share.clone(),
                                 },
                             )
-                            .await;
+                            .await
+                        {
+                            error!(%epoch, %err, "failed to persist next DKG epoch");
+                            break 'actor;
+                        }
 
                         // Acknowledge block processing before callback
                         response.acknowledge();

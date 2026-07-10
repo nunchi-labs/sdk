@@ -9,6 +9,7 @@ mod actor;
 mod consensus;
 mod egress;
 mod ingress;
+pub mod protector;
 pub mod orchestrator;
 mod setup;
 mod state;
@@ -22,6 +23,7 @@ pub use consensus::{
 };
 pub use egress::{ContinueOnUpdate, PostUpdate, Update, UpdateCallBack};
 pub use ingress::{Mailbox, Message};
+pub use protector::{StorageKey, StorageProtector};
 pub use setup::PeerConfig;
 pub use state::{Epoch as StoredEpoch, Storage};
 

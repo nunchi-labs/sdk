@@ -1,14 +1,15 @@
 use super::{
     multisig_account_id, Account, AccountPolicy, AccountType, Address, Authorization, CoinId,
-    CoinOperation, TokenDefinition, TokenFactory, Transaction,
+    CoinOperation, FeeConfig, TokenDefinition, TokenFactory, Transaction,
 };
 use crate::db::CoinDB;
 use crate::events::{
-    account_policy_registered_event, burned_event, minted_event, token_created_event,
-    transferred_event, AccountPolicyRegistered, Burned, Minted, TokenCreated, Transferred,
+    account_policy_registered_event, burned_event, fee_charged_event, minted_event,
+    token_created_event, transferred_event, AccountPolicyRegistered, Burned, FeeCharged, Minted,
+    TokenCreated, Transferred,
 };
 use commonware_cryptography::sha256::Digest;
-use nunchi_common::{CommitState, Event, EventSink, NoopEventSink};
+use nunchi_common::{CommitState, Event, EventSink};
 use nunchi_crypto::SignatureError;
 use thiserror::Error;
 
@@ -49,6 +50,8 @@ pub enum LedgerError {
     },
     #[error("balance overflow")]
     BalanceOverflow,
+    #[error("fee overflow")]
+    FeeOverflow,
     #[error("supply overflow")]
     SupplyOverflow,
     #[error("allocation sum mismatch: expected {expected}, got {actual}")]
@@ -111,18 +114,74 @@ impl<D: CoinDB> Ledger<D> {
         self.db.balance(account, coin).await
     }
 
-    /// Validate and apply a signed coin transaction.
+    /// The chain's fee configuration (`None` if the chain charges no fees).
+    pub async fn fee_config(&self) -> Result<Option<FeeConfig>, LedgerError> {
+        self.db.fee_config().await
+    }
+
+    /// Stage the chain's fee configuration.
+    pub fn set_fee_config(&mut self, config: &FeeConfig) {
+        self.db.set_fee_config(config);
+    }
+
+    /// Charge the deterministic fee for a transaction of `encoded_size` canonical bytes to
+    /// `payer`, crediting the configured collector. A no-op when no [`FeeConfig`] is stored.
     ///
-    /// Does not re-check the transaction signature: callers must only pass
-    /// transactions that already passed stateless verification
-    /// ([`Transaction::verify`]), which the chain guarantees at mempool
-    /// admission and block verification. Account policy, nonce, and balance
-    /// checks are all performed here.
+    /// Callers stage this alongside the rest of the transaction's writes so a failed
+    /// transaction reverts its fee.
+    pub async fn charge_fee<Events>(
+        &mut self,
+        payer: &Address,
+        encoded_size: usize,
+        mut events: Events,
+    ) -> Result<(), LedgerError>
+    where
+        Events: EventSink + Send,
+    {
+        let Some(config) = self.db.fee_config().await? else {
+            return Ok(());
+        };
+        let amount = config.quote(encoded_size)?;
+        if amount == 0 {
+            return Ok(());
+        }
+        self.debit(payer, config.coin, amount).await?;
+        self.credit(&config.collector, config.coin, amount).await?;
+        events.emit(fee_charged_event(FeeCharged {
+            coin: config.coin,
+            payer: payer.clone(),
+            collector: config.collector,
+            amount,
+        }));
+        Ok(())
+    }
+
+    /// Move `amount` of `coin` from `from` to `to`, preserving total supply.
+    ///
+    /// This is an unauthenticated ledger primitive: it performs no signature or policy check, so
+    /// the caller is responsible for authorization. It exists for chain-level integrations (such as
+    /// moving a locked asset into bridge escrow) that authorize the movement through another
+    /// module's signed transaction and stage it in the same overlay.
+    pub async fn transfer(
+        &mut self,
+        from: &Address,
+        to: &Address,
+        coin: CoinId,
+        amount: u128,
+    ) -> Result<(), LedgerError> {
+        self.debit(from, coin, amount).await?;
+        self.credit(to, coin, amount).await?;
+        Ok(())
+    }
+
     pub async fn apply_transaction(
         &mut self,
         tx: &Transaction,
-        events: Option<&mut (dyn EventSink + Send)>,
-    ) -> Result<(), LedgerError> {
+        mut events: Events,
+    ) -> Result<(), LedgerError>
+    where
+        Events: EventSink + Send,
+    {
         self.ensure_authorized(tx).await?;
 
         let expected = self.db.nonce(&tx.account_id).await?;
@@ -139,8 +198,6 @@ impl<D: CoinDB> Ledger<D> {
             .apply_operation(&tx.account_id, &tx.payload.operation)
             .await?;
         self.db.set_nonce(&tx.account_id, next_nonce);
-        let mut noop = NoopEventSink;
-        let events = events.unwrap_or(&mut noop);
         events.emit(event);
         Ok(())
     }

@@ -105,6 +105,15 @@ fn nonce_gaps_are_admitted_but_not_proposed() {
 }
 
 #[test]
+fn pending_handles_max_nonce() {
+    let mut pool = pool(PoolConfig::default());
+    pool.finalize(vec![], vec![(1, u64::MAX)], 1);
+    pool.admit(tx(1, u64::MAX, 10)).unwrap();
+    let ids: Vec<u64> = pool.pending(10).iter().map(|t| t.id).collect();
+    assert_eq!(ids, vec![10]);
+}
+
+#[test]
 fn enforces_per_account_cap() {
     let mut pool = pool(small_config());
     for nonce in 0..3 {
@@ -230,9 +239,9 @@ fn ttl_is_measured_from_admission_height() {
     );
 }
 
-/// Drive the pool through the full production flow — bursty out-of-order
+/// Drive the pool through the full production flow: bursty out-of-order
 /// admission, block building from `pending`, finalization with lane nonces,
-/// TTL expiry, and evictions at the cap — and check on every round that
+/// TTL expiry, and evictions at the cap, and check on every round that
 /// selection agrees with the ready accounting.
 #[test]
 fn stress_ready_tracking_stays_consistent() {
@@ -268,7 +277,7 @@ fn stress_ready_tracking_stays_consistent() {
             let lane = (rand() % LANES) as usize;
             let account = lane as u8 + 1;
             let nonce = match rand() % 10 {
-                0 => frontier[lane] + 1 + rand() % 4, // gap
+                0 => frontier[lane] + 1 + rand() % 4,              // gap
                 1 => chain_nonce[lane].saturating_sub(rand() % 3), // stale
                 _ => frontier[lane],
             };

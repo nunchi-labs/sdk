@@ -190,9 +190,8 @@ where
     fn strategy(&mut self) -> Rayon {
         if self.strategy.is_none() {
             let concurrency = std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
-            self.strategy = Some(
-                Rayon::new(concurrency).expect("failed to create application thread pool"),
-            );
+            self.strategy =
+                Some(Rayon::new(concurrency).expect("failed to create application thread pool"));
         }
         self.strategy
             .clone()
