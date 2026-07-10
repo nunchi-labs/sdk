@@ -8,10 +8,11 @@ use commonware_actor::mailbox;
 use commonware_consensus::{
     marshal::{core::Mailbox as MarshalMailbox, standard::Standard},
     simplex::{
-        self, elector::Config as Elector, scheme, types::Activity, types::Context, Floor, Plan,
+        self, elector::Config as Elector, scheme, types::Activity, types::Context,
+        types::Finalization, Floor, Plan,
     },
     types::{Epoch, Epocher, FixedEpocher, Height, ViewDelta},
-    CertifiableAutomaton, Relay, Reporter, Reporters,
+    CertifiableAutomaton, Epochable, Relay, Reporter, Reporters,
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, certificate::Scheme, ed25519, sha256::Digest, Digestible,
@@ -99,6 +100,7 @@ where
     pub partition_prefix: String,
     pub epoch_length: NonZeroU64,
     pub genesis_digest: Digest,
+    pub recovered_floor: Option<Finalization<S, Digest>>,
 
     pub _phantom: PhantomData<L>,
 }
@@ -140,6 +142,7 @@ where
     partition_prefix: String,
     epoch_length: NonZeroU64,
     genesis_digest: Digest,
+    recovered_floor: Option<Finalization<S, Digest>>,
     page_cache_ref: CacheRef,
 
     latest_epoch: Gauge,
@@ -194,6 +197,7 @@ where
                 partition_prefix: config.partition_prefix,
                 epoch_length: config.epoch_length,
                 genesis_digest: config.genesis_digest,
+                recovered_floor: config.recovered_floor,
                 page_cache_ref,
                 latest_epoch,
                 _phantom: PhantomData,
@@ -313,21 +317,34 @@ where
                         continue;
                     }
 
-                    // DKG state does not persist the consensus floor; derive it from marshal's
-                    // finalized boundary block when entering each epoch.
-                    let floor = match Self::floor_boundary(&epocher, transition.epoch) {
-                        Some(boundary_height) => self
-                            .marshal
-                            .get_block(boundary_height)
-                            .await
-                            .unwrap_or_else(|| {
-                                panic!(
-                                    "missing finalized boundary block at height {} for epoch {}",
-                                    boundary_height, transition.epoch
-                                )
-                            })
-                            .digest(),
-                        None => self.genesis_digest,
+                    let floor = if self
+                        .recovered_floor
+                        .as_ref()
+                        .is_some_and(|floor| floor.epoch() == transition.epoch)
+                    {
+                        Floor::Finalized(
+                            self.recovered_floor
+                                .take()
+                                .expect("matching recovered floor must exist"),
+                        )
+                    } else {
+                        // DKG state does not persist the consensus floor; derive the epoch's
+                        // genesis from marshal's finalized boundary block.
+                        let digest = match Self::floor_boundary(&epocher, transition.epoch) {
+                            Some(boundary_height) => self
+                                .marshal
+                                .get_block(boundary_height)
+                                .await
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "missing finalized boundary block at height {} for epoch {}",
+                                        boundary_height, transition.epoch
+                                    )
+                                })
+                                .digest(),
+                            None => self.genesis_digest,
+                        };
+                        Floor::Genesis(digest)
                     };
 
                     // Register the new signing scheme with the scheme provider.
@@ -381,7 +398,7 @@ where
     async fn enter_epoch(
         &mut self,
         epoch: Epoch,
-        floor: Digest,
+        floor: Floor<S, Digest>,
         scheme: S,
         vote_mux: &mut MuxHandle<
             impl Sender<PublicKey = ed25519::PublicKey>,
@@ -414,7 +431,7 @@ where
                 partition: format!("{}_consensus_{}", self.partition_prefix, epoch),
                 mailbox_size: NZUsize!(1024),
                 epoch,
-                floor: Floor::Genesis(floor),
+                floor,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 leader_timeout: self.leader_timeout,

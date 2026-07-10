@@ -1,9 +1,10 @@
 use super::{Decision, Entry, SharedState};
 use crate::indexer::Client;
-use crate::{Block, Scheme};
+use crate::{Block, Finalized, Scheme};
 use commonware_consensus::marshal::{
     core::Mailbox as MarshalMailbox, standard::Standard, Identifier,
 };
+use commonware_consensus::types::Height;
 use commonware_cryptography::sha256::Digest;
 use commonware_macros::select_loop;
 use commonware_runtime::{
@@ -156,6 +157,28 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
                     return Completion::Skipped { position, height };
                 };
 
+                let finalized = loop {
+                    let Some(proof) = marshal.get_finalization(Height::new(height)).await else {
+                        warn!(
+                            height,
+                            ?digest,
+                            "consumer could not find finalization, retrying"
+                        );
+                        context.sleep(retry).await;
+                        continue;
+                    };
+                    if proof.proposal.payload != digest {
+                        warn!(
+                            height,
+                            ?digest,
+                            "consumer found mismatched finalization, retrying"
+                        );
+                        context.sleep(retry).await;
+                        continue;
+                    }
+                    break Finalized::new(proof, block.clone());
+                };
+
                 loop {
                     let decision = {
                         let uploads = uploads.lock();
@@ -173,10 +196,10 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
                         Decision::Proceed => {}
                     }
 
-                    match client.block_upload(block.clone()).await {
+                    match client.finalized_upload(finalized.clone()).await {
                         Ok(()) => {
                             upload_results.inc(status::Status::Success);
-                            debug!(?digest, "uploaded block by digest");
+                            debug!(?digest, "uploaded finalized block by digest");
                             return Completion::Uploaded {
                                 position,
                                 height,
@@ -185,7 +208,7 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
                         }
                         Err(e) => {
                             upload_results.inc(status::Status::Failure);
-                            warn!(?e, ?digest, "retrying block upload by digest");
+                            warn!(?e, ?digest, "retrying finalized block upload by digest");
                             context.sleep(retry).await;
                         }
                     }

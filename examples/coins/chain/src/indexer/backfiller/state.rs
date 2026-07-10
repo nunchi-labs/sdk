@@ -254,6 +254,20 @@ mod tests {
     }
 
     #[test]
+    fn notarization_upload_does_not_satisfy_finalization_backfill() {
+        let mut state = State::new();
+        let block = block(9, 9, b"nine");
+        let digest = block.digest();
+
+        state.cache_block(block.clone());
+        state.start_certificate_upload(digest);
+        state.finish_certificate_upload(&digest, None);
+
+        assert!(matches!(state.should_upload(&digest), Decision::Proceed));
+        assert_eq!(state.cached_block(&digest).as_ref(), Some(&block));
+    }
+
+    #[test]
     fn failed_certificate_upload_eventually_prunes_old_cache() {
         let mut state = State::new();
         let old = block(2, 2, b"old");

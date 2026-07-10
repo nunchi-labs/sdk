@@ -174,6 +174,11 @@ impl<D: CoinDB> Ledger<D> {
         Ok(())
     }
 
+    /// Apply a transaction that has already passed stateless verification.
+    ///
+    /// This performs stateful account-policy and nonce checks, but deliberately
+    /// does not repeat [`Transaction::verify`]. Chain callers verify transactions
+    /// at mempool admission and again when verifying untrusted blocks.
     pub async fn apply_transaction<Events>(
         &mut self,
         tx: &Transaction,
@@ -182,7 +187,6 @@ impl<D: CoinDB> Ledger<D> {
     where
         Events: EventSink + Send,
     {
-        tx.verify()?;
         self.ensure_authorized(tx).await?;
 
         let expected = self.db.nonce(&tx.account_id).await?;
@@ -203,8 +207,8 @@ impl<D: CoinDB> Ledger<D> {
         Ok(())
     }
 
+    /// Validate stateful account-policy authorization for a preverified transaction.
     pub async fn validate_authorization(&self, tx: &Transaction) -> Result<(), LedgerError> {
-        tx.verify()?;
         self.ensure_authorized(tx).await
     }
 
@@ -257,9 +261,7 @@ impl<D: CoinDB> Ledger<D> {
         Ok(token)
     }
 
-    /// Stateful authorization checks (account policy consistency). Signature
-    /// validity is a stateless property checked before transactions reach the
-    /// ledger; see [`Ledger::apply_transaction`].
+    /// Stateful authorization checks (account policy consistency).
     async fn ensure_authorized(&self, tx: &Transaction) -> Result<(), LedgerError> {
         match (&tx.authorization, &tx.payload.operation) {
             (

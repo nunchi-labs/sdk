@@ -13,6 +13,7 @@ use commonware_consensus::{
         core::Actor as MarshalActor,
         resolver,
         standard::{Deferred, Standard},
+        store::Certificates,
     },
     simplex::elector::Random,
     types::{FixedEpocher, Height, ViewDelta},
@@ -38,7 +39,10 @@ use commonware_runtime::{
     buffer::paged::CacheRef, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics,
     Network, Spawner, Storage, ThreadPooler,
 };
-use commonware_storage::{archive::immutable, queue};
+use commonware_storage::{
+    archive::{immutable, Identifier as ArchiveIdentifier},
+    queue,
+};
 use commonware_utils::{union, NZU64};
 use futures::lock::Mutex as AsyncMutex;
 use governor::clock::Clock as GClock;
@@ -292,6 +296,18 @@ where
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
+        let recovered_floor = if let Some(height) = Certificates::last_index(&finalizations_by_height)
+        {
+            Certificates::get(
+                &finalizations_by_height,
+                ArchiveIdentifier::Index(height.get()),
+            )
+            .await
+            .expect("failed to read recovered finalization floor")
+        } else {
+            None
+        };
+
         let certificate_verifier = <SchemeProvider as EpochProvider>::certificate_verifier(
             &consensus_namespace,
             &config.output,
@@ -365,12 +381,14 @@ where
         );
         let genesis = app.genesis_block();
         let genesis_digest = genesis.digest();
-        // The sync plan drives both marshal (its startup anchor below) and the stateful actor
-        // (via `StatefulConfig::plan`), so the two always agree on the startup decision. No
-        // finalized floor is ever attached here, so nodes recover via marshal backfill.
+        // Fresh nodes recover through marshal backfill. Existing nodes reuse the finalized floor
+        // recovered above so marshal, stateful execution, and Simplex restart from one anchor.
         let plan =
             SyncPlan::<_, Scheme, Standard<Block>>::init(&context, config.partition_prefix.clone())
                 .await;
+        let marshal_start = recovered_floor
+            .clone()
+            .map_or_else(|| plan.marshal_start(genesis), marshal::Start::Floor);
         let (marshal, marshal_mailbox, _processed_height) = MarshalActor::init(
             context.child("marshal"),
             finalizations_by_height,
@@ -378,7 +396,7 @@ where
             marshal::Config {
                 provider: provider.clone(),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                start: plan.marshal_start(genesis),
+                start: marshal_start,
                 partition_prefix: format!("{}_marshal", config.partition_prefix),
                 mailbox_size: MAILBOX_SIZE,
                 view_retention_timeout: ViewDelta::new(
@@ -469,6 +487,7 @@ where
                 partition_prefix: format!("{}_consensus", config.partition_prefix),
                 epoch_length: BLOCKS_PER_EPOCH,
                 genesis_digest,
+                recovered_floor,
                 _phantom: PhantomData,
             },
         );

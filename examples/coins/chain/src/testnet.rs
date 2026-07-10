@@ -514,17 +514,6 @@ async fn start_node(
 
     let indexer_client = config.indexer_url.as_deref().map(indexer::HttpClient::new);
     if let Some(client) = indexer_client.clone() {
-        upload_current_dkg_output(
-            context,
-            &config.name,
-            dkg_storage_key,
-            public_key.clone(),
-            max_participants,
-            client,
-        )
-        .await;
-    }
-    if let Some(client) = indexer_client.clone() {
         spawn_current_dkg_output_uploader(
             context,
             config.name.clone(),
@@ -557,10 +546,7 @@ async fn start_node(
         genesis: read_genesis(config.genesis_path.as_ref())?,
         indexer: indexer_client.clone(),
     };
-    let dkg_callback: Box<dyn UpdateCallBack<MinSig, PublicKey>> = match indexer_client {
-        Some(client) => indexer::DkgOutputPusher::boxed(client),
-        None => ContinueOnUpdate::boxed(),
-    };
+    let dkg_callback: Box<dyn UpdateCallBack<MinSig, PublicKey>> = ContinueOnUpdate::boxed();
 
     let resolver_config = marshal::resolver::p2p::Config {
         public_key,
@@ -651,7 +637,6 @@ fn spawn_current_dkg_output_uploader(
         .child("dkg_output_uploader")
         .spawn(move |context| async move {
             loop {
-                context.sleep(Duration::from_secs(60)).await;
                 upload_current_dkg_output(
                     &context,
                     &node_name,
@@ -661,6 +646,7 @@ fn spawn_current_dkg_output_uploader(
                     client.clone(),
                 )
                 .await;
+                context.sleep(Duration::from_secs(60)).await;
             }
         });
 }
