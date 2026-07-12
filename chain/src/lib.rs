@@ -12,7 +12,7 @@ mod macros;
 mod tests;
 
 pub use application::{Application, SharedAppliedHeight};
-pub use block::{Block, Finalized, Notarized, StateCommitment, MAX_TRANSACTIONS};
+pub use block::{Block, BlockHeader, Finalized, Notarized, StateCommitment, MAX_TRANSACTIONS};
 pub use consensus::{
     dkg_reporters, BlockExtension, Composite, ConsensusExtension, DkgActor, DkgMailbox,
     DkgReporters, NoConsensusExtension,
