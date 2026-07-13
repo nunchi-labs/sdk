@@ -15,7 +15,7 @@ use crate::error::MemClobError;
 
 enum Message {
     Submit {
-        tx: Transaction,
+        tx: Box<Transaction>,
         context: RuntimeContext,
         responder: oneshot::Sender<Result<(), MemClobError>>,
     },
@@ -50,7 +50,7 @@ impl MemClobHandle {
         let mut sender = self.sender.clone();
         if sender
             .send(Message::Submit {
-                tx,
+                tx: Box::new(tx),
                 context,
                 responder,
             })
@@ -223,7 +223,7 @@ where
                 let result = self
                     .memclob
                     .engine
-                    .apply_transaction(&tx, context)
+                    .apply_transaction(tx.as_ref(), context)
                     .map_err(MemClobError::from);
                 let _ = responder.send(result);
             }
@@ -253,11 +253,11 @@ where
                 context,
                 responder,
             } => {
-                let gossip = tx.clone();
+                let gossip = tx.as_ref().clone();
                 let result = self
                     .memclob
                     .engine
-                    .apply_transaction(&tx, context)
+                    .apply_transaction(tx.as_ref(), context)
                     .map_err(MemClobError::from);
                 if result.is_ok() {
                     let sent = sender.send(Recipients::All, gossip.encode(), false);

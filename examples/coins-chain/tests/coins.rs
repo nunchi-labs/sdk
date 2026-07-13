@@ -14,16 +14,14 @@ use nunchi_authority::{
     proposal_id, AuthorityOperation, MultisigPolicy, RegistryChange,
     Transaction as AuthorityTransaction,
 };
-use nunchi_coins::{
-    Address, CoinId, CoinOperation, CoinSpec, PrivateKey, TokenFactory, TokenName, TokenSymbol,
-    Transaction,
-};
+use nunchi_clearinghouse::{ClearinghouseOperation, Transaction as ClearinghouseTransaction};
 use nunchi_clob::{
     market_id, AssetId, ClobOperation, Side as ClobSide, TimeInForce,
     Transaction as ClobTransaction,
 };
-use nunchi_clearinghouse::{
-    ClearinghouseOperation, Transaction as ClearinghouseTransaction,
+use nunchi_coins::{
+    Address, CoinId, CoinOperation, CoinSpec, PrivateKey, TokenFactory, TokenName, TokenSymbol,
+    Transaction,
 };
 use nunchi_oracle::{IntervalKey, NamespaceId, OracleOperation, Transaction as OracleTransaction};
 use nunchi_perpetuals::{
@@ -267,7 +265,9 @@ fn perps_clob_clearinghouse_flow_finalizes_across_validators() {
                 PerpetualTransaction::sign(
                     &taker,
                     1,
-                    PerpetualOperation::RefreshMarketFromOracle { market: perps_market },
+                    PerpetualOperation::RefreshMarketFromOracle {
+                        market: perps_market,
+                    },
                 )
                 .into(),
             )
@@ -1181,9 +1181,10 @@ fn mempool_replaces_same_nonce_resubmission() {
     let executor = deterministic::Runner::timed(Duration::from_secs(120));
     executor.start(|mut context| async move {
         let mut network = TestNetworkBuilder::new(VALIDATORS)
+            .without_initial_links()
             .build(&mut context)
             .await;
-        network.start_all().await;
+        network.start_validator(0).await;
 
         let alice = key(ALICE);
         let alice_id = Address::from(alice.public_key());
@@ -1222,6 +1223,11 @@ fn mempool_replaces_same_nonce_resubmission() {
                 reason: nunchi_mempool::DropReason::Replaced
             })
         );
+
+        for index in 1..VALIDATORS as usize {
+            network.start_validator(index).await;
+        }
+        network.link_all(reliable_link()).await;
 
         network.run_until_nonces(&[(alice_id.clone(), 1)]).await;
         loop {

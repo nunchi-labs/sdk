@@ -460,7 +460,7 @@ fn commit_and_settle_fill_applies_memclob_style_fill() {
             &ClearingTx::sign(
                 &settler,
                 0,
-                ClearinghouseOperation::CommitAndSettleFill { fill: fill.clone() },
+                ClearinghouseOperation::CommitAndSettleFill { fill: Box::new(fill.clone()) },
             ),
             context(4_000),
         ),

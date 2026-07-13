@@ -584,6 +584,7 @@ impl<D: PerpetualDB + CoinDB + StateStore + Send + Sync> PerpetualLedger<D> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn apply_same_side_fill(
         &mut self,
         market: &mut Market,
@@ -1212,6 +1213,7 @@ fn decode_oracle_payload(bytes: &[u8]) -> Result<OraclePricePayload, PerpetualEr
     OraclePricePayload::read(&mut buf).map_err(|err| PerpetualError::OraclePayload(err.to_string()))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_market_params(
     oracle_interval_ms: u64,
     max_oracle_staleness_ms: u64,

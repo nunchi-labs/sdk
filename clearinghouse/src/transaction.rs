@@ -19,6 +19,7 @@ impl TryFrom<u8> for OperationTag {
         match tag {
             0 => Ok(Self::RegisterPerpsMarket),
             1 => Ok(Self::SettleFill),
+            2 => Ok(Self::CommitAndSettleFill),
             tag => Err(Error::InvalidEnum(tag)),
         }
     }
@@ -35,7 +36,7 @@ pub enum ClearinghouseOperation {
     /// Apply a previously matched CLOB fill to registered settlement consumers.
     SettleFill { fill: FillId },
     /// Commit an off-chain fill to CLOB state and settle it into perpetuals in one step.
-    CommitAndSettleFill { fill: Fill },
+    CommitAndSettleFill { fill: Box<Fill> },
 }
 
 impl Write for ClearinghouseOperation {
@@ -74,7 +75,7 @@ impl Read for ClearinghouseOperation {
                 fill: FillId::read(buf)?,
             }),
             OperationTag::CommitAndSettleFill => Ok(Self::CommitAndSettleFill {
-                fill: Fill::read(buf)?,
+                fill: Box::new(Fill::read(buf)?),
             }),
         }
     }

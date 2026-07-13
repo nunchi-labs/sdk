@@ -17,7 +17,7 @@ pub fn commit_and_settle_transactions(
             Transaction::sign(
                 settler,
                 start_nonce + idx as u64,
-                ClearinghouseOperation::CommitAndSettleFill { fill: fill.clone() },
+                ClearinghouseOperation::CommitAndSettleFill { fill: Box::new(fill.clone()) },
             )
         })
         .collect()

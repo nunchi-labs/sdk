@@ -208,7 +208,7 @@ impl<D: ClearinghouseDB + ClobDB + PerpetualDB + StateStore + Send + Sync> Clear
                 self.settle_fill(*fill, context).await?;
             }
             ClearinghouseOperation::CommitAndSettleFill { fill } => {
-                self.commit_and_settle_fill(fill.clone(), context).await?;
+                self.commit_and_settle_fill(fill.as_ref().clone(), context).await?;
             }
         }
         Ok(())
