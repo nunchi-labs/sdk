@@ -18,7 +18,7 @@ mod pusher;
 
 pub(crate) use backfiller::{Consumer, Entry, Producer};
 use backfiller::{SharedState, State};
-pub(crate) use metrics::IndexerMetrics;
+pub(crate) use metrics::{DkgUploadStatus, IndexerMetrics};
 #[cfg(test)]
 pub(crate) use metrics::{
     BackfillDecision, BackfillPhase, BackfillWaitReason, BlockMetricSource, HttpArtifact,

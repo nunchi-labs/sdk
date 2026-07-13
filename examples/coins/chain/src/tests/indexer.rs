@@ -1,8 +1,9 @@
 use crate::{
     indexer::{
-        BackfillDecision, BackfillPhase, BackfillWaitReason, BlockMetricSource, HttpArtifact,
-        IndexerMetrics, LiveUploadArtifact, ProducerActivity, ProducerStatus, QueueReadSource,
-        QueueStatus, SharedCacheSource, SharedRetentionReason, SharedStateSnapshot,
+        BackfillDecision, BackfillPhase, BackfillWaitReason, BlockMetricSource, DkgUploadStatus,
+        HttpArtifact, IndexerMetrics, LiveUploadArtifact, ProducerActivity, ProducerStatus,
+        QueueReadSource, QueueStatus, SharedCacheSource, SharedRetentionReason,
+        SharedStateSnapshot,
     },
     Block, StateCommitment, Transaction, EPOCH,
 };
@@ -268,6 +269,13 @@ fn backfill_metrics_use_expected_labels() {
         metrics.producer_recorded(ProducerStatus::AlreadyUploaded, Duration::from_millis(1));
         metrics.producer_mailbox_overflowed(256);
         metrics.producer_mailbox_overflow_drained(256);
+        metrics.dkg_upload_completed(DkgUploadStatus::NoEpoch, Duration::from_millis(1));
+        metrics.dkg_upload_completed(DkgUploadStatus::NoOutput, Duration::from_millis(1));
+        metrics.dkg_upload_completed(DkgUploadStatus::Success, Duration::from_millis(1));
+        metrics.dkg_upload_completed(DkgUploadStatus::Failure, Duration::from_millis(1));
+        metrics.dkg_upload_output_bytes(1024);
+        metrics.dkg_upload_last_attempt_epoch(8);
+        metrics.dkg_upload_last_success_epoch(7);
 
         let encoded = context.encode();
         assert!(encoded.contains("indexer_backfill_active_uploads 0"));
@@ -341,5 +349,13 @@ fn backfill_metrics_use_expected_labels() {
         assert!(encoded.contains("indexer_producer_mailbox_overflow_entries 0"));
         assert!(encoded.contains("indexer_producer_mailbox_overflow_block_estimated_bytes 0"));
         assert!(encoded.contains("indexer_producer_record_duration_seconds_bucket"));
+        assert!(encoded.contains("indexer_dkg_upload_loop_total{status=\"no_epoch\"} 1"));
+        assert!(encoded.contains("indexer_dkg_upload_loop_total{status=\"no_output\"} 1"));
+        assert!(encoded.contains("indexer_dkg_upload_loop_total{status=\"success\"} 1"));
+        assert!(encoded.contains("indexer_dkg_upload_loop_total{status=\"failure\"} 1"));
+        assert!(encoded.contains("indexer_dkg_upload_output_bytes_bucket"));
+        assert!(encoded.contains("indexer_dkg_upload_duration_seconds_bucket"));
+        assert!(encoded.contains("indexer_dkg_upload_last_attempt_epoch 8"));
+        assert!(encoded.contains("indexer_dkg_upload_last_success_epoch 7"));
     });
 }

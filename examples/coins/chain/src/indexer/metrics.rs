@@ -3,7 +3,7 @@ use commonware_runtime::{
     telemetry::metrics::{
         encoding::EncodeLabelValue as EncodeLabelValueTrait, histogram::Buckets, raw,
         Counter, CounterFamily, EncodeLabelSet, Gauge, GaugeExt as _, GaugeFamily, GaugeValue,
-        HistogramExt as _, MetricsExt as _, Registered,
+        Histogram, HistogramExt as _, MetricsExt as _, Registered,
     },
     Clock, Metrics,
 };
@@ -470,6 +470,36 @@ impl EncodeLabelValueTrait for ProducerStatus {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum DkgUploadStatus {
+    NoEpoch,
+    NoOutput,
+    Success,
+    Failure,
+}
+
+impl DkgUploadStatus {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::NoEpoch => "no_epoch",
+            Self::NoOutput => "no_output",
+            Self::Success => "success",
+            Self::Failure => "failure",
+        }
+    }
+}
+
+impl EncodeLabelValueTrait for DkgUploadStatus {
+    fn encode(
+        &self,
+        encoder: &mut commonware_runtime::telemetry::metrics::LabelValueEncoder,
+    ) -> Result<(), fmt::Error> {
+        use fmt::Write as _;
+
+        encoder.write_str(self.as_str())
+    }
+}
+
 pub(crate) struct SharedStateSnapshot {
     pub(crate) cached_blocks: usize,
     pub(crate) cached_block_estimated_bytes: u64,
@@ -561,6 +591,11 @@ struct ProducerRecordLabel {
     status: ProducerStatus,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, EncodeLabelSet)]
+struct DkgUploadStatusLabel {
+    status: DkgUploadStatus,
+}
+
 #[derive(Clone)]
 pub(crate) struct IndexerMetrics {
     live_upload_spawned: CounterFamily<ArtifactLabel>,
@@ -611,6 +646,11 @@ pub(crate) struct IndexerMetrics {
     producer_mailbox_overflow_entries: Gauge,
     producer_mailbox_overflow_block_estimated_bytes: Gauge,
     producer_record_duration: HistogramFamily<ProducerRecordLabel>,
+    dkg_upload_loop: CounterFamily<DkgUploadStatusLabel>,
+    dkg_upload_output_bytes: Histogram,
+    dkg_upload_duration: HistogramFamily<DkgUploadStatusLabel>,
+    dkg_upload_last_success_epoch: Gauge,
+    dkg_upload_last_attempt_epoch: Gauge,
 }
 
 impl IndexerMetrics {
@@ -840,6 +880,30 @@ impl IndexerMetrics {
                 raw::Family::<ProducerRecordLabel, raw::Histogram, fn() -> raw::Histogram>::new_with_constructor(
                     local_histogram,
                 ),
+            ),
+            dkg_upload_loop: context.family(
+                "dkg_upload_loop",
+                "Total current DKG output uploader loop outcomes by status",
+            ),
+            dkg_upload_output_bytes: context.histogram(
+                "dkg_upload_output_bytes",
+                "Encoded size of DKG outputs observed by the current-output uploader",
+                Buckets::LOCAL,
+            ),
+            dkg_upload_duration: context.register(
+                "dkg_upload_duration_seconds",
+                "Duration of current DKG output uploader loop attempts by status",
+                raw::Family::<DkgUploadStatusLabel, raw::Histogram, fn() -> raw::Histogram>::new_with_constructor(
+                    local_histogram,
+                ),
+            ),
+            dkg_upload_last_success_epoch: context.gauge(
+                "dkg_upload_last_success_epoch",
+                "Latest DKG epoch successfully uploaded by the current-output uploader",
+            ),
+            dkg_upload_last_attempt_epoch: context.gauge(
+                "dkg_upload_last_attempt_epoch",
+                "Latest DKG epoch attempted by the current-output uploader",
             ),
         }
     }
@@ -1080,6 +1144,26 @@ impl IndexerMetrics {
         self.producer_record_duration
             .get_or_create(&ProducerRecordLabel { status })
             .observe(duration.as_secs_f64());
+    }
+
+    pub(crate) fn dkg_upload_completed(&self, status: DkgUploadStatus, duration: Duration) {
+        let label = DkgUploadStatusLabel { status };
+        self.dkg_upload_loop.get_or_create(&label).inc();
+        self.dkg_upload_duration
+            .get_or_create(&label)
+            .observe(duration.as_secs_f64());
+    }
+
+    pub(crate) fn dkg_upload_output_bytes(&self, bytes: u64) {
+        self.dkg_upload_output_bytes.observe(bytes as f64);
+    }
+
+    pub(crate) fn dkg_upload_last_attempt_epoch(&self, epoch: u64) {
+        let _ = self.dkg_upload_last_attempt_epoch.try_set(epoch);
+    }
+
+    pub(crate) fn dkg_upload_last_success_epoch(&self, epoch: u64) {
+        let _ = self.dkg_upload_last_success_epoch.try_set(epoch);
     }
 }
 
