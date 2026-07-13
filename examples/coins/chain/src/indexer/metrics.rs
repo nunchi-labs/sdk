@@ -1,14 +1,16 @@
 use crate::{Block, Finalized};
 use commonware_runtime::{
     telemetry::metrics::{
-        encoding::EncodeLabelValue as EncodeLabelValueTrait, histogram::Buckets, raw,
-        Counter, CounterFamily, EncodeLabelSet, Gauge, GaugeExt as _, GaugeFamily, GaugeValue,
-        Histogram, HistogramExt as _, MetricsExt as _, Registered,
+        encoding::EncodeLabelValue as EncodeLabelValueTrait, histogram::Buckets, raw, Counter,
+        CounterFamily, EncodeLabelSet, Gauge, GaugeExt as _, GaugeFamily, GaugeValue, Histogram,
+        HistogramExt as _, MetricsExt as _, Registered,
     },
     Clock, Metrics,
 };
 use std::{
     fmt,
+    ops::Deref,
+    sync::Arc,
     time::{Duration, Instant, SystemTime},
 };
 
@@ -597,7 +599,17 @@ struct DkgUploadStatusLabel {
 }
 
 #[derive(Clone)]
-pub(crate) struct IndexerMetrics {
+pub(crate) struct IndexerMetrics(Arc<Inner>);
+
+impl Deref for IndexerMetrics {
+    type Target = Inner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+pub(crate) struct Inner {
     live_upload_spawned: CounterFamily<ArtifactLabel>,
     live_upload_in_flight: GaugeFamily<ArtifactLabel>,
     live_upload_completed: CounterFamily<CompletionLabel>,
@@ -655,7 +667,7 @@ pub(crate) struct IndexerMetrics {
 
 impl IndexerMetrics {
     pub(crate) fn register<E: Metrics>(context: &E) -> Self {
-        Self {
+        Self(Arc::new(Inner {
             live_upload_spawned: context.family(
                 "live_upload_spawn",
                 "Total number of live indexer upload tasks spawned by artifact",
@@ -905,7 +917,7 @@ impl IndexerMetrics {
                 "dkg_upload_last_attempt_epoch",
                 "Latest DKG epoch attempted by the current-output uploader",
             ),
-        }
+        }))
     }
 
     pub(crate) fn live_upload_spawned(&self, artifact: LiveUploadArtifact) {
@@ -947,12 +959,7 @@ impl IndexerMetrics {
         }
     }
 
-    pub(crate) fn http_encoded(
-        &self,
-        artifact: HttpArtifact,
-        bytes: usize,
-        duration: Duration,
-    ) {
+    pub(crate) fn http_encoded(&self, artifact: HttpArtifact, bytes: usize, duration: Duration) {
         let label = HttpArtifactLabel { artifact };
         self.http_encode.get_or_create(&label).inc();
         self.http_encode_bytes
@@ -1053,11 +1060,7 @@ impl IndexerMetrics {
         }
     }
 
-    pub(crate) fn backfill_decision(
-        &self,
-        decision: BackfillDecision,
-        phase: BackfillPhase,
-    ) {
+    pub(crate) fn backfill_decision(&self, decision: BackfillDecision, phase: BackfillPhase) {
         self.backfill_decision
             .get_or_create(&BackfillDecisionLabel { decision, phase })
             .inc();
@@ -1116,11 +1119,7 @@ impl IndexerMetrics {
         let _ = self.queue_entry_height.try_set(height);
     }
 
-    pub(crate) fn producer_reported(
-        &self,
-        activity: ProducerActivity,
-        status: ProducerStatus,
-    ) {
+    pub(crate) fn producer_reported(&self, activity: ProducerActivity, status: ProducerStatus) {
         self.producer_report
             .get_or_create(&ProducerReportLabel { activity, status })
             .inc();
@@ -1348,10 +1347,7 @@ impl Drop for BackfillUploadGuard {
             return;
         };
         let label = BackfillCompletionLabel { status };
-        self.metrics
-            .backfill_completed
-            .get_or_create(&label)
-            .inc();
+        self.metrics.backfill_completed.get_or_create(&label).inc();
         self.metrics
             .backfill_upload_duration
             .get_or_create(&label)
