@@ -1,36 +1,83 @@
 use super::{Entry, SharedState};
 use crate::{
     indexer::{
-        metrics::{BlockMetricSource, QueueStatus},
+        metrics::{
+            estimated_block_bytes, BlockMetricSource, ProducerActivity, ProducerStatus,
+            QueueStatus,
+        },
         IndexerMetrics,
     },
     Block,
 };
 use commonware_actor::{
-    mailbox::{self, Policy},
+    mailbox::{self, Overflow, Policy},
     Feedback,
 };
 use commonware_consensus::{marshal::Update, Reporter};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use commonware_storage::queue;
 use commonware_utils::{acknowledgement::Exact, Acknowledgement};
-use std::{collections::VecDeque, num::NonZeroUsize};
+use std::{collections::VecDeque, num::NonZeroUsize, time::Instant};
 
 #[derive(Clone)]
 pub struct Producer {
     sender: mailbox::Sender<Message>,
+    metrics: IndexerMetrics,
 }
 
 struct Message {
     block: Block,
+    block_estimated_bytes: u64,
     ack: Exact,
+    metrics: IndexerMetrics,
+}
+
+impl Message {
+    fn new(block: Block, ack: Exact, metrics: IndexerMetrics) -> Self {
+        let block_estimated_bytes = estimated_block_bytes(&block);
+        Self {
+            block,
+            block_estimated_bytes,
+            ack,
+            metrics,
+        }
+    }
+}
+
+#[derive(Default)]
+struct OverflowMessages {
+    messages: VecDeque<Message>,
+}
+
+impl Overflow<Message> for OverflowMessages {
+    fn is_empty(&self) -> bool {
+        self.messages.is_empty()
+    }
+
+    fn drain<F>(&mut self, mut push: F)
+    where
+        F: FnMut(Message) -> Option<Message>,
+    {
+        while let Some(message) = self.messages.pop_front() {
+            let metrics = message.metrics.clone();
+            let block_estimated_bytes = message.block_estimated_bytes;
+            if let Some(message) = push(message) {
+                self.messages.push_front(message);
+                break;
+            }
+            metrics.producer_mailbox_overflow_drained(block_estimated_bytes);
+        }
+    }
 }
 
 impl Policy for Message {
-    type Overflow = VecDeque<Self>;
+    type Overflow = OverflowMessages;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
-        overflow.push_back(message);
+        message
+            .metrics
+            .producer_mailbox_overflowed(message.block_estimated_bytes);
+        overflow.messages.push_back(message);
     }
 }
 
@@ -47,8 +94,24 @@ impl Reporter for Producer {
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         match activity {
-            Update::Block(block, ack) => self.sender.enqueue(Message { block, ack }),
-            Update::Tip(_, _, _) => Feedback::Ok,
+            Update::Block(block, ack) => {
+                let feedback =
+                    self.sender
+                        .enqueue(Message::new(block, ack, self.metrics.clone()));
+                let status = if feedback.accepted() {
+                    ProducerStatus::Enqueued
+                } else {
+                    ProducerStatus::Dropped
+                };
+                self.metrics
+                    .producer_reported(ProducerActivity::Block, status);
+                feedback
+            }
+            Update::Tip(_, _, _) => {
+                self.metrics
+                    .producer_reported(ProducerActivity::Tip, ProducerStatus::Ignored);
+                Feedback::Ok
+            }
         }
     }
 }
@@ -65,11 +128,17 @@ impl<E: Clock + Storage + Metrics + Spawner> Actor<E> {
         let actor = Self {
             context: ContextCell::new(context),
             uploads,
-            metrics,
+            metrics: metrics.clone(),
             writer,
             receiver,
         };
-        (actor, Producer { sender })
+        (
+            actor,
+            Producer {
+                sender,
+                metrics,
+            },
+        )
     }
 
     fn start(mut self) -> Handle<()> {
@@ -77,21 +146,30 @@ impl<E: Clock + Storage + Metrics + Spawner> Actor<E> {
     }
 
     async fn run(mut self) {
-        while let Some(Message { block, ack }) = self.receiver.recv().await {
+        while let Some(Message { block, ack, .. }) = self.receiver.recv().await {
             self.record(&block).await;
             ack.acknowledge();
         }
     }
 
     async fn record(&mut self, block: &Block) {
+        let started = Instant::now();
         self.metrics
             .observe_block(BlockMetricSource::ProducerRecord, block);
         let Some(entry) = self.uploads.lock().record(block) else {
+            self.metrics.producer_recorded(
+                ProducerStatus::AlreadyUploaded,
+                started.elapsed(),
+            );
             return;
         };
         self.metrics.queue_entry(entry.height);
         match self.writer.enqueue(entry).await {
-            Ok(_) => self.metrics.queue_enqueued(QueueStatus::Success),
+            Ok(_) => {
+                self.metrics.queue_enqueued(QueueStatus::Success);
+                self.metrics
+                    .producer_recorded(ProducerStatus::Recorded, started.elapsed());
+            }
             Err(err) => {
                 self.metrics.queue_enqueued(QueueStatus::Failure);
                 panic!("failed to enqueue finalized digest: {err:?}");
@@ -198,6 +276,51 @@ mod tests {
                 .expect("queued entry");
             assert_eq!(entry.height, 2);
             assert_eq!(entry.digest, digest);
+
+            let encoded = context.encode();
+            assert!(encoded.contains(
+                "indexer_producer_report_total{activity=\"block\",status=\"enqueued\"} 1",
+            ));
+            assert!(encoded.contains(
+                "indexer_producer_report_total{activity=\"block\",status=\"recorded\"} 1",
+            ));
+            assert!(encoded.contains("indexer_producer_record_duration_seconds_bucket"));
+        });
+    }
+
+    #[test]
+    fn mailbox_overflow_tracks_retained_block_pressure() {
+        deterministic::Runner::default().start(|context| async move {
+            let metrics = IndexerMetrics::register(&context.child("indexer"));
+            let (sender, mut receiver) = mailbox::new(context.child("mailbox"), NZUsize!(1));
+            let (ack_1, _waiter_1) = Exact::handle();
+            let (ack_2, _waiter_2) = Exact::handle();
+
+            let first = block(1, 1, b"first");
+            let second = block(2, 2, b"second");
+            let second_bytes = estimated_block_bytes(&second);
+
+            assert_eq!(
+                sender.enqueue(Message::new(first, ack_1, metrics.clone())),
+                Feedback::Ok
+            );
+            assert_eq!(
+                sender.enqueue(Message::new(second, ack_2, metrics.clone())),
+                Feedback::Backoff
+            );
+
+            let encoded = context.encode();
+            assert!(encoded.contains("indexer_producer_mailbox_overflow_total 1"));
+            assert!(encoded.contains("indexer_producer_mailbox_overflow_entries 1"));
+            assert!(encoded.contains(&format!(
+                "indexer_producer_mailbox_overflow_block_estimated_bytes {second_bytes}"
+            )));
+
+            receiver.try_recv().expect("ready message");
+
+            let encoded = context.encode();
+            assert!(encoded.contains("indexer_producer_mailbox_overflow_entries 0"));
+            assert!(encoded.contains("indexer_producer_mailbox_overflow_block_estimated_bytes 0"));
         });
     }
 }

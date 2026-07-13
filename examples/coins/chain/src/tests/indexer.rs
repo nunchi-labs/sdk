@@ -1,8 +1,8 @@
 use crate::{
     indexer::{
         BackfillDecision, BackfillPhase, BackfillWaitReason, BlockMetricSource, HttpArtifact,
-        IndexerMetrics, LiveUploadArtifact, QueueReadSource, QueueStatus, SharedCacheSource,
-        SharedRetentionReason, SharedStateSnapshot,
+        IndexerMetrics, LiveUploadArtifact, ProducerActivity, ProducerStatus, QueueReadSource,
+        QueueStatus, SharedCacheSource, SharedRetentionReason, SharedStateSnapshot,
     },
     Block, StateCommitment, Transaction, EPOCH,
 };
@@ -261,6 +261,13 @@ fn backfill_metrics_use_expected_labels() {
         metrics.queue_read(QueueReadSource::Recv, QueueStatus::Failure);
         metrics.queue_ack_floor(7);
         metrics.queue_entry(9);
+        metrics.producer_reported(ProducerActivity::Block, ProducerStatus::Enqueued);
+        metrics.producer_reported(ProducerActivity::Block, ProducerStatus::Dropped);
+        metrics.producer_reported(ProducerActivity::Tip, ProducerStatus::Ignored);
+        metrics.producer_recorded(ProducerStatus::Recorded, Duration::from_millis(1));
+        metrics.producer_recorded(ProducerStatus::AlreadyUploaded, Duration::from_millis(1));
+        metrics.producer_mailbox_overflowed(256);
+        metrics.producer_mailbox_overflow_drained(256);
 
         let encoded = context.encode();
         assert!(encoded.contains("indexer_backfill_active_uploads 0"));
@@ -315,5 +322,24 @@ fn backfill_metrics_use_expected_labels() {
         );
         assert!(encoded.contains("indexer_queue_ack_floor_height 7"));
         assert!(encoded.contains("indexer_queue_entry_height 9"));
+        assert!(encoded.contains(
+            "indexer_producer_report_total{activity=\"block\",status=\"enqueued\"} 1",
+        ));
+        assert!(encoded.contains(
+            "indexer_producer_report_total{activity=\"block\",status=\"dropped\"} 1",
+        ));
+        assert!(
+            encoded.contains("indexer_producer_report_total{activity=\"tip\",status=\"ignored\"} 1")
+        );
+        assert!(encoded.contains(
+            "indexer_producer_report_total{activity=\"block\",status=\"recorded\"} 1",
+        ));
+        assert!(encoded.contains(
+            "indexer_producer_report_total{activity=\"block\",status=\"already_uploaded\"} 1",
+        ));
+        assert!(encoded.contains("indexer_producer_mailbox_overflow_total 1"));
+        assert!(encoded.contains("indexer_producer_mailbox_overflow_entries 0"));
+        assert!(encoded.contains("indexer_producer_mailbox_overflow_block_estimated_bytes 0"));
+        assert!(encoded.contains("indexer_producer_record_duration_seconds_bucket"));
     });
 }

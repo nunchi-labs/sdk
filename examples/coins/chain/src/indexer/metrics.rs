@@ -412,6 +412,64 @@ impl EncodeLabelValueTrait for QueueReadSource {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum ProducerActivity {
+    Block,
+    Tip,
+}
+
+impl ProducerActivity {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Block => "block",
+            Self::Tip => "tip",
+        }
+    }
+}
+
+impl EncodeLabelValueTrait for ProducerActivity {
+    fn encode(
+        &self,
+        encoder: &mut commonware_runtime::telemetry::metrics::LabelValueEncoder,
+    ) -> Result<(), fmt::Error> {
+        use fmt::Write as _;
+
+        encoder.write_str(self.as_str())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum ProducerStatus {
+    Enqueued,
+    Dropped,
+    Ignored,
+    Recorded,
+    AlreadyUploaded,
+}
+
+impl ProducerStatus {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Enqueued => "enqueued",
+            Self::Dropped => "dropped",
+            Self::Ignored => "ignored",
+            Self::Recorded => "recorded",
+            Self::AlreadyUploaded => "already_uploaded",
+        }
+    }
+}
+
+impl EncodeLabelValueTrait for ProducerStatus {
+    fn encode(
+        &self,
+        encoder: &mut commonware_runtime::telemetry::metrics::LabelValueEncoder,
+    ) -> Result<(), fmt::Error> {
+        use fmt::Write as _;
+
+        encoder.write_str(self.as_str())
+    }
+}
+
 pub(crate) struct SharedStateSnapshot {
     pub(crate) cached_blocks: usize,
     pub(crate) cached_block_estimated_bytes: u64,
@@ -492,6 +550,17 @@ struct QueueReadLabel {
     status: QueueStatus,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, EncodeLabelSet)]
+struct ProducerReportLabel {
+    activity: ProducerActivity,
+    status: ProducerStatus,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, EncodeLabelSet)]
+struct ProducerRecordLabel {
+    status: ProducerStatus,
+}
+
 #[derive(Clone)]
 pub(crate) struct IndexerMetrics {
     live_upload_spawned: CounterFamily<ArtifactLabel>,
@@ -537,6 +606,11 @@ pub(crate) struct IndexerMetrics {
     queue_ack_floor_height: Gauge,
     queue_entry_height: Gauge,
     queue_lag_height: Gauge,
+    producer_report: CounterFamily<ProducerReportLabel>,
+    producer_mailbox_overflow: Counter,
+    producer_mailbox_overflow_entries: Gauge,
+    producer_mailbox_overflow_block_estimated_bytes: Gauge,
+    producer_record_duration: HistogramFamily<ProducerRecordLabel>,
 }
 
 impl IndexerMetrics {
@@ -743,6 +817,29 @@ impl IndexerMetrics {
             queue_lag_height: context.gauge(
                 "queue_lag_height",
                 "Latest finalized height minus durable indexer queue acknowledged height",
+            ),
+            producer_report: context.family(
+                "producer_report",
+                "Total indexer producer activity outcomes by activity and status",
+            ),
+            producer_mailbox_overflow: context.counter(
+                "producer_mailbox_overflow",
+                "Total indexer producer mailbox overflow events",
+            ),
+            producer_mailbox_overflow_entries: context.gauge(
+                "producer_mailbox_overflow_entries",
+                "Current indexer producer mailbox overflow entries retaining full blocks",
+            ),
+            producer_mailbox_overflow_block_estimated_bytes: context.gauge(
+                "producer_mailbox_overflow_block_estimated_bytes",
+                "Current estimated encoded block bytes retained by indexer producer mailbox overflow",
+            ),
+            producer_record_duration: context.register(
+                "producer_record_duration_seconds",
+                "Duration of indexer producer record work by status",
+                raw::Family::<ProducerRecordLabel, raw::Histogram, fn() -> raw::Histogram>::new_with_constructor(
+                    local_histogram,
+                ),
             ),
         }
     }
@@ -953,6 +1050,36 @@ impl IndexerMetrics {
 
     pub(crate) fn queue_entry(&self, height: u64) {
         let _ = self.queue_entry_height.try_set(height);
+    }
+
+    pub(crate) fn producer_reported(
+        &self,
+        activity: ProducerActivity,
+        status: ProducerStatus,
+    ) {
+        self.producer_report
+            .get_or_create(&ProducerReportLabel { activity, status })
+            .inc();
+    }
+
+    pub(crate) fn producer_mailbox_overflowed(&self, block_estimated_bytes: u64) {
+        self.producer_mailbox_overflow.inc();
+        self.producer_mailbox_overflow_entries.inc();
+        self.producer_mailbox_overflow_block_estimated_bytes
+            .inc_by(gauge_u64(block_estimated_bytes));
+    }
+
+    pub(crate) fn producer_mailbox_overflow_drained(&self, block_estimated_bytes: u64) {
+        self.producer_mailbox_overflow_entries.dec();
+        self.producer_mailbox_overflow_block_estimated_bytes
+            .dec_by(gauge_u64(block_estimated_bytes));
+    }
+
+    pub(crate) fn producer_recorded(&self, status: ProducerStatus, duration: Duration) {
+        self.producer_reported(ProducerActivity::Block, status);
+        self.producer_record_duration
+            .get_or_create(&ProducerRecordLabel { status })
+            .observe(duration.as_secs_f64());
     }
 }
 

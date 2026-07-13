@@ -22,8 +22,8 @@ pub(crate) use metrics::IndexerMetrics;
 #[cfg(test)]
 pub(crate) use metrics::{
     BackfillDecision, BackfillPhase, BackfillWaitReason, BlockMetricSource, HttpArtifact,
-    LiveUploadArtifact, QueueReadSource, QueueStatus, SharedCacheSource, SharedRetentionReason,
-    SharedStateSnapshot,
+    LiveUploadArtifact, ProducerActivity, ProducerStatus, QueueReadSource, QueueStatus,
+    SharedCacheSource, SharedRetentionReason, SharedStateSnapshot,
 };
 use metrics::HttpArtifact as UploadArtifact;
 pub(crate) use pusher::Pusher;
