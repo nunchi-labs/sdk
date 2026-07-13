@@ -1,8 +1,8 @@
-use crate::Block;
+use crate::{Block, Finalized};
 use commonware_runtime::{
     telemetry::metrics::{
         encoding::EncodeLabelValue as EncodeLabelValueTrait, histogram::Buckets, raw,
-        CounterFamily, EncodeLabelSet, Gauge, GaugeExt as _, GaugeFamily, GaugeValue,
+        Counter, CounterFamily, EncodeLabelSet, Gauge, GaugeExt as _, GaugeFamily, GaugeValue,
         HistogramExt as _, MetricsExt as _, Registered,
     },
     Clock, Metrics,
@@ -242,6 +242,120 @@ impl EncodeLabelValueTrait for SharedRetentionReason {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum BackfillStatus {
+    Uploaded,
+    Skipped,
+}
+
+impl BackfillStatus {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Uploaded => "uploaded",
+            Self::Skipped => "skipped",
+        }
+    }
+}
+
+impl EncodeLabelValueTrait for BackfillStatus {
+    fn encode(
+        &self,
+        encoder: &mut commonware_runtime::telemetry::metrics::LabelValueEncoder,
+    ) -> Result<(), fmt::Error> {
+        use fmt::Write as _;
+
+        encoder.write_str(self.as_str())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum BackfillDecision {
+    Skip,
+    Wait,
+    Proceed,
+}
+
+impl BackfillDecision {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Skip => "skip",
+            Self::Wait => "wait",
+            Self::Proceed => "proceed",
+        }
+    }
+}
+
+impl EncodeLabelValueTrait for BackfillDecision {
+    fn encode(
+        &self,
+        encoder: &mut commonware_runtime::telemetry::metrics::LabelValueEncoder,
+    ) -> Result<(), fmt::Error> {
+        use fmt::Write as _;
+
+        encoder.write_str(self.as_str())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum BackfillPhase {
+    Start,
+    BeforeBlock,
+    BeforeAttempt,
+}
+
+impl BackfillPhase {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::BeforeBlock => "before_block",
+            Self::BeforeAttempt => "before_attempt",
+        }
+    }
+}
+
+impl EncodeLabelValueTrait for BackfillPhase {
+    fn encode(
+        &self,
+        encoder: &mut commonware_runtime::telemetry::metrics::LabelValueEncoder,
+    ) -> Result<(), fmt::Error> {
+        use fmt::Write as _;
+
+        encoder.write_str(self.as_str())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum BackfillWaitReason {
+    CertificateUpload,
+    MissingBlock,
+    MissingFinalization,
+    MismatchedFinalization,
+    HttpError,
+}
+
+impl BackfillWaitReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::CertificateUpload => "certificate_upload",
+            Self::MissingBlock => "missing_block",
+            Self::MissingFinalization => "missing_finalization",
+            Self::MismatchedFinalization => "mismatched_finalization",
+            Self::HttpError => "http_error",
+        }
+    }
+}
+
+impl EncodeLabelValueTrait for BackfillWaitReason {
+    fn encode(
+        &self,
+        encoder: &mut commonware_runtime::telemetry::metrics::LabelValueEncoder,
+    ) -> Result<(), fmt::Error> {
+        use fmt::Write as _;
+
+        encoder.write_str(self.as_str())
+    }
+}
+
 pub(crate) struct SharedStateSnapshot {
     pub(crate) cached_blocks: usize,
     pub(crate) cached_block_estimated_bytes: u64,
@@ -295,6 +409,22 @@ struct SharedRetentionReasonLabel {
     reason: SharedRetentionReason,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, EncodeLabelSet)]
+struct BackfillCompletionLabel {
+    status: BackfillStatus,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, EncodeLabelSet)]
+struct BackfillDecisionLabel {
+    decision: BackfillDecision,
+    phase: BackfillPhase,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, EncodeLabelSet)]
+struct BackfillWaitReasonLabel {
+    reason: BackfillWaitReason,
+}
+
 #[derive(Clone)]
 pub(crate) struct IndexerMetrics {
     live_upload_spawned: CounterFamily<ArtifactLabel>,
@@ -323,6 +453,16 @@ pub(crate) struct IndexerMetrics {
     shared_pruned: CounterFamily<SharedRetentionReasonLabel>,
     shared_cache_inserted: CounterFamily<SharedCacheSourceLabel>,
     shared_cache_removed: CounterFamily<SharedRetentionReasonLabel>,
+    backfill_active_uploads: Gauge,
+    backfill_max_active: Gauge,
+    backfill_started: Counter,
+    backfill_completed: CounterFamily<BackfillCompletionLabel>,
+    backfill_upload_duration: HistogramFamily<BackfillCompletionLabel>,
+    backfill_decision: CounterFamily<BackfillDecisionLabel>,
+    backfill_wait_duration: HistogramFamily<BackfillWaitReasonLabel>,
+    backfill_retry: CounterFamily<BackfillWaitReasonLabel>,
+    backfill_active_block_estimated_bytes: Gauge,
+    backfill_active_body_estimated_bytes: Gauge,
 }
 
 impl IndexerMetrics {
@@ -453,6 +593,52 @@ impl IndexerMetrics {
                 "shared_cache_remove",
                 "Total shared indexer cached block removals by reason",
             ),
+            backfill_active_uploads: context.gauge(
+                "backfill_active_uploads",
+                "Current number of durable backfill upload tasks",
+            ),
+            backfill_max_active: context.gauge(
+                "backfill_max_active",
+                "Configured maximum number of active durable backfill upload tasks",
+            ),
+            backfill_started: context.counter(
+                "backfill_start",
+                "Total durable backfill work items started",
+            ),
+            backfill_completed: context.family(
+                "backfill_complete",
+                "Total durable backfill work item outcomes by status",
+            ),
+            backfill_upload_duration: context.register(
+                "backfill_upload_duration_seconds",
+                "Duration of durable backfill work items by status",
+                raw::Family::<BackfillCompletionLabel, raw::Histogram, fn() -> raw::Histogram>::new_with_constructor(
+                    local_histogram,
+                ),
+            ),
+            backfill_decision: context.family(
+                "backfill_decision",
+                "Total durable backfill upload decisions by decision and phase",
+            ),
+            backfill_wait_duration: context.register(
+                "backfill_wait_duration_seconds",
+                "Duration of durable backfill waits by reason",
+                raw::Family::<BackfillWaitReasonLabel, raw::Histogram, fn() -> raw::Histogram>::new_with_constructor(
+                    local_histogram,
+                ),
+            ),
+            backfill_retry: context.family(
+                "backfill_retry",
+                "Total durable backfill retries by reason",
+            ),
+            backfill_active_block_estimated_bytes: context.gauge(
+                "backfill_active_block_estimated_bytes",
+                "Current estimated encoded block bytes held by durable backfill upload tasks",
+            ),
+            backfill_active_body_estimated_bytes: context.gauge(
+                "backfill_active_body_estimated_bytes",
+                "Current estimated encoded HTTP body bytes held by durable backfill upload tasks",
+            ),
         }
     }
 
@@ -579,6 +765,52 @@ impl IndexerMetrics {
         self.shared_pruned
             .get_or_create(&SharedRetentionReasonLabel { reason })
             .inc_by(count);
+    }
+
+    pub(crate) fn backfill_configured(&self, max_active: usize) {
+        let _ = self.backfill_max_active.try_set(max_active);
+    }
+
+    pub(crate) fn start_backfill_upload(&self) -> BackfillUploadGuard {
+        self.backfill_started.inc();
+        self.backfill_active_uploads.inc();
+        BackfillUploadGuard {
+            metrics: self.clone(),
+            status: None,
+            block_bytes: 0,
+            started: Instant::now(),
+        }
+    }
+
+    pub(crate) fn backfill_decision(
+        &self,
+        decision: BackfillDecision,
+        phase: BackfillPhase,
+    ) {
+        self.backfill_decision
+            .get_or_create(&BackfillDecisionLabel { decision, phase })
+            .inc();
+    }
+
+    pub(crate) fn backfill_retry(&self, reason: BackfillWaitReason) {
+        self.backfill_retry
+            .get_or_create(&BackfillWaitReasonLabel { reason })
+            .inc();
+    }
+
+    pub(crate) fn backfill_waited(&self, reason: BackfillWaitReason, duration: Duration) {
+        self.backfill_wait_duration
+            .get_or_create(&BackfillWaitReasonLabel { reason })
+            .observe(duration.as_secs_f64());
+    }
+
+    pub(crate) fn start_backfill_body(&self, bytes: u64) -> BackfillBodyGuard {
+        let bytes = gauge_u64(bytes);
+        self.backfill_active_body_estimated_bytes.inc_by(bytes);
+        BackfillBodyGuard {
+            metrics: self.clone(),
+            bytes,
+        }
     }
 }
 
@@ -720,6 +952,73 @@ impl Drop for HttpRequestGuard {
     }
 }
 
+pub(crate) struct BackfillUploadGuard {
+    metrics: IndexerMetrics,
+    status: Option<BackfillStatus>,
+    block_bytes: GaugeValue,
+    started: Instant,
+}
+
+impl BackfillUploadGuard {
+    pub(crate) fn hold_block(&mut self, block: &Block) {
+        let bytes = gauge_u64(estimated_block_bytes(block));
+        if self.block_bytes != 0 {
+            self.metrics
+                .backfill_active_block_estimated_bytes
+                .dec_by(self.block_bytes);
+        }
+        self.metrics
+            .backfill_active_block_estimated_bytes
+            .inc_by(bytes);
+        self.block_bytes = bytes;
+    }
+
+    pub(crate) const fn uploaded(&mut self) {
+        self.status = Some(BackfillStatus::Uploaded);
+    }
+
+    pub(crate) const fn skipped(&mut self) {
+        self.status = Some(BackfillStatus::Skipped);
+    }
+}
+
+impl Drop for BackfillUploadGuard {
+    fn drop(&mut self) {
+        self.metrics.backfill_active_uploads.dec();
+        if self.block_bytes != 0 {
+            self.metrics
+                .backfill_active_block_estimated_bytes
+                .dec_by(self.block_bytes);
+        }
+
+        let Some(status) = self.status else {
+            return;
+        };
+        let label = BackfillCompletionLabel { status };
+        self.metrics
+            .backfill_completed
+            .get_or_create(&label)
+            .inc();
+        self.metrics
+            .backfill_upload_duration
+            .get_or_create(&label)
+            .observe(self.started.elapsed().as_secs_f64());
+    }
+}
+
+pub(crate) struct BackfillBodyGuard {
+    metrics: IndexerMetrics,
+    bytes: GaugeValue,
+}
+
+impl Drop for BackfillBodyGuard {
+    fn drop(&mut self) {
+        self.metrics
+            .backfill_active_body_estimated_bytes
+            .dec_by(self.bytes);
+    }
+}
+
 fn local_histogram() -> raw::Histogram {
     raw::Histogram::new(Buckets::LOCAL)
 }
@@ -728,6 +1027,14 @@ fn gauge_bytes(bytes: usize) -> GaugeValue {
     bytes.try_into().unwrap_or(GaugeValue::MAX)
 }
 
+fn gauge_u64(bytes: u64) -> GaugeValue {
+    bytes.try_into().unwrap_or(GaugeValue::MAX)
+}
+
 pub(crate) fn estimated_block_bytes(block: &Block) -> u64 {
     commonware_codec::EncodeSize::encode_size(block) as u64
+}
+
+pub(crate) fn estimated_finalized_bytes(finalized: &Finalized) -> u64 {
+    commonware_codec::EncodeSize::encode_size(finalized) as u64
 }

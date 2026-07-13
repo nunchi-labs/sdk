@@ -1,7 +1,8 @@
 use crate::{
     indexer::{
-        BlockMetricSource, HttpArtifact, IndexerMetrics, LiveUploadArtifact, SharedCacheSource,
-        SharedRetentionReason, SharedStateSnapshot,
+        BackfillDecision, BackfillPhase, BackfillWaitReason, BlockMetricSource, HttpArtifact,
+        IndexerMetrics, LiveUploadArtifact, SharedCacheSource, SharedRetentionReason,
+        SharedStateSnapshot,
     },
     Block, StateCommitment, Transaction, EPOCH,
 };
@@ -210,5 +211,68 @@ fn block_metrics_use_expected_sources() {
         assert!(encoded.contains("source=\"live_certificate\""));
         assert!(encoded.contains("source=\"consumer_cached\""));
         assert!(encoded.contains("source=\"consumer_marshal\""));
+    });
+}
+
+#[test]
+fn backfill_metrics_use_expected_labels() {
+    deterministic::Runner::default().start(|context| async move {
+        let indexer = context.child("indexer");
+        let metrics = IndexerMetrics::register(&indexer);
+        let block = block(4, 4, b"block");
+
+        metrics.backfill_configured(16);
+        {
+            let mut upload = metrics.start_backfill_upload();
+            upload.hold_block(&block);
+            let _body = metrics.start_backfill_body(512);
+            upload.uploaded();
+        }
+        {
+            let mut upload = metrics.start_backfill_upload();
+            upload.skipped();
+        }
+        metrics.backfill_decision(BackfillDecision::Skip, BackfillPhase::Start);
+        metrics.backfill_decision(BackfillDecision::Wait, BackfillPhase::BeforeBlock);
+        metrics.backfill_decision(BackfillDecision::Proceed, BackfillPhase::BeforeAttempt);
+        metrics.backfill_retry(BackfillWaitReason::CertificateUpload);
+        metrics.backfill_retry(BackfillWaitReason::MissingBlock);
+        metrics.backfill_retry(BackfillWaitReason::MissingFinalization);
+        metrics.backfill_retry(BackfillWaitReason::MismatchedFinalization);
+        metrics.backfill_retry(BackfillWaitReason::HttpError);
+        metrics.backfill_waited(BackfillWaitReason::CertificateUpload, Duration::from_millis(1));
+        metrics.backfill_waited(BackfillWaitReason::MissingBlock, Duration::from_millis(1));
+        metrics.backfill_waited(BackfillWaitReason::MissingFinalization, Duration::from_millis(1));
+        metrics.backfill_waited(BackfillWaitReason::MismatchedFinalization, Duration::from_millis(1));
+        metrics.backfill_waited(BackfillWaitReason::HttpError, Duration::from_millis(1));
+
+        let encoded = context.encode();
+        assert!(encoded.contains("indexer_backfill_active_uploads 0"));
+        assert!(encoded.contains("indexer_backfill_max_active 16"));
+        assert!(encoded.contains("indexer_backfill_start_total 2"));
+        assert!(encoded.contains("indexer_backfill_complete_total{status=\"uploaded\"} 1"));
+        assert!(encoded.contains("indexer_backfill_complete_total{status=\"skipped\"} 1"));
+        assert!(encoded.contains("indexer_backfill_upload_duration_seconds_bucket"));
+        assert!(encoded.contains(
+            "indexer_backfill_decision_total{decision=\"skip\",phase=\"start\"} 1",
+        ));
+        assert!(encoded.contains(
+            "indexer_backfill_decision_total{decision=\"wait\",phase=\"before_block\"} 1",
+        ));
+        assert!(encoded.contains(
+            "indexer_backfill_decision_total{decision=\"proceed\",phase=\"before_attempt\"} 1",
+        ));
+        assert!(encoded.contains("indexer_backfill_wait_duration_seconds_bucket"));
+        assert!(encoded.contains(
+            "indexer_backfill_retry_total{reason=\"certificate_upload\"} 1",
+        ));
+        assert!(encoded.contains("indexer_backfill_retry_total{reason=\"missing_block\"} 1"));
+        assert!(encoded
+            .contains("indexer_backfill_retry_total{reason=\"missing_finalization\"} 1"));
+        assert!(encoded
+            .contains("indexer_backfill_retry_total{reason=\"mismatched_finalization\"} 1"));
+        assert!(encoded.contains("indexer_backfill_retry_total{reason=\"http_error\"} 1"));
+        assert!(encoded.contains("indexer_backfill_active_block_estimated_bytes 0"));
+        assert!(encoded.contains("indexer_backfill_active_body_estimated_bytes 0"));
     });
 }

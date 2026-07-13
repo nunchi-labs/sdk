@@ -1,6 +1,9 @@
 use super::{Decision, Entry, SharedState};
 use crate::indexer::{
-    metrics::{BlockMetricSource, SharedCacheSource},
+    metrics::{
+        estimated_finalized_bytes, BackfillDecision, BackfillPhase, BackfillUploadGuard,
+        BackfillWaitReason, BlockMetricSource, SharedCacheSource,
+    },
     Client, IndexerMetrics,
 };
 use crate::{Block, Finalized, Scheme};
@@ -17,6 +20,16 @@ use commonware_storage::queue;
 use commonware_utils::futures::{OptionFuture, Pool};
 use std::{num::NonZeroUsize, time::Duration};
 use tracing::{debug, warn};
+
+impl From<&Decision> for BackfillDecision {
+    fn from(decision: &Decision) -> Self {
+        match decision {
+            Decision::Skip => Self::Skip,
+            Decision::Wait => Self::Wait,
+            Decision::Proceed => Self::Proceed,
+        }
+    }
+}
 
 enum Completion {
     Uploaded {
@@ -65,6 +78,7 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
             status::Raw::default(),
         );
         let Config { max_active, retry } = config;
+        metrics.backfill_configured(max_active.get());
         let (writer, reader) = backfiller;
         Self {
             context: ContextCell::new(context),
@@ -141,7 +155,14 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
 
     async fn start_upload(&mut self, position: u64, entry: Entry) {
         let Entry { height, digest } = entry;
-        if matches!(self.uploads.lock().should_upload(&digest), Decision::Skip) {
+        let decision = self.uploads.lock().should_upload(&digest);
+        self.metrics
+            .backfill_decision((&decision).into(), BackfillPhase::Start);
+        if matches!(decision, Decision::Skip) {
+            {
+                let mut upload = self.metrics.start_backfill_upload();
+                upload.skipped();
+            }
             self.complete(Completion::Skipped { position, height })
                 .await;
             debug!(?digest, "consumer skipping already-uploaded block");
@@ -161,12 +182,14 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
             let uploads = self.uploads.clone();
             let retry = self.retry;
             async move {
+                let mut upload = metrics.start_backfill_upload();
                 let Some(block) =
                     Self::wait_for_uploadable_block(
-                        &context, &marshal, &metrics, &uploads, digest, retry,
+                        &context, &marshal, &metrics, &uploads, &mut upload, digest, retry,
                     )
                     .await
                 else {
+                    upload.skipped();
                     debug!(?digest, "skipping previously uploaded block");
                     return Completion::Skipped { position, height };
                 };
@@ -178,7 +201,13 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
                             ?digest,
                             "consumer could not find finalization, retrying"
                         );
-                        context.sleep(retry).await;
+                        Self::wait(
+                            &context,
+                            &metrics,
+                            BackfillWaitReason::MissingFinalization,
+                            retry,
+                        )
+                        .await;
                         continue;
                     };
                     if proof.proposal.payload != digest {
@@ -187,7 +216,13 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
                             ?digest,
                             "consumer found mismatched finalization, retrying"
                         );
-                        context.sleep(retry).await;
+                        Self::wait(
+                            &context,
+                            &metrics,
+                            BackfillWaitReason::MismatchedFinalization,
+                            retry,
+                        )
+                        .await;
                         continue;
                     }
                     break Finalized::new(proof, block.clone());
@@ -198,21 +233,35 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
                         let uploads = uploads.lock();
                         uploads.should_upload(&digest)
                     };
+                    metrics.backfill_decision((&decision).into(), BackfillPhase::BeforeAttempt);
                     match decision {
                         Decision::Skip => {
+                            upload.skipped();
                             debug!(?digest, "skipping previously uploaded block");
                             return Completion::Skipped { position, height };
                         }
                         Decision::Wait => {
-                            context.sleep(retry).await;
+                            Self::wait(
+                                &context,
+                                &metrics,
+                                BackfillWaitReason::CertificateUpload,
+                                retry,
+                            )
+                            .await;
                             continue;
                         }
                         Decision::Proceed => {}
                     }
 
-                    match client.finalized_upload(finalized.clone()).await {
+                    let result = {
+                        let _body =
+                            metrics.start_backfill_body(estimated_finalized_bytes(&finalized));
+                        client.finalized_upload(finalized.clone()).await
+                    };
+                    match result {
                         Ok(()) => {
                             upload_results.inc(status::Status::Success);
+                            upload.uploaded();
                             debug!(?digest, "uploaded finalized block by digest");
                             return Completion::Uploaded {
                                 position,
@@ -223,7 +272,8 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
                         Err(e) => {
                             upload_results.inc(status::Status::Failure);
                             warn!(?e, ?digest, "retrying finalized block upload by digest");
-                            context.sleep(retry).await;
+                            Self::wait(&context, &metrics, BackfillWaitReason::HttpError, retry)
+                                .await;
                         }
                     }
                 }
@@ -236,6 +286,7 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
         marshal: &MarshalMailbox<Scheme, Standard<Block>>,
         metrics: &IndexerMetrics,
         uploads: &SharedState,
+        upload: &mut BackfillUploadGuard,
         digest: Digest,
         retry: Duration,
     ) -> Option<Block> {
@@ -250,22 +301,47 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
             let next = {
                 let uploads = uploads.lock();
                 match uploads.should_upload(&digest) {
-                    Decision::Skip => NextBlock::AlreadyUploaded,
-                    Decision::Wait => NextBlock::WaitForCertificate,
-                    Decision::Proceed => uploads
-                        .cached_block(&digest)
-                        .map(|block| NextBlock::Ready(Box::new(block)))
-                        .unwrap_or(NextBlock::FetchFromMarshal),
+                    Decision::Skip => {
+                        metrics.backfill_decision(
+                            BackfillDecision::Skip,
+                            BackfillPhase::BeforeBlock,
+                        );
+                        NextBlock::AlreadyUploaded
+                    }
+                    Decision::Wait => {
+                        metrics.backfill_decision(
+                            BackfillDecision::Wait,
+                            BackfillPhase::BeforeBlock,
+                        );
+                        NextBlock::WaitForCertificate
+                    }
+                    Decision::Proceed => {
+                        metrics.backfill_decision(
+                            BackfillDecision::Proceed,
+                            BackfillPhase::BeforeBlock,
+                        );
+                        uploads
+                            .cached_block(&digest)
+                            .map(|block| NextBlock::Ready(Box::new(block)))
+                            .unwrap_or(NextBlock::FetchFromMarshal)
+                    }
                 }
             };
 
             match next {
                 NextBlock::AlreadyUploaded => return None,
                 NextBlock::WaitForCertificate => {
-                    context.sleep(retry).await;
+                    Self::wait(
+                        context,
+                        metrics,
+                        BackfillWaitReason::CertificateUpload,
+                        retry,
+                    )
+                    .await;
                 }
                 NextBlock::Ready(block) => {
                     metrics.observe_block(BlockMetricSource::ConsumerCached, &block);
+                    upload.hold_block(&block);
                     return Some(*block);
                 }
                 NextBlock::FetchFromMarshal => {
@@ -274,16 +350,33 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
                         uploads
                             .lock()
                             .cache_block(block.clone(), SharedCacheSource::ConsumerMarshal);
+                        upload.hold_block(&block);
                         return Some(block);
                     }
                     warn!(
                         ?digest,
                         "consumer could not find block in marshal, retrying"
                     );
-                    context.sleep(retry).await;
+                    Self::wait(context, metrics, BackfillWaitReason::MissingBlock, retry).await;
                 }
             }
         }
+    }
+
+    async fn wait(
+        context: &E,
+        metrics: &IndexerMetrics,
+        reason: BackfillWaitReason,
+        retry: Duration,
+    ) {
+        metrics.backfill_retry(reason);
+        let started = context.current();
+        context.sleep(retry).await;
+        let duration = context
+            .current()
+            .duration_since(started)
+            .unwrap_or_default();
+        metrics.backfill_waited(reason, duration);
     }
 
     async fn complete(&mut self, completion: Completion) {
