@@ -449,4 +449,63 @@ mod tests {
             assert!(encoded.contains("indexer_shared_prune_total{reason=\"pruned\"} 1"));
         });
     }
+
+    #[test]
+    fn metrics_track_cache_byte_transitions() {
+        deterministic::Runner::default().start(|context| async move {
+            let metrics = IndexerMetrics::register(&context.child("indexer"));
+            let mut state = State::with_metrics(metrics);
+            let first = block(1, 1, b"one");
+            let digest = first.digest();
+            let block_bytes = estimated_block_bytes(&first);
+
+            assert!(state.record(&first).is_some());
+
+            let encoded = context.encode();
+            assert!(encoded.contains("indexer_shared_cached_blocks 1"));
+            assert!(encoded.contains(&format!(
+                "indexer_shared_cached_block_estimated_bytes {block_bytes}"
+            )));
+            assert!(encoded.contains(
+                "indexer_shared_cache_insert_total{source=\"producer_record\"} 1",
+            ));
+
+            assert!(state.record(&first).is_some());
+
+            let encoded = context.encode();
+            assert!(encoded.contains("indexer_shared_cached_blocks 1"));
+            assert!(encoded.contains(&format!(
+                "indexer_shared_cached_block_estimated_bytes {block_bytes}"
+            )));
+            assert!(encoded.contains(
+                "indexer_shared_cache_insert_total{source=\"producer_record\"} 1",
+            ));
+
+            state.mark_uploaded(digest, first.height.get());
+
+            let encoded = context.encode();
+            assert!(encoded.contains("indexer_shared_cached_blocks 0"));
+            assert!(encoded.contains("indexer_shared_cached_block_estimated_bytes 0"));
+            assert!(encoded.contains(
+                "indexer_shared_cache_remove_total{reason=\"uploaded\"} 1",
+            ));
+
+            let pruned = block(2, 2, b"pruned");
+            let retained = block(3, 3, b"retained");
+            let retained_bytes = estimated_block_bytes(&retained);
+
+            assert!(state.record(&pruned).is_some());
+            assert!(state.record(&retained).is_some());
+
+            let encoded = context.encode();
+            assert!(encoded.contains("indexer_shared_cached_blocks 1"));
+            assert!(encoded.contains(&format!(
+                "indexer_shared_cached_block_estimated_bytes {retained_bytes}"
+            )));
+            assert!(encoded.contains(
+                "indexer_shared_cache_remove_total{reason=\"pruned\"} 1",
+            ));
+            assert!(encoded.contains("indexer_shared_prune_total{reason=\"pruned\"} 1"));
+        });
+    }
 }

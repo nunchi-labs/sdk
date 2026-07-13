@@ -10,11 +10,16 @@ use crate::{
 use commonware_consensus::types::{Height, Round, View};
 use commonware_cryptography::{ed25519, Hasher, Sha256, Signer};
 use commonware_runtime::{
-    deterministic, Clock as _, Metrics as _, Runner as _, Supervisor as _,
+    deterministic, Clock as _, Metrics as _, Runner as _, Spawner as _, Supervisor as _,
 };
+use futures::channel::oneshot;
 use commonware_storage::mmr::Location;
 use commonware_utils::range::NonEmptyRange;
-use std::time::Duration;
+use std::{
+    fmt,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 fn state(height: u64) -> StateCommitment {
     StateCommitment {
@@ -42,6 +47,194 @@ fn block(view: u64, height: u64, label: &[u8]) -> Block {
         (),
         state(height),
     )
+}
+
+fn assert_metric(encoded: &str, line: &str) {
+    assert!(
+        encoded.lines().any(|candidate| candidate == line),
+        "missing metric line `{line}` in:\n{encoded}",
+    );
+}
+
+#[derive(Debug)]
+enum MockUploadError {
+    HttpStatus,
+}
+
+impl fmt::Display for MockUploadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("mock upload failed")
+    }
+}
+
+impl std::error::Error for MockUploadError {}
+
+#[derive(Clone)]
+struct MockClient {
+    metrics: IndexerMetrics,
+    artifact: HttpArtifact,
+    body_bytes: usize,
+    started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    release: Arc<Mutex<Option<oneshot::Receiver<Result<(), MockUploadError>>>>>,
+}
+
+impl MockClient {
+    fn new(
+        metrics: IndexerMetrics,
+        artifact: HttpArtifact,
+        body_bytes: usize,
+    ) -> (
+        Self,
+        oneshot::Receiver<()>,
+        oneshot::Sender<Result<(), MockUploadError>>,
+    ) {
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        (
+            Self {
+                metrics,
+                artifact,
+                body_bytes,
+                started: Arc::new(Mutex::new(Some(started_tx))),
+                release: Arc::new(Mutex::new(Some(release_rx))),
+            },
+            started_rx,
+            release_tx,
+        )
+    }
+
+    async fn upload(&self) -> Result<(), MockUploadError> {
+        let mut request = self
+            .metrics
+            .start_http_request(self.artifact, self.body_bytes);
+        let started = self.started.lock().expect("started lock").take();
+        if let Some(started) = started {
+            started.send(()).expect("notify upload started");
+        }
+        let release = self
+            .release
+            .lock()
+            .expect("release lock")
+            .take()
+            .expect("release receiver should be present");
+        match release.await.unwrap_or(Err(MockUploadError::HttpStatus)) {
+            Ok(()) => {
+                request.succeed();
+                Ok(())
+            }
+            Err(error) => {
+                request.http_status_error();
+                Err(error)
+            }
+        }
+    }
+}
+
+#[test]
+fn live_upload_in_flight_gauge_tracks_blocked_upload() {
+    deterministic::Runner::default().start(|context| async move {
+        let metrics = IndexerMetrics::register(&context.child("indexer"));
+        let artifact = LiveUploadArtifact::FinalizedBlock;
+        let (client, started, release) =
+            MockClient::new(metrics.clone(), HttpArtifact::Finalization, 0);
+
+        metrics.live_upload_spawned(artifact);
+        let handle = context.child("upload").spawn({
+            let metrics = metrics.clone();
+            move |context| async move {
+                let mut upload = metrics.start_live_upload(context, artifact);
+                client.upload().await.expect("mock upload succeeds");
+                upload.succeed();
+            }
+        });
+
+        started.await.expect("live upload started");
+        let encoded = context.encode();
+        assert_metric(
+            &encoded,
+            "indexer_live_upload_spawn_total{artifact=\"finalized_block\"} 1",
+        );
+        assert_metric(
+            &encoded,
+            "indexer_live_upload_in_flight{artifact=\"finalized_block\"} 1",
+        );
+
+        release.send(Ok(())).expect("release upload");
+        handle.await.expect("upload task should complete");
+
+        let encoded = context.encode();
+        assert_metric(
+            &encoded,
+            "indexer_live_upload_in_flight{artifact=\"finalized_block\"} 0",
+        );
+        assert_metric(
+            &encoded,
+            "indexer_live_upload_complete_total{artifact=\"finalized_block\",status=\"success\"} 1",
+        );
+    });
+}
+
+#[test]
+fn http_body_bytes_are_held_only_while_request_is_in_flight() {
+    deterministic::Runner::default().start(|context| async move {
+        let metrics = IndexerMetrics::register(&context.child("indexer"));
+        let artifact = HttpArtifact::Finalization;
+        let (client, started, release) = MockClient::new(metrics.clone(), artifact, 512);
+
+        let handle = context.child("http_success").spawn({
+            move |_| async move {
+                client.upload().await.expect("mock upload succeeds");
+            }
+        });
+
+        started.await.expect("http request started");
+        let encoded = context.encode();
+        assert_metric(
+            &encoded,
+            "indexer_http_request_body_in_flight_bytes{artifact=\"finalization\"} 512",
+        );
+        assert_metric(
+            &encoded,
+            "indexer_http_request_in_flight{artifact=\"finalization\"} 1",
+        );
+
+        release.send(Ok(())).expect("release http success");
+        handle.await.expect("http success task should complete");
+
+        let encoded = context.encode();
+        assert_metric(
+            &encoded,
+            "indexer_http_request_body_in_flight_bytes{artifact=\"finalization\"} 0",
+        );
+        assert_metric(
+            &encoded,
+            "indexer_http_request_in_flight{artifact=\"finalization\"} 0",
+        );
+        assert_metric(
+            &encoded,
+            "indexer_http_request_complete_total{artifact=\"finalization\",status=\"success\"} 1",
+        );
+
+        let (client, started, release) = MockClient::new(metrics.clone(), artifact, 128);
+        let handle = context.child("http_failure").spawn(move |_| async move {
+            client.upload().await.expect_err("mock upload fails");
+        });
+        started.await.expect("http failure started");
+        release
+            .send(Err(MockUploadError::HttpStatus))
+            .expect("release http failure");
+        handle.await.expect("http failure task should complete");
+
+        let encoded = context.encode();
+        assert_metric(
+            &encoded,
+            "indexer_http_request_body_in_flight_bytes{artifact=\"finalization\"} 0",
+        );
+        assert_metric(
+            &encoded,
+            "indexer_http_request_complete_total{artifact=\"finalization\",status=\"http_status_error\"} 1",
+        );
+    });
 }
 
 #[test]
@@ -357,5 +550,50 @@ fn backfill_metrics_use_expected_labels() {
         assert!(encoded.contains("indexer_dkg_upload_duration_seconds_bucket"));
         assert!(encoded.contains("indexer_dkg_upload_last_attempt_epoch 8"));
         assert!(encoded.contains("indexer_dkg_upload_last_success_epoch 7"));
+    });
+}
+
+#[test]
+fn backfill_active_gauges_track_block_and_body_guards() {
+    deterministic::Runner::default().start(|context| async move {
+        let metrics = IndexerMetrics::register(&context.child("indexer"));
+        let first = block(10, 10, b"first");
+        let second = block(11, 11, b"second");
+
+        metrics.backfill_configured(2);
+        let mut first_upload = metrics.start_backfill_upload();
+        first_upload.hold_block(&first);
+        let mut second_upload = metrics.start_backfill_upload();
+        second_upload.hold_block(&second);
+        let body = metrics.start_backfill_body(1_024);
+
+        let encoded = context.encode();
+        assert_metric(&encoded, "indexer_backfill_max_active 2");
+        assert_metric(&encoded, "indexer_backfill_active_uploads 2");
+        assert!(encoded.contains("indexer_backfill_active_block_estimated_bytes "));
+        assert_metric(
+            &encoded,
+            "indexer_backfill_active_body_estimated_bytes 1024",
+        );
+
+        first_upload.uploaded();
+        second_upload.skipped();
+        drop(body);
+        drop(first_upload);
+        drop(second_upload);
+
+        let encoded = context.encode();
+        assert_metric(&encoded, "indexer_backfill_active_uploads 0");
+        assert_metric(&encoded, "indexer_backfill_active_block_estimated_bytes 0");
+        assert_metric(&encoded, "indexer_backfill_active_body_estimated_bytes 0");
+        assert_metric(&encoded, "indexer_backfill_start_total 2");
+        assert_metric(
+            &encoded,
+            "indexer_backfill_complete_total{status=\"uploaded\"} 1",
+        );
+        assert_metric(
+            &encoded,
+            "indexer_backfill_complete_total{status=\"skipped\"} 1",
+        );
     });
 }
