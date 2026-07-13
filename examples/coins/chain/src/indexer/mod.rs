@@ -13,10 +13,14 @@ use std::{future::Future, num::NonZeroUsize, sync::Arc, time::Duration};
 use thiserror::Error;
 
 mod backfiller;
+mod metrics;
 mod pusher;
 
 pub(crate) use backfiller::{Consumer, Entry, Producer};
 use backfiller::{SharedState, State};
+pub(crate) use metrics::IndexerMetrics;
+#[cfg(test)]
+pub(crate) use metrics::LiveUploadArtifact;
 pub(crate) use pusher::Pusher;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -141,12 +145,14 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Indexer<E, C> {
         backfiller_max_active: NonZeroUsize,
         backfiller_retry: Duration,
     ) -> Self {
+        let metrics = IndexerMetrics::register(&context);
         let uploads: SharedState = Arc::new(Mutex::new(State::new()));
         let pusher = Pusher::new(
             context.child("pusher"),
             client.clone(),
             marshal.clone(),
             uploads.clone(),
+            metrics.clone(),
         );
         let (writer, reader) = backfiller;
         let producer = backfiller::producer::init(
