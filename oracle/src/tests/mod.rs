@@ -60,7 +60,7 @@ fn context(timestamp_ms: u64) -> RuntimeContext {
 }
 
 fn sign(signer: &PrivateKey, nonce: u64, operation: OracleOperation) -> Transaction {
-    Transaction::sign(signer, nonce, operation)
+    Transaction::sign(signer, nunchi_common::DEFAULT_CHAIN_ID, nonce, operation)
 }
 
 fn append_tx(

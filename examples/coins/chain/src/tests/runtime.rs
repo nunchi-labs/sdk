@@ -36,10 +36,7 @@ fn runtime_apply_forwards_coin_events() {
             .await
             .unwrap();
         let key = PrivateKey::ed25519_from_seed(1);
-        let tx = nunchi_coins::Transaction::sign(
-            &key,
-            0,
-            CoinOperation::CreateToken {
+        let tx = nunchi_coins::Transaction::sign(&key, nunchi_common::DEFAULT_CHAIN_ID, 0, CoinOperation::CreateToken {
                 spec: CoinSpec::new(
                     TokenSymbol::new("NCH").unwrap(),
                     TokenName::new("Nunchi").unwrap(),
@@ -72,10 +69,7 @@ fn runtime_validate_has_no_event_sink_surface() {
             .await
             .unwrap();
         let key = PrivateKey::ed25519_from_seed(1);
-        let tx = Transaction::from(nunchi_coins::Transaction::sign(
-            &key,
-            0,
-            CoinOperation::CreateToken {
+        let tx = Transaction::from(nunchi_coins::Transaction::sign(&key, nunchi_common::DEFAULT_CHAIN_ID, 0, CoinOperation::CreateToken {
                 spec: CoinSpec::new(
                     TokenSymbol::new("NCH").unwrap(),
                     TokenName::new("Nunchi").unwrap(),
@@ -139,12 +133,8 @@ fn runtime_charges_fee_before_dispatch() {
         let spec = &genesis.tokens[0].spec;
         let coin = TokenFactory::derive_coin_id(&alice, 0, spec);
 
-        let tx = Transaction::from(nunchi_coins::Transaction::sign(
-            &alice_key,
-            0,
-            CoinOperation::Transfer {
-                coin,
-                from: alice.clone(),
+        let tx = Transaction::from(nunchi_coins::Transaction::sign(&alice_key, nunchi_common::DEFAULT_CHAIN_ID, 0, CoinOperation::Transfer {
+                coin, from: alice.clone(),
                 to: bob.clone(),
                 amount: 100,
             },
@@ -179,10 +169,7 @@ fn bridge_lock_escrows_funds_and_records_transfer() {
 
         // Create a token; alice (the issuer) receives the full 1_000 supply.
         let mut events = VecEventSink::new();
-        let create = Transaction::from(nunchi_coins::Transaction::sign(
-            &alice,
-            0,
-            CoinOperation::CreateToken {
+        let create = Transaction::from(nunchi_coins::Transaction::sign(&alice, nunchi_common::DEFAULT_CHAIN_ID, 0, CoinOperation::CreateToken {
                 spec: CoinSpec::new(
                     TokenSymbol::new("NCH").unwrap(),
                     TokenName::new("Nunchi").unwrap(),
@@ -205,9 +192,8 @@ fn bridge_lock_escrows_funds_and_records_transfer() {
         BridgeGenesis::new(local_chain).apply(&mut state);
         let dest = ChainId(Sha256::hash(b"dest-chain"));
         let recipient = Address::external(&PrivateKey::ed25519_from_seed(2).public_key());
-        let lock = Transaction::from(BridgeTransaction::sign(
-            &alice,
-            0,
+        let lock = Transaction::from(BridgeTransaction::sign(&alice, nunchi_common::DEFAULT_CHAIN_ID,
+                0,
             BridgeOperation::Lock {
                 destination_chain_id: dest,
                 local_asset: coin.0,
@@ -263,10 +249,7 @@ fn bridge_lock_reverts_escrow_when_bridge_rejects() {
         let alice_addr = Address::external(&alice.public_key());
 
         let mut events = VecEventSink::new();
-        let create = Transaction::from(nunchi_coins::Transaction::sign(
-            &alice,
-            0,
-            CoinOperation::CreateToken {
+        let create = Transaction::from(nunchi_coins::Transaction::sign(&alice, nunchi_common::DEFAULT_CHAIN_ID, 0, CoinOperation::CreateToken {
                 spec: CoinSpec::new(
                     TokenSymbol::new("NCH").unwrap(),
                     TokenName::new("Nunchi").unwrap(),
@@ -290,9 +273,8 @@ fn bridge_lock_reverts_escrow_when_bridge_rejects() {
         let recipient = Address::external(&PrivateKey::ed25519_from_seed(2).public_key());
 
         // Sufficient balance, but a wrong bridge nonce (expected 0, given 5).
-        let lock = Transaction::from(BridgeTransaction::sign(
-            &alice,
-            5,
+        let lock = Transaction::from(BridgeTransaction::sign(&alice, nunchi_common::DEFAULT_CHAIN_ID,
+                5,
             BridgeOperation::Lock {
                 destination_chain_id: dest,
                 local_asset: coin.0,
@@ -349,12 +331,8 @@ fn runtime_rejects_transaction_that_cannot_pay_fee() {
         let coin = TokenFactory::derive_coin_id(&alice, 0, &genesis.tokens[0].spec);
 
         // Bob holds no fee coin, so the ante rejects the transaction before dispatch.
-        let tx = Transaction::from(nunchi_coins::Transaction::sign(
-            &bob_key,
-            0,
-            CoinOperation::Transfer {
-                coin,
-                from: bob.clone(),
+        let tx = Transaction::from(nunchi_coins::Transaction::sign(&bob_key, nunchi_common::DEFAULT_CHAIN_ID, 0, CoinOperation::Transfer {
+                coin, from: bob.clone(),
                 to: alice,
                 amount: 1,
             },
@@ -379,10 +357,7 @@ fn bridge_lock_rejects_insufficient_balance_without_side_effects() {
         let alice_addr = Address::external(&alice.public_key());
 
         let mut events = VecEventSink::new();
-        let create = Transaction::from(nunchi_coins::Transaction::sign(
-            &alice,
-            0,
-            CoinOperation::CreateToken {
+        let create = Transaction::from(nunchi_coins::Transaction::sign(&alice, nunchi_common::DEFAULT_CHAIN_ID, 0, CoinOperation::CreateToken {
                 spec: CoinSpec::new(
                     TokenSymbol::new("NCH").unwrap(),
                     TokenName::new("Nunchi").unwrap(),
@@ -406,9 +381,8 @@ fn bridge_lock_rejects_insufficient_balance_without_side_effects() {
         let recipient = Address::external(&PrivateKey::ed25519_from_seed(2).public_key());
 
         // Lock more than alice holds: the escrow debit fails before any write.
-        let lock = Transaction::from(BridgeTransaction::sign(
-            &alice,
-            0,
+        let lock = Transaction::from(BridgeTransaction::sign(&alice, nunchi_common::DEFAULT_CHAIN_ID,
+                0,
             BridgeOperation::Lock {
                 destination_chain_id: dest,
                 local_asset: coin.0,

@@ -85,7 +85,7 @@ fn mint_respects_max_supply() {
 
         let mint = Transaction::sign(
             &alice_key,
-            nonce,
+            nunchi_common::DEFAULT_CHAIN_ID, nonce,
             crate::CoinOperation::Mint {
                 coin,
                 to: bob.clone(),
@@ -101,6 +101,7 @@ fn mint_respects_max_supply() {
 
         let mint = Transaction::sign(
             &alice_key,
+            nunchi_common::DEFAULT_CHAIN_ID,
             nonce.checked_add(1).expect("nonce overflow"),
             crate::CoinOperation::Mint {
                 coin,
@@ -133,12 +134,8 @@ fn transfer_via_signed_transaction_moves_balance_and_bumps_nonce() {
             .await
             .expect("create token");
 
-        let tx = Transaction::sign(
-            &alice_key,
-            0,
-            crate::CoinOperation::Transfer {
-                coin,
-                from: alice.clone(),
+        let tx = Transaction::sign(&alice_key, nunchi_common::DEFAULT_CHAIN_ID, 0, crate::CoinOperation::Transfer {
+                coin, from: alice.clone(),
                 to: bob.clone(),
                 amount: 250,
             },
@@ -165,12 +162,8 @@ fn rejects_transaction_with_wrong_nonce() {
             .await
             .expect("create token");
 
-        let tx = Transaction::sign(
-            &alice_key,
-            5,
-            crate::CoinOperation::Transfer {
-                coin,
-                from: alice.clone(),
+        let tx = Transaction::sign(&alice_key, nunchi_common::DEFAULT_CHAIN_ID, 5, crate::CoinOperation::Transfer {
+                coin, from: alice.clone(),
                 to: bob,
                 amount: 1,
             },
@@ -201,12 +194,8 @@ fn rejects_transaction_with_bad_signature() {
             .await
             .expect("create token");
 
-        let mut tx = Transaction::sign(
-            &alice_key,
-            0,
-            crate::CoinOperation::Transfer {
-                coin,
-                from: alice.clone(),
+        let mut tx = Transaction::sign(&alice_key, nunchi_common::DEFAULT_CHAIN_ID, 0, crate::CoinOperation::Transfer {
+                coin, from: alice.clone(),
                 to: bob,
                 amount: 1,
             },
@@ -280,7 +269,7 @@ fn multisig_transaction_moves_balance_and_bumps_account_nonce_once() {
             alice.clone(),
             policy,
             &[&alice_a, &alice_b],
-            0,
+            nunchi_common::DEFAULT_CHAIN_ID, 0,
             crate::CoinOperation::Transfer {
                 coin,
                 from: alice.clone(),
@@ -321,7 +310,7 @@ fn rejects_multisig_transaction_below_threshold() {
             alice.clone(),
             policy,
             &[&alice_a],
-            0,
+            nunchi_common::DEFAULT_CHAIN_ID, 0,
             crate::CoinOperation::Transfer {
                 coin,
                 from: alice,
@@ -352,7 +341,7 @@ fn rejects_unregistered_multisig_policy() {
             alice.clone(),
             policy,
             &[&alice_a, &alice_b],
-            0,
+            nunchi_common::DEFAULT_CHAIN_ID, 0,
             crate::CoinOperation::CreateToken {
                 spec: spec(1_000, None).expect("valid coin spec"),
             },
@@ -405,7 +394,7 @@ fn register_account_policy_operation_initializes_multisig_on_chain() {
             alice.clone(),
             policy.clone(),
             &[&alice_a, &alice_b],
-            0,
+            nunchi_common::DEFAULT_CHAIN_ID, 0,
             crate::CoinOperation::RegisterAccountPolicy {
                 account_id: alice.clone(),
                 policy: policy.clone(),
@@ -429,7 +418,7 @@ fn register_account_policy_operation_initializes_multisig_on_chain() {
             alice.clone(),
             policy,
             &[&alice_a, &alice_b],
-            1,
+            nunchi_common::DEFAULT_CHAIN_ID, 1,
             crate::CoinOperation::Transfer {
                 coin,
                 from: alice.clone(),
@@ -456,14 +445,8 @@ fn register_account_policy_operation_rejects_external_registration() {
             MultisigPolicy::new(2, vec![alice_a.public_key(), alice_b.public_key()]).unwrap();
         let alice = multisig_account(&policy);
 
-        let tx = Transaction::sign(
-            &attacker,
-            0,
-            crate::CoinOperation::RegisterAccountPolicy {
-                account_id: alice,
-                policy,
-            },
-        );
+        let tx = Transaction::sign(&attacker, nunchi_common::DEFAULT_CHAIN_ID, 0, crate::CoinOperation::RegisterAccountPolicy {
+                account_id: alice, policy, });
 
         assert_eq!(
             ledger.apply_transaction(&tx, NoopEventSink).await,
@@ -490,7 +473,7 @@ fn register_account_policy_operation_cannot_hijack_external_account() {
             alice.clone(),
             policy.clone(),
             &[&attacker],
-            0,
+            nunchi_common::DEFAULT_CHAIN_ID, 0,
             crate::CoinOperation::RegisterAccountPolicy {
                 account_id: alice.clone(),
                 policy,
@@ -525,7 +508,7 @@ fn register_account_policy_operation_rejects_policy_witness_mismatch() {
             alice.clone(),
             authorized,
             &[&alice_a, &alice_b],
-            0,
+            nunchi_common::DEFAULT_CHAIN_ID, 0,
             crate::CoinOperation::RegisterAccountPolicy {
                 account_id: alice.clone(),
                 policy: registered,
@@ -565,7 +548,7 @@ fn rejects_cross_account_multisig_replay() {
             account_a,
             policy_a,
             &[&alice_a, &alice_b],
-            0,
+            nunchi_common::DEFAULT_CHAIN_ID, 0,
             crate::CoinOperation::CreateToken {
                 spec: spec(1_000, None).expect("valid coin spec"),
             },
@@ -594,12 +577,8 @@ fn burn_reduces_balance_and_total_supply() {
             .await
             .expect("create token");
 
-        let burn = Transaction::sign(
-            &alice_key,
-            0,
-            crate::CoinOperation::Burn {
-                coin,
-                from: alice.clone(),
+        let burn = Transaction::sign(&alice_key, nunchi_common::DEFAULT_CHAIN_ID, 0, crate::CoinOperation::Burn {
+                coin, from: alice.clone(),
                 amount: 400,
             },
         );
@@ -627,15 +606,8 @@ fn burn_rejects_zero_amount() {
             .await
             .expect("create token");
 
-        let burn = Transaction::sign(
-            &alice_key,
-            0,
-            crate::CoinOperation::Burn {
-                coin,
-                from: alice,
-                amount: 0,
-            },
-        );
+        let burn = Transaction::sign(&alice_key, nunchi_common::DEFAULT_CHAIN_ID, 0, crate::CoinOperation::Burn {
+                coin, from: alice, amount: 0, });
         assert_eq!(
             ledger.apply_transaction(&burn, NoopEventSink).await.unwrap_err(),
             LedgerError::InvalidAmount
@@ -658,15 +630,8 @@ fn burn_rejects_unauthorized_signer() {
             .expect("create token");
 
         // alice signs a burn drawn from bob's account.
-        let burn = Transaction::sign(
-            &alice_key,
-            0,
-            crate::CoinOperation::Burn {
-                coin,
-                from: bob,
-                amount: 100,
-            },
-        );
+        let burn = Transaction::sign(&alice_key, nunchi_common::DEFAULT_CHAIN_ID, 0, crate::CoinOperation::Burn {
+                coin, from: bob, amount: 100, });
         assert_eq!(
             ledger.apply_transaction(&burn, NoopEventSink).await.unwrap_err(),
             LedgerError::Unauthorized
@@ -687,15 +652,8 @@ fn burn_rejects_insufficient_balance() {
             .await
             .expect("create token");
 
-        let burn = Transaction::sign(
-            &alice_key,
-            0,
-            crate::CoinOperation::Burn {
-                coin,
-                from: alice,
-                amount: 2_000,
-            },
-        );
+        let burn = Transaction::sign(&alice_key, nunchi_common::DEFAULT_CHAIN_ID, 0, crate::CoinOperation::Burn {
+                coin, from: alice, amount: 2_000, });
         assert!(matches!(
             ledger.apply_transaction(&burn, NoopEventSink).await.unwrap_err(),
             LedgerError::InsufficientBalance {
@@ -724,12 +682,8 @@ fn mint_rejects_non_issuer() {
             .expect("create token");
 
         // bob is not the issuer, so he cannot mint new supply.
-        let mint = Transaction::sign(
-            &bob_key,
-            0,
-            crate::CoinOperation::Mint {
-                coin,
-                to: bob.clone(),
+        let mint = Transaction::sign(&bob_key, nunchi_common::DEFAULT_CHAIN_ID, 0, crate::CoinOperation::Mint {
+                coin, to: bob.clone(),
                 amount: 100,
             },
         );
@@ -753,15 +707,8 @@ fn mint_rejects_zero_amount() {
             .await
             .expect("create token");
 
-        let mint = Transaction::sign(
-            &alice_key,
-            0,
-            crate::CoinOperation::Mint {
-                coin,
-                to: alice,
-                amount: 0,
-            },
-        );
+        let mint = Transaction::sign(&alice_key, nunchi_common::DEFAULT_CHAIN_ID, 0, crate::CoinOperation::Mint {
+                coin, to: alice, amount: 0, });
         assert_eq!(
             ledger.apply_transaction(&mint, NoopEventSink).await.unwrap_err(),
             LedgerError::InvalidAmount
@@ -779,15 +726,8 @@ fn mint_rejects_unknown_token() {
 
         let unknown =
             crate::TokenFactory::derive_coin_id(&alice, 7, &spec(1, None).expect("valid coin spec"));
-        let mint = Transaction::sign(
-            &alice_key,
-            0,
-            crate::CoinOperation::Mint {
-                coin: unknown,
-                to: alice,
-                amount: 100,
-            },
-        );
+        let mint = Transaction::sign(&alice_key, nunchi_common::DEFAULT_CHAIN_ID, 0, crate::CoinOperation::Mint {
+                coin: unknown, to: alice, amount: 100, });
         assert_eq!(
             ledger.apply_transaction(&mint, NoopEventSink).await.unwrap_err(),
             LedgerError::UnknownToken(unknown)
@@ -810,15 +750,8 @@ fn mint_rejects_supply_overflow() {
             .await
             .expect("create token");
 
-        let mint = Transaction::sign(
-            &alice_key,
-            0,
-            crate::CoinOperation::Mint {
-                coin,
-                to: bob,
-                amount: 1,
-            },
-        );
+        let mint = Transaction::sign(&alice_key, nunchi_common::DEFAULT_CHAIN_ID, 0, crate::CoinOperation::Mint {
+                coin, to: bob, amount: 1, });
         assert_eq!(
             ledger.apply_transaction(&mint, NoopEventSink).await.unwrap_err(),
             LedgerError::SupplyOverflow
@@ -842,16 +775,8 @@ fn transfer_rejects_insufficient_balance() {
             .await
             .expect("create token");
 
-        let tx = Transaction::sign(
-            &alice_key,
-            0,
-            crate::CoinOperation::Transfer {
-                coin,
-                from: alice,
-                to: bob,
-                amount: 2_000,
-            },
-        );
+        let tx = Transaction::sign(&alice_key, nunchi_common::DEFAULT_CHAIN_ID, 0, crate::CoinOperation::Transfer {
+                coin, from: alice, to: bob, amount: 2_000, });
         assert!(matches!(
             ledger.apply_transaction(&tx, NoopEventSink).await.unwrap_err(),
             LedgerError::InsufficientBalance {
@@ -877,16 +802,8 @@ fn transfer_rejects_zero_amount() {
             .await
             .expect("create token");
 
-        let tx = Transaction::sign(
-            &alice_key,
-            0,
-            crate::CoinOperation::Transfer {
-                coin,
-                from: alice,
-                to: bob,
-                amount: 0,
-            },
-        );
+        let tx = Transaction::sign(&alice_key, nunchi_common::DEFAULT_CHAIN_ID, 0, crate::CoinOperation::Transfer {
+                coin, from: alice, to: bob, amount: 0, });
         assert_eq!(
             ledger.apply_transaction(&tx, NoopEventSink).await.unwrap_err(),
             LedgerError::InvalidAmount
@@ -909,16 +826,8 @@ fn transfer_rejects_unauthorized_signer() {
             .expect("create token");
 
         // alice signs a transfer drawn from bob's account.
-        let tx = Transaction::sign(
-            &alice_key,
-            0,
-            crate::CoinOperation::Transfer {
-                coin,
-                from: bob,
-                to: alice,
-                amount: 100,
-            },
-        );
+        let tx = Transaction::sign(&alice_key, nunchi_common::DEFAULT_CHAIN_ID, 0, crate::CoinOperation::Transfer {
+                coin, from: bob, to: alice, amount: 100, });
         assert_eq!(
             ledger.apply_transaction(&tx, NoopEventSink).await.unwrap_err(),
             LedgerError::Unauthorized
@@ -939,12 +848,8 @@ fn transfer_to_self_preserves_balance() {
             .await
             .expect("create token");
 
-        let tx = Transaction::sign(
-            &alice_key,
-            0,
-            crate::CoinOperation::Transfer {
-                coin,
-                from: alice.clone(),
+        let tx = Transaction::sign(&alice_key, nunchi_common::DEFAULT_CHAIN_ID, 0, crate::CoinOperation::Transfer {
+                coin, from: alice.clone(),
                 to: alice.clone(),
                 amount: 250,
             },

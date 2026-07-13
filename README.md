@@ -37,7 +37,7 @@ This repository will contain modules for building public and private blockchains
 * [`nunchi-coins`](coins/) - defines what a coin and account are
 * [`nunchi-common`](common/) - core abstractions for addresses, state db, and runtime
 * [`nunchi-crypto`](crypto/) - core primitives/wrappers around commonware cryptographic primitives
-* [`nunchi-rpc`](rpc/) - core abstractions for modular RPC
+* [`nunchi-wallet`](wallet/) - native wallet framework (Bech32 CLI wallets, encrypted keystore, RPC client, passkey types)
 * [`nunchi-dkg`](dkg/) - contains dkg resharing ceremony logic and a consensus engine orchestator
 * [`nunchi-bridge`](bridge/) - bridges state roots from other chains, to verify against
 * [`nunchi-mempool`](mempool/) - simple p2p mempool
@@ -67,3 +67,4 @@ This repository will contain modules for building public and private blockchains
 * [`coins-chain`](examples/coins/chain) - default PoA chain
 * [`bridge-chain`](examples/bridge-chain) - two chains bridging consensus certificates
 * [`custom-module`](examples/custom-module) - starter template for creating a custom nunchi module
+* [`wallet-web`](examples/wallet-web) - browser passkey wallet kit for dApp integrators

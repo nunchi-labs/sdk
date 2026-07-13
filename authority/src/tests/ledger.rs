@@ -51,10 +51,7 @@ async fn configured() -> (
 ) {
     let owners = vec![owner(1), owner(2), owner(3)];
     let validators = vec![validator(10), validator(11)];
-    let configure = Transaction::sign(
-        &owners[0],
-        0,
-        AuthorityOperation::Configure {
+    let configure = Transaction::sign(&owners[0], nunchi_common::DEFAULT_CHAIN_ID, 0, AuthorityOperation::Configure {
             policy: policy(&owners, 2),
             initial_validators: validators.clone(),
             epoch: 0,
@@ -73,7 +70,7 @@ async fn submit(
 ) -> Result<(), AuthorityError> {
     let nonce = ledger.db().nonce(&owner.public_key()).await.unwrap();
     ledger
-        .apply_transaction(&Transaction::sign(owner, nonce, operation), current_epoch)
+        .apply_transaction(&Transaction::sign(owner, nunchi_common::DEFAULT_CHAIN_ID, nonce, operation), current_epoch)
         .await
 }
 
@@ -351,10 +348,7 @@ fn nonce_mismatch_is_rejected() {
         let (mut ledger, owners, _) = configured().await;
         let result = ledger
             .apply_transaction(
-                &Transaction::sign(
-                    &owners[0],
-                    5,
-                    AuthorityOperation::Propose {
+                &Transaction::sign(&owners[0], nunchi_common::DEFAULT_CHAIN_ID, 5, AuthorityOperation::Propose {
                         change: RegistryChange::AddValidator {
                             validator: validator(12),
                         },

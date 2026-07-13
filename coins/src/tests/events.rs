@@ -48,7 +48,7 @@ fn register_account_policy_emits_event() {
             alice.clone(),
             policy.clone(),
             &[&alice_a, &alice_b],
-            0,
+            nunchi_common::DEFAULT_CHAIN_ID, 0,
             CoinOperation::RegisterAccountPolicy {
                 account_id: alice.clone(),
                 policy: policy.clone(),
@@ -80,10 +80,7 @@ fn create_token_emits_event() {
         let mut ledger = ledger(context).await;
         let alice_key = PrivateKey::ed25519_from_seed(1);
         let alice = address(&alice_key);
-        let tx = Transaction::sign(
-            &alice_key,
-            0,
-            CoinOperation::CreateToken {
+        let tx = Transaction::sign(&alice_key, nunchi_common::DEFAULT_CHAIN_ID, 0, CoinOperation::CreateToken {
                 spec: spec(1_000, Some(2_000)).expect("valid coin spec"),
             },
         );
@@ -119,12 +116,8 @@ fn mint_emits_event() {
             .create_token(alice, spec(1_000, None).expect("valid coin spec"))
             .await
             .expect("create token");
-        let tx = Transaction::sign(
-            &alice_key,
-            0,
-            CoinOperation::Mint {
-                coin,
-                to: bob.clone(),
+        let tx = Transaction::sign(&alice_key, nunchi_common::DEFAULT_CHAIN_ID, 0, CoinOperation::Mint {
+                coin, to: bob.clone(),
                 amount: 250,
             },
         );
@@ -157,12 +150,8 @@ fn burn_emits_event() {
             .create_token(alice.clone(), spec(1_000, None).expect("valid coin spec"))
             .await
             .expect("create token");
-        let tx = Transaction::sign(
-            &alice_key,
-            0,
-            CoinOperation::Burn {
-                coin,
-                from: alice.clone(),
+        let tx = Transaction::sign(&alice_key, nunchi_common::DEFAULT_CHAIN_ID, 0, CoinOperation::Burn {
+                coin, from: alice.clone(),
                 amount: 250,
             },
         );
@@ -196,12 +185,8 @@ fn transfer_emits_event() {
             .create_token(alice.clone(), spec(1_000, None).expect("valid coin spec"))
             .await
             .expect("create token");
-        let tx = Transaction::sign(
-            &alice_key,
-            0,
-            CoinOperation::Transfer {
-                coin,
-                from: alice.clone(),
+        let tx = Transaction::sign(&alice_key, nunchi_common::DEFAULT_CHAIN_ID, 0, CoinOperation::Transfer {
+                coin, from: alice.clone(),
                 to: bob.clone(),
                 amount: 250,
             },
@@ -239,12 +224,8 @@ fn failed_transactions_emit_no_events() {
             .await
             .expect("create token");
 
-        let mut bad_signature = Transaction::sign(
-            &alice_key,
-            0,
-            CoinOperation::Transfer {
-                coin,
-                from: alice.clone(),
+        let mut bad_signature = Transaction::sign(&alice_key, nunchi_common::DEFAULT_CHAIN_ID, 0, CoinOperation::Transfer {
+                coin, from: alice.clone(),
                 to: bob.clone(),
                 amount: 1,
             },
@@ -262,12 +243,8 @@ fn failed_transactions_emit_no_events() {
         )
         .await;
 
-        let wrong_nonce = Transaction::sign(
-            &alice_key,
-            5,
-            CoinOperation::Transfer {
-                coin,
-                from: alice.clone(),
+        let wrong_nonce = Transaction::sign(&alice_key, nunchi_common::DEFAULT_CHAIN_ID, 5, CoinOperation::Transfer {
+                coin, from: alice.clone(),
                 to: bob.clone(),
                 amount: 1,
             },
@@ -283,36 +260,24 @@ fn failed_transactions_emit_no_events() {
         ));
         assert!(events.is_empty());
 
-        let zero_amount = Transaction::sign(
-            &alice_key,
-            0,
-            CoinOperation::Transfer {
-                coin,
-                from: alice.clone(),
+        let zero_amount = Transaction::sign(&alice_key, nunchi_common::DEFAULT_CHAIN_ID, 0, CoinOperation::Transfer {
+                coin, from: alice.clone(),
                 to: bob.clone(),
                 amount: 0,
             },
         );
         assert_no_event(&mut ledger, &zero_amount, LedgerError::InvalidAmount).await;
 
-        let unauthorized = Transaction::sign(
-            &alice_key,
-            0,
-            CoinOperation::Transfer {
-                coin,
-                from: bob.clone(),
+        let unauthorized = Transaction::sign(&alice_key, nunchi_common::DEFAULT_CHAIN_ID, 0, CoinOperation::Transfer {
+                coin, from: bob.clone(),
                 to: carol,
                 amount: 1,
             },
         );
         assert_no_event(&mut ledger, &unauthorized, LedgerError::Unauthorized).await;
 
-        let insufficient = Transaction::sign(
-            &bob_key,
-            0,
-            CoinOperation::Transfer {
-                coin,
-                from: bob.clone(),
+        let insufficient = Transaction::sign(&bob_key, nunchi_common::DEFAULT_CHAIN_ID, 0, CoinOperation::Transfer {
+                coin, from: bob.clone(),
                 to: alice,
                 amount: 1,
             },

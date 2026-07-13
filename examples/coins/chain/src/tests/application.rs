@@ -57,6 +57,7 @@ fn proposal_skips_unregistered_multisig() {
             account_id.clone(),
             policy.clone(),
             &[&alice_a, &alice_b],
+            nunchi_common::DEFAULT_CHAIN_ID,
             0,
             CoinOperation::CreateToken { spec: spec() },
         );
