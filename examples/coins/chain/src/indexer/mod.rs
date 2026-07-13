@@ -20,7 +20,9 @@ pub(crate) use backfiller::{Consumer, Entry, Producer};
 use backfiller::{SharedState, State};
 pub(crate) use metrics::IndexerMetrics;
 #[cfg(test)]
-pub(crate) use metrics::{BlockMetricSource, HttpArtifact, LiveUploadArtifact};
+pub(crate) use metrics::{
+    BlockMetricSource, HttpArtifact, LiveUploadArtifact, SharedCacheSource, SharedRetentionReason,
+};
 use metrics::HttpArtifact as UploadArtifact;
 pub(crate) use pusher::Pusher;
 
@@ -201,7 +203,7 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Indexer<E, C> {
             backfiller_retry,
             metrics,
         } = config;
-        let uploads: SharedState = Arc::new(Mutex::new(State::new()));
+        let uploads: SharedState = Arc::new(Mutex::new(State::with_metrics(metrics.clone())));
         let pusher = Pusher::new(
             context.child("pusher"),
             client.clone(),

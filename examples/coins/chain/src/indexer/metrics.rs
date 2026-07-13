@@ -2,8 +2,8 @@ use crate::Block;
 use commonware_runtime::{
     telemetry::metrics::{
         encoding::EncodeLabelValue as EncodeLabelValueTrait, histogram::Buckets, raw,
-        CounterFamily, EncodeLabelSet, Gauge, GaugeFamily, GaugeValue, HistogramExt as _,
-        MetricsExt as _, Registered,
+        CounterFamily, EncodeLabelSet, Gauge, GaugeExt as _, GaugeFamily, GaugeValue,
+        HistogramExt as _, MetricsExt as _, Registered,
     },
     Clock, Metrics,
 };
@@ -186,6 +186,62 @@ impl EncodeLabelValueTrait for BlockMetricSource {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum SharedCacheSource {
+    ProducerRecord,
+    LiveCertificate,
+    ConsumerMarshal,
+}
+
+impl SharedCacheSource {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::ProducerRecord => "producer_record",
+            Self::LiveCertificate => "live_certificate",
+            Self::ConsumerMarshal => "consumer_marshal",
+        }
+    }
+}
+
+impl EncodeLabelValueTrait for SharedCacheSource {
+    fn encode(
+        &self,
+        encoder: &mut commonware_runtime::telemetry::metrics::LabelValueEncoder,
+    ) -> Result<(), fmt::Error> {
+        use fmt::Write as _;
+
+        encoder.write_str(self.as_str())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum SharedRetentionReason {
+    Uploaded,
+    CertificateFinished,
+    Pruned,
+}
+
+impl SharedRetentionReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Uploaded => "uploaded",
+            Self::CertificateFinished => "certificate_finished",
+            Self::Pruned => "pruned",
+        }
+    }
+}
+
+impl EncodeLabelValueTrait for SharedRetentionReason {
+    fn encode(
+        &self,
+        encoder: &mut commonware_runtime::telemetry::metrics::LabelValueEncoder,
+    ) -> Result<(), fmt::Error> {
+        use fmt::Write as _;
+
+        encoder.write_str(self.as_str())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, EncodeLabelSet)]
 struct ArtifactLabel {
     artifact: LiveUploadArtifact,
@@ -219,6 +275,16 @@ struct BlockSourceLabel {
     source: BlockMetricSource,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, EncodeLabelSet)]
+struct SharedCacheSourceLabel {
+    source: SharedCacheSource,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, EncodeLabelSet)]
+struct SharedRetentionReasonLabel {
+    reason: SharedRetentionReason,
+}
+
 #[derive(Clone)]
 pub(crate) struct IndexerMetrics {
     live_upload_spawned: CounterFamily<ArtifactLabel>,
@@ -237,6 +303,16 @@ pub(crate) struct IndexerMetrics {
     http_request_duration: HistogramFamily<HttpCompletionLabel>,
     block_estimated_bytes: HistogramFamily<BlockSourceLabel>,
     block_transaction_count: HistogramFamily<BlockSourceLabel>,
+    shared_cached_blocks: Gauge,
+    shared_cached_block_estimated_bytes: Gauge,
+    shared_certificate_upload_digests: Gauge,
+    shared_certificate_upload_refs: Gauge,
+    shared_uploaded_digests: Gauge,
+    shared_latest_finalized_height: Gauge,
+    shared_acked_through_height: Gauge,
+    shared_pruned: CounterFamily<SharedRetentionReasonLabel>,
+    shared_cache_inserted: CounterFamily<SharedCacheSourceLabel>,
+    shared_cache_removed: CounterFamily<SharedRetentionReasonLabel>,
 }
 
 impl IndexerMetrics {
@@ -327,6 +403,46 @@ impl IndexerMetrics {
                     local_histogram,
                 ),
             ),
+            shared_cached_blocks: context.gauge(
+                "shared_cached_blocks",
+                "Current number of full blocks retained by shared indexer state",
+            ),
+            shared_cached_block_estimated_bytes: context.gauge(
+                "shared_cached_block_estimated_bytes",
+                "Current estimated encoded bytes retained by shared indexer cached blocks",
+            ),
+            shared_certificate_upload_digests: context.gauge(
+                "shared_certificate_upload_digests",
+                "Current number of digests with live certificate uploads in shared indexer state",
+            ),
+            shared_certificate_upload_refs: context.gauge(
+                "shared_certificate_upload_refs",
+                "Current total live certificate upload references in shared indexer state",
+            ),
+            shared_uploaded_digests: context.gauge(
+                "shared_uploaded_digests",
+                "Current number of uploaded digest dedupe entries in shared indexer state",
+            ),
+            shared_latest_finalized_height: context.gauge(
+                "shared_latest_finalized_height",
+                "Latest finalized height observed by shared indexer state",
+            ),
+            shared_acked_through_height: context.gauge(
+                "shared_acked_through_height",
+                "Queue acknowledgement floor tracked by shared indexer state",
+            ),
+            shared_pruned: context.family(
+                "shared_prune",
+                "Total shared indexer state retention removals by reason",
+            ),
+            shared_cache_inserted: context.family(
+                "shared_cache_insert",
+                "Total shared indexer cached block insertions by source",
+            ),
+            shared_cache_removed: context.family(
+                "shared_cache_remove",
+                "Total shared indexer cached block removals by reason",
+            ),
         }
     }
 
@@ -413,6 +529,53 @@ impl IndexerMetrics {
         self.block_transaction_count
             .get_or_create(&label)
             .observe(block.transactions.len() as f64);
+    }
+
+    pub(crate) fn shared_state(
+        &self,
+        cached_blocks: usize,
+        cached_block_estimated_bytes: u64,
+        certificate_upload_digests: usize,
+        certificate_upload_refs: usize,
+        uploaded_digests: usize,
+        latest_finalized_height: u64,
+        acked_through_height: u64,
+    ) {
+        let _ = self.shared_cached_blocks.try_set(cached_blocks);
+        let _ = self
+            .shared_cached_block_estimated_bytes
+            .try_set(cached_block_estimated_bytes);
+        let _ = self
+            .shared_certificate_upload_digests
+            .try_set(certificate_upload_digests);
+        let _ = self
+            .shared_certificate_upload_refs
+            .try_set(certificate_upload_refs);
+        let _ = self.shared_uploaded_digests.try_set(uploaded_digests);
+        let _ = self
+            .shared_latest_finalized_height
+            .try_set(latest_finalized_height);
+        let _ = self
+            .shared_acked_through_height
+            .try_set(acked_through_height);
+    }
+
+    pub(crate) fn shared_cache_inserted(&self, source: SharedCacheSource) {
+        self.shared_cache_inserted
+            .get_or_create(&SharedCacheSourceLabel { source })
+            .inc();
+    }
+
+    pub(crate) fn shared_cache_removed(&self, reason: SharedRetentionReason) {
+        self.shared_cache_removed
+            .get_or_create(&SharedRetentionReasonLabel { reason })
+            .inc();
+    }
+
+    pub(crate) fn shared_pruned(&self, reason: SharedRetentionReason, count: u64) {
+        self.shared_pruned
+            .get_or_create(&SharedRetentionReasonLabel { reason })
+            .inc_by(count);
     }
 }
 
@@ -562,6 +725,6 @@ fn gauge_bytes(bytes: usize) -> GaugeValue {
     bytes.try_into().unwrap_or(GaugeValue::MAX)
 }
 
-fn estimated_block_bytes(block: &Block) -> u64 {
+pub(crate) fn estimated_block_bytes(block: &Block) -> u64 {
     commonware_codec::EncodeSize::encode_size(block) as u64
 }

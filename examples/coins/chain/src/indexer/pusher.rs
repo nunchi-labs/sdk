@@ -1,5 +1,5 @@
 use super::{
-    metrics::{BlockMetricSource, LiveUploadArtifact},
+    metrics::{BlockMetricSource, LiveUploadArtifact, SharedCacheSource},
     Client, IndexerMetrics, SharedState,
 };
 use crate::{Activity, Block, Finalized, Notarized, Scheme, Seed, Seedable};
@@ -70,7 +70,9 @@ impl CertificateUploadGuard {
     }
 
     fn cache_block(&self, block: Block) {
-        self.uploads.lock().cache_block(block);
+        self.uploads
+            .lock()
+            .cache_block(block, SharedCacheSource::LiveCertificate);
     }
 
     fn mark_uploaded(&mut self, height: u64) {

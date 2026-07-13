@@ -1,5 +1,8 @@
 use super::{Decision, Entry, SharedState};
-use crate::indexer::{metrics::BlockMetricSource, Client, IndexerMetrics};
+use crate::indexer::{
+    metrics::{BlockMetricSource, SharedCacheSource},
+    Client, IndexerMetrics,
+};
 use crate::{Block, Finalized, Scheme};
 use commonware_consensus::marshal::{
     core::Mailbox as MarshalMailbox, standard::Standard, Identifier,
@@ -268,7 +271,9 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
                 NextBlock::FetchFromMarshal => {
                     if let Some(block) = marshal.get_block(Identifier::Digest(digest)).await {
                         metrics.observe_block(BlockMetricSource::ConsumerMarshal, &block);
-                        uploads.lock().cache_block(block.clone());
+                        uploads
+                            .lock()
+                            .cache_block(block.clone(), SharedCacheSource::ConsumerMarshal);
                         return Some(block);
                     }
                     warn!(

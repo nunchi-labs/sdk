@@ -1,4 +1,10 @@
-use crate::Block;
+use crate::{
+    indexer::{
+        metrics::{estimated_block_bytes, SharedCacheSource, SharedRetentionReason},
+        IndexerMetrics,
+    },
+    Block,
+};
 use bytes::{Buf, BufMut};
 use commonware_codec::{self, FixedSize, Read, Write};
 use commonware_cryptography::{sha256::Digest, Digestible};
@@ -42,8 +48,16 @@ pub struct State {
     uploaded: PrioritySet<Digest, u64>,
     acked_through: u64,
     latest_finalized: u64,
-    cached_blocks: BTreeMap<Digest, Block>,
+    cached_blocks: BTreeMap<Digest, CachedBlock>,
+    cached_block_estimated_bytes: u64,
     certificate_uploads: BTreeMap<Digest, usize>,
+    certificate_upload_refs: usize,
+    metrics: Option<IndexerMetrics>,
+}
+
+struct CachedBlock {
+    block: Block,
+    estimated_bytes: u64,
 }
 
 impl State {
@@ -53,8 +67,18 @@ impl State {
             acked_through: 0,
             latest_finalized: 0,
             cached_blocks: BTreeMap::new(),
+            cached_block_estimated_bytes: 0,
             certificate_uploads: BTreeMap::new(),
+            certificate_upload_refs: 0,
+            metrics: None,
         }
+    }
+
+    pub fn with_metrics(metrics: IndexerMetrics) -> Self {
+        let mut state = Self::new();
+        state.metrics = Some(metrics);
+        state.sync_metrics();
+        state
     }
 
     fn is_uploaded(&self, digest: &Digest) -> bool {
@@ -68,29 +92,39 @@ impl State {
         };
         self.observe_finalization(entry.height);
         if self.is_uploaded(&entry.digest) {
+            self.sync_metrics();
             return None;
         }
-        self.cache_block(block.clone());
+        self.cache_block_inner(block.clone(), SharedCacheSource::ProducerRecord);
+        self.sync_metrics();
         Some(entry)
     }
 
     pub fn advance_queue_floor(&mut self, height: u64) {
         self.acked_through = self.acked_through.max(height);
         self.prune();
+        self.sync_metrics();
     }
 
     pub fn mark_uploaded(&mut self, digest: Digest, height: u64) {
-        self.cached_blocks.remove(&digest);
+        self.remove_cached_block(&digest, SharedRetentionReason::Uploaded);
+        if !self.uploaded.contains(&digest) {
+            self.shared_pruned(SharedRetentionReason::Uploaded, 1);
+        }
         self.uploaded.put(digest, height);
         self.prune();
+        self.sync_metrics();
     }
 
-    pub fn cache_block(&mut self, block: Block) {
-        self.cached_blocks.entry(block.digest()).or_insert(block);
+    pub fn cache_block(&mut self, block: Block, source: SharedCacheSource) {
+        self.cache_block_inner(block, source);
+        self.sync_metrics();
     }
 
     pub fn cached_block(&self, digest: &Digest) -> Option<Block> {
-        self.cached_blocks.get(digest).cloned()
+        self.cached_blocks
+            .get(digest)
+            .map(|cached| cached.block.clone())
     }
 
     pub fn should_upload(&self, digest: &Digest) -> Decision {
@@ -105,6 +139,8 @@ impl State {
 
     pub fn start_certificate_upload(&mut self, digest: Digest) {
         *self.certificate_uploads.entry(digest).or_default() += 1;
+        self.certificate_upload_refs += 1;
+        self.sync_metrics();
     }
 
     pub fn finish_certificate_upload(&mut self, digest: &Digest, uploaded_height: Option<u64>) {
@@ -113,14 +149,19 @@ impl State {
             .get_mut(digest)
             .expect("missing in-flight certificate upload");
         *count -= 1;
+        self.certificate_upload_refs -= 1;
         if *count == 0 {
             self.certificate_uploads.remove(digest);
         }
         if let Some(height) = uploaded_height {
-            self.cached_blocks.remove(digest);
+            self.remove_cached_block(digest, SharedRetentionReason::CertificateFinished);
+            if !self.uploaded.contains(digest) {
+                self.shared_pruned(SharedRetentionReason::CertificateFinished, 1);
+            }
             self.uploaded.put(*digest, height);
         }
         self.prune();
+        self.sync_metrics();
     }
 
     fn observe_finalization(&mut self, height: u64) {
@@ -128,23 +169,94 @@ impl State {
         self.prune();
     }
 
+    fn cache_block_inner(&mut self, block: Block, source: SharedCacheSource) {
+        let digest = block.digest();
+        if self.cached_blocks.contains_key(&digest) {
+            return;
+        }
+
+        let estimated_bytes = estimated_block_bytes(&block);
+        self.cached_blocks.insert(
+            digest,
+            CachedBlock {
+                block,
+                estimated_bytes,
+            },
+        );
+        self.cached_block_estimated_bytes = self
+            .cached_block_estimated_bytes
+            .saturating_add(estimated_bytes);
+        if let Some(metrics) = &self.metrics {
+            metrics.shared_cache_inserted(source);
+        }
+    }
+
+    fn remove_cached_block(&mut self, digest: &Digest, reason: SharedRetentionReason) -> bool {
+        let Some(cached) = self.cached_blocks.remove(digest) else {
+            return false;
+        };
+        self.cached_block_estimated_bytes = self
+            .cached_block_estimated_bytes
+            .saturating_sub(cached.estimated_bytes);
+        if let Some(metrics) = &self.metrics {
+            metrics.shared_cache_removed(reason);
+        }
+        true
+    }
+
     fn prune(&mut self) {
+        let mut pruned = 0;
         while let Some((_, &height)) = self.uploaded.peek() {
             if height >= self.acked_through {
                 break;
             }
             self.uploaded.pop();
+            pruned += 1;
         }
+        self.shared_pruned(SharedRetentionReason::Pruned, pruned);
 
         let mut cached_prune_before = self.latest_finalized;
         for digest in self.certificate_uploads.keys() {
-            let Some(block) = self.cached_blocks.get(digest) else {
+            let Some(cached) = self.cached_blocks.get(digest) else {
                 continue;
             };
-            cached_prune_before = cached_prune_before.min(block.height.get());
+            cached_prune_before = cached_prune_before.min(cached.block.height.get());
         }
-        self.cached_blocks
-            .retain(|_, block| block.height.get() >= cached_prune_before);
+
+        let pruned = self
+            .cached_blocks
+            .iter()
+            .filter_map(|(digest, cached)| {
+                (cached.block.height.get() < cached_prune_before).then_some(*digest)
+            })
+            .collect::<Vec<_>>();
+        for digest in &pruned {
+            self.remove_cached_block(digest, SharedRetentionReason::Pruned);
+        }
+        self.shared_pruned(SharedRetentionReason::Pruned, pruned.len() as u64);
+    }
+
+    fn shared_pruned(&self, reason: SharedRetentionReason, count: u64) {
+        if count == 0 {
+            return;
+        }
+        if let Some(metrics) = &self.metrics {
+            metrics.shared_pruned(reason, count);
+        }
+    }
+
+    fn sync_metrics(&self) {
+        if let Some(metrics) = &self.metrics {
+            metrics.shared_state(
+                self.cached_blocks.len(),
+                self.cached_block_estimated_bytes,
+                self.certificate_uploads.len(),
+                self.certificate_upload_refs,
+                self.uploaded.len(),
+                self.latest_finalized,
+                self.acked_through,
+            );
+        }
     }
 }
 
@@ -157,6 +269,7 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode};
     use commonware_consensus::types::{Height, Round, View};
     use commonware_cryptography::{ed25519, Hasher, Sha256, Signer};
+    use commonware_runtime::{deterministic, Metrics as _, Runner as _, Supervisor as _};
     use commonware_storage::mmr::Location;
     use commonware_utils::range::NonEmptyRange;
 
@@ -241,7 +354,7 @@ mod tests {
         let block = block(9, 9, b"nine");
         let digest = block.digest();
 
-        state.cache_block(block.clone());
+        state.cache_block(block.clone(), SharedCacheSource::LiveCertificate);
         state.start_certificate_upload(digest);
 
         assert!(matches!(state.should_upload(&digest), Decision::Wait));
@@ -259,7 +372,7 @@ mod tests {
         let block = block(9, 9, b"nine");
         let digest = block.digest();
 
-        state.cache_block(block.clone());
+        state.cache_block(block.clone(), SharedCacheSource::LiveCertificate);
         state.start_certificate_upload(digest);
         state.finish_certificate_upload(&digest, None);
 
@@ -275,7 +388,7 @@ mod tests {
         let newer = block(3, 3, b"newer");
 
         state.start_certificate_upload(old_digest);
-        state.cache_block(old);
+        state.cache_block(old, SharedCacheSource::LiveCertificate);
         state.finish_certificate_upload(&old_digest, None);
 
         assert!(state.cached_block(&old_digest).is_some());
@@ -297,5 +410,41 @@ mod tests {
 
         assert!(!state.is_uploaded(&digest_10));
         assert!(state.is_uploaded(&digest_11));
+    }
+
+    #[test]
+    fn metrics_track_cache_bytes_refs_and_pruning() {
+        deterministic::Runner::default().start(|context| async move {
+            let metrics = IndexerMetrics::register(&context.child("indexer"));
+            let mut state = State::with_metrics(metrics);
+            let block = block(7, 7, b"seven");
+            let digest = block.digest();
+
+            assert!(state.record(&block).is_some());
+            assert!(state.record(&block).is_some());
+            state.start_certificate_upload(digest);
+            state.start_certificate_upload(digest);
+            state.finish_certificate_upload(&digest, None);
+            state.finish_certificate_upload(&digest, Some(block.height.get()));
+            state.advance_queue_floor(block.height.get() + 1);
+
+            let encoded = context.encode();
+            assert!(encoded.contains("indexer_shared_cached_blocks 0"));
+            assert!(encoded.contains("indexer_shared_cached_block_estimated_bytes 0"));
+            assert!(encoded.contains("indexer_shared_certificate_upload_digests 0"));
+            assert!(encoded.contains("indexer_shared_certificate_upload_refs 0"));
+            assert!(encoded.contains("indexer_shared_uploaded_digests 0"));
+            assert!(encoded.contains("indexer_shared_latest_finalized_height 7"));
+            assert!(encoded.contains("indexer_shared_acked_through_height 8"));
+            assert!(encoded.contains(
+                "indexer_shared_cache_insert_total{source=\"producer_record\"} 1",
+            ));
+            assert!(encoded.contains(
+                "indexer_shared_cache_remove_total{reason=\"certificate_finished\"} 1",
+            ));
+            assert!(encoded
+                .contains("indexer_shared_prune_total{reason=\"certificate_finished\"} 1"));
+            assert!(encoded.contains("indexer_shared_prune_total{reason=\"pruned\"} 1"));
+        });
     }
 }

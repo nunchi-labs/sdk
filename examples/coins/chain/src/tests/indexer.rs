@@ -1,5 +1,8 @@
 use crate::{
-    indexer::{BlockMetricSource, HttpArtifact, IndexerMetrics, LiveUploadArtifact},
+    indexer::{
+        BlockMetricSource, HttpArtifact, IndexerMetrics, LiveUploadArtifact, SharedCacheSource,
+        SharedRetentionReason,
+    },
     Block, StateCommitment, Transaction, EPOCH,
 };
 use commonware_consensus::types::{Height, Round, View};
@@ -127,6 +130,56 @@ fn live_upload_metrics_use_expected_labels() {
         assert!(encoded.contains("status=\"cancelled\""));
         assert!(encoded.contains("status=\"http_status_error\""));
         assert!(encoded.contains("status=\"transport_error\""));
+    });
+}
+
+#[test]
+fn shared_state_metrics_use_expected_labels() {
+    deterministic::Runner::default().start(|context| async move {
+        let indexer = context.child("indexer");
+        let metrics = IndexerMetrics::register(&indexer);
+
+        metrics.shared_state(1, 256, 2, 3, 4, 5, 6);
+        metrics.shared_cache_inserted(SharedCacheSource::ProducerRecord);
+        metrics.shared_cache_inserted(SharedCacheSource::LiveCertificate);
+        metrics.shared_cache_inserted(SharedCacheSource::ConsumerMarshal);
+        metrics.shared_cache_removed(SharedRetentionReason::Uploaded);
+        metrics.shared_cache_removed(SharedRetentionReason::CertificateFinished);
+        metrics.shared_cache_removed(SharedRetentionReason::Pruned);
+        metrics.shared_pruned(SharedRetentionReason::Uploaded, 1);
+        metrics.shared_pruned(SharedRetentionReason::CertificateFinished, 1);
+        metrics.shared_pruned(SharedRetentionReason::Pruned, 1);
+
+        let encoded = context.encode();
+        assert!(encoded.contains("indexer_shared_cached_blocks 1"));
+        assert!(encoded.contains("indexer_shared_cached_block_estimated_bytes 256"));
+        assert!(encoded.contains("indexer_shared_certificate_upload_digests 2"));
+        assert!(encoded.contains("indexer_shared_certificate_upload_refs 3"));
+        assert!(encoded.contains("indexer_shared_uploaded_digests 4"));
+        assert!(encoded.contains("indexer_shared_latest_finalized_height 5"));
+        assert!(encoded.contains("indexer_shared_acked_through_height 6"));
+        assert!(encoded.contains(
+            "indexer_shared_cache_insert_total{source=\"producer_record\"} 1",
+        ));
+        assert!(encoded.contains(
+            "indexer_shared_cache_insert_total{source=\"live_certificate\"} 1",
+        ));
+        assert!(encoded.contains(
+            "indexer_shared_cache_insert_total{source=\"consumer_marshal\"} 1",
+        ));
+        assert!(encoded.contains(
+            "indexer_shared_cache_remove_total{reason=\"uploaded\"} 1",
+        ));
+        assert!(encoded.contains(
+            "indexer_shared_cache_remove_total{reason=\"certificate_finished\"} 1",
+        ));
+        assert!(encoded.contains(
+            "indexer_shared_cache_remove_total{reason=\"pruned\"} 1",
+        ));
+        assert!(encoded.contains("indexer_shared_prune_total{reason=\"uploaded\"} 1"));
+        assert!(encoded
+            .contains("indexer_shared_prune_total{reason=\"certificate_finished\"} 1"));
+        assert!(encoded.contains("indexer_shared_prune_total{reason=\"pruned\"} 1"));
     });
 }
 
