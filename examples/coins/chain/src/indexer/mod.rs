@@ -20,7 +20,8 @@ pub(crate) use backfiller::{Consumer, Entry, Producer};
 use backfiller::{SharedState, State};
 pub(crate) use metrics::IndexerMetrics;
 #[cfg(test)]
-pub(crate) use metrics::LiveUploadArtifact;
+pub(crate) use metrics::{HttpArtifact, LiveUploadArtifact};
+use metrics::HttpArtifact as UploadArtifact;
 pub(crate) use pusher::Pusher;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -63,6 +64,7 @@ pub trait Client: Clone + Send + Sync + 'static {
 pub struct HttpClient {
     uri: String,
     http: reqwest::Client,
+    metrics: Option<IndexerMetrics>,
 }
 
 impl HttpClient {
@@ -74,20 +76,56 @@ impl HttpClient {
                 .timeout(REQUEST_TIMEOUT)
                 .build()
                 .expect("valid indexer HTTP client configuration"),
+            metrics: None,
         }
+    }
+
+    pub(crate) fn with_metrics(mut self, metrics: IndexerMetrics) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     fn path(&self, suffix: &str) -> String {
         format!("{}{}", self.uri.trim_end_matches('/'), suffix)
     }
 
-    async fn post(&self, suffix: &str, body: Vec<u8>) -> Result<(), Error> {
-        let response = self.http.post(self.path(suffix)).body(body).send().await?;
-        if response.status().is_success() {
-            Ok(())
-        } else {
-            Err(Error::Failed(response.status()))
+    fn encode<T: commonware_codec::Encode>(&self, artifact: UploadArtifact, value: &T) -> Vec<u8> {
+        let started = std::time::Instant::now();
+        let body = value.encode().to_vec();
+        if let Some(metrics) = &self.metrics {
+            metrics.http_encoded(artifact, body.len(), started.elapsed());
         }
+        body
+    }
+
+    async fn post(
+        &self,
+        artifact: UploadArtifact,
+        suffix: &str,
+        body: Vec<u8>,
+    ) -> Result<(), Error> {
+        let mut request = self
+            .metrics
+            .as_ref()
+            .map(|metrics| metrics.start_http_request(artifact, body.len()));
+
+        let response = match self.http.post(self.path(suffix)).body(body).send().await {
+            Ok(response) => response,
+            Err(error) => return Err(Error::Reqwest(error)),
+        };
+
+        let status = response.status();
+        if status.is_success() {
+            if let Some(request) = request.as_mut() {
+                request.succeed();
+            }
+            return Ok(());
+        }
+
+        if let Some(request) = request.as_mut() {
+            request.http_status_error();
+        }
+        Err(Error::Failed(status))
     }
 }
 
@@ -100,35 +138,49 @@ impl Client for HttpClient {
         output: DkgOutput<MinSig, crate::PublicKey>,
     ) -> Result<(), Self::Error> {
         self.post(
+            UploadArtifact::DkgOutput,
             &format!("/dkg-output/{}", epoch.get()),
-            commonware_codec::Encode::encode(&output).to_vec(),
+            self.encode(UploadArtifact::DkgOutput, &output),
         )
         .await
     }
 
     async fn seed_upload(&self, seed: Seed) -> Result<(), Self::Error> {
-        self.post("/seed", commonware_codec::Encode::encode(&seed).to_vec())
+        self.post(
+            UploadArtifact::Seed,
+            "/seed",
+            self.encode(UploadArtifact::Seed, &seed),
+        )
             .await
     }
 
     async fn notarized_upload(&self, notarized: Notarized) -> Result<(), Self::Error> {
         self.post(
+            UploadArtifact::Notarization,
             "/notarization",
-            commonware_codec::Encode::encode(&notarized).to_vec(),
+            self.encode(UploadArtifact::Notarization, &notarized),
         )
         .await
     }
 
     async fn finalized_upload(&self, finalized: Finalized) -> Result<(), Self::Error> {
         self.post(
+            UploadArtifact::Finalization,
             "/finalization",
-            commonware_codec::Encode::encode(&finalized).to_vec(),
+            self.encode(UploadArtifact::Finalization, &finalized),
         )
         .await
     }
 }
 
 /// Builds and owns the live and durable indexer upload actors.
+pub(crate) struct Config {
+    pub(crate) mailbox_size: NonZeroUsize,
+    pub(crate) backfiller_max_active: NonZeroUsize,
+    pub(crate) backfiller_retry: Duration,
+    pub(crate) metrics: IndexerMetrics,
+}
+
 pub(crate) struct Indexer<E: Spawner + Clock + Storage + Metrics, C: Client> {
     producer: Producer,
     pusher: Pusher<E, C>,
@@ -141,11 +193,14 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Indexer<E, C> {
         client: C,
         marshal: MarshalMailbox<crate::Scheme, Standard<Block>>,
         backfiller: (queue::Writer<E, Entry>, queue::Reader<E, Entry>),
-        mailbox_size: NonZeroUsize,
-        backfiller_max_active: NonZeroUsize,
-        backfiller_retry: Duration,
+        config: Config,
     ) -> Self {
-        let metrics = IndexerMetrics::register(&context);
+        let Config {
+            mailbox_size,
+            backfiller_max_active,
+            backfiller_retry,
+            metrics,
+        } = config;
         let uploads: SharedState = Arc::new(Mutex::new(State::new()));
         let pusher = Pusher::new(
             context.child("pusher"),

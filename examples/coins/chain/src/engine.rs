@@ -442,6 +442,9 @@ where
 
         let (indexer_producer, indexer_pusher, indexer_consumer) =
             if let Some(client) = config.indexer.clone() {
+                let indexer_context = context.child("indexer");
+                let indexer_metrics = indexer::IndexerMetrics::register(&indexer_context);
+                let client = client.with_metrics(indexer_metrics.clone());
                 let queue = queue::shared::init(
                     context.child("indexer_queue"),
                     queue::Config {
@@ -456,13 +459,16 @@ where
                 .await
                 .expect("failed to initialize indexer queue");
                 let indexer = indexer::Indexer::new(
-                    context.child("indexer"),
+                    indexer_context,
                     client,
                     marshal_mailbox.clone(),
                     queue,
-                    MAILBOX_SIZE,
-                    commonware_utils::NZUsize!(16),
-                    Duration::from_millis(500),
+                    indexer::Config {
+                        mailbox_size: MAILBOX_SIZE,
+                        backfiller_max_active: commonware_utils::NZUsize!(16),
+                        backfiller_retry: Duration::from_millis(500),
+                        metrics: indexer_metrics,
+                    },
                 )
                 .await;
                 let (producer, pusher, consumer) = indexer.split();

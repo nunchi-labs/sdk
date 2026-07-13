@@ -512,7 +512,10 @@ async fn start_node(
     let mempool = register(channels::MEMPOOL);
     network.start();
 
-    let indexer_client = config.indexer_url.as_deref().map(indexer::HttpClient::new);
+    let indexer_client = config.indexer_url.as_deref().map(|url| {
+        let metrics = indexer::IndexerMetrics::register(&context.child("indexer"));
+        indexer::HttpClient::new(url).with_metrics(metrics)
+    });
     if let Some(client) = indexer_client.clone() {
         spawn_current_dkg_output_uploader(
             context,
