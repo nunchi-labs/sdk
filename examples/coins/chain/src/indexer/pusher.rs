@@ -123,14 +123,18 @@ impl<E: Spawner + Metrics + Clock, C: Client> Pusher<E, C> {
                 let mut upload = metrics.start_live_upload(context, artifact);
                 let mut guard = CertificateUploadGuard::new(uploads, digest);
 
+                let mut wait = upload.start_marshal_wait();
                 let block = marshal
                     .subscribe_by_digest(digest, DigestFallback::FetchByRound { round })
                     .await;
                 let Ok(block) = block else {
+                    drop(wait);
                     upload.marshal_cancelled();
                     warn!(%view, "subscription for block cancelled");
                     return;
                 };
+                wait.found();
+                drop(wait);
 
                 let height = block.height.get();
                 guard.cache_block(block.clone());
