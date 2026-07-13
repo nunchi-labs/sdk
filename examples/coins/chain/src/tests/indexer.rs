@@ -21,6 +21,9 @@ use std::{
     time::Duration,
 };
 
+type MockRelease = oneshot::Receiver<Result<(), MockUploadError>>;
+type SharedMockRelease = Arc<Mutex<Option<MockRelease>>>;
+
 fn state(height: u64) -> StateCommitment {
     StateCommitment {
         root: Sha256::hash(&height.to_be_bytes()),
@@ -75,7 +78,7 @@ struct MockClient {
     artifact: HttpArtifact,
     body_bytes: usize,
     started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-    release: Arc<Mutex<Option<oneshot::Receiver<Result<(), MockUploadError>>>>>,
+    release: SharedMockRelease,
 }
 
 impl MockClient {
