@@ -1,5 +1,8 @@
 use super::{Entry, SharedState};
-use crate::Block;
+use crate::{
+    indexer::{metrics::BlockMetricSource, IndexerMetrics},
+    Block,
+};
 use commonware_actor::{
     mailbox::{self, Policy},
     Feedback,
@@ -31,6 +34,7 @@ impl Policy for Message {
 struct Actor<E: Clock + Storage + Metrics> {
     context: ContextCell<E>,
     uploads: SharedState,
+    metrics: IndexerMetrics,
     writer: queue::Writer<E, Entry>,
     receiver: mailbox::Receiver<Message>,
 }
@@ -50,6 +54,7 @@ impl<E: Clock + Storage + Metrics + Spawner> Actor<E> {
     fn new(
         context: E,
         uploads: SharedState,
+        metrics: IndexerMetrics,
         writer: queue::Writer<E, Entry>,
         mailbox_size: NonZeroUsize,
     ) -> (Self, Producer) {
@@ -57,6 +62,7 @@ impl<E: Clock + Storage + Metrics + Spawner> Actor<E> {
         let actor = Self {
             context: ContextCell::new(context),
             uploads,
+            metrics,
             writer,
             receiver,
         };
@@ -75,6 +81,8 @@ impl<E: Clock + Storage + Metrics + Spawner> Actor<E> {
     }
 
     async fn record(&mut self, block: &Block) {
+        self.metrics
+            .observe_block(BlockMetricSource::ProducerRecord, block);
         let Some(entry) = self.uploads.lock().record(block) else {
             return;
         };
@@ -88,13 +96,14 @@ impl<E: Clock + Storage + Metrics + Spawner> Actor<E> {
 pub fn init<E>(
     context: E,
     uploads: SharedState,
+    metrics: IndexerMetrics,
     writer: queue::Writer<E, Entry>,
     mailbox_size: NonZeroUsize,
 ) -> Producer
 where
     E: Clock + Storage + Metrics + Spawner,
 {
-    let (actor, producer) = Actor::new(context, uploads, writer, mailbox_size);
+    let (actor, producer) = Actor::new(context, uploads, metrics, writer, mailbox_size);
     actor.start();
     producer
 }
@@ -161,7 +170,8 @@ mod tests {
             .await
             .expect("init queue");
             let uploads = Arc::new(Mutex::new(crate::indexer::backfiller::State::new()));
-            let mut producer = init(context.child("producer"), uploads, writer, NZUsize!(4));
+            let metrics = IndexerMetrics::register(&context.child("indexer"));
+            let mut producer = init(context.child("producer"), uploads, metrics, writer, NZUsize!(4));
             let block = block(2, 2, b"block");
             let digest = block.digest();
             let (ack, waiter) = Exact::handle();

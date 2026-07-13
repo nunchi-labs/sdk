@@ -20,7 +20,7 @@ pub(crate) use backfiller::{Consumer, Entry, Producer};
 use backfiller::{SharedState, State};
 pub(crate) use metrics::IndexerMetrics;
 #[cfg(test)]
-pub(crate) use metrics::{HttpArtifact, LiveUploadArtifact};
+pub(crate) use metrics::{BlockMetricSource, HttpArtifact, LiveUploadArtifact};
 use metrics::HttpArtifact as UploadArtifact;
 pub(crate) use pusher::Pusher;
 
@@ -213,6 +213,7 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Indexer<E, C> {
         let producer = backfiller::producer::init(
             context.child("producer"),
             uploads.clone(),
+            metrics.clone(),
             writer.clone(),
             mailbox_size,
         );
@@ -220,6 +221,7 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Indexer<E, C> {
             context.child("consumer"),
             client,
             marshal,
+            metrics,
             uploads,
             (writer, reader),
             backfiller_max_active,

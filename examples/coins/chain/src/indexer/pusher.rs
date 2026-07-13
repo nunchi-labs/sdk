@@ -1,4 +1,7 @@
-use super::{metrics::LiveUploadArtifact, Client, IndexerMetrics, SharedState};
+use super::{
+    metrics::{BlockMetricSource, LiveUploadArtifact},
+    Client, IndexerMetrics, SharedState,
+};
 use crate::{Activity, Block, Finalized, Notarized, Scheme, Seed, Seedable};
 use commonware_actor::Feedback;
 use commonware_consensus::{
@@ -137,6 +140,7 @@ impl<E: Spawner + Metrics + Clock, C: Client> Pusher<E, C> {
                 drop(wait);
 
                 let height = block.height.get();
+                metrics.observe_block(BlockMetricSource::LiveCertificate, &block);
                 guard.cache_block(block.clone());
                 if let Err(e) = upload_fn(client, block).await {
                     warn!(?e, %view, label = artifact.as_str(), "failed to upload certificate");

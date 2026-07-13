@@ -1,5 +1,5 @@
 use super::{Decision, Entry, SharedState};
-use crate::indexer::Client;
+use crate::indexer::{metrics::BlockMetricSource, Client, IndexerMetrics};
 use crate::{Block, Finalized, Scheme};
 use commonware_consensus::marshal::{
     core::Mailbox as MarshalMailbox, standard::Standard, Identifier,
@@ -31,6 +31,7 @@ pub struct Consumer<E: Spawner + Clock + Storage + Metrics, C: Client> {
     context: ContextCell<E>,
     client: C,
     marshal: MarshalMailbox<Scheme, Standard<Block>>,
+    metrics: IndexerMetrics,
     upload_results: status::Counter,
     uploads: SharedState,
     writer: queue::Writer<E, Entry>,
@@ -45,6 +46,7 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
         context: E,
         client: C,
         marshal: MarshalMailbox<Scheme, Standard<Block>>,
+        metrics: IndexerMetrics,
         uploads: SharedState,
         backfiller: (queue::Writer<E, Entry>, queue::Reader<E, Entry>),
         max_active: NonZeroUsize,
@@ -60,6 +62,7 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
             context: ContextCell::new(context),
             client,
             marshal,
+            metrics,
             upload_results,
             uploads,
             writer,
@@ -145,13 +148,16 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
                 .with_attribute("height", height);
             let client = self.client.clone();
             let marshal = self.marshal.clone();
+            let metrics = self.metrics.clone();
             let upload_results = self.upload_results.clone();
             let uploads = self.uploads.clone();
             let retry = self.retry;
             async move {
                 let Some(block) =
-                    Self::wait_for_uploadable_block(&context, &marshal, &uploads, digest, retry)
-                        .await
+                    Self::wait_for_uploadable_block(
+                        &context, &marshal, &metrics, &uploads, digest, retry,
+                    )
+                    .await
                 else {
                     debug!(?digest, "skipping previously uploaded block");
                     return Completion::Skipped { position, height };
@@ -220,6 +226,7 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
     async fn wait_for_uploadable_block(
         context: &E,
         marshal: &MarshalMailbox<Scheme, Standard<Block>>,
+        metrics: &IndexerMetrics,
         uploads: &SharedState,
         digest: Digest,
         retry: Duration,
@@ -249,9 +256,13 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
                 NextBlock::WaitForCertificate => {
                     context.sleep(retry).await;
                 }
-                NextBlock::Ready(block) => return Some(*block),
+                NextBlock::Ready(block) => {
+                    metrics.observe_block(BlockMetricSource::ConsumerCached, &block);
+                    return Some(*block);
+                }
                 NextBlock::FetchFromMarshal => {
                     if let Some(block) = marshal.get_block(Identifier::Digest(digest)).await {
+                        metrics.observe_block(BlockMetricSource::ConsumerMarshal, &block);
                         uploads.lock().cache_block(block.clone());
                         return Some(block);
                     }

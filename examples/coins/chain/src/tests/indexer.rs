@@ -1,8 +1,43 @@
-use crate::indexer::{HttpArtifact, IndexerMetrics, LiveUploadArtifact};
+use crate::{
+    indexer::{BlockMetricSource, HttpArtifact, IndexerMetrics, LiveUploadArtifact},
+    Block, StateCommitment, Transaction, EPOCH,
+};
+use commonware_consensus::types::{Height, Round, View};
+use commonware_cryptography::{ed25519, Hasher, Sha256, Signer};
 use commonware_runtime::{
     deterministic, Clock as _, Metrics as _, Runner as _, Supervisor as _,
 };
+use commonware_storage::mmr::Location;
+use commonware_utils::range::NonEmptyRange;
 use std::time::Duration;
+
+fn state(height: u64) -> StateCommitment {
+    StateCommitment {
+        root: Sha256::hash(&height.to_be_bytes()),
+        range: NonEmptyRange::new(Location::new(height)..Location::new(height + 1))
+            .expect("non-empty range"),
+    }
+}
+
+fn block(view: u64, height: u64, label: &[u8]) -> Block {
+    Block::new(
+        crate::Context {
+            round: Round::new(EPOCH, View::new(view)),
+            leader: ed25519::PrivateKey::from_seed(view).public_key(),
+            parent: (
+                View::new(view.saturating_sub(1)),
+                Sha256::hash(format!("parent-{view}").as_bytes()),
+            ),
+        },
+        Sha256::hash(label),
+        Height::new(height),
+        height,
+        Vec::<Transaction>::new(),
+        None,
+        (),
+        state(height),
+    )
+}
 
 #[test]
 fn live_upload_metrics_use_expected_labels() {
@@ -92,5 +127,27 @@ fn live_upload_metrics_use_expected_labels() {
         assert!(encoded.contains("status=\"cancelled\""));
         assert!(encoded.contains("status=\"http_status_error\""));
         assert!(encoded.contains("status=\"transport_error\""));
+    });
+}
+
+#[test]
+fn block_metrics_use_expected_sources() {
+    deterministic::Runner::default().start(|context| async move {
+        let indexer = context.child("indexer");
+        let metrics = IndexerMetrics::register(&indexer);
+        let block = block(3, 3, b"block");
+
+        metrics.observe_block(BlockMetricSource::ProducerRecord, &block);
+        metrics.observe_block(BlockMetricSource::LiveCertificate, &block);
+        metrics.observe_block(BlockMetricSource::ConsumerCached, &block);
+        metrics.observe_block(BlockMetricSource::ConsumerMarshal, &block);
+
+        let encoded = context.encode();
+        assert!(encoded.contains("indexer_block_estimated_bytes_bucket"));
+        assert!(encoded.contains("indexer_block_transaction_count_bucket"));
+        assert!(encoded.contains("source=\"producer_record\""));
+        assert!(encoded.contains("source=\"live_certificate\""));
+        assert!(encoded.contains("source=\"consumer_cached\""));
+        assert!(encoded.contains("source=\"consumer_marshal\""));
     });
 }

@@ -1,8 +1,9 @@
+use crate::Block;
 use commonware_runtime::{
     telemetry::metrics::{
         encoding::EncodeLabelValue as EncodeLabelValueTrait, histogram::Buckets, raw,
-        CounterFamily, EncodeLabelSet, Gauge, GaugeFamily, HistogramExt as _, MetricsExt as _,
-        Registered, GaugeValue,
+        CounterFamily, EncodeLabelSet, Gauge, GaugeFamily, GaugeValue, HistogramExt as _,
+        MetricsExt as _, Registered,
     },
     Clock, Metrics,
 };
@@ -155,6 +156,36 @@ impl EncodeLabelValueTrait for HttpRequestStatus {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum BlockMetricSource {
+    ProducerRecord,
+    LiveCertificate,
+    ConsumerCached,
+    ConsumerMarshal,
+}
+
+impl BlockMetricSource {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::ProducerRecord => "producer_record",
+            Self::LiveCertificate => "live_certificate",
+            Self::ConsumerCached => "consumer_cached",
+            Self::ConsumerMarshal => "consumer_marshal",
+        }
+    }
+}
+
+impl EncodeLabelValueTrait for BlockMetricSource {
+    fn encode(
+        &self,
+        encoder: &mut commonware_runtime::telemetry::metrics::LabelValueEncoder,
+    ) -> Result<(), fmt::Error> {
+        use fmt::Write as _;
+
+        encoder.write_str(self.as_str())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, EncodeLabelSet)]
 struct ArtifactLabel {
     artifact: LiveUploadArtifact,
@@ -183,6 +214,11 @@ struct HttpCompletionLabel {
     status: HttpRequestStatus,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, EncodeLabelSet)]
+struct BlockSourceLabel {
+    source: BlockMetricSource,
+}
+
 #[derive(Clone)]
 pub(crate) struct IndexerMetrics {
     live_upload_spawned: CounterFamily<ArtifactLabel>,
@@ -199,6 +235,8 @@ pub(crate) struct IndexerMetrics {
     http_request_in_flight: GaugeFamily<HttpArtifactLabel>,
     http_request_completed: CounterFamily<HttpCompletionLabel>,
     http_request_duration: HistogramFamily<HttpCompletionLabel>,
+    block_estimated_bytes: HistogramFamily<BlockSourceLabel>,
+    block_transaction_count: HistogramFamily<BlockSourceLabel>,
 }
 
 impl IndexerMetrics {
@@ -272,6 +310,20 @@ impl IndexerMetrics {
                 "http_request_duration_seconds",
                 "Duration of indexer HTTP requests by artifact and status",
                 raw::Family::<HttpCompletionLabel, raw::Histogram, fn() -> raw::Histogram>::new_with_constructor(
+                    local_histogram,
+                ),
+            ),
+            block_estimated_bytes: context.register(
+                "block_estimated_bytes",
+                "Estimated encoded block size by source",
+                raw::Family::<BlockSourceLabel, raw::Histogram, fn() -> raw::Histogram>::new_with_constructor(
+                    local_histogram,
+                ),
+            ),
+            block_transaction_count: context.register(
+                "block_transaction_count",
+                "Block transaction count by source",
+                raw::Family::<BlockSourceLabel, raw::Histogram, fn() -> raw::Histogram>::new_with_constructor(
                     local_histogram,
                 ),
             ),
@@ -351,6 +403,16 @@ impl IndexerMetrics {
             status: HttpRequestStatus::TransportError,
             started: Instant::now(),
         }
+    }
+
+    pub(crate) fn observe_block(&self, source: BlockMetricSource, block: &Block) {
+        let label = BlockSourceLabel { source };
+        self.block_estimated_bytes
+            .get_or_create(&label)
+            .observe(estimated_block_bytes(block) as f64);
+        self.block_transaction_count
+            .get_or_create(&label)
+            .observe(block.transactions.len() as f64);
     }
 }
 
@@ -498,4 +560,8 @@ fn local_histogram() -> raw::Histogram {
 
 fn gauge_bytes(bytes: usize) -> GaugeValue {
     bytes.try_into().unwrap_or(GaugeValue::MAX)
+}
+
+fn estimated_block_bytes(block: &Block) -> u64 {
+    commonware_codec::EncodeSize::encode_size(block) as u64
 }
