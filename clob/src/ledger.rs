@@ -50,10 +50,6 @@ pub enum ClobError {
     SequenceOverflow,
     #[error("quote quantity overflow")]
     QuoteOverflow,
-    #[error("fill already committed")]
-    FillAlreadyCommitted,
-    #[error("invalid fill: {0}")]
-    InvalidFill(&'static str),
     #[error("state storage error: {0}")]
     Storage(String),
 }
@@ -204,7 +200,6 @@ impl<D: ClobDB> ClobLedger<D> {
                 .map(|_| ())
             }
             ClobOperation::CancelOrder { order } => self.cancel_order(&tx.account_id, order).await,
-            ClobOperation::CommitFill { fill } => self.commit_fill(fill, context).await,
         }
     }
 
@@ -401,86 +396,22 @@ impl<D: ClobDB> ClobLedger<D> {
         Ok(taker)
     }
 
-    async fn commit_fill(&mut self, fill: &Fill, context: RuntimeContext) -> Result<(), ClobError> {
+    /// Persist an off-chain matched fill into on-chain CLOB state.
+    ///
+    /// Memclob and other off-chain matchers call this before clearinghouse settlement.
+    pub async fn record_fill(&mut self, fill: &Fill) -> Result<(), ClobError> {
         if self.db.fill(&fill.id).await?.is_some() {
-            return Err(ClobError::FillAlreadyCommitted);
+            return Ok(());
         }
         if self.db.market(&fill.market).await?.is_none() {
             return Err(ClobError::MarketNotFound);
         }
-
-        let mut maker = self
-            .db
-            .order(&fill.maker_order)
-            .await?
-            .ok_or(ClobError::OrderNotFound)?;
-        if maker.owner != fill.maker {
-            return Err(ClobError::InvalidFill("maker owner mismatch"));
-        }
-        if fill.base_quantity == 0 || fill.base_quantity > maker.remaining_base {
-            return Err(ClobError::InvalidFill("fill exceeds maker remaining quantity"));
-        }
-        if fill.price != maker.price {
-            return Err(ClobError::InvalidFill("fill price must match maker price"));
-        }
-
-        maker.remaining_base -= fill.base_quantity;
-        maker.filled_base += fill.base_quantity;
-        maker.status = if maker.remaining_base == 0 {
-            OrderStatus::Filled
-        } else {
-            OrderStatus::PartiallyFilled
-        };
-
-        let mut maker_book = self.db.side_book(&fill.market, maker.side).await?;
-        if !(maker.status.is_open() && maker.remaining_base > 0) {
-            maker_book.retain(|id| id != &fill.maker_order);
-        }
-        self.db.set_side_book(&fill.market, maker.side, &maker_book);
-        self.db.set_order(&maker);
-        if !maker.status.is_open() {
-            self.remove_from_account_orders(&maker.owner, &maker.id)
-                .await?;
-        }
-
-        if let Some(mut taker) = self.db.order(&fill.taker_order).await? {
-            if taker.owner != fill.taker {
-                return Err(ClobError::InvalidFill("taker owner mismatch"));
-            }
-            if fill.base_quantity > taker.remaining_base {
-                return Err(ClobError::InvalidFill("fill exceeds taker remaining quantity"));
-            }
-            taker.remaining_base -= fill.base_quantity;
-            taker.filled_base += fill.base_quantity;
-            taker.status = if taker.remaining_base == 0 {
-                OrderStatus::Filled
-            } else {
-                OrderStatus::PartiallyFilled
-            };
-            let mut taker_book = self.db.side_book(&fill.market, taker.side).await?;
-            if !(taker.status.is_open() && taker.remaining_base > 0) {
-                taker_book.retain(|id| id != &fill.taker_order);
-            }
-            self.db.set_side_book(&fill.market, taker.side, &taker_book);
-            self.db.set_order(&taker);
-            if !taker.status.is_open() {
-                self.remove_from_account_orders(&taker.owner, &taker.id)
-                    .await?;
-            }
-        }
-
         let mut market_fill_ids = self.db.market_fills(&fill.market).await?;
-        if market_fill_ids.len() == MAX_FILLS_PER_MARKET {
+        if market_fill_ids.len() >= MAX_FILLS_PER_MARKET {
             return Err(ClobError::FillIndexFull);
         }
-
-        let committed = Fill {
-            written_at_height: context.height,
-            written_at_ms: context.timestamp_ms,
-            ..fill.clone()
-        };
-        self.db.set_fill(&committed);
-        market_fill_ids.push(committed.id);
+        market_fill_ids.push(fill.id);
+        self.db.set_fill(fill);
         self.db.set_market_fills(&fill.market, &market_fill_ids);
         Ok(())
     }

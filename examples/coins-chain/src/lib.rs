@@ -21,7 +21,6 @@ pub mod execution;
 pub mod genesis;
 pub mod rpc;
 pub mod runtime;
-pub mod settlement;
 pub mod testnet;
 pub mod transaction;
 

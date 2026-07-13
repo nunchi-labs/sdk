@@ -1,6 +1,6 @@
 use super::super::*;
 use crate::state::{Epoch as EpochState, Storage};
-use crate::{orchestrator::Message, protector::StorageProtector, ContinueOnUpdate, PeerConfig};
+use crate::{orchestrator::Message, ContinueOnUpdate, PeerConfig};
 use bytes::{Buf, BufMut};
 use commonware_actor::{mailbox, Feedback};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
@@ -20,8 +20,6 @@ use commonware_runtime::{deterministic, Runner, Supervisor as _};
 use commonware_utils::{channel::mpsc, N3f1, NZUsize, TryCollect, NZU32, NZU64};
 use core::marker::PhantomData;
 use std::collections::BTreeMap;
-
-const TEST_STORAGE_KEY: [u8; 32] = [7u8; 32];
 
 #[derive(Clone)]
 struct TestBlock {
@@ -130,7 +128,8 @@ fn peer_config(
     (peer_config, participants)
 }
 
-fn assert_recovered_storage_controls_dkg_mode_on_restart(execution: Execution, suffix: &str) {
+#[test_traced]
+fn recovered_storage_controls_dkg_mode_on_restart() {
     let executor = deterministic::Runner::seeded(8);
     executor.start(|mut context| async move {
         const RECOVERED_EPOCH: u64 = 5;
@@ -153,19 +152,15 @@ fn assert_recovered_storage_controls_dkg_mode_on_restart(execution: Execution, s
         )
         .expect("deal should succeed");
         let share = shares.get_value(&first_player).cloned();
-        let partition_prefix = format!("recovered_restart_{suffix}_{first_player}");
+        let partition_prefix = format!("recovered_restart_{first_player}");
 
         let mut storage = Storage::<_, MinSig, Ed25519PublicKey>::init(
             context.child("seed_storage"),
             &partition_prefix,
-            StorageProtector::new(TEST_STORAGE_KEY),
-            b"test_dkg".to_vec(),
-            first_player.clone(),
             NZU32!(peer_config.max_participants_per_round()),
             crate::MAX_SUPPORTED_MODE,
         )
-        .await
-        .expect("storage init should succeed");
+        .await;
         storage
             .set_epoch(
                 Epoch::new(RECOVERED_EPOCH),
@@ -176,8 +171,7 @@ fn assert_recovered_storage_controls_dkg_mode_on_restart(execution: Execution, s
                     share,
                 },
             )
-            .await
-            .expect("set epoch should succeed");
+            .await;
         drop(storage);
 
         let (actor, _mailbox) = Actor::<_, _, TestBlock>::new(
@@ -186,19 +180,17 @@ fn assert_recovered_storage_controls_dkg_mode_on_restart(execution: Execution, s
                 manager: NoopManager::<Ed25519PublicKey>::default(),
                 signer,
                 mailbox_size: NZUsize!(8),
-                execution,
                 partition_prefix,
                 peer_config: peer_config.clone(),
                 max_supported_mode: crate::MAX_SUPPORTED_MODE,
                 namespace: b"test_dkg".to_vec(),
-                storage_protector: StorageProtector::new(TEST_STORAGE_KEY),
                 epoch_length: NZU64!(200),
             },
         );
         let (sender, receiver) = inert_channel(&peer_config.participants);
         let (orchestrator_sender, mut orchestrator_receiver) =
             mailbox::new(context.child("orchestrator_mailbox"), NZUsize!(4));
-        let handle = actor.start(
+        actor.start(
             None,
             None,
             crate::orchestrator::Mailbox::new(orchestrator_sender),
@@ -212,18 +204,5 @@ fn assert_recovered_storage_controls_dkg_mode_on_restart(execution: Execution, s
         assert_eq!(transition.epoch, Epoch::new(RECOVERED_EPOCH));
         assert!(transition.poly.is_some());
         assert_eq!(transition.dealers, peer_config.dealers(RECOVERED_ROUND));
-
-        handle.abort();
-        let _ = handle.await;
     });
-}
-
-#[test_traced]
-fn default_execution_recovered_storage_controls_dkg_mode_on_restart() {
-    assert_recovered_storage_controls_dkg_mode_on_restart(Execution::default(), "shared");
-}
-
-#[test_traced]
-fn dedicated_execution_recovered_storage_controls_dkg_mode_on_restart() {
-    assert_recovered_storage_controls_dkg_mode_on_restart(Execution::Dedicated, "dedicated");
 }

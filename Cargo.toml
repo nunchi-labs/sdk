@@ -2,9 +2,10 @@
 members = [
     "authority",
     "bridge",
+    "clearinghouse",
+    "clob",
     "common",
     "chain",
-    "clob",
     "coins",
     "crypto",
     "dkg",
@@ -12,6 +13,7 @@ members = [
     "narae",
     "mempool",
     "oracle",
+    "perpetuals",
     "rpc",
     "mcp",
     "examples/bridge-chain",
@@ -40,13 +42,15 @@ nunchi-coins = { version = "2026.5.0", path = "coins" }
 nunchi-authority = { version = "2026.5.0", path = "authority" }
 nunchi-bridge = { version = "2026.5.0", path = "bridge" }
 nunchi-chain = { version = "2026.5.0", path = "chain" }
-nunchi-clob = { version = "2026.5.0", path = "clob" }
 nunchi-common = { version = "2026.5.0", path = "common" }
 nunchi-crypto = { version = "2026.5.0", path = "crypto" }
 nunchi-dkg = { version = "2026.5.0", path = "dkg" }
+nunchi-clob = { version = "2026.5.0", path = "clob" }
+nunchi-clearinghouse = { version = "2026.5.0", path = "clearinghouse" }
 nunchi-memclob = { version = "2026.5.0", path = "memclob" }
 nunchi-mempool = { version = "2026.5.0", path = "mempool" }
 nunchi-oracle = { version = "2026.5.0", path = "oracle" }
+nunchi-perpetuals = { version = "2026.5.0", path = "perpetuals" }
 nunchi-rpc = { version = "2026.5.0", path = "rpc" }
 nunchi-coins-chain = { version = "2026.5.0", path = "examples/coins-chain" }
 nunchi-bridge-chain = { version = "2026.5.0", path = "examples/bridge-chain" }
@@ -68,7 +72,6 @@ commonware-math = "2026.5.0"
 commonware-parallel = "2026.5.0"
 thiserror = "2.0.12"
 bytes = "1.7.1"
-chacha20poly1305 = "0.10.1"
 rand = "0.8.5"
 rand_core = "0.6.4"
 futures = "0.3.31"

@@ -1,5 +1,6 @@
 //! Node-facing handles for submitting transactions and observing stateful execution.
 
+use commonware_cryptography::sha256;
 use commonware_glue::stateful::Mailbox as StatefulMailbox;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_storage::Context as StorageContext;
@@ -20,7 +21,7 @@ pub struct NodeHandle<E, R, Ext = NoConsensusExtension, Events = NoopEventConsum
 where
     E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
     R: Runtime + Clone + Send + Sync + 'static,
-    R::Transaction: PoolTransaction + Sync,
+    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
     Ext: ConsensusExtension + Sync,
     Events: EventConsumer,
 {
@@ -33,7 +34,7 @@ impl<E, R, Ext, Events> NodeHandle<E, R, Ext, Events>
 where
     E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
     R: Runtime + Clone + Send + Sync + 'static,
-    R::Transaction: PoolTransaction + Sync,
+    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
     Ext: ConsensusExtension + Sync,
     Events: EventConsumer,
 {
@@ -60,7 +61,7 @@ pub struct StatefulQuery<E, R, Ext = NoConsensusExtension, Events = NoopEventCon
 where
     E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
     R: Runtime + Clone + Send + Sync + 'static,
-    R::Transaction: PoolTransaction + Sync,
+    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
     Ext: ConsensusExtension + Sync,
     Events: EventConsumer,
 {
@@ -71,7 +72,7 @@ impl<E, R, Ext, Events> Clone for StatefulQuery<E, R, Ext, Events>
 where
     E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
     R: Runtime + Clone + Send + Sync + 'static,
-    R::Transaction: PoolTransaction + Sync,
+    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
     Ext: ConsensusExtension + Sync,
     Events: EventConsumer,
 {
@@ -86,7 +87,7 @@ impl<E, R, Ext, Events> StatefulQuery<E, R, Ext, Events>
 where
     E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
     R: Runtime + Clone + Send + Sync + 'static,
-    R::Transaction: PoolTransaction + Sync,
+    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
     Ext: ConsensusExtension + Sync,
     Events: EventConsumer,
 {

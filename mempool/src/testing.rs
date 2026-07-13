@@ -2,7 +2,6 @@
 
 use crate::tx::PoolTransaction;
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
-use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use thiserror::Error;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -19,11 +18,12 @@ pub struct TestTx {
 pub struct BadSignature;
 
 impl PoolTransaction for TestTx {
+    type Digest = u64;
     type NonceKey = u8;
     type VerifyError = BadSignature;
 
-    fn digest(&self) -> Digest {
-        digest(self.id)
+    fn digest(&self) -> u64 {
+        self.id
     }
 
     fn nonce_key(&self) -> u8 {
@@ -89,8 +89,4 @@ pub fn tx(account: u8, nonce: u64, id: u64) -> TestTx {
         size: 100,
         valid: true,
     }
-}
-
-pub fn digest(id: u64) -> Digest {
-    Sha256::hash(&id.to_be_bytes())
 }

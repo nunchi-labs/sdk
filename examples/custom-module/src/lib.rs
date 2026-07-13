@@ -6,7 +6,6 @@
 
 commonware_macros::stability_scope!(ALPHA {
 mod db;
-mod events;
 mod genesis;
 mod ledger;
 #[cfg(feature = "rpc")]
@@ -16,10 +15,6 @@ mod tests;
 mod transaction;
 
 pub use db::CustomDB;
-pub use events::{
-    value_cleared_event, value_set_event, ValueCleared, ValueSet, VALUE_CLEARED_EVENT,
-    VALUE_SET_EVENT,
-};
 pub use genesis::{CustomAccountGenesis, CustomGenesis};
 pub use ledger::{CustomError, CustomLedger};
 pub use transaction::{CustomOperation, Transaction, TransactionPayload};

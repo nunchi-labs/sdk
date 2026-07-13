@@ -1,6 +1,4 @@
 mod account;
-mod events;
-mod genesis;
 mod ledger;
 mod rpc;
 #[cfg(feature = "mempool")]

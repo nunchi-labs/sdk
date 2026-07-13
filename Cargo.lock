@@ -2747,6 +2747,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "nunchi-clearinghouse"
+version = "2026.6.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-formatting",
+ "commonware-macros",
+ "commonware-runtime",
+ "futures",
+ "nunchi-clob",
+ "nunchi-coins",
+ "nunchi-common",
+ "nunchi-crypto",
+ "nunchi-oracle",
+ "nunchi-perpetuals",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "nunchi-clob"
 version = "2026.6.0"
 dependencies = [
@@ -2815,6 +2836,7 @@ dependencies = [
  "jsonrpsee",
  "nunchi-authority",
  "nunchi-chain",
+ "nunchi-clearinghouse",
  "nunchi-clob",
  "nunchi-coins",
  "nunchi-common",
@@ -2823,6 +2845,7 @@ dependencies = [
  "nunchi-memclob",
  "nunchi-mempool",
  "nunchi-oracle",
+ "nunchi-perpetuals",
  "nunchi-rpc",
  "rand 0.8.6",
  "rand_core 0.6.4",
@@ -2888,7 +2911,6 @@ name = "nunchi-dkg"
 version = "2026.6.0"
 dependencies = [
  "bytes",
- "chacha20poly1305",
  "commonware-actor",
  "commonware-codec",
  "commonware-consensus",
@@ -2906,7 +2928,6 @@ dependencies = [
  "rand 0.8.6",
  "rand_core 0.6.4",
  "serde",
- "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber 0.3.23",
 ]
@@ -2986,6 +3007,33 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "nunchi-perpetuals"
+version = "2026.6.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "commonware-actor",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-formatting",
+ "commonware-macros",
+ "commonware-runtime",
+ "commonware-utils",
+ "futures",
+ "jsonrpsee",
+ "nunchi-coins",
+ "nunchi-common",
+ "nunchi-crypto",
+ "nunchi-mempool",
+ "nunchi-oracle",
+ "nunchi-rpc",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

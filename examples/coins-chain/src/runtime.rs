@@ -2,9 +2,11 @@
 
 use nunchi_authority::{AuthorityError, AuthorityLedger};
 use nunchi_clob::{ClobError, ClobLedger};
+use nunchi_clearinghouse::{ClearinghouseError, ClearinghouseLedger};
 use nunchi_coins::{Ledger, LedgerError};
-use nunchi_common::{EventSink, NoopEventSink, Runtime, RuntimeContext, StateStore};
+use nunchi_common::{EventSink, Runtime, RuntimeContext, StateStore};
 use nunchi_oracle::{OracleError, OracleLedger};
+use nunchi_perpetuals::{PerpetualError, PerpetualLedger};
 
 use crate::Transaction;
 
@@ -19,8 +21,12 @@ pub enum RuntimeError {
     Authority(#[from] AuthorityError),
     #[error("oracle module error: {0}")]
     Oracle(#[from] OracleError),
+    #[error("perpetuals module error: {0}")]
+    Perpetuals(#[from] PerpetualError),
     #[error("clob module error: {0}")]
     Clob(#[from] ClobError),
+    #[error("clearinghouse module error: {0}")]
+    Clearinghouse(#[from] ClearinghouseError),
 }
 
 impl RuntimeError {
@@ -30,7 +36,17 @@ impl RuntimeError {
             Self::Coins(LedgerError::Storage(_))
                 | Self::Authority(AuthorityError::Storage(_))
                 | Self::Oracle(OracleError::Storage(_))
+                | Self::Perpetuals(PerpetualError::Storage(_))
+                | Self::Perpetuals(PerpetualError::Coin(LedgerError::Storage(_)))
                 | Self::Clob(ClobError::Storage(_))
+                | Self::Clearinghouse(ClearinghouseError::Storage(_))
+                | Self::Clearinghouse(ClearinghouseError::Perpetuals(
+                    PerpetualError::Storage(_)
+                ))
+                | Self::Clearinghouse(ClearinghouseError::Perpetuals(
+                    PerpetualError::Coin(LedgerError::Storage(_))
+                ))
+                | Self::Clearinghouse(ClearinghouseError::Clob(ClobError::Storage(_)))
         )
     }
 }
@@ -47,20 +63,20 @@ impl Runtime for CoinsRuntime {
     where
         S: StateStore + Send + Sync,
     {
-        apply_transaction(state, context, transaction, NoopEventSink).await
+        apply_transaction(state, context, transaction).await
     }
 
     async fn apply<S, Events>(
         state: &mut S,
         context: RuntimeContext,
         transaction: &Self::Transaction,
-        events: &mut Events,
+        _events: &mut Events,
     ) -> Result<(), Self::Error>
     where
         S: StateStore + Send + Sync,
         Events: EventSink + Send,
     {
-        apply_transaction(state, context, transaction, events).await
+        apply_transaction(state, context, transaction).await
     }
 
     fn is_storage_error(error: &Self::Error) -> bool {
@@ -68,20 +84,18 @@ impl Runtime for CoinsRuntime {
     }
 }
 
-async fn apply_transaction<S, Events>(
+async fn apply_transaction<S>(
     state: &mut S,
     context: RuntimeContext,
     transaction: &Transaction,
-    events: Events,
 ) -> Result<(), RuntimeError>
 where
     S: StateStore + Send + Sync,
-    Events: EventSink + Send,
 {
     match transaction {
         Transaction::Coin(transaction) => {
             let mut ledger = Ledger::new(state);
-            ledger.apply_transaction(transaction, events).await?;
+            ledger.apply_transaction(transaction).await?;
         }
         Transaction::Authority(transaction) => {
             let mut ledger = AuthorityLedger::new(state);
@@ -91,8 +105,16 @@ where
             let mut ledger = OracleLedger::new(state);
             ledger.apply_transaction(transaction, context).await?;
         }
+        Transaction::Perpetual(transaction) => {
+            let mut ledger = PerpetualLedger::new(state);
+            ledger.apply_transaction(transaction, context).await?;
+        }
         Transaction::Clob(transaction) => {
             let mut ledger = ClobLedger::new(state);
+            ledger.apply_transaction(transaction, context).await?;
+        }
+        Transaction::Clearinghouse(transaction) => {
+            let mut ledger = ClearinghouseLedger::new(state);
             ledger.apply_transaction(transaction, context).await?;
         }
     }
@@ -108,10 +130,15 @@ mod tests {
         assert!(RuntimeError::Coins(LedgerError::Storage("disk".into())).is_storage());
         assert!(RuntimeError::Authority(AuthorityError::Storage("disk".into())).is_storage());
         assert!(RuntimeError::Oracle(OracleError::Storage("disk".into())).is_storage());
+        assert!(RuntimeError::Perpetuals(PerpetualError::Storage("disk".into())).is_storage());
         assert!(RuntimeError::Clob(ClobError::Storage("disk".into())).is_storage());
+        assert!(RuntimeError::Clearinghouse(ClearinghouseError::Storage("disk".into())).is_storage());
 
         assert!(!RuntimeError::Authority(AuthorityError::NotConfigured).is_storage());
         assert!(!RuntimeError::Coins(LedgerError::InvalidTokenSpec("bad")).is_storage());
         assert!(!RuntimeError::Oracle(OracleError::PayloadTooLarge).is_storage());
+        assert!(!RuntimeError::Perpetuals(PerpetualError::Unauthorized).is_storage());
+        assert!(!RuntimeError::Clob(ClobError::MarketNotFound).is_storage());
+        assert!(!RuntimeError::Clearinghouse(ClearinghouseError::Unauthorized).is_storage());
     }
 }

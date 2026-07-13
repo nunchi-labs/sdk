@@ -45,8 +45,6 @@ use nunchi_common::{QmdbBackend, QmdbState};
 use nunchi_dkg::{self as dkg, orchestrator, PeerConfig, UpdateCallBack, MAX_SUPPORTED_MODE};
 use nunchi_mempool::{Mempool, PoolConfig};
 use nunchi_memclob::{MemClob, MemClobConfig};
-use nunchi_crypto::PrivateKey;
-use crate::settlement::{SettlementBridge, SettlementConfig};
 use rand::{CryptoRng, Rng};
 use rand_core::CryptoRngCore;
 use std::{
@@ -77,7 +75,6 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
     pub blocks_freezer_table_initial_size: u32,
     pub finalized_freezer_table_initial_size: u32,
     pub signer: ed25519::PrivateKey,
-    pub dkg_storage_key: dkg::StorageKey,
     pub output: Output<MinSig, PublicKey>,
     pub share: Option<group::Share>,
     pub peer_config: PeerConfig<PublicKey>,
@@ -138,7 +135,6 @@ where
     orchestrator_mailbox: orchestrator::Mailbox<MinSig, PublicKey>,
     mempool: Mempool<Transaction>,
     memclob: MemClob,
-    settlement: SettlementBridge,
     stateful: StatefulApp<E>,
     stateful_mailbox: StatefulAppMailbox<E>,
 }
@@ -167,12 +163,6 @@ where
     pub async fn new(context: E, config: Config<B, P, S>) -> (Self, NodeHandle<E>) {
         let (mempool, submitter) = Mempool::<Transaction>::new(config.pool_config.clone());
         let (memclob, memclob_handle) = MemClob::new(MemClobConfig::default());
-        let settlement = SettlementBridge::new(
-            PrivateKey::Ed25519(config.signer.clone()),
-            memclob_handle.clone(),
-            submitter.clone(),
-            SettlementConfig::default(),
-        );
 
         let page_cache = CacheRef::from_pooler(&context, PAGE_CACHE_PAGE_SIZE, PAGE_CACHE_CAPACITY);
         let consensus_namespace = union(NAMESPACE, b"_CONSENSUS");
@@ -186,12 +176,10 @@ where
                 manager: config.manager.clone(),
                 signer: config.signer.clone(),
                 mailbox_size: MAILBOX_SIZE,
-                execution: dkg::Execution::default(),
                 partition_prefix: config.partition_prefix.clone(),
                 peer_config: config.peer_config.clone(),
                 max_supported_mode: MAX_SUPPORTED_MODE,
                 namespace: NAMESPACE.to_vec(),
-                storage_protector: dkg::StorageProtector::new(config.dkg_storage_key),
                 epoch_length: BLOCKS_PER_EPOCH,
             },
         );
@@ -455,7 +443,6 @@ where
             orchestrator_mailbox,
             mempool,
             memclob,
-            settlement,
             stateful,
             stateful_mailbox,
         };
@@ -572,9 +559,6 @@ where
         let memclob_handle = self
             .memclob
             .start_p2p(self.context.child("memclob"), memclob);
-        let settlement_handle = self
-            .settlement
-            .start(self.context.child("settlement"));
 
         let mut shutdown = self.context.stopped();
         commonware_macros::select! {
@@ -593,7 +577,6 @@ where
             result = orchestrator_handle => unexpected_exit("orchestrator", result),
             result = mempool_handle => unexpected_exit("mempool", result),
             result = memclob_handle => unexpected_exit("memclob", result),
-            result = settlement_handle => unexpected_exit("settlement", result),
         }
     }
 }

@@ -6,16 +6,14 @@ Validator-local, in-memory central limit order books with P2P gossip — modeled
 
 Each validator runs a `MemBookEngine` that is **not** committed to consensus directly. Signed order instructions (`PlaceOrder`, `CancelOrder`, `CreateMarket`) propagate over a dedicated P2P channel using the same wire format as `nunchi-clob` transactions. Every honest node applies the same deterministic matching rules, so local books stay eventually consistent.
 
-When a validator proposes a block, the `SettlementBridge` drains `pending_fills()` from memclob, wraps each fill in a signed `ClobOperation::CommitFill` transaction, and submits it to the mempool for block inclusion. After finalization, the bridge calls `MemClobHandle::finalize` to drop settled fills from RAM.
+When a validator proposes a block, it drains `pending_fills()` from its memclob and includes those fills for on-chain settlement via `nunchi-clob::ClobLedger`.
 
 ```
 Trader ──submit──► MemClobHandle ──► MemBookEngine (RAM)
                          │
                          └── P2P gossip (Recipients::All) ──► peer validators
 
-SettlementBridge ──pending_fills()──► CommitFill tx ──► Mempool ──► block ──► ClobLedger (QMDB)
-                         ▲
-                         └── finalize(fill_ids) after mempool reports Finalized
+Proposer ──pending_fills()──► block ──finalize──► ClobLedger (QMDB)
 ```
 
 ## Relationship to `nunchi-clob`

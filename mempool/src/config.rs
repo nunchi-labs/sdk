@@ -21,10 +21,10 @@ pub struct PoolConfig {
 impl Default for PoolConfig {
     fn default() -> Self {
         Self {
-            max_total_txs: 1_000_000,
-            max_per_account_txs: 256,
+            max_total_txs: 10_000,
+            max_per_account_txs: 64,
             max_tx_bytes: 64 * 1024,
-            ttl_blocks: 25_000,
+            ttl_blocks: 1_000,
             status_cache_capacity: 100_000,
             mailbox_size: 1_024,
         }

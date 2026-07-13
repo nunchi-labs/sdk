@@ -22,14 +22,12 @@ commonware-runtime = { workspace = true }
 commonware-storage = { workspace = true }
 commonware-utils = { workspace = true }
 bytes = { workspace = true }
-chacha20poly1305 = { workspace = true }
 futures = { workspace = true }
 rand = { workspace = true }
 rand_core = { workspace = true }
 # `EncodeStruct` metrics derives expand to paths under `prometheus_client`.
 prometheus-client = { workspace = true }
 serde = { version = "1.0.219", features = ["derive"] }
-thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

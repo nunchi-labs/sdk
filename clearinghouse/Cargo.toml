@@ -1,0 +1,31 @@
+[package]
+name = "nunchi-clearinghouse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Trade settlement layer routing CLOB fills to perpetuals and spot consumers."
+
+[lints]
+workspace = true
+
+[features]
+default = []
+
+[dependencies]
+async-trait = { workspace = true }
+bytes = { workspace = true }
+commonware-codec = { workspace = true }
+commonware-cryptography = { workspace = true }
+commonware-formatting = { workspace = true }
+commonware-macros = { workspace = true }
+nunchi-clob = { workspace = true }
+nunchi-common = { workspace = true }
+nunchi-crypto = { workspace = true }
+nunchi-perpetuals = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+commonware-runtime = { workspace = true }
+futures = { workspace = true }
+nunchi-coins = { workspace = true }
+nunchi-oracle = { workspace = true }

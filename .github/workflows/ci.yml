@@ -4,48 +4,13 @@ on:
   push:
     branches: [main]
   pull_request:
-  merge_group:
-    types: [checks_requested]
-
-permissions:
-  contents: read
-  pull-requests: read
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  changes:
-    runs-on: ubuntu-latest
-
-    outputs:
-      rust: ${{ steps.filter.outputs.rust }}
-
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v6
-
-      - name: Detect Rust Changes
-        id: filter
-        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4
-        with:
-          filters: |
-            rust:
-              - '*.rs'
-              - '**/*.rs'
-              - 'Cargo.toml'
-              - '**/Cargo.toml'
-              - 'Cargo.lock'
-              - 'rust-toolchain'
-              - 'rust-toolchain.toml'
-              - 'rustfmt.toml'
-              - 'clippy.toml'
-              - '.cargo/**'
-
   fmt:
-    needs: changes
-    if: ${{ always() && !cancelled() && (needs.changes.result == 'failure' || needs.changes.outputs.rust == 'true') }}
     runs-on: ubuntu-latest
 
     steps:
@@ -61,8 +26,6 @@ jobs:
         run: cargo fmt --all -- --check
 
   test-and-coverage:
-    needs: changes
-    if: ${{ always() && !cancelled() && (needs.changes.result == 'failure' || needs.changes.outputs.rust == 'true') }}
     runs-on: ubuntu-latest
 
     steps:
@@ -102,8 +65,6 @@ jobs:
           flags: rust
 
   unused-dependencies:
-    needs: changes
-    if: ${{ always() && !cancelled() && (needs.changes.result == 'failure' || needs.changes.outputs.rust == 'true') }}
     runs-on: ubuntu-latest
 
     steps:
@@ -126,8 +87,6 @@ jobs:
         run: cargo +nightly udeps --locked --all-features --all-targets
 
   clippy:
-    needs: changes
-    if: ${{ always() && !cancelled() && (needs.changes.result == 'failure' || needs.changes.outputs.rust == 'true') }}
     runs-on: ubuntu-latest
 
     steps:

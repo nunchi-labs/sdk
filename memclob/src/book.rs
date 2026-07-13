@@ -180,9 +180,6 @@ impl MemBookEngine {
                 Ok(())
             }
             ClobOperation::CancelOrder { order } => self.cancel_order(&tx.account_id, order),
-            ClobOperation::CommitFill { .. } => Err(ClobError::InvalidOrder(
-                "commit fill is chain-settlement only",
-            )),
         }
     }
 

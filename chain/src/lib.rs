@@ -7,7 +7,6 @@ pub mod consensus;
 pub mod engine;
 pub mod events;
 pub mod execution;
-mod macros;
 #[cfg(test)]
 mod tests;
 

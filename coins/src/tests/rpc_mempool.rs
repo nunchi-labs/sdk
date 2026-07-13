@@ -9,7 +9,7 @@ use nunchi_rpc::{encode_hex, RpcRouter};
 use crate::{
     rpc::{
         register_mempool, CoinsMempoolRpc, MempoolIngress, SubmitTransactionResponse,
-        SubmitTransactionsResponse, TransactionStatusResponse,
+        TransactionStatusResponse,
     },
     CoinOperation, CoinSpec, PrivateKey, TokenName, TokenSymbol, Transaction,
 };
@@ -31,19 +31,6 @@ impl MempoolIngress for MockIngress {
             Some(error) => Err(error.clone()),
             None => Ok(transaction.digest()),
         }
-    }
-
-    async fn submit_many(
-        &self,
-        transactions: Vec<Transaction>,
-    ) -> Vec<Result<commonware_cryptography::sha256::Digest, nunchi_mempool::AdmissionError>> {
-        transactions
-            .into_iter()
-            .map(|transaction| match &self.reject {
-                Some(error) => Err(error.clone()),
-                None => Ok(transaction.digest()),
-            })
-            .collect()
     }
 
     async fn status(
@@ -116,38 +103,6 @@ fn submit_transaction_maps_admission_errors() {
             .await
             .expect_err("stale nonce should be rejected");
         assert!(error.to_string().contains("committed nonce"));
-    });
-}
-
-#[test]
-fn submit_transactions_reports_partial_results() {
-    commonware_runtime::deterministic::Runner::default().start(|_| async move {
-        let module = module(MockIngress::default());
-        let transaction = sample_transaction();
-
-        let mut params = jsonrpsee::core::params::ObjectParams::new();
-        params
-            .insert(
-                "transactions",
-                vec![encode_hex(&transaction), "not hex".to_string()],
-            )
-            .expect("serialize transaction params");
-        let response: SubmitTransactionsResponse = module
-            .call("coins.submit_transactions", params)
-            .await
-            .expect("submit response");
-
-        assert_eq!(response.results.len(), 2);
-        assert_eq!(
-            response.results[0].hash.as_deref(),
-            Some(encode_hex(&transaction.digest()).as_str())
-        );
-        assert!(response.results[0].error.is_none());
-        assert!(response.results[1].hash.is_none());
-        assert!(response.results[1]
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("coin transaction")));
     });
 }
 

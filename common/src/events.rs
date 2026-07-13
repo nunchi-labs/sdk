@@ -47,12 +47,6 @@ pub trait EventSink {
     fn emit(&mut self, event: Event);
 }
 
-impl<T: EventSink + ?Sized> EventSink for &mut T {
-    fn emit(&mut self, event: Event) {
-        (**self).emit(event);
-    }
-}
-
 /// Event sink that discards all events.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct NoopEventSink;
