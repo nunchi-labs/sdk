@@ -27,6 +27,11 @@ enum Completion {
     },
 }
 
+pub(crate) struct Config {
+    pub(crate) max_active: NonZeroUsize,
+    pub(crate) retry: Duration,
+}
+
 pub struct Consumer<E: Spawner + Clock + Storage + Metrics, C: Client> {
     context: ContextCell<E>,
     client: C,
@@ -49,14 +54,14 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
         metrics: IndexerMetrics,
         uploads: SharedState,
         backfiller: (queue::Writer<E, Entry>, queue::Reader<E, Entry>),
-        max_active: NonZeroUsize,
-        retry: Duration,
+        config: Config,
     ) -> Self {
         let upload_results = context.register(
             "uploads",
             "Total number of finalized block upload attempt outcomes by status",
             status::Raw::default(),
         );
+        let Config { max_active, retry } = config;
         let (writer, reader) = backfiller;
         Self {
             context: ContextCell::new(context),

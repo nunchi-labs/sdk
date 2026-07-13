@@ -224,8 +224,10 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Indexer<E, C> {
             metrics,
             uploads,
             (writer, reader),
-            backfiller_max_active,
-            backfiller_retry,
+            backfiller::consumer::Config {
+                max_active: backfiller_max_active,
+                retry: backfiller_retry,
+            },
         );
 
         Self {
