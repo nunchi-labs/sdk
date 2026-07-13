@@ -1,6 +1,9 @@
 use super::{Entry, SharedState};
 use crate::{
-    indexer::{metrics::BlockMetricSource, IndexerMetrics},
+    indexer::{
+        metrics::{BlockMetricSource, QueueStatus},
+        IndexerMetrics,
+    },
     Block,
 };
 use commonware_actor::{
@@ -86,10 +89,14 @@ impl<E: Clock + Storage + Metrics + Spawner> Actor<E> {
         let Some(entry) = self.uploads.lock().record(block) else {
             return;
         };
-        self.writer
-            .enqueue(entry)
-            .await
-            .expect("failed to enqueue finalized digest");
+        self.metrics.queue_entry(entry.height);
+        match self.writer.enqueue(entry).await {
+            Ok(_) => self.metrics.queue_enqueued(QueueStatus::Success),
+            Err(err) => {
+                self.metrics.queue_enqueued(QueueStatus::Failure);
+                panic!("failed to enqueue finalized digest: {err:?}");
+            }
+        }
     }
 }
 

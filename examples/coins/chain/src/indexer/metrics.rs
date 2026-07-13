@@ -356,6 +356,62 @@ impl EncodeLabelValueTrait for BackfillWaitReason {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum QueueStatus {
+    Success,
+    Empty,
+    Closed,
+    Failure,
+}
+
+impl QueueStatus {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Empty => "empty",
+            Self::Closed => "closed",
+            Self::Failure => "failure",
+        }
+    }
+}
+
+impl EncodeLabelValueTrait for QueueStatus {
+    fn encode(
+        &self,
+        encoder: &mut commonware_runtime::telemetry::metrics::LabelValueEncoder,
+    ) -> Result<(), fmt::Error> {
+        use fmt::Write as _;
+
+        encoder.write_str(self.as_str())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum QueueReadSource {
+    TryRecv,
+    Recv,
+}
+
+impl QueueReadSource {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::TryRecv => "try_recv",
+            Self::Recv => "recv",
+        }
+    }
+}
+
+impl EncodeLabelValueTrait for QueueReadSource {
+    fn encode(
+        &self,
+        encoder: &mut commonware_runtime::telemetry::metrics::LabelValueEncoder,
+    ) -> Result<(), fmt::Error> {
+        use fmt::Write as _;
+
+        encoder.write_str(self.as_str())
+    }
+}
+
 pub(crate) struct SharedStateSnapshot {
     pub(crate) cached_blocks: usize,
     pub(crate) cached_block_estimated_bytes: u64,
@@ -425,6 +481,17 @@ struct BackfillWaitReasonLabel {
     reason: BackfillWaitReason,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, EncodeLabelSet)]
+struct QueueStatusLabel {
+    status: QueueStatus,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, EncodeLabelSet)]
+struct QueueReadLabel {
+    source: QueueReadSource,
+    status: QueueStatus,
+}
+
 #[derive(Clone)]
 pub(crate) struct IndexerMetrics {
     live_upload_spawned: CounterFamily<ArtifactLabel>,
@@ -463,6 +530,13 @@ pub(crate) struct IndexerMetrics {
     backfill_retry: CounterFamily<BackfillWaitReasonLabel>,
     backfill_active_block_estimated_bytes: Gauge,
     backfill_active_body_estimated_bytes: Gauge,
+    queue_enqueue: CounterFamily<QueueStatusLabel>,
+    queue_ack: CounterFamily<QueueStatusLabel>,
+    queue_sync_duration: HistogramFamily<QueueStatusLabel>,
+    queue_read: CounterFamily<QueueReadLabel>,
+    queue_ack_floor_height: Gauge,
+    queue_entry_height: Gauge,
+    queue_lag_height: Gauge,
 }
 
 impl IndexerMetrics {
@@ -639,6 +713,37 @@ impl IndexerMetrics {
                 "backfill_active_body_estimated_bytes",
                 "Current estimated encoded HTTP body bytes held by durable backfill upload tasks",
             ),
+            queue_enqueue: context.family(
+                "queue_enqueue",
+                "Total durable indexer queue enqueue outcomes by status",
+            ),
+            queue_ack: context.family(
+                "queue_ack",
+                "Total durable indexer queue acknowledgement outcomes by status",
+            ),
+            queue_sync_duration: context.register(
+                "queue_sync_duration_seconds",
+                "Duration of durable indexer queue syncs by status",
+                raw::Family::<QueueStatusLabel, raw::Histogram, fn() -> raw::Histogram>::new_with_constructor(
+                    local_histogram,
+                ),
+            ),
+            queue_read: context.family(
+                "queue_read",
+                "Total durable indexer queue read outcomes by source and status",
+            ),
+            queue_ack_floor_height: context.gauge(
+                "queue_ack_floor_height",
+                "Latest durable indexer queue acknowledgement floor height",
+            ),
+            queue_entry_height: context.gauge(
+                "queue_entry_height",
+                "Latest durable indexer queue entry height observed by enqueue or read",
+            ),
+            queue_lag_height: context.gauge(
+                "queue_lag_height",
+                "Latest finalized height minus durable indexer queue acknowledged height",
+            ),
         }
     }
 
@@ -747,6 +852,11 @@ impl IndexerMetrics {
         let _ = self
             .shared_acked_through_height
             .try_set(snapshot.acked_through_height);
+        self.queue_ack_floor(snapshot.acked_through_height);
+        let lag = snapshot
+            .latest_finalized_height
+            .saturating_sub(snapshot.acked_through_height);
+        let _ = self.queue_lag_height.try_set(lag);
     }
 
     pub(crate) fn shared_cache_inserted(&self, source: SharedCacheSource) {
@@ -811,6 +921,38 @@ impl IndexerMetrics {
             metrics: self.clone(),
             bytes,
         }
+    }
+
+    pub(crate) fn queue_enqueued(&self, status: QueueStatus) {
+        self.queue_enqueue
+            .get_or_create(&QueueStatusLabel { status })
+            .inc();
+    }
+
+    pub(crate) fn queue_acked(&self, status: QueueStatus) {
+        self.queue_ack
+            .get_or_create(&QueueStatusLabel { status })
+            .inc();
+    }
+
+    pub(crate) fn queue_synced(&self, status: QueueStatus, duration: Duration) {
+        self.queue_sync_duration
+            .get_or_create(&QueueStatusLabel { status })
+            .observe(duration.as_secs_f64());
+    }
+
+    pub(crate) fn queue_read(&self, source: QueueReadSource, status: QueueStatus) {
+        self.queue_read
+            .get_or_create(&QueueReadLabel { source, status })
+            .inc();
+    }
+
+    pub(crate) fn queue_ack_floor(&self, height: u64) {
+        let _ = self.queue_ack_floor_height.try_set(height);
+    }
+
+    pub(crate) fn queue_entry(&self, height: u64) {
+        let _ = self.queue_entry_height.try_set(height);
     }
 }
 

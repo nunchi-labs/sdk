@@ -1,8 +1,8 @@
 use crate::{
     indexer::{
         BackfillDecision, BackfillPhase, BackfillWaitReason, BlockMetricSource, HttpArtifact,
-        IndexerMetrics, LiveUploadArtifact, SharedCacheSource, SharedRetentionReason,
-        SharedStateSnapshot,
+        IndexerMetrics, LiveUploadArtifact, QueueReadSource, QueueStatus, SharedCacheSource,
+        SharedRetentionReason, SharedStateSnapshot,
     },
     Block, StateCommitment, Transaction, EPOCH,
 };
@@ -146,7 +146,7 @@ fn shared_state_metrics_use_expected_labels() {
             certificate_upload_digests: 2,
             certificate_upload_refs: 3,
             uploaded_digests: 4,
-            latest_finalized_height: 5,
+            latest_finalized_height: 8,
             acked_through_height: 6,
         });
         metrics.shared_cache_inserted(SharedCacheSource::ProducerRecord);
@@ -165,8 +165,10 @@ fn shared_state_metrics_use_expected_labels() {
         assert!(encoded.contains("indexer_shared_certificate_upload_digests 2"));
         assert!(encoded.contains("indexer_shared_certificate_upload_refs 3"));
         assert!(encoded.contains("indexer_shared_uploaded_digests 4"));
-        assert!(encoded.contains("indexer_shared_latest_finalized_height 5"));
+        assert!(encoded.contains("indexer_shared_latest_finalized_height 8"));
         assert!(encoded.contains("indexer_shared_acked_through_height 6"));
+        assert!(encoded.contains("indexer_queue_ack_floor_height 6"));
+        assert!(encoded.contains("indexer_queue_lag_height 2"));
         assert!(encoded.contains(
             "indexer_shared_cache_insert_total{source=\"producer_record\"} 1",
         ));
@@ -245,6 +247,20 @@ fn backfill_metrics_use_expected_labels() {
         metrics.backfill_waited(BackfillWaitReason::MissingFinalization, Duration::from_millis(1));
         metrics.backfill_waited(BackfillWaitReason::MismatchedFinalization, Duration::from_millis(1));
         metrics.backfill_waited(BackfillWaitReason::HttpError, Duration::from_millis(1));
+        metrics.queue_enqueued(QueueStatus::Success);
+        metrics.queue_enqueued(QueueStatus::Failure);
+        metrics.queue_acked(QueueStatus::Success);
+        metrics.queue_acked(QueueStatus::Failure);
+        metrics.queue_synced(QueueStatus::Success, Duration::from_millis(1));
+        metrics.queue_synced(QueueStatus::Failure, Duration::from_millis(1));
+        metrics.queue_read(QueueReadSource::TryRecv, QueueStatus::Success);
+        metrics.queue_read(QueueReadSource::TryRecv, QueueStatus::Empty);
+        metrics.queue_read(QueueReadSource::TryRecv, QueueStatus::Failure);
+        metrics.queue_read(QueueReadSource::Recv, QueueStatus::Success);
+        metrics.queue_read(QueueReadSource::Recv, QueueStatus::Closed);
+        metrics.queue_read(QueueReadSource::Recv, QueueStatus::Failure);
+        metrics.queue_ack_floor(7);
+        metrics.queue_entry(9);
 
         let encoded = context.encode();
         assert!(encoded.contains("indexer_backfill_active_uploads 0"));
@@ -274,5 +290,30 @@ fn backfill_metrics_use_expected_labels() {
         assert!(encoded.contains("indexer_backfill_retry_total{reason=\"http_error\"} 1"));
         assert!(encoded.contains("indexer_backfill_active_block_estimated_bytes 0"));
         assert!(encoded.contains("indexer_backfill_active_body_estimated_bytes 0"));
+        assert!(encoded.contains("indexer_queue_enqueue_total{status=\"success\"} 1"));
+        assert!(encoded.contains("indexer_queue_enqueue_total{status=\"failure\"} 1"));
+        assert!(encoded.contains("indexer_queue_ack_total{status=\"success\"} 1"));
+        assert!(encoded.contains("indexer_queue_ack_total{status=\"failure\"} 1"));
+        assert!(encoded.contains("indexer_queue_sync_duration_seconds_bucket"));
+        assert!(encoded.contains(
+            "indexer_queue_read_total{source=\"try_recv\",status=\"success\"} 1",
+        ));
+        assert!(encoded.contains(
+            "indexer_queue_read_total{source=\"try_recv\",status=\"empty\"} 1",
+        ));
+        assert!(encoded.contains(
+            "indexer_queue_read_total{source=\"try_recv\",status=\"failure\"} 1",
+        ));
+        assert!(
+            encoded.contains("indexer_queue_read_total{source=\"recv\",status=\"success\"} 1")
+        );
+        assert!(
+            encoded.contains("indexer_queue_read_total{source=\"recv\",status=\"closed\"} 1")
+        );
+        assert!(
+            encoded.contains("indexer_queue_read_total{source=\"recv\",status=\"failure\"} 1")
+        );
+        assert!(encoded.contains("indexer_queue_ack_floor_height 7"));
+        assert!(encoded.contains("indexer_queue_entry_height 9"));
     });
 }

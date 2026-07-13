@@ -2,7 +2,7 @@ use super::{Decision, Entry, SharedState};
 use crate::indexer::{
     metrics::{
         estimated_finalized_bytes, BackfillDecision, BackfillPhase, BackfillUploadGuard,
-        BackfillWaitReason, BlockMetricSource, SharedCacheSource,
+        BackfillWaitReason, BlockMetricSource, QueueReadSource, QueueStatus, SharedCacheSource,
     },
     Client, IndexerMetrics,
 };
@@ -18,7 +18,10 @@ use commonware_runtime::{
 };
 use commonware_storage::queue;
 use commonware_utils::futures::{OptionFuture, Pool};
-use std::{num::NonZeroUsize, time::Duration};
+use std::{
+    num::NonZeroUsize,
+    time::{Duration, Instant},
+};
 use tracing::{debug, warn};
 
 impl From<&Decision> for BackfillDecision {
@@ -105,11 +108,7 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
             on_start => {
                 self.fill_slots().await;
                 if self.active.is_empty() {
-                    let item = self
-                        .reader
-                        .recv()
-                        .await
-                        .expect("failed to recv from finalized queue");
+                    let item = Self::recv_queue(&mut self.reader, self.metrics.clone()).await;
                     let Some((position, entry)) = item else {
                         warn!("consumer queue closed");
                         break;
@@ -118,7 +117,9 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
                     continue;
                 }
                 let item = OptionFuture::from(
-                    (self.active.len() < self.max_active.get()).then(|| self.reader.recv()),
+                    (self.active.len() < self.max_active.get()).then(|| {
+                        Self::recv_queue(&mut self.reader, self.metrics.clone())
+                    }),
                 );
             },
             on_stopped => {},
@@ -126,7 +127,7 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
                 self.complete(completion).await;
             },
             item = item => {
-                match item.expect("failed to recv from finalized queue") {
+                match item {
                     Some((position, entry)) => {
                         self.start_upload(position, entry).await;
                     }
@@ -141,15 +142,53 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
 
     async fn fill_slots(&mut self) {
         while self.active.len() < self.max_active.get() {
-            let item = self
-                .reader
-                .try_recv()
-                .await
-                .expect("failed to recv from finalized queue");
+            let item = Self::try_recv_queue(&mut self.reader, self.metrics.clone()).await;
             let Some((position, entry)) = item else {
                 break;
             };
             self.start_upload(position, entry).await;
+        }
+    }
+
+    async fn recv_queue(
+        reader: &mut queue::Reader<E, Entry>,
+        metrics: IndexerMetrics,
+    ) -> Option<(u64, Entry)> {
+        match reader.recv().await {
+            Ok(Some((position, entry))) => {
+                metrics.queue_read(QueueReadSource::Recv, QueueStatus::Success);
+                metrics.queue_entry(entry.height);
+                Some((position, entry))
+            }
+            Ok(None) => {
+                metrics.queue_read(QueueReadSource::Recv, QueueStatus::Closed);
+                None
+            }
+            Err(err) => {
+                metrics.queue_read(QueueReadSource::Recv, QueueStatus::Failure);
+                panic!("failed to recv from finalized queue: {err:?}");
+            }
+        }
+    }
+
+    async fn try_recv_queue(
+        reader: &mut queue::Reader<E, Entry>,
+        metrics: IndexerMetrics,
+    ) -> Option<(u64, Entry)> {
+        match reader.try_recv().await {
+            Ok(Some((position, entry))) => {
+                metrics.queue_read(QueueReadSource::TryRecv, QueueStatus::Success);
+                metrics.queue_entry(entry.height);
+                Some((position, entry))
+            }
+            Ok(None) => {
+                metrics.queue_read(QueueReadSource::TryRecv, QueueStatus::Empty);
+                None
+            }
+            Err(err) => {
+                metrics.queue_read(QueueReadSource::TryRecv, QueueStatus::Failure);
+                panic!("failed to recv from finalized queue: {err:?}");
+            }
         }
     }
 
@@ -393,10 +432,27 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
         };
 
         let floor = self.reader.ack_floor().await;
-        self.reader.ack(position).await.expect("failed to ack");
+        match self.reader.ack(position).await {
+            Ok(()) => self.metrics.queue_acked(QueueStatus::Success),
+            Err(err) => {
+                self.metrics.queue_acked(QueueStatus::Failure);
+                panic!("failed to ack: {err:?}");
+            }
+        }
         let floor_advanced = self.reader.ack_floor().await > floor;
-        self.writer.sync().await.expect("failed to sync after ack");
+        let sync_started = Instant::now();
+        match self.writer.sync().await {
+            Ok(()) => self
+                .metrics
+                .queue_synced(QueueStatus::Success, sync_started.elapsed()),
+            Err(err) => {
+                self.metrics
+                    .queue_synced(QueueStatus::Failure, sync_started.elapsed());
+                panic!("failed to sync after ack: {err:?}");
+            }
+        }
         if floor_advanced {
+            self.metrics.queue_ack_floor(height);
             self.uploads.lock().advance_queue_floor(height);
         }
     }
