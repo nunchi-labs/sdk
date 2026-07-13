@@ -242,6 +242,16 @@ impl EncodeLabelValueTrait for SharedRetentionReason {
     }
 }
 
+pub(crate) struct SharedStateSnapshot {
+    pub(crate) cached_blocks: usize,
+    pub(crate) cached_block_estimated_bytes: u64,
+    pub(crate) certificate_upload_digests: usize,
+    pub(crate) certificate_upload_refs: usize,
+    pub(crate) uploaded_digests: usize,
+    pub(crate) latest_finalized_height: u64,
+    pub(crate) acked_through_height: u64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, EncodeLabelSet)]
 struct ArtifactLabel {
     artifact: LiveUploadArtifact,
@@ -531,33 +541,26 @@ impl IndexerMetrics {
             .observe(block.transactions.len() as f64);
     }
 
-    pub(crate) fn shared_state(
-        &self,
-        cached_blocks: usize,
-        cached_block_estimated_bytes: u64,
-        certificate_upload_digests: usize,
-        certificate_upload_refs: usize,
-        uploaded_digests: usize,
-        latest_finalized_height: u64,
-        acked_through_height: u64,
-    ) {
-        let _ = self.shared_cached_blocks.try_set(cached_blocks);
+    pub(crate) fn shared_state(&self, snapshot: SharedStateSnapshot) {
+        let _ = self.shared_cached_blocks.try_set(snapshot.cached_blocks);
         let _ = self
             .shared_cached_block_estimated_bytes
-            .try_set(cached_block_estimated_bytes);
+            .try_set(snapshot.cached_block_estimated_bytes);
         let _ = self
             .shared_certificate_upload_digests
-            .try_set(certificate_upload_digests);
+            .try_set(snapshot.certificate_upload_digests);
         let _ = self
             .shared_certificate_upload_refs
-            .try_set(certificate_upload_refs);
-        let _ = self.shared_uploaded_digests.try_set(uploaded_digests);
+            .try_set(snapshot.certificate_upload_refs);
+        let _ = self
+            .shared_uploaded_digests
+            .try_set(snapshot.uploaded_digests);
         let _ = self
             .shared_latest_finalized_height
-            .try_set(latest_finalized_height);
+            .try_set(snapshot.latest_finalized_height);
         let _ = self
             .shared_acked_through_height
-            .try_set(acked_through_height);
+            .try_set(snapshot.acked_through_height);
     }
 
     pub(crate) fn shared_cache_inserted(&self, source: SharedCacheSource) {

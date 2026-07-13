@@ -1,6 +1,8 @@
 use crate::{
     indexer::{
-        metrics::{estimated_block_bytes, SharedCacheSource, SharedRetentionReason},
+        metrics::{
+            estimated_block_bytes, SharedCacheSource, SharedRetentionReason, SharedStateSnapshot,
+        },
         IndexerMetrics,
     },
     Block,
@@ -247,15 +249,15 @@ impl State {
 
     fn sync_metrics(&self) {
         if let Some(metrics) = &self.metrics {
-            metrics.shared_state(
-                self.cached_blocks.len(),
-                self.cached_block_estimated_bytes,
-                self.certificate_uploads.len(),
-                self.certificate_upload_refs,
-                self.uploaded.len(),
-                self.latest_finalized,
-                self.acked_through,
-            );
+            metrics.shared_state(SharedStateSnapshot {
+                cached_blocks: self.cached_blocks.len(),
+                cached_block_estimated_bytes: self.cached_block_estimated_bytes,
+                certificate_upload_digests: self.certificate_uploads.len(),
+                certificate_upload_refs: self.certificate_upload_refs,
+                uploaded_digests: self.uploaded.len(),
+                latest_finalized_height: self.latest_finalized,
+                acked_through_height: self.acked_through,
+            });
         }
     }
 }

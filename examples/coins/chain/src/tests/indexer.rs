@@ -1,7 +1,7 @@
 use crate::{
     indexer::{
         BlockMetricSource, HttpArtifact, IndexerMetrics, LiveUploadArtifact, SharedCacheSource,
-        SharedRetentionReason,
+        SharedRetentionReason, SharedStateSnapshot,
     },
     Block, StateCommitment, Transaction, EPOCH,
 };
@@ -139,7 +139,15 @@ fn shared_state_metrics_use_expected_labels() {
         let indexer = context.child("indexer");
         let metrics = IndexerMetrics::register(&indexer);
 
-        metrics.shared_state(1, 256, 2, 3, 4, 5, 6);
+        metrics.shared_state(SharedStateSnapshot {
+            cached_blocks: 1,
+            cached_block_estimated_bytes: 256,
+            certificate_upload_digests: 2,
+            certificate_upload_refs: 3,
+            uploaded_digests: 4,
+            latest_finalized_height: 5,
+            acked_through_height: 6,
+        });
         metrics.shared_cache_inserted(SharedCacheSource::ProducerRecord);
         metrics.shared_cache_inserted(SharedCacheSource::LiveCertificate);
         metrics.shared_cache_inserted(SharedCacheSource::ConsumerMarshal);
