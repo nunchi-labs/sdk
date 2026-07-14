@@ -21,15 +21,17 @@ use backfiller::{SharedState, State};
 pub(crate) use metrics::{DkgUploadStatus, IndexerMetrics};
 #[cfg(test)]
 pub(crate) use metrics::{
-    BackfillDecision, BackfillPhase, BackfillWaitReason, BlockMetricSource, HttpArtifact,
-    LiveUploadArtifact, ProducerActivity, ProducerStatus, QueueReadSource, QueueStatus,
-    SharedCacheSource, SharedRetentionReason, SharedStateSnapshot,
+    BackfillDecision, BackfillPhase, BackfillResetReason, BackfillWaitReason, BlockMetricSource,
+    HttpArtifact, LiveUploadArtifact, ProducerActivity, ProducerStatus, QueueReadSource,
+    QueueStatus, SharedCacheSource, SharedRetentionReason, SharedStateSnapshot,
 };
 use metrics::HttpArtifact as UploadArtifact;
 pub(crate) use pusher::Pusher;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const MISSING_FINALIZATION_GRACE: Duration = Duration::from_secs(120);
+const MISMATCHED_FINALIZATION_GRACE: Duration = Duration::from_secs(15);
 
 /// Errors returned by the HTTP indexer client.
 #[derive(Debug, Error)]
@@ -231,6 +233,8 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Indexer<E, C> {
             backfiller::consumer::Config {
                 max_active: backfiller_max_active,
                 retry: backfiller_retry,
+                missing_finalization_grace: MISSING_FINALIZATION_GRACE,
+                mismatched_finalization_grace: MISMATCHED_FINALIZATION_GRACE,
             },
         );
 

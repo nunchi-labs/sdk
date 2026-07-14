@@ -50,6 +50,7 @@ pub struct State {
     uploaded: PrioritySet<Digest, u64>,
     acked_through: u64,
     latest_finalized: u64,
+    restart_watermark: u64,
     cached_blocks: BTreeMap<Digest, CachedBlock>,
     cached_block_estimated_bytes: u64,
     certificate_uploads: BTreeMap<Digest, usize>,
@@ -68,6 +69,7 @@ impl State {
             uploaded: PrioritySet::new(),
             acked_through: 0,
             latest_finalized: 0,
+            restart_watermark: 0,
             cached_blocks: BTreeMap::new(),
             cached_block_estimated_bytes: 0,
             certificate_uploads: BTreeMap::new(),
@@ -93,6 +95,10 @@ impl State {
             digest: block.digest(),
         };
         self.observe_finalization(entry.height);
+        if entry.height <= self.restart_watermark {
+            self.sync_metrics();
+            return None;
+        }
         if self.is_uploaded(&entry.digest) {
             self.sync_metrics();
             return None;
@@ -105,6 +111,22 @@ impl State {
     pub fn advance_queue_floor(&mut self, height: u64) {
         self.acked_through = self.acked_through.max(height);
         self.prune();
+        self.sync_metrics();
+    }
+
+    pub fn restart_above(&mut self, height: u64) {
+        self.restart_watermark = self.restart_watermark.max(height);
+        let pruned = self
+            .cached_blocks
+            .iter()
+            .filter_map(|(digest, cached)| {
+                (cached.block.height.get() <= self.restart_watermark).then_some(*digest)
+            })
+            .collect::<Vec<_>>();
+        for digest in &pruned {
+            self.remove_cached_block(digest, SharedRetentionReason::Pruned);
+        }
+        self.shared_pruned(SharedRetentionReason::Pruned, pruned.len() as u64);
         self.sync_metrics();
     }
 
@@ -348,6 +370,28 @@ mod tests {
         state.mark_uploaded(digest, 5);
 
         assert!(state.record(&block).is_none());
+    }
+
+    #[test]
+    fn restart_watermark_suppresses_replayed_old_blocks() {
+        let mut state = State::new();
+        let old = block(5, 5, b"old");
+        let old_digest = old.digest();
+        let tip = block(8, 8, b"tip");
+        let future = block(9, 9, b"future");
+
+        assert!(state.record(&old).is_some());
+        assert!(state.record(&tip).is_some());
+
+        state.restart_above(8);
+
+        assert!(state.record(&old).is_none());
+        assert!(state.record(&tip).is_none());
+        assert!(state.cached_block(&old_digest).is_none());
+
+        let entry = state.record(&future).expect("future block should enqueue");
+        assert_eq!(entry.height, 9);
+        assert_eq!(entry.digest, future.digest());
     }
 
     #[test]

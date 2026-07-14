@@ -1,8 +1,9 @@
 use super::{Decision, Entry, SharedState};
 use crate::indexer::{
     metrics::{
-        estimated_finalized_bytes, BackfillDecision, BackfillPhase, BackfillUploadGuard,
-        BackfillWaitReason, BlockMetricSource, QueueReadSource, QueueStatus, SharedCacheSource,
+        estimated_finalized_bytes, BackfillDecision, BackfillPhase, BackfillResetReason,
+        BackfillUploadGuard, BackfillWaitReason, BlockMetricSource, QueueReadSource, QueueStatus,
+        SharedCacheSource,
     },
     Client, IndexerMetrics,
 };
@@ -44,11 +45,20 @@ enum Completion {
         position: u64,
         height: u64,
     },
+    Stale {
+        reason: BackfillResetReason,
+        first_height: u64,
+        first_digest: Digest,
+        attempts: u64,
+        elapsed: Duration,
+    },
 }
 
 pub(crate) struct Config {
     pub(crate) max_active: NonZeroUsize,
     pub(crate) retry: Duration,
+    pub(crate) missing_finalization_grace: Duration,
+    pub(crate) mismatched_finalization_grace: Duration,
 }
 
 pub struct Consumer<E: Spawner + Clock + Storage + Metrics, C: Client> {
@@ -63,6 +73,8 @@ pub struct Consumer<E: Spawner + Clock + Storage + Metrics, C: Client> {
     active: Pool<Completion>,
     max_active: NonZeroUsize,
     retry: Duration,
+    missing_finalization_grace: Duration,
+    mismatched_finalization_grace: Duration,
 }
 
 impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
@@ -80,7 +92,12 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
             "Total number of finalized block upload attempt outcomes by status",
             status::Raw::default(),
         );
-        let Config { max_active, retry } = config;
+        let Config {
+            max_active,
+            retry,
+            missing_finalization_grace,
+            mismatched_finalization_grace,
+        } = config;
         metrics.backfill_configured(max_active.get());
         let (writer, reader) = backfiller;
         Self {
@@ -95,6 +112,8 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
             active: Pool::default(),
             max_active,
             retry,
+            missing_finalization_grace,
+            mismatched_finalization_grace,
         }
     }
 
@@ -220,6 +239,8 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
             let upload_results = self.upload_results.clone();
             let uploads = self.uploads.clone();
             let retry = self.retry;
+            let missing_finalization_grace = self.missing_finalization_grace;
+            let mismatched_finalization_grace = self.mismatched_finalization_grace;
             async move {
                 let mut upload = metrics.start_backfill_upload();
                 let Some(block) =
@@ -233,8 +254,19 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
                     return Completion::Skipped { position, height };
                 };
 
+                let mut proof_failure = ProofFailure::default();
                 let finalized = loop {
                     let Some(proof) = marshal.get_finalization(Height::new(height)).await else {
+                        if let Some(stale) = proof_failure.observe(
+                            &context,
+                            BackfillResetReason::MissingFinalization,
+                            missing_finalization_grace,
+                            height,
+                            digest,
+                        ) {
+                            upload.abandoned();
+                            return stale;
+                        }
                         warn!(
                             height,
                             ?digest,
@@ -250,6 +282,16 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
                         continue;
                     };
                     if proof.proposal.payload != digest {
+                        if let Some(stale) = proof_failure.observe(
+                            &context,
+                            BackfillResetReason::MismatchedFinalization,
+                            mismatched_finalization_grace,
+                            height,
+                            digest,
+                        ) {
+                            upload.abandoned();
+                            return stale;
+                        }
                         warn!(
                             height,
                             ?digest,
@@ -429,6 +471,17 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
                 (position, height)
             }
             Completion::Skipped { position, height } => (position, height),
+            Completion::Stale {
+                reason,
+                first_height,
+                first_digest,
+                attempts,
+                elapsed,
+            } => {
+                self.reset_stale_queue(reason, first_height, first_digest, attempts, elapsed)
+                    .await;
+                return;
+            }
         };
 
         let floor = self.reader.ack_floor().await;
@@ -455,5 +508,111 @@ impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
             self.metrics.queue_ack_floor(height);
             self.uploads.lock().advance_queue_floor(height);
         }
+    }
+
+    async fn reset_stale_queue(
+        &mut self,
+        reason: BackfillResetReason,
+        first_height: u64,
+        first_digest: Digest,
+        attempts: u64,
+        elapsed: Duration,
+    ) {
+        let queue_size = self.writer.size().await;
+        let ack_floor = self.reader.ack_floor().await;
+        let abandoned_entries = queue_size.saturating_sub(ack_floor);
+        let tip = Self::latest_proof_bearing_tip(self.marshal.clone()).await;
+        let (tip_height, tip_digest) = tip.unwrap_or((0, first_digest));
+        let abandoned_height_span = tip_height.saturating_sub(first_height);
+
+        warn!(
+            ?reason,
+            first_height,
+            ?first_digest,
+            tip_height,
+            ?tip_digest,
+            attempts,
+            ?elapsed,
+            abandoned_entries,
+            abandoned_height_span,
+            "resetting stale durable backfill queue"
+        );
+
+        self.active.cancel_all();
+        match self.reader.ack_up_to(queue_size).await {
+            Ok(()) => self.metrics.queue_acked(QueueStatus::Success),
+            Err(err) => {
+                self.metrics.queue_acked(QueueStatus::Failure);
+                panic!("failed to ack stale finalized queue: {err:?}");
+            }
+        }
+        let sync_started = Instant::now();
+        match self.writer.sync().await {
+            Ok(()) => self
+                .metrics
+                .queue_synced(QueueStatus::Success, sync_started.elapsed()),
+            Err(err) => {
+                self.metrics
+                    .queue_synced(QueueStatus::Failure, sync_started.elapsed());
+                panic!("failed to sync stale finalized queue reset: {err:?}");
+            }
+        }
+        self.reader.reset().await;
+        self.metrics.queue_ack_floor(tip_height);
+        self.metrics.backfill_queue_reset(
+            reason,
+            abandoned_entries,
+            abandoned_height_span,
+        );
+        self.uploads.lock().advance_queue_floor(tip_height);
+        self.uploads.lock().restart_above(tip_height);
+    }
+
+    async fn latest_proof_bearing_tip(
+        marshal: MarshalMailbox<Scheme, Standard<Block>>,
+    ) -> Option<(u64, Digest)> {
+        let (height, _) = marshal.get_info(Identifier::Latest).await?;
+        for height in (0..=height.get()).rev() {
+            if let Some(proof) = marshal.get_finalization(Height::new(height)).await {
+                return Some((height, proof.proposal.payload));
+            }
+        }
+        None
+    }
+}
+
+#[derive(Default)]
+struct ProofFailure {
+    reason: Option<BackfillResetReason>,
+    first_seen: Option<std::time::SystemTime>,
+    attempts: u64,
+}
+
+impl ProofFailure {
+    fn observe<E: Clock>(
+        &mut self,
+        context: &E,
+        reason: BackfillResetReason,
+        grace: Duration,
+        height: u64,
+        digest: Digest,
+    ) -> Option<Completion> {
+        if self.reason != Some(reason) {
+            self.reason = Some(reason);
+            self.first_seen = Some(context.current());
+            self.attempts = 0;
+        }
+        self.attempts = self.attempts.saturating_add(1);
+        let elapsed = context
+            .current()
+            .duration_since(self.first_seen.expect("proof failure start"))
+            .unwrap_or_default();
+        (elapsed >= grace).then_some(Completion::Stale {
+            reason,
+            first_height: height,
+            first_digest: digest,
+            attempts: self.attempts,
+            elapsed,
+        })
     }
 }

@@ -248,6 +248,7 @@ impl EncodeLabelValueTrait for SharedRetentionReason {
 pub(crate) enum BackfillStatus {
     Uploaded,
     Skipped,
+    Abandoned,
 }
 
 impl BackfillStatus {
@@ -255,6 +256,7 @@ impl BackfillStatus {
         match self {
             Self::Uploaded => "uploaded",
             Self::Skipped => "skipped",
+            Self::Abandoned => "abandoned",
         }
     }
 }
@@ -344,6 +346,32 @@ impl BackfillWaitReason {
             Self::MismatchedFinalization => "mismatched_finalization",
             Self::HttpError => "http_error",
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum BackfillResetReason {
+    MissingFinalization,
+    MismatchedFinalization,
+}
+
+impl BackfillResetReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::MissingFinalization => "missing_finalization",
+            Self::MismatchedFinalization => "mismatched_finalization",
+        }
+    }
+}
+
+impl EncodeLabelValueTrait for BackfillResetReason {
+    fn encode(
+        &self,
+        encoder: &mut commonware_runtime::telemetry::metrics::LabelValueEncoder,
+    ) -> Result<(), fmt::Error> {
+        use fmt::Write as _;
+
+        encoder.write_str(self.as_str())
     }
 }
 
@@ -572,6 +600,11 @@ struct BackfillWaitReasonLabel {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, EncodeLabelSet)]
+struct BackfillResetReasonLabel {
+    reason: BackfillResetReason,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, EncodeLabelSet)]
 struct QueueStatusLabel {
     status: QueueStatus,
 }
@@ -644,6 +677,9 @@ pub(crate) struct Inner {
     backfill_decision: CounterFamily<BackfillDecisionLabel>,
     backfill_wait_duration: HistogramFamily<BackfillWaitReasonLabel>,
     backfill_retry: CounterFamily<BackfillWaitReasonLabel>,
+    backfill_queue_reset: CounterFamily<BackfillResetReasonLabel>,
+    backfill_queue_reset_abandoned_entries: HistogramFamily<BackfillResetReasonLabel>,
+    backfill_queue_reset_abandoned_height_span: HistogramFamily<BackfillResetReasonLabel>,
     backfill_active_block_estimated_bytes: Gauge,
     backfill_active_body_estimated_bytes: Gauge,
     queue_enqueue: CounterFamily<QueueStatusLabel>,
@@ -830,6 +866,24 @@ impl IndexerMetrics {
             backfill_retry: context.family(
                 "backfill_retry",
                 "Total durable backfill retries by reason",
+            ),
+            backfill_queue_reset: context.family(
+                "backfill_queue_reset",
+                "Total durable backfill queue resets by reason",
+            ),
+            backfill_queue_reset_abandoned_entries: context.register(
+                "backfill_queue_reset_abandoned_entries",
+                "Durable backfill entries abandoned by queue reset",
+                raw::Family::<BackfillResetReasonLabel, raw::Histogram, fn() -> raw::Histogram>::new_with_constructor(
+                    local_histogram,
+                ),
+            ),
+            backfill_queue_reset_abandoned_height_span: context.register(
+                "backfill_queue_reset_abandoned_height_span",
+                "Durable backfill height span abandoned by queue reset",
+                raw::Family::<BackfillResetReasonLabel, raw::Histogram, fn() -> raw::Histogram>::new_with_constructor(
+                    local_histogram,
+                ),
             ),
             backfill_active_block_estimated_bytes: context.gauge(
                 "backfill_active_block_estimated_bytes",
@@ -1076,6 +1130,22 @@ impl IndexerMetrics {
         self.backfill_wait_duration
             .get_or_create(&BackfillWaitReasonLabel { reason })
             .observe(duration.as_secs_f64());
+    }
+
+    pub(crate) fn backfill_queue_reset(
+        &self,
+        reason: BackfillResetReason,
+        abandoned_entries: u64,
+        abandoned_height_span: u64,
+    ) {
+        let label = BackfillResetReasonLabel { reason };
+        self.backfill_queue_reset.get_or_create(&label).inc();
+        self.backfill_queue_reset_abandoned_entries
+            .get_or_create(&label)
+            .observe(abandoned_entries as f64);
+        self.backfill_queue_reset_abandoned_height_span
+            .get_or_create(&label)
+            .observe(abandoned_height_span as f64);
     }
 
     pub(crate) fn start_backfill_body(&self, bytes: u64) -> BackfillBodyGuard {
@@ -1331,6 +1401,10 @@ impl BackfillUploadGuard {
 
     pub(crate) const fn skipped(&mut self) {
         self.status = Some(BackfillStatus::Skipped);
+    }
+
+    pub(crate) const fn abandoned(&mut self) {
+        self.status = Some(BackfillStatus::Abandoned);
     }
 }
 

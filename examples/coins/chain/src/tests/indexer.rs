@@ -1,8 +1,9 @@
 use crate::{
     indexer::{
-        BackfillDecision, BackfillPhase, BackfillWaitReason, BlockMetricSource, DkgUploadStatus,
-        HttpArtifact, IndexerMetrics, LiveUploadArtifact, ProducerActivity, ProducerStatus,
-        QueueReadSource, QueueStatus, SharedCacheSource, SharedRetentionReason,
+        BackfillDecision, BackfillPhase, BackfillResetReason, BackfillWaitReason,
+        BlockMetricSource, DkgUploadStatus, HttpArtifact, IndexerMetrics, LiveUploadArtifact,
+        ProducerActivity, ProducerStatus, QueueReadSource, QueueStatus, SharedCacheSource,
+        SharedRetentionReason,
         SharedStateSnapshot,
     },
     Block, StateCommitment, Transaction, EPOCH,
@@ -444,6 +445,8 @@ fn backfill_metrics_use_expected_labels() {
         metrics.backfill_waited(BackfillWaitReason::MissingFinalization, Duration::from_millis(1));
         metrics.backfill_waited(BackfillWaitReason::MismatchedFinalization, Duration::from_millis(1));
         metrics.backfill_waited(BackfillWaitReason::HttpError, Duration::from_millis(1));
+        metrics.backfill_queue_reset(BackfillResetReason::MissingFinalization, 32, 31);
+        metrics.backfill_queue_reset(BackfillResetReason::MismatchedFinalization, 2, 1);
         metrics.queue_enqueued(QueueStatus::Success);
         metrics.queue_enqueued(QueueStatus::Failure);
         metrics.queue_acked(QueueStatus::Success);
@@ -499,6 +502,14 @@ fn backfill_metrics_use_expected_labels() {
         assert!(encoded
             .contains("indexer_backfill_retry_total{reason=\"mismatched_finalization\"} 1"));
         assert!(encoded.contains("indexer_backfill_retry_total{reason=\"http_error\"} 1"));
+        assert!(encoded.contains(
+            "indexer_backfill_queue_reset_total{reason=\"missing_finalization\"} 1",
+        ));
+        assert!(encoded.contains(
+            "indexer_backfill_queue_reset_total{reason=\"mismatched_finalization\"} 1",
+        ));
+        assert!(encoded.contains("indexer_backfill_queue_reset_abandoned_entries_bucket"));
+        assert!(encoded.contains("indexer_backfill_queue_reset_abandoned_height_span_bucket"));
         assert!(encoded.contains("indexer_backfill_active_block_estimated_bytes 0"));
         assert!(encoded.contains("indexer_backfill_active_body_estimated_bytes 0"));
         assert!(encoded.contains("indexer_queue_enqueue_total{status=\"success\"} 1"));
