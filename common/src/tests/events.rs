@@ -39,3 +39,20 @@ fn noop_event_sink_accepts_events() {
         Bytes::from_static(b"burn"),
     ));
 }
+
+#[test]
+fn mutable_event_sink_reference_forwards_events() {
+    fn emit<S: EventSink>(mut sink: S, event: Event) {
+        sink.emit(event);
+    }
+
+    let event = Event::new(
+        Bytes::from_static(b"coins.transferred.v1"),
+        Bytes::from_static(b"transfer"),
+    );
+    let mut sink = VecEventSink::new();
+
+    emit(&mut sink, event.clone());
+
+    assert_eq!(sink.events(), &[event]);
+}

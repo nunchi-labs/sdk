@@ -97,6 +97,8 @@ pub trait ClobDB {
 
     fn set_order(&mut self, order: &Order);
 
+    fn remove_order(&mut self, order: &OrderId);
+
     async fn side_book(&self, market: &MarketId, side: Side) -> Result<Vec<OrderId>, ClobError>;
 
     fn set_side_book(&mut self, market: &MarketId, side: Side, orders: &[OrderId]);
@@ -108,6 +110,8 @@ pub trait ClobDB {
     async fn fill(&self, id: &FillId) -> Result<Option<Fill>, ClobError>;
 
     fn set_fill(&mut self, fill: &Fill);
+
+    fn remove_fill(&mut self, fill: &FillId);
 
     async fn market_fills(&self, market: &MarketId) -> Result<Vec<FillId>, ClobError>;
 
@@ -180,6 +184,10 @@ impl<S: StateStore + Send + Sync> ClobDB for S {
         StateStore::set(self, order_key(&order.id), encoded(order));
     }
 
+    fn remove_order(&mut self, order: &OrderId) {
+        StateStore::remove(self, order_key(order));
+    }
+
     async fn side_book(&self, market: &MarketId, side: Side) -> Result<Vec<OrderId>, ClobError> {
         match StateStore::get(self, &side_book_key(market, side))
             .await
@@ -232,6 +240,10 @@ impl<S: StateStore + Send + Sync> ClobDB for S {
 
     fn set_fill(&mut self, fill: &Fill) {
         StateStore::set(self, fill_key(&fill.id), encoded(fill));
+    }
+
+    fn remove_fill(&mut self, fill: &FillId) {
+        StateStore::remove(self, fill_key(fill));
     }
 
     async fn market_fills(&self, market: &MarketId) -> Result<Vec<FillId>, ClobError> {

@@ -7,7 +7,11 @@ use commonware_glue::stateful::{
     db::{DatabaseSet, Merkleized as _},
     Application as StatefulApplication, Proposed,
 };
-use commonware_runtime::{Clock, Metrics, Spawner, Storage};
+use commonware_parallel::{Rayon, Strategy as _};
+use commonware_runtime::{
+    telemetry::metrics::{histogram::Buckets, Histogram, HistogramExt as _, MetricsExt as _},
+    Clock, Metrics, Spawner, Storage,
+};
 use commonware_storage::{mmr::Location, qmdb::sync::Target};
 use commonware_utils::{non_empty_range, range::NonEmptyRange, SystemTimeExt};
 use futures::{lock::Mutex as AsyncMutex, StreamExt};
@@ -18,6 +22,7 @@ use rand::Rng;
 use std::{
     collections::HashMap,
     marker::PhantomData,
+    num::NonZeroUsize,
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -67,13 +72,56 @@ where
     applied_height: SharedAppliedHeight,
     genesis_state: StateCommitment,
     genesis_payload: sha256::Digest,
+    metrics: Option<ApplicationMetrics>,
+    strategy: Option<Rayon>,
     _runtime: PhantomData<R>,
+}
+
+#[derive(Clone)]
+struct ApplicationMetrics {
+    candidate_selection_duration: Histogram,
+    proposal_validate_duration: Histogram,
+    proposal_merkleize_duration: Histogram,
+    apply_transactions_duration: Histogram,
+    apply_merkleize_duration: Histogram,
+}
+
+impl ApplicationMetrics {
+    fn register<E: Metrics>(context: &E) -> Self {
+        Self {
+            candidate_selection_duration: context.histogram(
+                "candidate_selection_duration_seconds",
+                "duration spent fetching proposal candidates from the mempool",
+                Buckets::LOCAL,
+            ),
+            proposal_validate_duration: context.histogram(
+                "proposal_validate_duration_seconds",
+                "duration spent validating txpool candidates during block proposal",
+                Buckets::LOCAL,
+            ),
+            proposal_merkleize_duration: context.histogram(
+                "proposal_merkleize_duration_seconds",
+                "duration spent merkleizing proposal state",
+                Buckets::LOCAL,
+            ),
+            apply_transactions_duration: context.histogram(
+                "apply_transactions_duration_seconds",
+                "duration spent applying block transactions",
+                Buckets::LOCAL,
+            ),
+            apply_merkleize_duration: context.histogram(
+                "apply_merkleize_duration_seconds",
+                "duration spent merkleizing applied block state",
+                Buckets::LOCAL,
+            ),
+        }
+    }
 }
 
 impl<R, Ext, Events> Application<R, Ext, Events>
 where
     R: Runtime,
-    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
+    R::Transaction: PoolTransaction,
     Ext: ConsensusExtension + Sync,
     Events: EventConsumer,
 {
@@ -119,8 +167,35 @@ where
             applied_height,
             genesis_state,
             genesis_payload,
+            metrics: None,
+            strategy: None,
             _runtime: PhantomData,
         }
+    }
+
+    fn metrics<E: Metrics>(&mut self, context: &E) -> ApplicationMetrics {
+        if self.metrics.is_none() {
+            self.metrics = Some(ApplicationMetrics::register(context));
+        }
+        self.metrics
+            .as_ref()
+            .expect("application metrics initialized")
+            .clone()
+    }
+
+    /// Thread pool strategy for CPU-heavy per-transaction work, created
+    /// lazily on first use. A plain rayon pool (rather than one placed on
+    /// runtime-spawned threads) keeps multiple in-process nodes from
+    /// contending over rayon's thread-local registry.
+    fn strategy(&mut self) -> Rayon {
+        if self.strategy.is_none() {
+            let concurrency = std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
+            self.strategy =
+                Some(Rayon::new(concurrency).expect("failed to create application thread pool"));
+        }
+        self.strategy
+            .clone()
+            .expect("application strategy initialized")
     }
 
     fn timestamp<E: Clock>(
@@ -142,9 +217,21 @@ where
         context: RuntimeContext,
         candidates: Vec<R::Transaction>,
     ) -> Option<(Vec<R::Transaction>, QmdbMerkleized<E>)> {
+        self.build_valid_transactions_inner(None, batches, context, candidates)
+            .await
+    }
+
+    async fn build_valid_transactions_inner<E: Storage + Clock + Metrics>(
+        &self,
+        timing: Option<(&E, &ApplicationMetrics)>,
+        batches: <QmdbDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
+        context: RuntimeContext,
+        candidates: Vec<R::Transaction>,
+    ) -> Option<(Vec<R::Transaction>, QmdbMerkleized<E>)> {
         let mut batch = QmdbBatch::new(batches);
         let mut included = Vec::new();
 
+        let validate_start = timing.map(|(runtime_context, _)| runtime_context.current());
         for transaction in candidates {
             if included.len() == self.max_block_transactions {
                 break;
@@ -164,7 +251,13 @@ where
                 }
             }
         }
+        if let Some(((runtime_context, metrics), validate_start)) = timing.zip(validate_start) {
+            metrics
+                .proposal_validate_duration
+                .observe_between(validate_start, runtime_context.current());
+        }
 
+        let merkleize_start = timing.map(|(runtime_context, _)| runtime_context.current());
         let merkleized = match batch.merkleize().await {
             Ok(merkleized) => merkleized,
             Err(error) => {
@@ -172,14 +265,86 @@ where
                 return None;
             }
         };
+        if let Some(((runtime_context, metrics), merkleize_start)) = timing.zip(merkleize_start) {
+            metrics
+                .proposal_merkleize_duration
+                .observe_between(merkleize_start, runtime_context.current());
+        }
         Some((included, merkleized))
     }
 
+    async fn build_proposal_state<E: Storage + Clock + Metrics>(
+        &mut self,
+        timing: Option<(&E, &ApplicationMetrics)>,
+        batches: <QmdbDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
+        context: RuntimeContext,
+        candidates: Vec<R::Transaction>,
+    ) -> Option<(Vec<R::Transaction>, Ext::Payload, QmdbMerkleized<E>)> {
+        let mut batch = QmdbBatch::new(batches);
+        let mut included = Vec::new();
+
+        let validate_start = timing.map(|(runtime_context, _)| runtime_context.current());
+        for transaction in candidates {
+            if included.len() == self.max_block_transactions {
+                break;
+            }
+            let mut overlay = Overlay::new(&mut batch);
+            match R::validate(&mut overlay, context, &transaction).await {
+                Ok(()) => {
+                    overlay.commit();
+                    included.push(transaction);
+                }
+                Err(error) if R::is_storage_error(&error) => {
+                    error!(?error, "storage failure while building block");
+                    return None;
+                }
+                Err(error) => {
+                    debug!(?error, "skipping non-executable txpool transaction");
+                }
+            }
+        }
+        if let Some(((runtime_context, metrics), validate_start)) = timing.zip(validate_start) {
+            metrics
+                .proposal_validate_duration
+                .observe_between(validate_start, runtime_context.current());
+        }
+
+        let extension = self.consensus.propose().await;
+        if !self
+            .consensus
+            .apply_payload(&mut batch, context, &extension)
+            .await
+        {
+            return None;
+        }
+
+        let merkleize_start = timing.map(|(runtime_context, _)| runtime_context.current());
+        let merkleized = match batch.merkleize().await {
+            Ok(merkleized) => merkleized,
+            Err(error) => {
+                error!(?error, "merkleization failed while building block");
+                return None;
+            }
+        };
+        if let Some(((runtime_context, metrics), merkleize_start)) = timing.zip(merkleize_start) {
+            metrics
+                .proposal_merkleize_duration
+                .observe_between(merkleize_start, runtime_context.current());
+        }
+        Some((included, extension, merkleized))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn execute_block<E, EventHandler>(
+        &mut self,
+        runtime_context: &E,
+        metrics: &ApplicationMetrics,
         batches: <QmdbDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
         context: RuntimeContext,
         transactions: &[R::Transaction],
+        extension: &Ext::Payload,
         events: &EventHandler,
+        commit_extension: bool,
     ) -> Option<QmdbMerkleized<E>>
     where
         E: Storage + Clock + Metrics,
@@ -187,6 +352,7 @@ where
     {
         events.begin_block(context).await;
         let mut batch = QmdbBatch::new(batches);
+        let apply_start = runtime_context.current();
         for (tx_index, transaction) in transactions.iter().enumerate() {
             let transaction_events = TransactionEventContext {
                 tx_index: u32::try_from(tx_index).expect("block contains more than u32::MAX txs"),
@@ -208,12 +374,36 @@ where
                 }
             }
         }
+        if !self
+            .consensus
+            .apply_payload(&mut batch, context, extension)
+            .await
+        {
+            if let Some(digest) = context.block_digest {
+                events.discard_block(digest).await;
+            }
+            return None;
+        }
+        if commit_extension {
+            self.consensus
+                .commit_payload(&mut batch, context, extension)
+                .await;
+        }
+        metrics
+            .apply_transactions_duration
+            .observe_between(apply_start, runtime_context.current());
+        let merkleize_start = runtime_context.current();
         Some(
             batch
                 .merkleize()
                 .await
                 .expect("merkleization failed while executing block"),
         )
+        .inspect(|_| {
+            metrics
+                .apply_merkleize_duration
+                .observe_between(merkleize_start, runtime_context.current());
+        })
     }
 
     fn proposal_runtime_context(epoch: u64, height: Height, timestamp_ms: u64) -> RuntimeContext {
@@ -261,7 +451,7 @@ where
 impl<R, Ext> Application<R, Ext, NoopEventConsumer>
 where
     R: Runtime,
-    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
+    R::Transaction: PoolTransaction,
     Ext: ConsensusExtension + Sync,
 {
     pub fn with_consensus(
@@ -291,7 +481,7 @@ where
 impl<R> Application<R>
 where
     R: Runtime,
-    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
+    R::Transaction: PoolTransaction,
 {
     pub fn new(
         submitter: MempoolHandle<R::Transaction>,
@@ -315,7 +505,7 @@ where
 impl<R, Events> Application<R, NoConsensusExtension, Events>
 where
     R: Runtime,
-    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
+    R::Transaction: PoolTransaction,
     Events: EventConsumer,
 {
     pub fn new_with_events(
@@ -344,7 +534,7 @@ where
 impl<R> Application<R>
 where
     R: Runtime,
-    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
+    R::Transaction: PoolTransaction,
     Block<R::Transaction>: nunchi_dkg::ReshareBlock,
 {
     pub fn with_dkg(
@@ -370,7 +560,7 @@ where
 impl<R, Events> Application<R, NoConsensusExtension, Events>
 where
     R: Runtime,
-    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
+    R::Transaction: PoolTransaction,
     Block<R::Transaction>: nunchi_dkg::ReshareBlock,
     Events: EventConsumer,
 {
@@ -402,7 +592,7 @@ impl<E, R, Ext, Events> StatefulApplication<E> for Application<R, Ext, Events>
 where
     E: Rng + Spawner + Metrics + Clock + Storage,
     R: Runtime + Clone + Send + Sync + 'static,
-    R::Transaction: PoolTransaction<Digest = sha256::Digest>,
+    R::Transaction: PoolTransaction + Sync,
     Ext: ConsensusExtension + Sync,
     Events: EventConsumer,
 {
@@ -427,24 +617,33 @@ where
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: &mut Self::InputProvider,
     ) -> Option<Proposed<Self, E>> {
+        let metrics = self.metrics(&runtime_context);
         let mut ancestry = Box::pin(ancestry);
         let parent = ancestry.next().await?;
         let timestamp = Self::timestamp(&runtime_context, &parent)?;
-        let candidates = input.pending(usize::MAX).await;
+        let selection_start = runtime_context.current();
+        let candidates = input.pending(self.max_block_transactions).await;
+        metrics
+            .candidate_selection_duration
+            .observe_between(selection_start, runtime_context.current());
         let execution_context = Self::proposal_runtime_context(
             context.round.epoch().get(),
             parent.height.next(),
             timestamp,
         );
-        let (transactions, merkleized) = self
-            .build_valid_transactions(batches, execution_context, candidates)
+        let (transactions, extension, merkleized) = self
+            .build_proposal_state(
+                Some((&runtime_context, &metrics)),
+                batches,
+                execution_context,
+                candidates,
+            )
             .await?;
         let state_range = Self::state_range(&merkleized);
         let reshare_log = match &mut self.dkg {
             Some(dkg) => dkg.act().await,
             None => None,
         };
-        let extension = self.consensus.propose().await;
         let block = Block::new(
             context,
             parent.digest(),
@@ -467,6 +666,7 @@ where
         ancestry: impl futures::Stream<Item = Self::Block> + Send,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
+        let metrics = self.metrics(&runtime_context);
         let mut ancestry = Box::pin(ancestry);
         let block = ancestry.next().await?;
         let parent = ancestry.next().await?;
@@ -479,11 +679,17 @@ where
             return None;
         }
 
-        if block
-            .transactions
-            .iter()
-            .any(|tx| PoolTransaction::verify(tx).is_err())
-        {
+        // Stateless signature verification is the adversarial gate for
+        // proposed blocks, and it dominates large-block latency when run
+        // serially; fan it out across the verification thread pool.
+        let strategy = self.strategy();
+        let all_valid = strategy.fold(
+            &block.transactions,
+            || true,
+            |valid, tx| valid && PoolTransaction::verify(tx).is_ok(),
+            |a, b| a && b,
+        );
+        if !all_valid {
             return None;
         }
 
@@ -492,13 +698,18 @@ where
         }
 
         let execution_context = Self::block_runtime_context(&block);
-        let merkleized = Self::execute_block(
-            batches,
-            execution_context,
-            &block.transactions,
-            &NoopEventConsumer,
-        )
-        .await?;
+        let merkleized = self
+            .execute_block(
+                &runtime_context,
+                &metrics,
+                batches,
+                execution_context,
+                &block.transactions,
+                &block.extension,
+                &NoopEventConsumer,
+                false,
+            )
+            .await?;
         let state_range = Self::state_range(&merkleized);
         if merkleized.root() != block.state_root || state_range != block.state_range {
             return None;
@@ -508,19 +719,26 @@ where
 
     async fn apply(
         &mut self,
-        _context: (E, Self::Context),
+        (runtime_context, _): (E, Self::Context),
         block: &Self::Block,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
+        let metrics = self.metrics(&runtime_context);
         let execution_context = Self::block_runtime_context(block);
-        let merkleized = Self::execute_block(
-            batches,
-            execution_context,
-            &block.transactions,
-            &self.events,
-        )
-        .await
-        .expect("certified block failed deterministic execution");
+        let events = self.events.clone();
+        let merkleized = self
+            .execute_block(
+                &runtime_context,
+                &metrics,
+                batches,
+                execution_context,
+                &block.transactions,
+                &block.extension,
+                &events,
+                true,
+            )
+            .await
+            .expect("certified block failed deterministic execution");
         let state_range = Self::state_range(&merkleized);
         assert_eq!(
             merkleized.root(),

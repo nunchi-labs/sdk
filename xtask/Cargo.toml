@@ -1,0 +1,21 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Workspace automation and deployment setup tasks."
+
+[lints]
+workspace = true
+
+[lib]
+name = "nunchi_xtask"
+path = "src/lib.rs"
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true, features = ["derive"] }
+nunchi-coins-chain = { workspace = true }

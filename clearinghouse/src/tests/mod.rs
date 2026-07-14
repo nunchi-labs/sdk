@@ -4,7 +4,7 @@ use commonware_codec::Encode;
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use futures::executor::block_on;
 use nunchi_clob::{
-    market_id, AssetId, ClobLedger, ClobOperation, Side as ClobSide, TimeInForce,
+    market_id, AssetId, ClobLedger, ClobOperation, Fill, FillId, OrderId, Side as ClobSide,
     Transaction as ClobTransaction,
 };
 use nunchi_coins::{CoinDB, CoinSpec, TokenDefinition, TokenName, TokenSymbol};
@@ -176,6 +176,46 @@ fn register_perps_market(
     .unwrap();
 }
 
+fn test_fill(
+    clob_market: nunchi_clob::MarketId,
+    maker: &PrivateKey,
+    taker: &PrivateKey,
+    timestamp_ms: u64,
+    sequence: u64,
+) -> Fill {
+    let ctx = context(timestamp_ms);
+    Fill {
+        id: FillId(Sha256::hash(
+            &[b"clearinghouse-test-fill", sequence.to_le_bytes().as_ref()].concat(),
+        )),
+        market: clob_market,
+        maker_order: OrderId(Sha256::hash(&[b"maker-order", sequence.to_le_bytes().as_ref()].concat())),
+        taker_order: OrderId(Sha256::hash(&[b"taker-order", sequence.to_le_bytes().as_ref()].concat())),
+        maker: address(maker),
+        taker: address(taker),
+        taker_side: ClobSide::Bid,
+        price: FILL_PRICE,
+        base_quantity: FILL_QTY,
+        quote_quantity: FILL_PRICE * FILL_QTY,
+        sequence,
+        written_at_height: ctx.height,
+        written_at_ms: ctx.timestamp_ms,
+    }
+}
+
+fn record_test_fill(
+    store: &mut MemoryStore,
+    clob_market: nunchi_clob::MarketId,
+    maker: &PrivateKey,
+    taker: &PrivateKey,
+    timestamp_ms: u64,
+    sequence: u64,
+) -> Fill {
+    let fill = test_fill(clob_market, maker, taker, timestamp_ms, sequence);
+    block_on(ClobLedger::new(store).record_fill(&fill)).unwrap();
+    fill
+}
+
 #[test]
 fn settle_fill_opens_counterparty_perps_positions() {
     let maker = PrivateKey::from_seed(1);
@@ -207,46 +247,7 @@ fn settle_fill_opens_counterparty_perps_positions() {
     seed_collateral(&mut store, &address(&maker), 100_000);
     seed_collateral(&mut store, &address(&taker), 100_000);
 
-    block_on(
-        ClobLedger::new(&mut store).apply_transaction(
-            &ClobTransaction::sign(
-                &maker,
-                1,
-                ClobOperation::PlaceOrder {
-                    market: clob_market,
-                    side: ClobSide::Ask,
-                    price: FILL_PRICE,
-                    base_quantity: 10,
-                    time_in_force: TimeInForce::GoodTilCancelled,
-                },
-            ),
-            context(2_000),
-        ),
-    )
-    .unwrap();
-
-    block_on(
-        ClobLedger::new(&mut store).apply_transaction(
-            &ClobTransaction::sign(
-                &taker,
-                0,
-                ClobOperation::PlaceOrder {
-                    market: clob_market,
-                    side: ClobSide::Bid,
-                    price: FILL_PRICE,
-                    base_quantity: FILL_QTY,
-                    time_in_force: TimeInForce::ImmediateOrCancel,
-                },
-            ),
-            context(3_000),
-        ),
-    )
-    .unwrap();
-
-    let fill = block_on(ClobLedger::new(&mut store).market_fills(&clob_market))
-        .unwrap()
-        .pop()
-        .unwrap();
+    let fill = record_test_fill(&mut store, clob_market, &maker, &taker, 3_000, 0);
 
     block_on(
         ClearinghouseLedger::new(&mut store).apply_transaction(
@@ -333,46 +334,8 @@ fn settle_fill_is_idempotent_guarded() {
     seed_collateral(&mut store, &address(&maker), 100_000);
     seed_collateral(&mut store, &address(&taker), 100_000);
 
-    block_on(
-        ClobLedger::new(&mut store).apply_transaction(
-            &ClobTransaction::sign(
-                &maker,
-                1,
-                ClobOperation::PlaceOrder {
-                    market: clob_market,
-                    side: ClobSide::Ask,
-                    price: FILL_PRICE,
-                    base_quantity: 10,
-                    time_in_force: TimeInForce::GoodTilCancelled,
-                },
-            ),
-            context(2_000),
-        ),
-    )
-    .unwrap();
-    block_on(
-        ClobLedger::new(&mut store).apply_transaction(
-            &ClobTransaction::sign(
-                &taker,
-                0,
-                ClobOperation::PlaceOrder {
-                    market: clob_market,
-                    side: ClobSide::Bid,
-                    price: FILL_PRICE,
-                    base_quantity: FILL_QTY,
-                    time_in_force: TimeInForce::ImmediateOrCancel,
-                },
-            ),
-            context(3_000),
-        ),
-    )
-    .unwrap();
-
-    let fill_id = block_on(ClobLedger::new(&mut store).market_fills(&clob_market))
-        .unwrap()
-        .pop()
-        .unwrap()
-        .id;
+    let fill = record_test_fill(&mut store, clob_market, &maker, &taker, 3_000, 1);
+    let fill_id = fill.id;
 
     block_on(
         ClearinghouseLedger::new(&mut store).settle_fill(fill_id, context(4_000)),
@@ -415,45 +378,7 @@ fn commit_and_settle_fill_applies_memclob_style_fill() {
     seed_collateral(&mut store, &address(&maker), 100_000);
     seed_collateral(&mut store, &address(&taker), 100_000);
 
-    block_on(
-        ClobLedger::new(&mut store).apply_transaction(
-            &ClobTransaction::sign(
-                &maker,
-                1,
-                ClobOperation::PlaceOrder {
-                    market: clob_market,
-                    side: ClobSide::Ask,
-                    price: FILL_PRICE,
-                    base_quantity: 10,
-                    time_in_force: TimeInForce::GoodTilCancelled,
-                },
-            ),
-            context(2_000),
-        ),
-    )
-    .unwrap();
-    block_on(
-        ClobLedger::new(&mut store).apply_transaction(
-            &ClobTransaction::sign(
-                &taker,
-                0,
-                ClobOperation::PlaceOrder {
-                    market: clob_market,
-                    side: ClobSide::Bid,
-                    price: FILL_PRICE,
-                    base_quantity: FILL_QTY,
-                    time_in_force: TimeInForce::ImmediateOrCancel,
-                },
-            ),
-            context(3_000),
-        ),
-    )
-    .unwrap();
-
-    let fill = block_on(ClobLedger::new(&mut store).market_fills(&clob_market))
-        .unwrap()
-        .pop()
-        .unwrap();
+    let fill = test_fill(clob_market, &maker, &taker, 3_000, 2);
 
     block_on(
         ClearinghouseLedger::new(&mut store).apply_transaction(

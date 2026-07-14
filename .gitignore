@@ -1,6 +1,7 @@
 *.swp
 *.DS_Store
 target
+.local-chain/
 /testnet
 *.vscode
 /assets

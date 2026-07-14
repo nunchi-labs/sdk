@@ -17,6 +17,17 @@ use crate::Transaction;
 pub trait MempoolIngress: Clone + Send + Sync + 'static {
     async fn submit(&self, transaction: Transaction) -> Result<Digest, AdmissionError>;
 
+    async fn submit_many(
+        &self,
+        transactions: Vec<Transaction>,
+    ) -> Vec<Result<Digest, AdmissionError>> {
+        let mut results = Vec::with_capacity(transactions.len());
+        for transaction in transactions {
+            results.push(self.submit(transaction).await);
+        }
+        results
+    }
+
     async fn status(&self, digest: Digest) -> Option<TxStatus>;
 }
 
@@ -24,6 +35,13 @@ pub trait MempoolIngress: Clone + Send + Sync + 'static {
 impl MempoolIngress for MempoolHandle<Transaction> {
     async fn submit(&self, transaction: Transaction) -> Result<Digest, AdmissionError> {
         MempoolHandle::submit(self, transaction).await
+    }
+
+    async fn submit_many(
+        &self,
+        transactions: Vec<Transaction>,
+    ) -> Vec<Result<Digest, AdmissionError>> {
+        MempoolHandle::submit_many(self, transactions).await
     }
 
     async fn status(&self, digest: Digest) -> Option<TxStatus> {
@@ -49,6 +67,12 @@ pub trait CoinMempool {
     async fn submit_transaction(&self, transaction: String)
         -> RpcResult<SubmitTransactionResponse>;
 
+    #[method(name = "submit_transactions", param_kind = map)]
+    async fn submit_transactions(
+        &self,
+        transactions: Vec<String>,
+    ) -> RpcResult<SubmitTransactionsResponse>;
+
     #[method(name = "transaction_status", param_kind = map)]
     async fn transaction_status(&self, hash: String) -> RpcResult<TransactionStatusResponse>;
 }
@@ -63,7 +87,6 @@ where
         transaction: String,
     ) -> RpcResult<SubmitTransactionResponse> {
         let transaction: Transaction = decode_hex(&transaction, "coin transaction")?;
-        // Signature verification happens once, inside pool admission.
         let hash = self
             .ingress
             .submit(transaction)
@@ -71,6 +94,42 @@ where
             .map_err(admission_error)?;
         Ok(SubmitTransactionResponse {
             hash: encode_hex(&hash),
+        })
+    }
+
+    async fn submit_transactions(
+        &self,
+        transactions: Vec<String>,
+    ) -> RpcResult<SubmitTransactionsResponse> {
+        let mut decoded = Vec::with_capacity(transactions.len());
+        let mut results = vec![None; transactions.len()];
+        for (index, transaction) in transactions.into_iter().enumerate() {
+            match decode_hex::<Transaction>(&transaction, "coin transaction") {
+                Ok(transaction) => decoded.push((index, transaction)),
+                Err(error) => {
+                    results[index] = Some(SubmitTransactionResult::err(error.to_string()))
+                }
+            }
+        }
+
+        if !decoded.is_empty() {
+            let (indices, transactions): (Vec<_>, Vec<_>) = decoded.into_iter().unzip();
+            for (index, result) in indices
+                .into_iter()
+                .zip(self.ingress.submit_many(transactions).await)
+            {
+                results[index] = Some(match result {
+                    Ok(hash) => SubmitTransactionResult::ok(encode_hex(&hash)),
+                    Err(error) => SubmitTransactionResult::err(error.to_string()),
+                });
+            }
+        }
+
+        Ok(SubmitTransactionsResponse {
+            results: results
+                .into_iter()
+                .map(|result| result.expect("every result is filled"))
+                .collect(),
         })
     }
 
@@ -91,6 +150,41 @@ pub struct SubmitTransactionParams {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SubmitTransactionResponse {
     pub hash: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SubmitTransactionsParams {
+    /// Hex-encoded transaction bytes.
+    pub transactions: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SubmitTransactionsResponse {
+    pub results: Vec<SubmitTransactionResult>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SubmitTransactionResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl SubmitTransactionResult {
+    fn ok(hash: String) -> Self {
+        Self {
+            hash: Some(hash),
+            error: None,
+        }
+    }
+
+    fn err(error: String) -> Self {
+        Self {
+            hash: None,
+            error: Some(error),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

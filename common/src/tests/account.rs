@@ -35,6 +35,26 @@ fn address_derivation_separates_external_and_multisig_accounts() {
 }
 
 #[test]
+fn reserved_addresses_are_deterministic_and_disjoint_from_accounts() {
+    let escrow = Address::reserved(b"nunchi/bridge/escrow/v1");
+
+    // Deterministic for a given label, distinct across labels.
+    assert_eq!(escrow, Address::reserved(b"nunchi/bridge/escrow/v1"));
+    assert_ne!(escrow, Address::reserved(b"nunchi/bridge/other"));
+
+    // A reserved address can never collide with an external or multisig account, even if the label
+    // happens to match the material those derivations hash.
+    let signer = PrivateKey::ed25519_from_seed(1).public_key();
+    let policy = MultisigPolicy::new(1, vec![signer.clone()]).unwrap();
+    assert_ne!(escrow, Address::external(&signer));
+    assert_ne!(escrow, Address::multisig(&policy));
+    assert_ne!(
+        Address::reserved(&signer.encode()),
+        Address::external(&signer)
+    );
+}
+
+#[test]
 fn external_address_roundtrips_through_bech32() {
     let signer = PrivateKey::ed25519_from_seed(1).public_key();
     let address = Address::external(&signer);

@@ -4,7 +4,9 @@ commonware_macros::stability_scope!(ALPHA {
 mod account;
 mod asset;
 mod db;
+mod events;
 mod factory;
+mod fees;
 mod genesis;
 mod ledger;
 /// JSON-RPC surface for the coin module (enabled by the default `rpc` feature).
@@ -22,9 +24,17 @@ pub use asset::{
     CoinId, CoinSpec, TokenDefinition, TokenName, TokenSymbol, MAX_NAME_BYTES, MAX_SYMBOL_BYTES,
 };
 pub use db::CoinDB;
+pub use events::{
+    account_policy_registered_event, burned_event, fee_charged_event, minted_event,
+    token_created_event, transferred_event, AccountPolicyRegistered, Burned, FeeCharged, Minted,
+    TokenCreated, Transferred, ACCOUNT_POLICY_REGISTERED_EVENT, BURNED_EVENT, FEE_CHARGED_EVENT,
+    MINTED_EVENT, TOKEN_CREATED_EVENT, TRANSFERRED_EVENT,
+};
 pub use factory::TokenFactory;
+pub use fees::FeeConfig;
 pub use genesis::{
-    AccountPolicyGenesis, AllocationGenesis, CoinsGenesis, MultisigPolicyGenesis, TokenGenesis,
+    AccountPolicyGenesis, AllocationGenesis, CoinsGenesis, FeeGenesis, MultisigPolicyGenesis,
+    TokenGenesis,
 };
 pub use ledger::{Ledger, LedgerError};
 pub use nunchi_common::{AccountSignature, Authorization};

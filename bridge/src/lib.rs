@@ -8,6 +8,27 @@ commonware_macros::stability_scope!(ALPHA {
 #[cfg(feature = "rpc")]
 pub mod rpc;
 
+pub mod record;
+pub use record::{
+    escrow_address, transfer_record, AssetId, BridgeTransferRecord, ChainId, TransferRecordId,
+    BRIDGE_NAMESPACE,
+};
+
+pub mod events;
+pub use events::{transfer_locked_event, TransferLocked, TRANSFER_LOCKED_EVENT};
+
+pub mod genesis;
+pub use genesis::BridgeGenesis;
+
+pub mod ledger;
+pub use ledger::{BridgeError, BridgeLedger};
+
+pub mod transaction;
+pub use transaction::{
+    BridgeOperation, BridgeOperationId, Transaction as BridgeTransaction,
+    TransactionPayload as BridgeTransactionPayload,
+};
+
 use std::future::Future;
 
 use commonware_consensus::Viewable;

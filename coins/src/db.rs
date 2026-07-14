@@ -5,7 +5,7 @@
 //! blanket impl below means any [`StateDb`] is automatically a [`CoinDB`], so the coin module
 //! composes onto the same store as every other module without bespoke wiring.
 
-use super::{AccountPolicy, Address, CoinId, TokenDefinition, COINS_NAMESPACE};
+use super::{AccountPolicy, Address, CoinId, FeeConfig, TokenDefinition, COINS_NAMESPACE};
 use crate::LedgerError;
 use async_trait::async_trait;
 use commonware_codec::{Encode, Read, ReadExt};
@@ -25,6 +25,7 @@ enum Table {
     Token = 2,
     Balance = 3,
     AccountPolicy = 4,
+    Fee = 5,
 }
 
 impl From<Table> for u8 {
@@ -79,6 +80,12 @@ pub trait CoinDB {
 
     /// Stage a balance. An amount of 0 removes the entry so empty balances leave no state.
     fn set_balance(&mut self, account: &Address, coin: &CoinId, amount: u128);
+
+    /// The chain's fee configuration (`None` if the chain charges no fees).
+    async fn fee_config(&self) -> Result<Option<FeeConfig>, LedgerError>;
+
+    /// Stage the chain's fee configuration.
+    fn set_fee_config(&mut self, config: &FeeConfig);
 }
 
 #[async_trait]
@@ -165,5 +172,21 @@ impl<S: StateStore + Send + Sync> CoinDB for S {
         } else {
             StateStore::set(self, key, encoded(&amount));
         }
+    }
+
+    async fn fee_config(&self) -> Result<Option<FeeConfig>, LedgerError> {
+        let key = NS.key(Table::Fee, &[]);
+        match StateStore::get(self, &key)
+            .await
+            .map_err(|err| LedgerError::Storage(err.to_string()))?
+        {
+            Some(bytes) => Ok(Some(decoded::<FeeConfig>(&bytes)?)),
+            None => Ok(None),
+        }
+    }
+
+    fn set_fee_config(&mut self, config: &FeeConfig) {
+        let key = NS.key(Table::Fee, &[]);
+        StateStore::set(self, key, encoded(config));
     }
 }

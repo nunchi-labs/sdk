@@ -10,9 +10,11 @@
 //! layer their own typed accessors on top (see `nunchi-coins`' `LedgerDB` for an example).
 
 use std::future::Future;
+use std::num::NonZeroU64;
 use std::{collections::BTreeMap, sync::Arc};
 
-use commonware_codec::Read;
+use bytes::{Buf, BufMut};
+use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, Write};
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_glue::stateful::db::{
     any::{AnyMerkleized, AnyUnmerkleized},
@@ -24,7 +26,7 @@ use commonware_storage::{
     index::unordered::Index as UnorderedIndex,
     journal::contiguous::variable::Config as JournalConfig,
     journal::contiguous::variable::Journal as VariableJournal,
-    merkle::{full::Config as MerkleConfig, Location},
+    merkle::{full::Config as MerkleConfig, hasher::Standard, Bagging, Location, Proof},
     mmr::Family,
     qmdb::{
         any::{
@@ -32,7 +34,7 @@ use commonware_storage::{
             VariableConfig,
         },
         sync::Target,
-        Error as QmdbError,
+        verify_proof, Error as QmdbError,
     },
     translator::TwoCap,
     Context,
@@ -247,6 +249,161 @@ impl<E: Context> CommitState for QmdbState<E> {
 
     fn root(&self) -> Digest {
         self.root
+    }
+}
+
+/// An inclusion proof over a contiguous range of authenticated operations, verifiable against a
+/// committed [`CommitState::root`].
+///
+/// This is the low-level proof surface: it authenticates that a set of QMDB operations is committed
+/// under a given root, and [`StateProof::operations`] exposes those operations so a verifier can
+/// confirm a specific key/value is among them (see [`verify_state_update`]). Proofs can be generated
+/// against the latest committed root ([`QmdbState::proof`]) or a historical finalized root such as a
+/// foreign block's state root ([`QmdbState::historical_proof`]). Targeting a single key directly
+/// (key -> operation location) is still a follow-up, not covered here.
+pub struct StateProof {
+    proof: Proof<Family, Digest>,
+    start: Location<Family>,
+    operations: Vec<QmdbOperation>,
+}
+
+impl StateProof {
+    /// The authenticated operations covered by this proof.
+    pub fn operations(&self) -> &[QmdbOperation] {
+        &self.operations
+    }
+
+    /// The operation location the proof starts at. Together with [`StateProof::operations`] this
+    /// gives the operation range the proof authenticates, so a caller can check the range lines up
+    /// with a finalized block's state range.
+    pub fn start(&self) -> Location<Family> {
+        self.start
+    }
+}
+
+impl<E: Context> QmdbState<E> {
+    /// The active operation range in the committed authenticated log.
+    pub async fn operation_bounds(&self) -> std::ops::Range<Location<Family>> {
+        self.db.bounds().await
+    }
+
+    /// Generate an inclusion proof for up to `max_ops` operations starting at `start`, verifiable
+    /// against the committed [`CommitState::root`] with [`verify_state_proof`].
+    pub async fn proof(
+        &self,
+        start: Location<Family>,
+        max_ops: NonZeroU64,
+    ) -> Result<StateProof, StateError> {
+        let (proof, operations) = self.db.proof(start, max_ops).await.map_err(backend_err)?;
+        Ok(StateProof {
+            proof,
+            start,
+            operations,
+        })
+    }
+
+    /// Generate an inclusion proof against a historical root instead of the latest committed one.
+    ///
+    /// `historical_size` is the total operation count of the log at the point the historical root
+    /// was produced; it selects which past state the proof is verified against. Callers must take
+    /// it from the finalized block (or state commitment) whose root they intend to verify against,
+    /// for example the `state_range` end of a foreign block; passing a mismatched size yields a
+    /// proof that will not verify. The returned proof is checked with [`verify_state_proof`] (or
+    /// [`verify_state_update`]) against that block's `state_root`.
+    pub async fn historical_proof(
+        &self,
+        historical_size: Location<Family>,
+        start: Location<Family>,
+        max_ops: NonZeroU64,
+    ) -> Result<StateProof, StateError> {
+        let (proof, operations) = self
+            .db
+            .historical_proof(historical_size, start, max_ops)
+            .await
+            .map_err(backend_err)?;
+        Ok(StateProof {
+            proof,
+            start,
+            operations,
+        })
+    }
+}
+
+/// Verify that the operations in `proof` are committed by the authenticated state `root`.
+///
+/// Standalone (no database handle), so a remote verifier can check a proof against a state root it
+/// obtained elsewhere (for example a finalized foreign block).
+pub fn verify_state_proof(proof: &StateProof, root: &Digest) -> bool {
+    verify_proof::<Family, QmdbOperation, Sha256, Digest>(
+        &Standard::new(Bagging::ForwardFold),
+        &proof.proof,
+        proof.start,
+        &proof.operations,
+        root,
+    )
+}
+
+/// Verify that `proof` is committed by `root` and authenticates an update writing `value` to `key`.
+///
+/// This checks that the exact `key`/`value` write appears among the proof's authenticated
+/// operations. It proves operation membership, not latest-value semantics: a later update to the
+/// same key is not ruled out, so this only establishes that the write happened at some point in the
+/// authenticated history. That is sufficient for append-only or content-addressed records (such as
+/// bridge transfer records keyed by the hash of their contents), where a key is written at most
+/// once and never overwritten.
+pub fn verify_state_update(proof: &StateProof, root: &Digest, key: &Digest, value: &[u8]) -> bool {
+    verify_state_proof(proof, root)
+        && proof.operations.iter().any(|op| match op {
+            QmdbOperation::Update(update) => &update.0 == key && update.1.as_slice() == value,
+            _ => false,
+        })
+}
+
+/// Decoding limits for [`StateProof`], bounding attacker-controlled allocation when a proof is read
+/// off the wire.
+///
+/// A [`StateProof`] is otherwise self-describing, but its length-prefixed vectors (proof digests,
+/// operations, operation values) must be capped so a malicious sender cannot force an unbounded
+/// allocation. Callers pick bounds appropriate for the message that carries the proof.
+#[derive(Clone, Copy, Debug)]
+pub struct StateProofCfg {
+    /// Maximum number of internal Merkle digests accepted in the proof.
+    pub max_proof_digests: usize,
+    /// Accepted range for the number of operations the proof carries.
+    pub operations: RangeCfg<usize>,
+    /// Accepted range for the byte length of each operation's value.
+    pub value_len: RangeCfg<usize>,
+}
+
+impl Write for StateProof {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.proof.write(buf);
+        self.start.write(buf);
+        self.operations.write(buf);
+    }
+}
+
+impl EncodeSize for StateProof {
+    fn encode_size(&self) -> usize {
+        self.proof.encode_size() + self.start.encode_size() + self.operations.encode_size()
+    }
+}
+
+impl Read for StateProof {
+    type Cfg = StateProofCfg;
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        let proof = Proof::<Family, Digest>::read_cfg(buf, &cfg.max_proof_digests)?;
+        let start = Location::<Family>::read_cfg(buf, &())?;
+        // Operation cfg mirrors the unordered/variable layout: key cfg is `()`, value cfg is the
+        // byte-length range; the outer range caps the number of operations.
+        let operation_cfg = ((), (cfg.value_len, ()));
+        let operations = Vec::<QmdbOperation>::read_cfg(buf, &(cfg.operations, operation_cfg))?;
+        Ok(StateProof {
+            proof,
+            start,
+            operations,
+        })
     }
 }
 

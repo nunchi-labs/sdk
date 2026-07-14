@@ -22,7 +22,7 @@ This document supersedes the original PR #80 follow-up list. Perpetuals is now a
 
 ## Next PRs (replaces open #79 / #80)
 
-1. **Wire into `examples/coins-chain`** — transaction tags for clearinghouse + perps refactor
+1. **Wire into `examples/coins/chain`** — transaction tags for clearinghouse + perps refactor (landed)
 2. **Block proposer path** — batch `SettleFill` from memclob `pending_fills()`
 3. **Reduce-only CLOB orders** — perps close flow via opposite-side fills
 4. **Spot settlement domain** — `SettlementDomain::Spot` in clearinghouse
@@ -38,8 +38,8 @@ This document supersedes the original PR #80 follow-up list. Perpetuals is now a
 
 ## Merge readiness
 
-- [ ] `cargo test -p nunchi-clearinghouse`
-- [ ] `cargo test -p nunchi-perpetuals --features mock-execution`
-- [ ] `cargo test -p nunchi-clob`
-- [ ] coins-chain integration test for CLOB → clearinghouse → perps path
+- [x] `cargo test -p nunchi-clearinghouse`
+- [x] `cargo test -p nunchi-perpetuals --features mock-execution`
+- [x] `cargo test -p nunchi-clob`
+- [x] coins-chain integration test for CLOB → clearinghouse → perps path
 - [ ] Close superseded PRs #79 and #80 with links to new stack

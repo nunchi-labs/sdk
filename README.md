@@ -14,6 +14,12 @@
   <a href="https://x.com/nunchi"><strong>X</strong></a>
 </p>
 
+<p align="center">
+  <a href="https://app.codecov.io/gh/nunchi-labs/sdk">
+    <img src="https://codecov.io/gh/nunchi-labs/sdk/graph/badge.svg" alt="Codecov" />
+  </a>
+</p>
+
 ---
 
 
@@ -52,13 +58,12 @@ This repository will contain modules for building public and private blockchains
 * `nunchi-margin` - user has BTC + nunchi and doesn't want to sell, and deposits BTC+nunchi and gets a stablecoin.  Could be backed by other coins, not just btc and nunchi. 
 * `nunchi-securities` - Non-synthetic perps contracts (delivery of tokenized stock)
 * `nunchi-vaults` - a module for running vaults composed of many types of capital, traded by an authorised offchain party
-* `nunchi-clob` - used on the global chain, provides liquidity between local chain tokens
-* [`nunchi-perpetuals`](perpetuals/) - oracle-backed isolated-margin perpetual futures
+* [`nunchi-clob`](clob/) - used on the global chain, provides liquidity between local chain tokens
 * `nunchi-derivatives` - ingests a price feed and creates derivatives products
 * `nunchi-stablecoin` - a wrapper of coins special for the needs of stablecoins
 
 ### Chain Examples
 
-* [`coins-chain`](examples/coins-chain) - default PoA chain
+* [`coins-chain`](examples/coins/chain) - default PoA chain
 * [`bridge-chain`](examples/bridge-chain) - two chains bridging consensus certificates
 * [`custom-module`](examples/custom-module) - starter template for creating a custom nunchi module

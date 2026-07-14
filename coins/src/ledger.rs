@@ -1,10 +1,15 @@
 use super::{
     multisig_account_id, Account, AccountPolicy, AccountType, Address, Authorization, CoinId,
-    CoinOperation, TokenDefinition, TokenFactory, Transaction,
+    CoinOperation, FeeConfig, TokenDefinition, TokenFactory, Transaction,
 };
 use crate::db::CoinDB;
+use crate::events::{
+    account_policy_registered_event, burned_event, fee_charged_event, minted_event,
+    token_created_event, transferred_event, AccountPolicyRegistered, Burned, FeeCharged, Minted,
+    TokenCreated, Transferred,
+};
 use commonware_cryptography::sha256::Digest;
-use nunchi_common::CommitState;
+use nunchi_common::{CommitState, Event, EventSink};
 use nunchi_crypto::SignatureError;
 use thiserror::Error;
 
@@ -45,6 +50,8 @@ pub enum LedgerError {
     },
     #[error("balance overflow")]
     BalanceOverflow,
+    #[error("fee overflow")]
+    FeeOverflow,
     #[error("supply overflow")]
     SupplyOverflow,
     #[error("allocation sum mismatch: expected {expected}, got {actual}")]
@@ -103,7 +110,74 @@ impl<D: CoinDB> Ledger<D> {
         self.db.balance(account, coin).await
     }
 
-    pub async fn apply_transaction(&mut self, tx: &Transaction) -> Result<(), LedgerError> {
+    /// The chain's fee configuration (`None` if the chain charges no fees).
+    pub async fn fee_config(&self) -> Result<Option<FeeConfig>, LedgerError> {
+        self.db.fee_config().await
+    }
+
+    /// Stage the chain's fee configuration.
+    pub fn set_fee_config(&mut self, config: &FeeConfig) {
+        self.db.set_fee_config(config);
+    }
+
+    /// Charge the deterministic fee for a transaction of `encoded_size` canonical bytes to
+    /// `payer`, crediting the configured collector. A no-op when no [`FeeConfig`] is stored.
+    ///
+    /// Callers stage this alongside the rest of the transaction's writes so a failed
+    /// transaction reverts its fee.
+    pub async fn charge_fee<Events>(
+        &mut self,
+        payer: &Address,
+        encoded_size: usize,
+        mut events: Events,
+    ) -> Result<(), LedgerError>
+    where
+        Events: EventSink + Send,
+    {
+        let Some(config) = self.db.fee_config().await? else {
+            return Ok(());
+        };
+        let amount = config.quote(encoded_size)?;
+        if amount == 0 {
+            return Ok(());
+        }
+        self.debit(payer, config.coin, amount).await?;
+        self.credit(&config.collector, config.coin, amount).await?;
+        events.emit(fee_charged_event(FeeCharged {
+            coin: config.coin,
+            payer: payer.clone(),
+            collector: config.collector,
+            amount,
+        }));
+        Ok(())
+    }
+
+    /// Move `amount` of `coin` from `from` to `to`, preserving total supply.
+    ///
+    /// This is an unauthenticated ledger primitive: it performs no signature or policy check, so
+    /// the caller is responsible for authorization. It exists for chain-level integrations (such as
+    /// moving a locked asset into bridge escrow) that authorize the movement through another
+    /// module's signed transaction and stage it in the same overlay.
+    pub async fn transfer(
+        &mut self,
+        from: &Address,
+        to: &Address,
+        coin: CoinId,
+        amount: u128,
+    ) -> Result<(), LedgerError> {
+        self.debit(from, coin, amount).await?;
+        self.credit(to, coin, amount).await?;
+        Ok(())
+    }
+
+    pub async fn apply_transaction<Events>(
+        &mut self,
+        tx: &Transaction,
+        mut events: Events,
+    ) -> Result<(), LedgerError>
+    where
+        Events: EventSink + Send,
+    {
         self.ensure_authorized(tx).await?;
 
         let expected = self.db.nonce(&tx.account_id).await?;
@@ -115,10 +189,12 @@ impl<D: CoinDB> Ledger<D> {
             });
         }
 
-        self.apply_operation(&tx.account_id, &tx.payload.operation)
-            .await?;
         let next_nonce = expected.checked_add(1).ok_or(LedgerError::NonceOverflow)?;
+        let event = self
+            .apply_operation(&tx.account_id, &tx.payload.operation)
+            .await?;
         self.db.set_nonce(&tx.account_id, next_nonce);
+        events.emit(event);
         Ok(())
     }
 
@@ -151,6 +227,15 @@ impl<D: CoinDB> Ledger<D> {
         issuer: Address,
         spec: super::CoinSpec,
     ) -> Result<CoinId, LedgerError> {
+        let token = self.create_token_definition(issuer, spec).await?;
+        Ok(token.id)
+    }
+
+    async fn create_token_definition(
+        &mut self,
+        issuer: Address,
+        spec: super::CoinSpec,
+    ) -> Result<TokenDefinition, LedgerError> {
         let mut factory = TokenFactory::with_nonce(self.db.factory_nonce().await?);
         let token = factory.create(issuer.clone(), spec)?;
 
@@ -163,7 +248,7 @@ impl<D: CoinDB> Ledger<D> {
         if token.total_supply > 0 {
             self.credit(&issuer, id, token.total_supply).await?;
         }
-        Ok(id)
+        Ok(token)
     }
 
     async fn ensure_authorized(&self, tx: &Transaction) -> Result<(), LedgerError> {
@@ -229,7 +314,7 @@ impl<D: CoinDB> Ledger<D> {
         &mut self,
         signer: &Address,
         operation: &CoinOperation,
-    ) -> Result<(), LedgerError> {
+    ) -> Result<Event, LedgerError> {
         match operation {
             CoinOperation::RegisterAccountPolicy { account_id, policy } => {
                 if signer != account_id {
@@ -240,15 +325,28 @@ impl<D: CoinDB> Ledger<D> {
                     AccountPolicy::Multisig(policy.clone()),
                 )
                 .await?;
+                Ok(account_policy_registered_event(AccountPolicyRegistered {
+                    account_id: account_id.clone(),
+                    policy: policy.clone(),
+                }))
             }
             CoinOperation::CreateToken { spec } => {
-                self.create_token(signer.clone(), spec.clone()).await?;
+                let token = self
+                    .create_token_definition(signer.clone(), spec.clone())
+                    .await?;
+                Ok(token_created_event(TokenCreated { token }))
             }
             CoinOperation::Mint { coin, to, amount } => {
                 ensure_positive(*amount)?;
                 self.ensure_issuer(signer, coin).await?;
-                self.increase_supply(*coin, *amount).await?;
+                let total_supply = self.increase_supply(*coin, *amount).await?;
                 self.credit(to, *coin, *amount).await?;
+                Ok(minted_event(Minted {
+                    coin: *coin,
+                    to: to.clone(),
+                    amount: *amount,
+                    total_supply,
+                }))
             }
             CoinOperation::Burn { coin, from, amount } => {
                 ensure_positive(*amount)?;
@@ -256,7 +354,13 @@ impl<D: CoinDB> Ledger<D> {
                     return Err(LedgerError::Unauthorized);
                 }
                 self.debit(from, *coin, *amount).await?;
-                self.decrease_supply(*coin, *amount).await?;
+                let total_supply = self.decrease_supply(*coin, *amount).await?;
+                Ok(burned_event(Burned {
+                    coin: *coin,
+                    from: from.clone(),
+                    amount: *amount,
+                    total_supply,
+                }))
             }
             CoinOperation::Transfer {
                 coin,
@@ -270,9 +374,14 @@ impl<D: CoinDB> Ledger<D> {
                 }
                 self.debit(from, *coin, *amount).await?;
                 self.credit(to, *coin, *amount).await?;
+                Ok(transferred_event(Transferred {
+                    coin: *coin,
+                    from: from.clone(),
+                    to: to.clone(),
+                    amount: *amount,
+                }))
             }
         }
-        Ok(())
     }
 
     async fn ensure_issuer(&self, signer: &Address, coin: &CoinId) -> Result<(), LedgerError> {
@@ -288,7 +397,7 @@ impl<D: CoinDB> Ledger<D> {
         }
     }
 
-    async fn increase_supply(&mut self, coin: CoinId, amount: u128) -> Result<(), LedgerError> {
+    async fn increase_supply(&mut self, coin: CoinId, amount: u128) -> Result<u128, LedgerError> {
         let mut token = self
             .db
             .token(&coin)
@@ -305,21 +414,22 @@ impl<D: CoinDB> Ledger<D> {
         }
         token.total_supply = attempted;
         self.db.set_token(&token);
-        Ok(())
+        Ok(attempted)
     }
 
-    async fn decrease_supply(&mut self, coin: CoinId, amount: u128) -> Result<(), LedgerError> {
+    async fn decrease_supply(&mut self, coin: CoinId, amount: u128) -> Result<u128, LedgerError> {
         let mut token = self
             .db
             .token(&coin)
             .await?
             .ok_or(LedgerError::UnknownToken(coin))?;
-        token.total_supply = token
+        let total_supply = token
             .total_supply
             .checked_sub(amount)
             .ok_or(LedgerError::SupplyOverflow)?;
+        token.total_supply = total_supply;
         self.db.set_token(&token);
-        Ok(())
+        Ok(total_supply)
     }
 
     pub(crate) async fn credit(

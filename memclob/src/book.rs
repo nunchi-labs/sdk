@@ -4,10 +4,22 @@ use commonware_codec::Encode;
 use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
 use nunchi_clob::{
     canonical_asset_pair, market_id, ClobError, ClobOperation, Fill, FillId, Market, MarketId, Order,
-    OrderId, OrderStatus, PlaceOrderParams, Side, TimeInForce, Transaction, MAX_ACCOUNT_ORDERS,
-    MAX_BOOK_ORDERS, MAX_FILLS_PER_MARKET, MAX_MARKETS, CLOB_NAMESPACE,
+    OrderId, OrderStatus, Side, TimeInForce, Transaction, MAX_ACCOUNT_ORDERS, MAX_BOOK_ORDERS,
+    MAX_FILLS_PER_MARKET, MAX_MARKETS, CLOB_NAMESPACE,
 };
 use nunchi_common::{Address, RuntimeContext};
+
+/// Inputs for programmatic order placement inside the in-memory matcher.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PlaceOrderParams {
+    owner: Address,
+    order_id: OrderId,
+    market: MarketId,
+    side: Side,
+    price: u128,
+    base_quantity: u128,
+    time_in_force: TimeInForce,
+}
 
 /// In-memory replica of the CLOB matching engine kept in validator RAM.
 ///
@@ -180,6 +192,7 @@ impl MemBookEngine {
                 Ok(())
             }
             ClobOperation::CancelOrder { order } => self.cancel_order(&tx.account_id, order),
+            ClobOperation::ApplyMatchBatch { .. } => Err(ClobError::OffchainOnly),
         }
     }
 

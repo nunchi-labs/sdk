@@ -9,6 +9,7 @@ use thiserror::Error;
 const ADDRESS_DOMAIN: &[u8] = b"nunchi/account/v1";
 const ADDRESS_EXTERNAL: u8 = 0;
 const ADDRESS_MULTISIG: u8 = 1;
+const ADDRESS_RESERVED: u8 = 2;
 
 /// Bech32 human-readable prefix for account addresses.
 pub const ADDRESS_HRP: &str = "nch";
@@ -29,6 +30,15 @@ impl Address {
     /// Derive a multisig account's bootstrap address from its initial policy.
     pub fn multisig(policy: &MultisigPolicy) -> Self {
         Self::derive(ADDRESS_MULTISIG, &policy.encode())
+    }
+
+    /// Derive a deterministic module-owned address from a static `label`.
+    ///
+    /// Reserved addresses live in a domain disjoint from external and multisig accounts, so no
+    /// public key or policy can ever collide with one. Funds sent to a reserved address cannot be
+    /// spent by any signature; a module (for example the bridge escrow) moves them programmatically.
+    pub fn reserved(label: &[u8]) -> Self {
+        Self::derive(ADDRESS_RESERVED, label)
     }
 
     /// Encode this address using Nunchi's Bech32 human-facing format.

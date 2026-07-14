@@ -9,19 +9,21 @@ mod actor;
 mod consensus;
 mod egress;
 mod ingress;
+pub mod protector;
 pub mod orchestrator;
 mod setup;
 mod state;
 #[cfg(test)]
 mod tests;
 
-pub use actor::{Actor, Config};
+pub use actor::{Actor, Config, Execution};
 pub use consensus::{
     Activity, Context, EdScheme, EpochProvider, Finalization, Identity, Notarization, Provider,
     PublicKey, Scheme, Seed, Seedable, Signature, ThresholdScheme,
 };
 pub use egress::{ContinueOnUpdate, PostUpdate, Update, UpdateCallBack};
 pub use ingress::{Mailbox, Message};
+pub use protector::{StorageKey, StorageProtector};
 pub use setup::PeerConfig;
 
 pub type DealerLog = SignedDealerLog<MinSig, ed25519::PrivateKey>;
