@@ -80,7 +80,8 @@ type DkgMailbox = nunchi_chain::DkgMailbox<NoopTransaction, BridgeExtension>;
 type StatefulApp<E> =
     StatefulActor<E, crate::Application, Scheme, Standard<Block>, NoStateSyncResolver>;
 type StatefulAppMailbox<E> = StatefulMailbox<E, crate::Application>;
-type Marshaled<E> = Deferred<E, Scheme, StatefulAppMailbox<E>, Block, FixedEpocher>;
+type LimitedStatefulAppMailbox<E> = VerifyLimiter<StatefulAppMailbox<E>>;
+type Marshaled<E> = Deferred<E, Scheme, LimitedStatefulAppMailbox<E>, Block, FixedEpocher>;
 type SchemeProvider = Provider<Scheme, ed25519::PrivateKey>;
 type FinalizationsArchive<E> = immutable::Archive<E, Digest, Finalization>;
 type BlocksArchive<E> = immutable::Archive<E, Digest, Block>;
@@ -374,9 +375,14 @@ where
             applied_height,
         );
 
+        let verify_limiter_context = context.child("application_verify");
         let application = Deferred::new(
             context.child("application"),
-            stateful_mailbox.clone(),
+            VerifyLimiter::new(
+                &verify_limiter_context,
+                stateful_mailbox.clone(),
+                APPLICATION_VERIFY_CONCURRENCY,
+            ),
             marshal_mailbox.clone(),
             FixedEpocher::new(BLOCKS_PER_EPOCH),
         );
