@@ -1,3 +1,5 @@
+mod genesis;
+
 use std::collections::BTreeMap;
 
 use commonware_codec::Encode;

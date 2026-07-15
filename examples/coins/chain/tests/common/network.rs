@@ -394,7 +394,6 @@ impl TestNetwork<'_> {
     }
 
     #[allow(dead_code)]
-    /// Mirror an on-chain CLOB account nonce into each validator's local matcher actor.
     pub(crate) async fn sync_clob_actor_nonce(&self, account: &Address, nonce: u64) {
         for index in 0..self.participants.len() {
             self.clob(index)
@@ -477,8 +476,29 @@ impl TestNetwork<'_> {
         ledgers
     }
 
+    #[allow(dead_code)]
+    pub(crate) async fn sync_clob_actors_from_chain(&self) {
+        for (index, participant) in self.participants.iter().enumerate() {
+            let Some(node) = self.nodes.get(participant) else {
+                continue;
+            };
+            let db = node.stateful.subscribe_databases().await;
+            let ledger = ClobLedger::new(QmdbReader::new(db));
+            let Ok(markets) = ledger.markets().await else {
+                continue;
+            };
+            for market in markets {
+                let Ok(sequence) = ledger.market_sequence(&market.id).await else {
+                    continue;
+                };
+                self.clob(index).upsert_market_state(market, sequence);
+            }
+        }
+    }
+
     pub(crate) async fn run_until_clob_nonces(&self, expected: &[(Address, u64)]) {
         loop {
+            self.sync_clob_actors_from_chain().await;
             if self.all_clob_nonces_reached(expected).await {
                 break;
             }
@@ -498,6 +518,7 @@ impl TestNetwork<'_> {
     #[allow(dead_code)]
     pub(crate) async fn wait_for_clob_fill(&self, market: MarketId) -> Fill {
         loop {
+            self.sync_clob_actors_from_chain().await;
             let ledgers = self.clob_ledgers().await;
             if ledgers.len() == self.participants.len() {
                 let mut fill: Option<Fill> = None;

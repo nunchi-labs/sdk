@@ -397,3 +397,18 @@ fn commit_and_settle_fill_applies_memclob_style_fill() {
     assert_eq!(market.long_open_interest, FILL_QTY * nunchi_perpetuals::PRICE_SCALE);
     assert_eq!(market.short_open_interest, FILL_QTY * nunchi_perpetuals::PRICE_SCALE);
 }
+
+#[test]
+fn commit_and_settle_transactions_builds_signed_batch() {
+    use crate::commit_and_settle_transactions;
+
+    let settler = PrivateKey::from_seed(40);
+    let fill = test_fill(clob_market_id(), &PrivateKey::from_seed(41), &PrivateKey::from_seed(42), 1_000, 3);
+    let txs = commit_and_settle_transactions(std::slice::from_ref(&fill), &settler, 5);
+    assert_eq!(txs.len(), 1);
+    assert_eq!(txs[0].payload.nonce, 5);
+    assert!(matches!(
+        txs[0].payload.operation,
+        ClearinghouseOperation::CommitAndSettleFill { .. }
+    ));
+}

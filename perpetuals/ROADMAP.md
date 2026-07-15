@@ -41,5 +41,6 @@ This document supersedes the original PR #80 follow-up list. Perpetuals is now a
 - [x] `cargo test -p nunchi-clearinghouse`
 - [x] `cargo test -p nunchi-perpetuals --features mock-execution`
 - [x] `cargo test -p nunchi-clob`
-- [x] coins-chain integration test for CLOB → clearinghouse → perps path
+- [x] coins-chain integration test for clearinghouse → perps settlement (`CommitAndSettleFill`)
+- [ ] coins-chain integration test for live mailbox match batch → `SettleFill` (tracked in #133 follow-up)
 - [ ] Close superseded PRs #79 and #80 with links to new stack
