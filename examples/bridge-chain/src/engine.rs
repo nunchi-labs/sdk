@@ -9,7 +9,7 @@ use commonware_consensus::{
         self,
         core::Actor as MarshalActor,
         resolver,
-        standard::{Deferred, Standard},
+        standard::{Inline, Standard},
         store::Certificates,
     },
     simplex::elector::Random,
@@ -81,8 +81,7 @@ type StatefulApp<E> =
     StatefulActor<E, crate::Application, Scheme, Standard<Block>, NoStateSyncResolver>;
 type StatefulAppMailbox<E> = StatefulMailbox<E, crate::Application>;
 type LimitedStatefulAppMailbox<E> = VerifyLimiter<StatefulAppMailbox<E>>;
-type DeferredApp<E> = Deferred<E, Scheme, LimitedStatefulAppMailbox<E>, Block, FixedEpocher>;
-type Marshaled<E> = VerificationScheduler<E, DeferredApp<E>>;
+type Marshaled<E> = Inline<E, Scheme, LimitedStatefulAppMailbox<E>, Block, FixedEpocher>;
 type SchemeProvider = Provider<Scheme, ed25519::PrivateKey>;
 type FinalizationsArchive<E> = immutable::Archive<E, Digest, Finalization>;
 type BlocksArchive<E> = immutable::Archive<E, Digest, Block>;
@@ -377,7 +376,7 @@ where
         );
 
         let verify_limiter_context = context.child("application_verify");
-        let deferred = Deferred::new(
+        let application = Inline::new(
             context.child("application"),
             VerifyLimiter::new(
                 &verify_limiter_context,
@@ -386,12 +385,6 @@ where
             ),
             marshal_mailbox.clone(),
             FixedEpocher::new(BLOCKS_PER_EPOCH),
-        );
-        let application = VerificationScheduler::new(
-            context.child("consensus_verify"),
-            deferred,
-            CONSENSUS_VERIFY_CONCURRENCY,
-            CONSENSUS_VERIFY_WAITING,
         );
 
         let (orchestrator, orchestrator_mailbox) = orchestrator::Actor::new(
