@@ -13,7 +13,7 @@ use commonware_consensus::{
         core::Actor as MarshalActor,
         resolver,
         standard::{Inline, Standard},
-        store::Certificates,
+        store::{Blocks as _, Certificates},
     },
     simplex::elector::Random,
     types::{FixedEpocher, Height, ViewDelta},
@@ -30,6 +30,7 @@ use commonware_cryptography::{
     BatchVerifier, Digestible, Signer,
 };
 use commonware_glue::stateful::{
+    Application as StatefulApplication,
     db::ManagedDb as _, Config as StatefulConfig, Mailbox as StatefulMailbox,
     Stateful as StatefulActor, SyncPlan,
 };
@@ -41,9 +42,10 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     archive::{immutable, Identifier as ArchiveIdentifier},
+    metadata::{self, Metadata},
     queue,
 };
-use commonware_utils::{union, NZU64};
+use commonware_utils::{sequence::U64, union, NZU64};
 use futures::lock::Mutex as AsyncMutex;
 use governor::clock::Clock as GClock;
 use nunchi_chain::engine::*;
@@ -297,8 +299,8 @@ where
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
-        let recovered_floor = if let Some(height) = Certificates::last_index(&finalizations_by_height)
-        {
+        let recovered_height = Certificates::last_index(&finalizations_by_height);
+        let mut recovered_floor = if let Some(height) = recovered_height {
             Certificates::get(
                 &finalizations_by_height,
                 ArchiveIdentifier::Index(height.get()),
@@ -371,6 +373,25 @@ where
         } else {
             empty_state
         };
+        let current_state_target = {
+            let state = QmdbState::init_with_config(
+                context.child("startup_state_probe"),
+                db_config.clone(),
+            )
+            .await
+            .expect("failed to initialize state database for startup probe");
+            state.sync_target().await
+        };
+        if repair_marshal_progress_if_state_is_behind(
+            &context,
+            &config.partition_prefix,
+            &finalized_blocks,
+            &current_state_target,
+        )
+        .await
+        {
+            recovered_floor = None;
+        }
         let applied_height = Arc::new(AsyncMutex::new(Height::zero()));
         let app = Application::with_dkg(
             submitter.clone(),
@@ -673,5 +694,85 @@ fn unexpected_exit(
     match result {
         Ok(()) => Err(EngineError::UnexpectedExit(component)),
         Err(error) => Err(error.into()),
+    }
+}
+
+const MARSHAL_PROCESSED_KEY: U64 = U64::new(0xFF);
+const STATE_SYNC_METADATA_SUFFIX: &str = "state_sync_metadata";
+
+async fn repair_marshal_progress_if_state_is_behind<E>(
+    context: &E,
+    partition_prefix: &str,
+    finalized_blocks: &BlocksArchive<E>,
+    current_target: &commonware_storage::qmdb::sync::Target<commonware_storage::mmr::Family, Digest>,
+) -> bool
+where
+    E: BufferPooler
+        + Clock
+        + Metrics
+        + Network
+        + Rng
+        + Spawner
+        + Storage
+        + ThreadPooler
+        + Send
+        + Sync
+        + 'static,
+{
+    let marshal_metadata_partition = format!("{partition_prefix}_marshal-application-metadata");
+    let metadata = Metadata::<E, U64, Height>::init(
+        context.child("marshal_progress_probe"),
+        metadata::Config {
+            partition: marshal_metadata_partition.clone(),
+            codec_config: (),
+        },
+    )
+    .await
+    .expect("failed to initialize marshal progress metadata probe");
+    let Some(processed_height) = metadata.get(&MARSHAL_PROCESSED_KEY).copied() else {
+        return false;
+    };
+    drop(metadata);
+
+    let Some(processed_block) = finalized_blocks
+        .get(ArchiveIdentifier::Index(processed_height.get()))
+        .await
+        .expect("failed to read processed block for state repair")
+    else {
+        warn!(
+            %processed_height,
+            "marshal progress references a missing finalized block; leaving metadata unchanged"
+        );
+        return false;
+    };
+    let processed_target = <Application as StatefulApplication<E>>::sync_targets(&processed_block);
+    let current_size = current_target.range.end().as_u64();
+    let processed_size = processed_target.range.end().as_u64();
+    if current_size >= processed_size {
+        return false;
+    }
+
+    warn!(
+        %processed_height,
+        current_size,
+        processed_size,
+        "state database is behind marshal progress; clearing startup metadata to replay finalized blocks"
+    );
+    remove_partition_if_exists(context, &marshal_metadata_partition).await;
+    remove_partition_if_exists(
+        context,
+        &format!("{partition_prefix}{STATE_SYNC_METADATA_SUFFIX}"),
+    )
+    .await;
+    true
+}
+
+async fn remove_partition_if_exists<E>(context: &E, partition: &str)
+where
+    E: Storage,
+{
+    match context.remove(partition, None).await {
+        Ok(()) | Err(commonware_runtime::Error::PartitionMissing(_)) => {}
+        Err(error) => panic!("failed to remove partition {partition}: {error}"),
     }
 }
