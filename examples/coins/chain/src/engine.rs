@@ -98,7 +98,8 @@ type DkgMailbox = nunchi_chain::DkgMailbox<Transaction>;
 type StatefulApp<E> = StatefulActor<E, Application, Scheme, Standard<Block>, NoStateSyncResolver>;
 type StatefulAppMailbox<E> = StatefulMailbox<E, Application>;
 type LimitedStatefulAppMailbox<E> = VerifyLimiter<StatefulAppMailbox<E>>;
-type Marshaled<E> = Deferred<E, Scheme, LimitedStatefulAppMailbox<E>, Block, FixedEpocher>;
+type DeferredApp<E> = Deferred<E, Scheme, LimitedStatefulAppMailbox<E>, Block, FixedEpocher>;
+type Marshaled<E> = VerificationScheduler<E, DeferredApp<E>>;
 type SchemeProvider = Provider<Scheme, ed25519::PrivateKey>;
 type FinalizationsArchive<E> = immutable::Archive<E, Digest, Finalization>;
 type BlocksArchive<E> = immutable::Archive<E, Digest, Block>;
@@ -435,7 +436,7 @@ where
         let node_handle = NodeHandle::new(submitter, stateful_mailbox.clone(), applied_height);
 
         let verify_limiter_context = context.child("application_verify");
-        let application = Deferred::new(
+        let deferred = Deferred::new(
             context.child("application"),
             VerifyLimiter::new(
                 &verify_limiter_context,
@@ -444,6 +445,12 @@ where
             ),
             marshal_mailbox.clone(),
             FixedEpocher::new(BLOCKS_PER_EPOCH),
+        );
+        let application = VerificationScheduler::new(
+            context.child("consensus_verify"),
+            deferred,
+            CONSENSUS_VERIFY_CONCURRENCY,
+            CONSENSUS_VERIFY_WAITING,
         );
 
         let (indexer_producer, indexer_pusher, indexer_consumer) =

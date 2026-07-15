@@ -1,13 +1,21 @@
 //! Reusable engine tuning and support types.
 
-use commonware_consensus::{marshal::ancestry::Ancestry, types::ViewDelta};
+use commonware_actor::Feedback;
+use commonware_consensus::{
+    marshal::ancestry::Ancestry, Automaton, CertifiableAutomaton, Relay, Reporter, types::ViewDelta,
+};
 use commonware_cryptography::sha256::Digest;
 use commonware_glue::stateful::db::{AttachableResolver, SyncEngineConfig};
+use commonware_macros::select;
 use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
     Clock, Metrics, Spawner,
 };
-use commonware_utils::{channel::oneshot, sync::AsyncRwLock, NZUsize, NZU16, NZU64};
+use commonware_utils::{
+    channel::{fallible::OneshotExt, oneshot},
+    sync::AsyncRwLock,
+    NZU16, NZU64, NZUsize,
+};
 use futures::channel::oneshot as futures_oneshot;
 use nunchi_common::{QmdbBackend, QmdbOperation};
 use rand::Rng;
@@ -40,6 +48,8 @@ pub const STATE_SYNC_MAX_OUTSTANDING_REQUESTS: usize = 8;
 pub const STATE_SYNC_UPDATE_CHANNEL_SIZE: NonZero<usize> = NZUsize!(256);
 pub const STATE_SYNC_MAX_RETAINED_ROOTS: usize = 32;
 pub const APPLICATION_VERIFY_CONCURRENCY: NonZeroUsize = NZUsize!(16);
+pub const CONSENSUS_VERIFY_CONCURRENCY: NonZeroUsize = NZUsize!(16);
+pub const CONSENSUS_VERIFY_WAITING: usize = 64;
 
 #[derive(Clone)]
 pub struct VerifyLimiter<A> {
@@ -201,6 +211,317 @@ where
     }
 }
 
+pub struct VerificationScheduler<E, A> {
+    automaton: A,
+    scheduler: Arc<Scheduler>,
+    metrics: SchedulerMetrics,
+    context: Arc<AsyncRwLock<E>>,
+}
+
+impl<E, A> Clone for VerificationScheduler<E, A>
+where
+    A: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            automaton: self.automaton.clone(),
+            scheduler: self.scheduler.clone(),
+            metrics: self.metrics.clone(),
+            context: self.context.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SchedulerMetrics {
+    in_flight: Gauge,
+    waiting: Gauge,
+    admitted_total: Counter,
+    completed_total: Counter,
+    verify_overflow_total: Counter,
+    certify_overflow_total: Counter,
+    canceled_waiters_total: Counter,
+}
+
+struct Scheduler {
+    max_waiting: usize,
+    state: Mutex<SchedulerState>,
+}
+
+struct SchedulerState {
+    available: usize,
+    in_flight: usize,
+    waiting: usize,
+    waiters: VecDeque<futures_oneshot::Sender<()>>,
+}
+
+enum Admission {
+    Permit(SchedulerPermit),
+    Overflow,
+}
+
+struct SchedulerPermit {
+    scheduler: Arc<Scheduler>,
+    metrics: SchedulerMetrics,
+}
+
+impl<E, A> VerificationScheduler<E, A> {
+    pub fn new(
+        context: E,
+        automaton: A,
+        max_in_flight: NonZeroUsize,
+        max_waiting: usize,
+    ) -> Self
+    where
+        E: Metrics,
+    {
+        Self {
+            automaton,
+            scheduler: Arc::new(Scheduler {
+                max_waiting,
+                state: Mutex::new(SchedulerState {
+                    available: max_in_flight.get(),
+                    in_flight: 0,
+                    waiting: 0,
+                    waiters: VecDeque::new(),
+                }),
+            }),
+            metrics: SchedulerMetrics {
+                in_flight: context.gauge(
+                    "consensus_verify_in_flight",
+                    "consensus verification tasks currently admitted before deferred verification",
+                ),
+                waiting: context.gauge(
+                    "consensus_verify_waiting",
+                    "consensus verification requests waiting before deferred verification",
+                ),
+                admitted_total: context.counter(
+                    "consensus_verify_admitted_total",
+                    "consensus verification requests admitted before deferred verification",
+                ),
+                completed_total: context.counter(
+                    "consensus_verify_completed_total",
+                    "consensus verification requests completed after admission",
+                ),
+                verify_overflow_total: context.counter(
+                    "consensus_verify_verify_overflow_total",
+                    "verify requests left pending because the consensus verification scheduler was full",
+                ),
+                certify_overflow_total: context.counter(
+                    "consensus_verify_certify_overflow_total",
+                    "certify requests left pending because the consensus verification scheduler was full",
+                ),
+                canceled_waiters_total: context.counter(
+                    "consensus_verify_canceled_waiters_total",
+                    "consensus verification waiters canceled before admission",
+                ),
+            },
+            context: Arc::new(AsyncRwLock::new(context)),
+        }
+    }
+}
+
+impl Scheduler {
+    async fn acquire(self: &Arc<Self>, metrics: &SchedulerMetrics) -> Admission {
+        loop {
+            let receiver = {
+                let mut state = self.state.lock().expect("verification scheduler mutex poisoned");
+                if state.available > 0 {
+                    state.available -= 1;
+                    state.in_flight += 1;
+                    metrics.in_flight.try_set(state.in_flight).ok();
+                    metrics.admitted_total.inc();
+                    return Admission::Permit(SchedulerPermit {
+                        scheduler: self.clone(),
+                        metrics: metrics.clone(),
+                    });
+                }
+
+                if state.waiting >= self.max_waiting {
+                    return Admission::Overflow;
+                }
+
+                let (sender, receiver) = futures_oneshot::channel();
+                state.waiting += 1;
+                state.waiters.push_back(sender);
+                metrics.waiting.try_set(state.waiting).ok();
+                receiver
+            };
+
+            if receiver.await.is_ok() {
+                metrics.admitted_total.inc();
+                return Admission::Permit(SchedulerPermit {
+                    scheduler: self.clone(),
+                    metrics: metrics.clone(),
+                });
+            }
+        }
+    }
+
+    fn release(&self, metrics: &SchedulerMetrics) {
+        let mut state = self.state.lock().expect("verification scheduler mutex poisoned");
+        state.in_flight = state.in_flight.saturating_sub(1);
+        metrics.in_flight.try_set(state.in_flight).ok();
+        metrics.completed_total.inc();
+
+        while let Some(sender) = state.waiters.pop_front() {
+            state.waiting = state.waiting.saturating_sub(1);
+            metrics.waiting.try_set(state.waiting).ok();
+            if sender.send(()).is_ok() {
+                state.in_flight += 1;
+                metrics.in_flight.try_set(state.in_flight).ok();
+                return;
+            }
+            metrics.canceled_waiters_total.inc();
+        }
+
+        state.available += 1;
+    }
+}
+
+impl Drop for SchedulerPermit {
+    fn drop(&mut self) {
+        self.scheduler.release(&self.metrics);
+    }
+}
+
+impl<E, A> VerificationScheduler<E, A>
+where
+    E: Spawner,
+{
+    async fn pending_receiver(
+        context: Arc<AsyncRwLock<E>>,
+        name: &'static str,
+    ) -> oneshot::Receiver<bool> {
+        let (mut sender, receiver) = oneshot::channel();
+        let runtime_context = context.write().await.child(name);
+        runtime_context.spawn(move |_| async move {
+            sender.closed().await;
+        });
+        receiver
+    }
+}
+
+impl<E, A> Automaton for VerificationScheduler<E, A>
+where
+    E: Spawner + Metrics + Send + Sync + 'static,
+    A: Automaton,
+    A::Context: Send,
+{
+    type Context = A::Context;
+    type Digest = A::Digest;
+
+    fn propose(
+        &mut self,
+        context: Self::Context,
+    ) -> impl Future<Output = oneshot::Receiver<Self::Digest>> + Send {
+        self.automaton.propose(context)
+    }
+
+    async fn verify(
+        &mut self,
+        context: Self::Context,
+        payload: Self::Digest,
+    ) -> oneshot::Receiver<bool> {
+        let admission = self.scheduler.acquire(&self.metrics).await;
+        let Admission::Permit(permit) = admission else {
+            self.metrics.verify_overflow_total.inc();
+            return Self::pending_receiver(self.context.clone(), "verify_overflow").await;
+        };
+
+        let mut automaton = self.automaton.clone();
+        let (mut sender, receiver) = oneshot::channel();
+        let runtime_context = self.context.write().await.child("verify");
+        runtime_context.spawn(move |_| async move {
+            let inner = select! {
+                _ = sender.closed() => {
+                    return;
+                },
+                inner = automaton.verify(context, payload) => inner,
+            };
+            let result = select! {
+                _ = sender.closed() => {
+                    return;
+                },
+                result = inner => result,
+            };
+            if let Ok(valid) = result {
+                sender.send_lossy(valid);
+            }
+            drop(permit);
+        });
+        receiver
+    }
+}
+
+impl<E, A> CertifiableAutomaton for VerificationScheduler<E, A>
+where
+    E: Spawner + Metrics + Send + Sync + 'static,
+    A: CertifiableAutomaton,
+    A::Context: Send,
+{
+    async fn certify(
+        &mut self,
+        round: commonware_consensus::types::Round,
+        payload: Self::Digest,
+    ) -> oneshot::Receiver<bool> {
+        let admission = self.scheduler.acquire(&self.metrics).await;
+        let Admission::Permit(permit) = admission else {
+            self.metrics.certify_overflow_total.inc();
+            return Self::pending_receiver(self.context.clone(), "certify_overflow").await;
+        };
+
+        let mut automaton = self.automaton.clone();
+        let (mut sender, receiver) = oneshot::channel();
+        let runtime_context = self.context.write().await.child("certify");
+        runtime_context.spawn(move |_| async move {
+            let inner = select! {
+                _ = sender.closed() => {
+                    return;
+                },
+                inner = automaton.certify(round, payload) => inner,
+            };
+            let result = select! {
+                _ = sender.closed() => {
+                    return;
+                },
+                result = inner => result,
+            };
+            if let Ok(valid) = result {
+                sender.send_lossy(valid);
+            }
+            drop(permit);
+        });
+        receiver
+    }
+}
+
+impl<E, A> Relay for VerificationScheduler<E, A>
+where
+    E: Send + Sync + 'static,
+    A: Relay,
+{
+    type Digest = A::Digest;
+    type PublicKey = A::PublicKey;
+    type Plan = A::Plan;
+
+    fn broadcast(&mut self, payload: Self::Digest, plan: Self::Plan) -> Feedback {
+        self.automaton.broadcast(payload, plan)
+    }
+}
+
+impl<E, A> Reporter for VerificationScheduler<E, A>
+where
+    E: Send + Sync + 'static,
+    A: Reporter,
+{
+    type Activity = A::Activity;
+
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
+        self.automaton.report(activity)
+    }
+}
+
 pub fn state_sync_config() -> SyncEngineConfig {
     SyncEngineConfig {
         fetch_batch_size: STATE_SYNC_FETCH_BATCH_SIZE,
@@ -289,6 +610,45 @@ mod tests {
         }
     }
 
+    fn scheduler_metrics() -> SchedulerMetrics {
+        SchedulerMetrics {
+            in_flight: Registered::with_registration(raw::Gauge::default(), Registration::from(())),
+            waiting: Registered::with_registration(raw::Gauge::default(), Registration::from(())),
+            admitted_total: Registered::with_registration(
+                raw::Counter::default(),
+                Registration::from(()),
+            ),
+            completed_total: Registered::with_registration(
+                raw::Counter::default(),
+                Registration::from(()),
+            ),
+            verify_overflow_total: Registered::with_registration(
+                raw::Counter::default(),
+                Registration::from(()),
+            ),
+            certify_overflow_total: Registered::with_registration(
+                raw::Counter::default(),
+                Registration::from(()),
+            ),
+            canceled_waiters_total: Registered::with_registration(
+                raw::Counter::default(),
+                Registration::from(()),
+            ),
+        }
+    }
+
+    fn scheduler(max_in_flight: usize, max_waiting: usize) -> Arc<Scheduler> {
+        Arc::new(Scheduler {
+            max_waiting,
+            state: Mutex::new(SchedulerState {
+                available: max_in_flight,
+                in_flight: 0,
+                waiting: 0,
+                waiters: VecDeque::new(),
+            }),
+        })
+    }
+
     #[test]
     fn verify_limiter_holds_second_acquire_until_release() {
         let limiter = Arc::new(Limiter {
@@ -311,5 +671,77 @@ mod tests {
 
         drop(first);
         assert!(matches!(second.as_mut().poll(&mut context), Poll::Ready(_)));
+    }
+
+    #[test]
+    fn scheduler_holds_second_acquire_until_release() {
+        let scheduler = scheduler(1, 1);
+        let metrics = scheduler_metrics();
+
+        let first = match futures::executor::block_on(scheduler.acquire(&metrics)) {
+            Admission::Permit(permit) => permit,
+            Admission::Overflow => panic!("first acquire should be admitted"),
+        };
+        let second = scheduler.acquire(&metrics);
+        pin_mut!(second);
+
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        assert!(matches!(second.as_mut().poll(&mut context), Poll::Pending));
+
+        drop(first);
+        assert!(matches!(
+            second.as_mut().poll(&mut context),
+            Poll::Ready(Admission::Permit(_))
+        ));
+    }
+
+    #[test]
+    fn scheduler_rejects_waiter_when_queue_full() {
+        let scheduler = scheduler(1, 1);
+        let metrics = scheduler_metrics();
+
+        let _first = match futures::executor::block_on(scheduler.acquire(&metrics)) {
+            Admission::Permit(permit) => permit,
+            Admission::Overflow => panic!("first acquire should be admitted"),
+        };
+        let second = scheduler.acquire(&metrics);
+        pin_mut!(second);
+
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        assert!(matches!(second.as_mut().poll(&mut context), Poll::Pending));
+        assert!(matches!(
+            futures::executor::block_on(scheduler.acquire(&metrics)),
+            Admission::Overflow
+        ));
+    }
+
+    #[test]
+    fn scheduler_releases_canceled_waiter() {
+        let scheduler = scheduler(1, 1);
+        let metrics = scheduler_metrics();
+
+        let first = match futures::executor::block_on(scheduler.acquire(&metrics)) {
+            Admission::Permit(permit) => permit,
+            Admission::Overflow => panic!("first acquire should be admitted"),
+        };
+        {
+            let second = scheduler.acquire(&metrics);
+            pin_mut!(second);
+
+            let waker = noop_waker();
+            let mut context = Context::from_waker(&waker);
+            assert!(matches!(second.as_mut().poll(&mut context), Poll::Pending));
+        }
+        drop(first);
+
+        let state = scheduler
+            .state
+            .lock()
+            .expect("verification scheduler mutex poisoned");
+        assert_eq!(state.waiting, 0);
+        assert_eq!(state.in_flight, 0);
+        assert_eq!(state.available, 1);
     }
 }
