@@ -382,6 +382,7 @@ where
             .expect("failed to initialize state database for startup probe");
             state.sync_target().await
         };
+        clear_disabled_state_sync_metadata(&context, &config.partition_prefix).await;
         if repair_marshal_progress_if_state_is_behind(
             &context,
             &config.partition_prefix,
@@ -741,9 +742,11 @@ where
     else {
         warn!(
             %processed_height,
-            "marshal progress references a missing finalized block; leaving metadata unchanged"
+            "marshal progress references a missing finalized block; clearing startup metadata to replay"
         );
-        return false;
+        remove_partition_if_exists(context, &marshal_metadata_partition).await;
+        clear_disabled_state_sync_metadata(context, partition_prefix).await;
+        return true;
     };
     let processed_target = <Application as StatefulApplication<E>>::sync_targets(&processed_block);
     let current_size = current_target.range.end().as_u64();
@@ -765,6 +768,17 @@ where
     )
     .await;
     true
+}
+
+async fn clear_disabled_state_sync_metadata<E>(context: &E, partition_prefix: &str)
+where
+    E: Storage,
+{
+    remove_partition_if_exists(
+        context,
+        &format!("{partition_prefix}{STATE_SYNC_METADATA_SUFFIX}"),
+    )
+    .await;
 }
 
 async fn remove_partition_if_exists<E>(context: &E, partition: &str)
