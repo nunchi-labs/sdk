@@ -4,9 +4,11 @@ use commonware_codec::EncodeSize;
 use nunchi_authority::{AuthorityError, AuthorityLedger};
 use nunchi_bridge::{escrow_address, BridgeError, BridgeLedger, BridgeOperation};
 use nunchi_clob::{ClobError, ClobLedger};
+use nunchi_clearinghouse::{ClearinghouseError, ClearinghouseLedger};
 use nunchi_coins::{CoinId, Ledger, LedgerError};
 use nunchi_common::{EventSink, NoopEventSink, Overlay, Runtime, RuntimeContext, StateStore};
 use nunchi_oracle::{OracleError, OracleLedger};
+use nunchi_perpetuals::{PerpetualError, PerpetualLedger};
 
 use crate::Transaction;
 
@@ -25,6 +27,10 @@ pub enum RuntimeError {
     Bridge(#[from] BridgeError),
     #[error("clob module error: {0}")]
     Clob(#[from] ClobError),
+    #[error("perpetuals module error: {0}")]
+    Perpetuals(#[from] PerpetualError),
+    #[error("clearinghouse module error: {0}")]
+    Clearinghouse(#[from] ClearinghouseError),
 }
 
 impl RuntimeError {
@@ -36,6 +42,16 @@ impl RuntimeError {
                 | Self::Oracle(OracleError::Storage(_))
                 | Self::Bridge(BridgeError::Storage(_))
                 | Self::Clob(ClobError::Storage(_))
+                | Self::Perpetuals(PerpetualError::Storage(_))
+                | Self::Perpetuals(PerpetualError::Coin(LedgerError::Storage(_)))
+                | Self::Clearinghouse(ClearinghouseError::Storage(_))
+                | Self::Clearinghouse(ClearinghouseError::Perpetuals(
+                    PerpetualError::Storage(_)
+                ))
+                | Self::Clearinghouse(ClearinghouseError::Perpetuals(
+                    PerpetualError::Coin(LedgerError::Storage(_))
+                ))
+                | Self::Clearinghouse(ClearinghouseError::Clob(ClobError::Storage(_)))
         )
     }
 }
@@ -83,8 +99,6 @@ where
     S: StateStore + Send + Sync,
     Events: EventSink + Send,
 {
-    // Fee ante: charge the authorizing account before module dispatch. The fee is staged in the
-    // same overlay as the operation, so a failed transaction reverts its fee.
     let mut fees = Ledger::new(&mut *state);
     fees.charge_fee(
         transaction.account_id(),
@@ -107,11 +121,6 @@ where
             ledger.apply_transaction(transaction, context).await?;
         }
         Transaction::Bridge(transaction) => {
-            // Escrow the locked source coins and record the transfer atomically. Both writes go
-            // into an inner overlay that is committed only if the whole lock succeeds, so a bridge
-            // validation failure after the escrow move (bad nonce, unconfigured chain, self-bridge,
-            // unsupported authorization, ...) reverts everything, without relying on the caller to
-            // discard partial writes. The bridge crate itself stays decoupled from coins.
             let mut overlay = Overlay::new(&mut *state);
             match &transaction.payload.operation {
                 BridgeOperation::Lock {
@@ -138,6 +147,37 @@ where
             let mut ledger = ClobLedger::new(state);
             ledger.apply_transaction(transaction, context).await?;
         }
+        Transaction::Perpetual(transaction) => {
+            let mut ledger = PerpetualLedger::new(state);
+            ledger.apply_transaction(transaction, context).await?;
+        }
+        Transaction::Clearinghouse(transaction) => {
+            let mut ledger = ClearinghouseLedger::new(state);
+            ledger.apply_transaction(transaction, context).await?;
+        }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_error_classifies_storage_errors() {
+        assert!(RuntimeError::Coins(LedgerError::Storage("disk".into())).is_storage());
+        assert!(RuntimeError::Authority(AuthorityError::Storage("disk".into())).is_storage());
+        assert!(RuntimeError::Oracle(OracleError::Storage("disk".into())).is_storage());
+        assert!(RuntimeError::Bridge(BridgeError::Storage("disk".into())).is_storage());
+        assert!(RuntimeError::Clob(ClobError::Storage("disk".into())).is_storage());
+        assert!(RuntimeError::Perpetuals(PerpetualError::Storage("disk".into())).is_storage());
+        assert!(RuntimeError::Clearinghouse(ClearinghouseError::Storage("disk".into())).is_storage());
+
+        assert!(!RuntimeError::Authority(AuthorityError::NotConfigured).is_storage());
+        assert!(!RuntimeError::Coins(LedgerError::InvalidTokenSpec("bad")).is_storage());
+        assert!(!RuntimeError::Oracle(OracleError::PayloadTooLarge).is_storage());
+        assert!(!RuntimeError::Perpetuals(PerpetualError::Unauthorized).is_storage());
+        assert!(!RuntimeError::Clob(ClobError::MarketNotFound).is_storage());
+        assert!(!RuntimeError::Clearinghouse(ClearinghouseError::Unauthorized).is_storage());
+    }
 }

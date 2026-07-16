@@ -139,6 +139,24 @@ impl<D: ClobDB> ClobLedger<D> {
         Ok(fills)
     }
 
+    /// Persist an off-chain matched fill into on-chain CLOB state.
+    pub async fn record_fill(&mut self, fill: &Fill) -> Result<(), ClobError> {
+        if self.db.fill(&fill.id).await?.is_some() {
+            return Ok(());
+        }
+        if self.db.market(&fill.market).await?.is_none() {
+            return Err(ClobError::MarketNotFound);
+        }
+        let mut market_fill_ids = self.db.market_fills(&fill.market).await?;
+        if market_fill_ids.len() >= MAX_FILLS_PER_MARKET {
+            return Err(ClobError::FillIndexFull);
+        }
+        market_fill_ids.push(fill.id);
+        self.db.set_fill(fill);
+        self.db.set_market_fills(&fill.market, &market_fill_ids);
+        Ok(())
+    }
+
     /// Validate and apply a signed CLOB transaction.
     pub async fn apply_transaction(
         &mut self,

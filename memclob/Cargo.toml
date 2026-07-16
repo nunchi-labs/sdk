@@ -1,0 +1,33 @@
+[package]
+name = "nunchi-memclob"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Validator-local in-memory order books with P2P gossip (dYdX v4 style)."
+
+[lints]
+workspace = true
+
+[features]
+default = []
+
+[dependencies]
+bytes = { workspace = true }
+commonware-codec = { workspace = true }
+commonware-cryptography = { workspace = true }
+commonware-macros = { workspace = true }
+commonware-p2p = { workspace = true }
+commonware-runtime = { workspace = true }
+futures = { workspace = true }
+nunchi-clob = { workspace = true }
+nunchi-common = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+commonware-cryptography = { workspace = true }
+commonware-p2p = { workspace = true }
+commonware-runtime = { workspace = true }
+commonware-utils = { workspace = true }
+governor = { workspace = true }
+nunchi-crypto = { workspace = true }

@@ -70,6 +70,7 @@ fn sample_genesis() -> ChainGenesis {
             }],
         }),
         oracle: Some(OracleGenesis {}),
+        perpetuals: None,
         clob: None,
     }
 }

@@ -21,6 +21,8 @@ use commonware_utils::{
 };
 use governor::Quota;
 use nunchi_authority::AuthorityLedger;
+use nunchi_clearinghouse::ClearinghouseLedger;
+use nunchi_clob::{ClobLedger, ClobMailbox, Fill, MarketId};
 use nunchi_coins::{Address, Ledger};
 use nunchi_coins_chain::{
     engine::{Config, Engine},
@@ -31,6 +33,7 @@ use nunchi_common::QmdbReader;
 use nunchi_dkg::{ContinueOnUpdate, PeerConfig};
 use nunchi_mempool::{MempoolHandle, PoolConfig};
 use nunchi_oracle::OracleLedger;
+use nunchi_perpetuals::PerpetualLedger;
 use std::{
     collections::{HashMap, HashSet},
     time::Duration,
@@ -56,6 +59,9 @@ type Channel = (
 type ReadLedger = Ledger<QmdbReader<deterministic::Context>>;
 type ReadAuthorityLedger = AuthorityLedger<QmdbReader<deterministic::Context>>;
 type ReadOracleLedger = OracleLedger<QmdbReader<deterministic::Context>>;
+type ReadPerpetualLedger = PerpetualLedger<QmdbReader<deterministic::Context>>;
+type ReadClobLedger = ClobLedger<QmdbReader<deterministic::Context>>;
+type ReadClearinghouseLedger = ClearinghouseLedger<QmdbReader<deterministic::Context>>;
 
 #[derive(Clone)]
 pub(crate) struct ThresholdFixture {
@@ -360,6 +366,43 @@ impl TestNetwork<'_> {
             .clone()
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn clob(&self, index: usize) -> ClobMailbox {
+        self.nodes
+            .get(&self.participants[index])
+            .expect("validator not started")
+            .clob
+            .clone()
+    }
+
+    #[allow(dead_code)]
+    /// Mirror an on-chain CLOB market into each validator's local matcher actor.
+    pub(crate) async fn sync_clob_actor_market(&self, market: MarketId) {
+        let ledgers = self.clob_ledgers().await;
+        for (index, ledger) in ledgers.into_iter().enumerate() {
+            let market_info = ledger
+                .market(&market)
+                .await
+                .expect("clob market read")
+                .expect("clob market exists");
+            let sequence = ledger
+                .market_sequence(&market)
+                .await
+                .expect("clob market sequence read");
+            self.clob(index).upsert_market_state(market_info, sequence);
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn sync_clob_actor_nonce(&self, account: &Address, nonce: u64) {
+        for index in 0..self.participants.len() {
+            self.clob(index)
+                .sync_nonce(account.clone(), nonce)
+                .await
+                .expect("sync clob actor nonce");
+        }
+    }
+
     /// Snapshot, in registration order, every started validator's committed coin ledger.
     pub(crate) async fn ledgers(&self) -> Vec<ReadLedger> {
         let mut ledgers = Vec::new();
@@ -395,6 +438,178 @@ impl TestNetwork<'_> {
             ledgers.push(OracleLedger::new(QmdbReader::new(db)));
         }
         ledgers
+    }
+
+    pub(crate) async fn perpetual_ledgers(&self) -> Vec<ReadPerpetualLedger> {
+        let mut ledgers = Vec::new();
+        for participant in &self.participants {
+            let Some(node) = self.nodes.get(participant) else {
+                continue;
+            };
+            let db = node.stateful.subscribe_databases().await;
+            ledgers.push(PerpetualLedger::new(QmdbReader::new(db)));
+        }
+        ledgers
+    }
+
+    pub(crate) async fn clob_ledgers(&self) -> Vec<ReadClobLedger> {
+        let mut ledgers = Vec::new();
+        for participant in &self.participants {
+            let Some(node) = self.nodes.get(participant) else {
+                continue;
+            };
+            let db = node.stateful.subscribe_databases().await;
+            ledgers.push(ClobLedger::new(QmdbReader::new(db)));
+        }
+        ledgers
+    }
+
+    pub(crate) async fn clearinghouse_ledgers(&self) -> Vec<ReadClearinghouseLedger> {
+        let mut ledgers = Vec::new();
+        for participant in &self.participants {
+            let Some(node) = self.nodes.get(participant) else {
+                continue;
+            };
+            let db = node.stateful.subscribe_databases().await;
+            ledgers.push(ClearinghouseLedger::new(QmdbReader::new(db)));
+        }
+        ledgers
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn sync_clob_actors_from_chain(&self) {
+        for (index, participant) in self.participants.iter().enumerate() {
+            let Some(node) = self.nodes.get(participant) else {
+                continue;
+            };
+            let db = node.stateful.subscribe_databases().await;
+            let ledger = ClobLedger::new(QmdbReader::new(db));
+            let Ok(markets) = ledger.markets().await else {
+                continue;
+            };
+            for market in markets {
+                let Ok(sequence) = ledger.market_sequence(&market.id).await else {
+                    continue;
+                };
+                self.clob(index).upsert_market_state(market, sequence);
+            }
+        }
+    }
+
+    pub(crate) async fn run_until_clob_nonces(&self, expected: &[(Address, u64)]) {
+        loop {
+            self.sync_clob_actors_from_chain().await;
+            if self.all_clob_nonces_reached(expected).await {
+                break;
+            }
+            self.context.sleep(Duration::from_secs(1)).await;
+        }
+    }
+
+    pub(crate) async fn run_until_clearinghouse_nonces(&self, expected: &[(Address, u64)]) {
+        loop {
+            if self.all_clearinghouse_nonces_reached(expected).await {
+                break;
+            }
+            self.context.sleep(Duration::from_secs(1)).await;
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn wait_for_clob_fill(&self, market: MarketId) -> Fill {
+        loop {
+            self.sync_clob_actors_from_chain().await;
+            let ledgers = self.clob_ledgers().await;
+            if ledgers.len() == self.participants.len() {
+                let mut fill: Option<Fill> = None;
+                let mut all_have_fill = true;
+                for ledger in &ledgers {
+                    let fills = ledger
+                        .market_fills(&market)
+                        .await
+                        .expect("read clob market fills");
+                    let Some(record) = fills.last() else {
+                        all_have_fill = false;
+                        break;
+                    };
+                    if let Some(expected) = &fill {
+                        if expected.id != record.id {
+                            all_have_fill = false;
+                            break;
+                        }
+                    } else {
+                        fill = Some(record.clone());
+                    }
+                }
+                if all_have_fill {
+                    return fill.expect("matched fill on all validators");
+                }
+            }
+            self.context.sleep(Duration::from_secs(1)).await;
+        }
+    }
+
+    pub(crate) async fn run_until_perpetual_nonces(&self, expected: &[(Address, u64)]) {
+        loop {
+            if self.all_perpetual_nonces_reached(expected).await {
+                break;
+            }
+            self.context.sleep(Duration::from_secs(1)).await;
+        }
+    }
+
+    async fn all_clob_nonces_reached(&self, expected: &[(Address, u64)]) -> bool {
+        let ledgers = self.clob_ledgers().await;
+        if ledgers.len() != self.participants.len() {
+            return false;
+        }
+        for ledger in ledgers {
+            for (account, target) in expected {
+                let nonce = ledger.nonce(account).await.expect("clob nonce read failed");
+                if nonce != *target {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    async fn all_clearinghouse_nonces_reached(&self, expected: &[(Address, u64)]) -> bool {
+        let ledgers = self.clearinghouse_ledgers().await;
+        if ledgers.len() != self.participants.len() {
+            return false;
+        }
+        for ledger in ledgers {
+            for (account, target) in expected {
+                let nonce = ledger
+                    .nonce(account)
+                    .await
+                    .expect("clearinghouse nonce read failed");
+                if nonce != *target {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    async fn all_perpetual_nonces_reached(&self, expected: &[(Address, u64)]) -> bool {
+        let ledgers = self.perpetual_ledgers().await;
+        if ledgers.len() != self.participants.len() {
+            return false;
+        }
+        for ledger in ledgers {
+            for (account, target) in expected {
+                let nonce = ledger
+                    .nonce(account)
+                    .await
+                    .expect("perpetual nonce read failed");
+                if nonce != *target {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// Poll until every node's ledger shows the expected nonce for each listed account.

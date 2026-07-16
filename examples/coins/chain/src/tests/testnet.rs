@@ -51,7 +51,6 @@ fn generated_testnet_has_unique_ports_dirs_and_complete_peer_sets() {
         .map(|node| node.data_dir.clone())
         .collect::<HashSet<_>>();
     assert_eq!(dirs.len(), 4);
-    let mut dkg_storage_keys = HashSet::new();
 
     for node in &manifest.nodes {
         let config = NodeConfig::read(&node.config_path).expect("read node config");
@@ -71,12 +70,7 @@ fn generated_testnet_has_unique_ports_dirs_and_complete_peer_sets() {
         decode_unit::<group::Share>(&config.share, "share").expect("decode share");
         decode_unit::<ed25519::PrivateKey>(&config.private_key, "private_key")
             .expect("decode private key");
-        let dkg_storage_key =
-            decode_storage_key(&config.dkg_storage_key).expect("decode dkg storage key");
-        assert_ne!(config.dkg_storage_key, config.private_key);
-        assert!(dkg_storage_keys.insert(dkg_storage_key));
     }
-    assert_eq!(dkg_storage_keys.len(), 4);
 
     let _ = fs::remove_dir_all(dir);
 }

@@ -2,16 +2,19 @@
 members = [
     "authority",
     "bridge",
-    "common",
     "chain",
+    "clearinghouse",
     "clob",
     "coins",
+    "common",
     "crypto",
     "dkg",
+    "memclob",
     "narae",
     "xtask",
     "mempool",
     "oracle",
+    "perpetuals",
     "rpc",
     "mcp",
     "examples/bridge-chain",
@@ -44,8 +47,11 @@ nunchi-clob = { version = "2026.5.0", path = "clob" }
 nunchi-common = { version = "2026.5.0", path = "common" }
 nunchi-crypto = { version = "2026.5.0", path = "crypto" }
 nunchi-dkg = { version = "2026.5.0", path = "dkg" }
+nunchi-clearinghouse = { version = "2026.5.0", path = "clearinghouse" }
+nunchi-memclob = { version = "2026.5.0", path = "memclob" }
 nunchi-mempool = { version = "2026.5.0", path = "mempool" }
 nunchi-oracle = { version = "2026.5.0", path = "oracle" }
+nunchi-perpetuals = { version = "2026.5.0", path = "perpetuals" }
 nunchi-rpc = { version = "2026.5.0", path = "rpc" }
 nunchi-coins-chain = { version = "2026.5.0", path = "examples/coins/chain" }
 nunchi-bridge-chain = { version = "2026.5.0", path = "examples/bridge-chain" }

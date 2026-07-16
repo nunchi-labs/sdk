@@ -9,6 +9,7 @@ use nunchi_common::{
     CommitState, Namespace, Overlay, QmdbConfig, QmdbState, StateError, StateStore,
 };
 use nunchi_oracle::{OracleGenesis, OracleLedger};
+use nunchi_perpetuals::{PerpetualLedger, PerpetualsGenesis};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
 use thiserror::Error;
@@ -37,6 +38,8 @@ pub struct ChainGenesis {
     pub oracle: Option<OracleGenesis>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clob: Option<ClobGenesis>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub perpetuals: Option<PerpetualsGenesis>,
 }
 
 #[derive(Debug, Error)]
@@ -53,6 +56,8 @@ pub enum GenesisError {
     Oracle(#[from] nunchi_oracle::OracleError),
     #[error("clob genesis error: {0}")]
     Clob(#[from] nunchi_clob::ClobError),
+    #[error("perpetuals genesis error: {0}")]
+    Perpetuals(#[from] nunchi_perpetuals::PerpetualError),
     #[error("state error: {0}")]
     State(#[from] StateError),
     #[error("existing chain state was initialized with a different genesis")]
@@ -113,6 +118,11 @@ impl ChainGenesis {
         if let Some(clob) = &self.clob {
             let mut ledger = ClobLedger::new(overlay);
             ledger.apply_genesis(clob).await?;
+            overlay = ledger.into_inner();
+        }
+        if let Some(perpetuals) = &self.perpetuals {
+            let mut ledger = PerpetualLedger::new(overlay);
+            ledger.apply_genesis(perpetuals).await?;
             overlay = ledger.into_inner();
         }
         set_genesis_marker(&mut overlay, fingerprint);

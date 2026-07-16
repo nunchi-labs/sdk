@@ -4,6 +4,7 @@ use common::network::{
     deterministic_state, lossy_link, reliable_link, TestNetworkBuilder, ThresholdFixture,
     ValidatorConfig,
 };
+use commonware_codec::Encode;
 use commonware_cryptography::Signer as _;
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_macros::{select, test_traced};
@@ -13,11 +14,21 @@ use nunchi_authority::{
     proposal_id, AuthorityOperation, MultisigPolicy, RegistryChange,
     Transaction as AuthorityTransaction,
 };
+use nunchi_clearinghouse::{ClearinghouseOperation, Transaction as ClearinghouseTransaction};
+use nunchi_clob::{
+    market_id, AssetId, ClobOperation, Fill, FillId, OrderId, Side as ClobSide,
+    Transaction as ClobTransaction,
+};
 use nunchi_coins::{
     Address, CoinId, CoinOperation, CoinSpec, PrivateKey, TokenFactory, TokenName, TokenSymbol,
     Transaction,
 };
 use nunchi_oracle::{IntervalKey, NamespaceId, OracleOperation, Transaction as OracleTransaction};
+use nunchi_perpetuals::{
+    collateral_escrow_account, derive_market_id, derive_position_id, derive_position_id_for_side,
+    OraclePricePayload, PerpetualOperation, Side, Transaction as PerpetualTransaction,
+    DEFAULT_LIQUIDATION_REWARD_BPS, PRICE_SCALE,
+};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::time::Duration;
 use tracing::info;
@@ -28,6 +39,16 @@ const VALIDATORS: u32 = 5;
 const ALICE: u64 = 100;
 const BOB: u64 = 101;
 const CAROL: u64 = 102;
+const COLLATERAL_ISSUER: u64 = 800;
+const PERPS_TRADER: u64 = 801;
+const PERPS_ORACLE_WRITER: u64 = 803;
+const PERPS_MAKER: u64 = 802;
+const PERPS_SETTLER: u64 = 804;
+
+const CLOB_TICK: u128 = 5;
+const CLOB_LOT: u128 = 2;
+const CLOB_FILL_QTY: u128 = 4;
+const CLOB_FILL_PRICE: u128 = 100;
 
 fn key(seed: u64) -> PrivateKey {
     PrivateKey::from_seed(seed)
@@ -55,6 +76,291 @@ fn gold_coin() -> CoinId {
 
 fn oracle_namespace() -> NamespaceId {
     NamespaceId(Sha256::hash(b"coins-chain-integration-oracle-namespace"))
+}
+
+fn perps_oracle_namespace() -> NamespaceId {
+    NamespaceId(Sha256::hash(b"coins-chain-perps-oracle-namespace"))
+}
+
+fn usdc_spec() -> CoinSpec {
+    CoinSpec::new(
+        TokenSymbol::new("USDC").expect("valid token symbol"),
+        TokenName::new("USD Coin").expect("valid token name"),
+        6,
+        1_000_000,
+        None,
+    )
+}
+
+fn usdc_coin() -> CoinId {
+    TokenFactory::derive_coin_id(
+        &Address::from(key(COLLATERAL_ISSUER).public_key()),
+        0,
+        &usdc_spec(),
+    )
+}
+
+fn btc_coin() -> CoinId {
+    CoinId(Sha256::hash(b"btc-asset"))
+}
+
+fn usd_coin() -> CoinId {
+    CoinId(Sha256::hash(b"usd-quote"))
+}
+
+fn clob_market_id() -> nunchi_clob::MarketId {
+    market_id(
+        &AssetId(btc_coin().0),
+        &AssetId(usd_coin().0),
+        CLOB_TICK,
+        CLOB_LOT,
+    )
+}
+
+fn integration_fill(clob_market: nunchi_clob::MarketId, maker: &Address, taker: &Address) -> Fill {
+    Fill {
+        id: FillId(Sha256::hash(b"perps-integration-fill")),
+        market: clob_market,
+        maker_order: OrderId(Sha256::hash(b"maker-order")),
+        taker_order: OrderId(Sha256::hash(b"taker-order")),
+        maker: maker.clone(),
+        taker: taker.clone(),
+        taker_side: ClobSide::Bid,
+        price: CLOB_FILL_PRICE,
+        base_quantity: CLOB_FILL_QTY,
+        quote_quantity: CLOB_FILL_PRICE * CLOB_FILL_QTY,
+        sequence: 0,
+        written_at_height: 0,
+        written_at_ms: 0,
+    }
+}
+
+#[test_traced]
+fn perps_clob_clearinghouse_flow_finalizes_across_validators() {
+    let executor = deterministic::Runner::timed(Duration::from_secs(120));
+    executor.start(|mut context| async move {
+        let mut network = TestNetworkBuilder::new(VALIDATORS)
+            .build(&mut context)
+            .await;
+        network.start_all().await;
+
+        let issuer = key(COLLATERAL_ISSUER);
+        let maker = key(PERPS_MAKER);
+        let taker = key(PERPS_TRADER);
+        let settler = key(PERPS_SETTLER);
+        let oracle_writer = authority_key(PERPS_ORACLE_WRITER);
+        let oracle_writer_id = Address::from(oracle_writer.public_key());
+        let issuer_id = Address::from(issuer.public_key());
+        let maker_id = Address::from(maker.public_key());
+        let taker_id = Address::from(taker.public_key());
+        let settler_id = Address::from(settler.public_key());
+        let clob_market = clob_market_id();
+        let perps_market = derive_market_id(btc_coin(), usd_coin(), usdc_coin(), 0);
+        let submitter = network.submitter(0);
+
+        submitter
+            .submit(
+                Transaction::sign(&issuer, 0, CoinOperation::CreateToken { spec: usdc_spec() })
+                    .into(),
+            )
+            .await
+            .expect("admit collateral token creation");
+        for (trader, nonce) in [(&maker, 1_u64), (&taker, 2_u64)] {
+            submitter
+                .submit(
+                    Transaction::sign(
+                        &issuer,
+                        nonce,
+                        CoinOperation::Transfer {
+                            coin: usdc_coin(),
+                            from: issuer_id.clone(),
+                            to: Address::from(trader.public_key()),
+                            amount: 100_000,
+                        },
+                    )
+                    .into(),
+                )
+                .await
+                .expect("admit trader collateral transfer");
+        }
+        network.run_until_nonces(&[(issuer_id, 3)]).await;
+
+        submitter
+            .submit(
+                OracleTransaction::sign(
+                    &oracle_writer,
+                    0,
+                    OracleOperation::AppendRecord {
+                        namespace: perps_oracle_namespace(),
+                        interval: IntervalKey::new(0),
+                        payload: OraclePricePayload {
+                            market: perps_market,
+                            price: CLOB_FILL_PRICE,
+                            price_decimals: 0,
+                            source_timestamp_ms: 0,
+                        }
+                        .encode()
+                        .as_ref()
+                        .to_vec(),
+                        proof: None,
+                    },
+                )
+                .into(),
+            )
+            .await
+            .expect("admit initial perps oracle record");
+
+        loop {
+            let ledgers = network.oracle_ledgers().await;
+            if ledgers.len() == VALIDATORS as usize {
+                let mut all_updated = true;
+                for ledger in ledgers {
+                    let records = ledger
+                        .records_by_namespace(
+                            &perps_oracle_namespace(),
+                            IntervalKey::new(0),
+                            IntervalKey::new(0),
+                        )
+                        .await
+                        .unwrap();
+                    if records.len() != 1 {
+                        all_updated = false;
+                        break;
+                    }
+                }
+                if all_updated {
+                    break;
+                }
+            }
+            network.context().sleep(Duration::from_secs(1)).await;
+        }
+
+        submitter
+            .submit(
+                ClobTransaction::sign(
+                    &maker,
+                    0,
+                    ClobOperation::CreateMarket {
+                        base_asset: AssetId(btc_coin().0),
+                        quote_asset: AssetId(usd_coin().0),
+                        tick_size: CLOB_TICK,
+                        lot_size: CLOB_LOT,
+                    },
+                )
+                .into(),
+            )
+            .await
+            .expect("admit clob market creation");
+
+        submitter
+            .submit(
+                PerpetualTransaction::sign(
+                    &taker,
+                    0,
+                    PerpetualOperation::CreateMarket {
+                        base_asset: btc_coin(),
+                        quote_asset: usd_coin(),
+                        collateral_asset: usdc_coin(),
+                        oracle_namespace: perps_oracle_namespace(),
+                        oracle_writer: oracle_writer_id.clone(),
+                        clob_market: Some(clob_market.0),
+                        oracle_interval_ms: u64::MAX,
+                        max_oracle_staleness_ms: u64::MAX,
+                        price_decimals: 0,
+                        max_leverage_bps: 50_000,
+                        maintenance_margin_bps: 1_000,
+                        funding_interval_ms: 3_600_000,
+                        max_funding_rate_bps: 100,
+                        liquidation_reward_bps: DEFAULT_LIQUIDATION_REWARD_BPS,
+                    },
+                )
+                .into(),
+            )
+            .await
+            .expect("admit perps market creation");
+        submitter
+            .submit(
+                PerpetualTransaction::sign(
+                    &taker,
+                    1,
+                    PerpetualOperation::RefreshMarketFromOracle {
+                        market: perps_market,
+                    },
+                )
+                .into(),
+            )
+            .await
+            .expect("admit perps market refresh");
+        submitter
+            .submit(
+                ClearinghouseTransaction::sign(
+                    &settler,
+                    0,
+                    ClearinghouseOperation::RegisterPerpsMarket {
+                        clob_market,
+                        perps_market,
+                    },
+                )
+                .into(),
+            )
+            .await
+            .expect("admit clearinghouse registration");
+        network
+            .run_until_clob_nonces(&[(maker_id.clone(), 1)])
+            .await;
+        network
+            .run_until_perpetual_nonces(&[(taker_id.clone(), 2)])
+            .await;
+        network
+            .run_until_clearinghouse_nonces(&[(settler_id.clone(), 1)])
+            .await;
+
+        submitter
+            .submit(
+                ClearinghouseTransaction::sign(
+                    &settler,
+                    1,
+                    ClearinghouseOperation::CommitAndSettleFill {
+                        fill: Box::new(integration_fill(clob_market, &maker_id, &taker_id)),
+                    },
+                )
+                .into(),
+            )
+            .await
+            .expect("admit fill commit and settlement");
+        network
+            .run_until_clearinghouse_nonces(&[(settler_id.clone(), 2)])
+            .await;
+
+        let expected_qty = CLOB_FILL_QTY * PRICE_SCALE;
+        for ledger in network.perpetual_ledgers().await {
+            let market = ledger.market(&perps_market).await.unwrap().unwrap();
+            assert_eq!(market.long_open_interest, expected_qty);
+            assert_eq!(market.short_open_interest, expected_qty);
+
+            let maker_position = ledger
+                .position(&derive_position_id_for_side(
+                    &maker_id,
+                    &perps_market,
+                    Side::Short,
+                ))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(maker_position.quantity, expected_qty);
+
+            let taker_position = ledger
+                .position(&derive_position_id_for_side(
+                    &taker_id,
+                    &perps_market,
+                    Side::Long,
+                ))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(taker_position.quantity, expected_qty);
+        }
+    });
 }
 
 #[test_traced]
@@ -487,6 +793,262 @@ fn oracle_updates_finalize_across_validators() {
     });
 }
 
+#[test_traced]
+fn perps_oracle_flow_finalizes_across_validators() {
+    let executor = deterministic::Runner::timed(Duration::from_secs(120));
+    executor.start(|mut context| async move {
+        let mut network = TestNetworkBuilder::new(VALIDATORS)
+            .build(&mut context)
+            .await;
+        network.start_all().await;
+
+        let issuer = key(COLLATERAL_ISSUER);
+        let trader = key(PERPS_TRADER);
+        let oracle_writer = authority_key(PERPS_ORACLE_WRITER);
+        let oracle_writer_id = Address::from(oracle_writer.public_key());
+        let issuer_id = Address::from(issuer.public_key());
+        let trader_id = Address::from(trader.public_key());
+        let market_id = derive_market_id(btc_coin(), usd_coin(), usdc_coin(), 0);
+        let position_id = derive_position_id(&trader_id, &market_id, 0);
+        let submitter = network.submitter(0);
+
+        submitter
+            .submit(
+                Transaction::sign(&issuer, 0, CoinOperation::CreateToken { spec: usdc_spec() })
+                    .into(),
+            )
+            .await
+            .expect("admit collateral token creation");
+        submitter
+            .submit(
+                Transaction::sign(
+                    &issuer,
+                    1,
+                    CoinOperation::Transfer {
+                        coin: usdc_coin(),
+                        from: issuer_id.clone(),
+                        to: trader_id.clone(),
+                        amount: 100_000,
+                    },
+                )
+                .into(),
+            )
+            .await
+            .expect("admit trader collateral transfer");
+        network.run_until_nonces(&[(issuer_id, 2)]).await;
+
+        submitter
+            .submit(
+                OracleTransaction::sign(
+                    &oracle_writer,
+                    0,
+                    OracleOperation::AppendRecord {
+                        namespace: perps_oracle_namespace(),
+                        interval: IntervalKey::new(0),
+                        payload: OraclePricePayload {
+                            market: market_id,
+                            price: 5_000_000,
+                            price_decimals: 2,
+                            source_timestamp_ms: 0,
+                        }
+                        .encode()
+                        .as_ref()
+                        .to_vec(),
+                        proof: None,
+                    },
+                )
+                .into(),
+            )
+            .await
+            .expect("admit initial perps oracle record");
+
+        loop {
+            let ledgers = network.oracle_ledgers().await;
+            if ledgers.len() == VALIDATORS as usize {
+                let mut all_updated = true;
+                for ledger in ledgers {
+                    let records = ledger
+                        .records_by_namespace(
+                            &perps_oracle_namespace(),
+                            IntervalKey::new(0),
+                            IntervalKey::new(0),
+                        )
+                        .await
+                        .unwrap();
+                    if records.len() != 1 {
+                        all_updated = false;
+                        break;
+                    }
+                }
+                if all_updated {
+                    break;
+                }
+            }
+            network.context().sleep(Duration::from_secs(1)).await;
+        }
+
+        submitter
+            .submit(
+                PerpetualTransaction::sign(
+                    &trader,
+                    0,
+                    PerpetualOperation::CreateMarket {
+                        base_asset: btc_coin(),
+                        quote_asset: usd_coin(),
+                        collateral_asset: usdc_coin(),
+                        oracle_namespace: perps_oracle_namespace(),
+                        oracle_writer: oracle_writer_id.clone(),
+                        clob_market: None,
+                        oracle_interval_ms: u64::MAX,
+                        max_oracle_staleness_ms: u64::MAX,
+                        price_decimals: 2,
+                        max_leverage_bps: 50_000,
+                        maintenance_margin_bps: 1_000,
+                        funding_interval_ms: 3_600_000,
+                        max_funding_rate_bps: 100,
+                        liquidation_reward_bps: DEFAULT_LIQUIDATION_REWARD_BPS,
+                    },
+                )
+                .into(),
+            )
+            .await
+            .expect("admit perps market creation");
+        submitter
+            .submit(
+                PerpetualTransaction::sign(
+                    &trader,
+                    1,
+                    PerpetualOperation::RefreshMarketFromOracle { market: market_id },
+                )
+                .into(),
+            )
+            .await
+            .expect("admit perps market refresh");
+        submitter
+            .submit(
+                PerpetualTransaction::sign(
+                    &trader,
+                    2,
+                    PerpetualOperation::OpenPosition {
+                        market: market_id,
+                        side: Side::Long,
+                        collateral: 1_000,
+                        leverage_bps: 50_000,
+                    },
+                )
+                .into(),
+            )
+            .await
+            .expect("admit long position");
+        network
+            .run_until_perpetual_nonces(&[(trader_id.clone(), 3)])
+            .await;
+
+        for ledger in network.perpetual_ledgers().await {
+            assert!(ledger.market(&market_id).await.unwrap().is_some());
+            assert!(ledger.position(&position_id).await.unwrap().is_some());
+        }
+        for ledger in network.ledgers().await {
+            assert_eq!(
+                ledger.balance(&trader_id, &usdc_coin()).await.unwrap(),
+                99_000
+            );
+            assert_eq!(
+                ledger
+                    .balance(&collateral_escrow_account(), &usdc_coin())
+                    .await
+                    .unwrap(),
+                1_000
+            );
+        }
+
+        submitter
+            .submit(
+                OracleTransaction::sign(
+                    &oracle_writer,
+                    1,
+                    OracleOperation::AppendRecord {
+                        namespace: perps_oracle_namespace(),
+                        interval: IntervalKey::new(0),
+                        payload: OraclePricePayload {
+                            market: market_id,
+                            price: 2_500_000,
+                            price_decimals: 2,
+                            source_timestamp_ms: 0,
+                        }
+                        .encode()
+                        .as_ref()
+                        .to_vec(),
+                        proof: None,
+                    },
+                )
+                .into(),
+            )
+            .await
+            .expect("admit adverse perps oracle record");
+
+        loop {
+            let ledgers = network.oracle_ledgers().await;
+            if ledgers.len() == VALIDATORS as usize {
+                let mut all_updated = true;
+                for ledger in ledgers {
+                    let records = ledger
+                        .records_by_namespace(
+                            &perps_oracle_namespace(),
+                            IntervalKey::new(0),
+                            IntervalKey::new(0),
+                        )
+                        .await
+                        .unwrap();
+                    if records.len() != 2 {
+                        all_updated = false;
+                        break;
+                    }
+                }
+                if all_updated {
+                    break;
+                }
+            }
+            network.context().sleep(Duration::from_secs(1)).await;
+        }
+
+        submitter
+            .submit(
+                PerpetualTransaction::sign(
+                    &trader,
+                    3,
+                    PerpetualOperation::RefreshMarketFromOracle { market: market_id },
+                )
+                .into(),
+            )
+            .await
+            .expect("admit adverse market refresh");
+        submitter
+            .submit(
+                PerpetualTransaction::sign(
+                    &trader,
+                    4,
+                    PerpetualOperation::Liquidate {
+                        position: position_id,
+                    },
+                )
+                .into(),
+            )
+            .await
+            .expect("admit liquidation");
+        network
+            .run_until_perpetual_nonces(&[(trader_id.clone(), 5)])
+            .await;
+
+        for ledger in network.perpetual_ledgers().await {
+            assert!(ledger.position(&position_id).await.unwrap().is_none());
+        }
+        for ledger in network.ledgers().await {
+            assert!(ledger.balance(&trader_id, &usdc_coin()).await.unwrap() > 99_000);
+        }
+    });
+}
+
 /// The mempool reports each submission's lifecycle: executable transactions finalize, while a
 /// nonce-gapped transaction is admitted but never proposed and stays pending.
 #[test_traced]
@@ -577,9 +1139,10 @@ fn mempool_replaces_same_nonce_resubmission() {
     let executor = deterministic::Runner::timed(Duration::from_secs(120));
     executor.start(|mut context| async move {
         let mut network = TestNetworkBuilder::new(VALIDATORS)
+            .without_initial_links()
             .build(&mut context)
             .await;
-        network.start_all().await;
+        network.start_validator(0).await;
 
         let alice = key(ALICE);
         let alice_id = Address::from(alice.public_key());
@@ -618,6 +1181,11 @@ fn mempool_replaces_same_nonce_resubmission() {
                 reason: nunchi_mempool::DropReason::Replaced
             })
         );
+
+        for index in 1..VALIDATORS as usize {
+            network.start_validator(index).await;
+        }
+        network.link_all(reliable_link()).await;
 
         network.run_until_nonces(&[(alice_id.clone(), 1)]).await;
         loop {

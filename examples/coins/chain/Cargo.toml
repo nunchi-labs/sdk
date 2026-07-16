@@ -14,11 +14,13 @@ nunchi-authority = { workspace = true }
 nunchi-bridge = { workspace = true }
 nunchi-chain = { workspace = true }
 nunchi-clob = { workspace = true }
+nunchi-clearinghouse = { workspace = true }
 nunchi-common = { workspace = true }
 nunchi-crypto = { workspace = true }
 nunchi-dkg = { workspace = true }
 nunchi-mempool = { workspace = true }
 nunchi-oracle = { workspace = true }
+nunchi-perpetuals = { workspace = true, features = ["mempool", "mock-execution"] }
 nunchi-rpc = { workspace = true }
 commonware-actor = { workspace = true }
 commonware-broadcast = { workspace = true }
