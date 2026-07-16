@@ -108,7 +108,6 @@ where
         + Spawner
         + Metrics
         + CryptoRng
-        + CryptoRng
         + Rng
         + Clock
         + GClock
@@ -140,7 +139,6 @@ where
     E: BufferPooler
         + Spawner
         + Metrics
-        + CryptoRng
         + CryptoRng
         + Rng
         + Clock

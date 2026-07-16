@@ -170,14 +170,14 @@ impl BridgeActor {
     /// Spawn the actor's event loop.
     pub fn start<E>(self, context: E) -> Handle<()>
     where
-        E: Spawner + CryptoRng + CryptoRng + Rng + Send + 'static,
+        E: Spawner + CryptoRng + Rng + Send + 'static,
     {
         context.spawn(|context| self.run(context))
     }
 
     async fn run<E>(mut self, mut context: E)
     where
-        E: CryptoRng + CryptoRng + Rng,
+        E: CryptoRng + Rng,
     {
         while let Some(message) = self.receiver.next().await {
             match message {
@@ -202,7 +202,7 @@ impl BridgeActor {
 
     fn verify_payload<R>(&self, rng: &mut R, payload: &BridgePayload) -> bool
     where
-        R: CryptoRng + CryptoRng + Rng,
+        R: CryptoRng + Rng,
     {
         let Some(finalization) = payload else {
             return true;
@@ -212,7 +212,7 @@ impl BridgeActor {
 
     fn submit<R>(&mut self, rng: &mut R, finalization: Finalization) -> SubmitResult
     where
-        R: CryptoRng + CryptoRng + Rng,
+        R: CryptoRng + Rng,
     {
         if !self.verify_payload(rng, &Some(finalization.clone())) {
             return SubmitResult::Rejected;
