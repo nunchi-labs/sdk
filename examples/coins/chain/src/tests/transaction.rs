@@ -17,7 +17,7 @@ fn coin_transaction(seed: u64, nonce: u64) -> CoinTransaction {
     let signer = PrivateKey::ed25519_from_seed(seed);
     CoinTransaction::sign(
         &signer,
-        nonce,
+        nunchi_common::DEFAULT_CHAIN_ID, nonce,
         CoinOperation::CreateToken {
             spec: CoinSpec::new(
                 TokenSymbol::new("NCH").unwrap(),
@@ -34,7 +34,7 @@ fn authority_transaction(seed: u64, nonce: u64) -> AuthorityTransaction {
     let owner = nunchi_crypto::PrivateKey::ed25519_from_seed(seed);
     AuthorityTransaction::sign(
         &owner,
-        nonce,
+        nunchi_common::DEFAULT_CHAIN_ID, nonce,
         AuthorityOperation::Configure {
             policy: MultisigPolicy {
                 owners: vec![owner.public_key()],
@@ -50,7 +50,7 @@ fn oracle_transaction(seed: u64, nonce: u64) -> OracleTransaction {
     let signer = nunchi_crypto::PrivateKey::ed25519_from_seed(seed);
     OracleTransaction::sign(
         &signer,
-        nonce,
+        nunchi_common::DEFAULT_CHAIN_ID, nonce,
         OracleOperation::AppendRecord {
             namespace: NamespaceId(Sha256::hash(b"test-namespace")),
             interval: IntervalKey::new(0),

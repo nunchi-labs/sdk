@@ -18,6 +18,7 @@ use nunchi_coins::{
     external_account_id, multisig_account_id, CoinId, CoinOperation, CoinSpec, MultisigPolicy,
     PrivateKey, TokenFactory, TokenName, TokenSymbol, Transaction,
 };
+use nunchi_common::DEFAULT_CHAIN_ID;
 use nunchi_crypto::PublicKey;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -42,6 +43,10 @@ fn decode_value<T: commonware_codec::Read<Cfg = ()>>(
 
 fn encode_value<T: Encode>(value: &T) -> String {
     hex(value.encode().as_ref())
+}
+
+fn chain_id_from(value: Option<u64>) -> u64 {
+    value.unwrap_or(DEFAULT_CHAIN_ID)
 }
 
 // ── parameter structs — chain tools ──────────────────────────────────────────
@@ -126,6 +131,9 @@ pub struct DeriveCoinIdParams {
 pub struct BuildTransferParams {
     /// Hex-encoded curve-tagged private key bytes.
     pub private_key_hex: String,
+    /// Target chain id for replay protection. Defaults to 0 (devnet).
+    #[serde(default)]
+    pub chain_id: Option<u64>,
     /// Sender's current nonce (from `coins_nonce`).
     pub nonce: u64,
     /// Hex-encoded coin ID.
@@ -143,6 +151,9 @@ pub struct BuildTransferParams {
 pub struct BuildMintParams {
     /// Hex-encoded curve-tagged private key bytes (must be the token issuer's key).
     pub private_key_hex: String,
+    /// Target chain id for replay protection. Defaults to 0 (devnet).
+    #[serde(default)]
+    pub chain_id: Option<u64>,
     /// Issuer's current nonce (from `coins_nonce`).
     pub nonce: u64,
     /// Hex-encoded coin ID to mint.
@@ -158,6 +169,9 @@ pub struct BuildMintParams {
 pub struct BuildBurnParams {
     /// Hex-encoded curve-tagged private key bytes.
     pub private_key_hex: String,
+    /// Target chain id for replay protection. Defaults to 0 (devnet).
+    #[serde(default)]
+    pub chain_id: Option<u64>,
     /// Account's current nonce (from `coins_nonce`).
     pub nonce: u64,
     /// Hex-encoded coin ID to burn.
@@ -173,6 +187,9 @@ pub struct BuildBurnParams {
 pub struct BuildCreateTokenParams {
     /// Hex-encoded curve-tagged private key bytes (will become the token issuer).
     pub private_key_hex: String,
+    /// Target chain id for replay protection. Defaults to 0 (devnet).
+    #[serde(default)]
+    pub chain_id: Option<u64>,
     /// Issuer's current nonce (from `coins_nonce`).
     pub nonce: u64,
     /// Token ticker symbol (≤ 32 bytes, UTF-8).
@@ -192,6 +209,9 @@ pub struct BuildCreateTokenParams {
 pub struct BuildRegisterAccountPolicyParams {
     /// Hex-encoded curve-tagged private key bytes of the transaction signer.
     pub private_key_hex: String,
+    /// Target chain id for replay protection. Defaults to 0 (devnet).
+    #[serde(default)]
+    pub chain_id: Option<u64>,
     /// Signer's current nonce (from `coins_nonce`).
     pub nonce: u64,
     /// Hex-encoded address of the account whose policy is being registered.
@@ -446,6 +466,7 @@ impl NunchiServer {
                 .map_err(|_| anyhow::anyhow!("amount is not a valid u128"))?;
             let tx = Transaction::sign(
                 &signer,
+                chain_id_from(p.chain_id),
                 p.nonce,
                 CoinOperation::Transfer {
                     coin,
@@ -479,7 +500,12 @@ impl NunchiServer {
                 .amount
                 .parse::<u128>()
                 .map_err(|_| anyhow::anyhow!("amount is not a valid u128"))?;
-            let tx = Transaction::sign(&signer, p.nonce, CoinOperation::Mint { coin, to, amount });
+            let tx = Transaction::sign(
+                &signer,
+                chain_id_from(p.chain_id),
+                p.nonce,
+                CoinOperation::Mint { coin, to, amount },
+            );
             Ok(encode_value(&tx))
         })() {
             Ok(hex) => hex,
@@ -505,8 +531,12 @@ impl NunchiServer {
                 .amount
                 .parse::<u128>()
                 .map_err(|_| anyhow::anyhow!("amount is not a valid u128"))?;
-            let tx =
-                Transaction::sign(&signer, p.nonce, CoinOperation::Burn { coin, from, amount });
+            let tx = Transaction::sign(
+                &signer,
+                chain_id_from(p.chain_id),
+                p.nonce,
+                CoinOperation::Burn { coin, from, amount },
+            );
             Ok(encode_value(&tx))
         })() {
             Ok(hex) => hex,
@@ -539,7 +569,12 @@ impl NunchiServer {
                 &p.initial_supply,
                 p.max_supply.as_deref(),
             )?;
-            let tx = Transaction::sign(&signer, p.nonce, CoinOperation::CreateToken { spec });
+            let tx = Transaction::sign(
+                &signer,
+                chain_id_from(p.chain_id),
+                p.nonce,
+                CoinOperation::CreateToken { spec },
+            );
             Ok(encode_value(&tx))
         })() {
             Ok(hex) => hex,
@@ -568,6 +603,7 @@ impl NunchiServer {
             let policy = build_multisig_policy(p.threshold, &p.signer_public_keys_hex)?;
             let tx = Transaction::sign(
                 &signer,
+                chain_id_from(p.chain_id),
                 p.nonce,
                 CoinOperation::RegisterAccountPolicy { account_id, policy },
             );

@@ -7,6 +7,15 @@ use std::collections::BTreeSet;
 const AUTH_SINGLE: u8 = 0;
 const AUTH_MULTISIG: u8 = 1;
 
+/// Chain identifier bound into every signed transaction payload.
+///
+/// Including `chain_id` in the signed bytes prevents cross-chain replay when the
+/// same account key is reused across federated Nunchi chains.
+pub type ChainId = u64;
+
+/// Default chain id used by local devnets and unit tests.
+pub const DEFAULT_CHAIN_ID: ChainId = 0;
+
 /// Operation types that can be carried by signed Nunchi transactions.
 pub trait Operation: EncodeSize + Read<Cfg = ()> + Write {
     /// Domain separator used when signing and verifying transactions for this operation type.
@@ -16,18 +25,24 @@ pub trait Operation: EncodeSize + Read<Cfg = ()> + Write {
 /// Signable transaction payload. The nonce is scoped to the account being authorized.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TransactionPayload<Operation> {
+    pub chain_id: ChainId,
     pub nonce: u64,
     pub operation: Operation,
 }
 
 impl<Operation> TransactionPayload<Operation> {
-    pub fn new(nonce: u64, operation: Operation) -> Self {
-        Self { nonce, operation }
+    pub fn new(chain_id: ChainId, nonce: u64, operation: Operation) -> Self {
+        Self {
+            chain_id,
+            nonce,
+            operation,
+        }
     }
 }
 
 impl<Operation: Write> Write for TransactionPayload<Operation> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.chain_id.write(buf);
         self.nonce.write(buf);
         self.operation.write(buf);
     }
@@ -38,6 +53,7 @@ impl<Operation: Read<Cfg = ()>> Read for TransactionPayload<Operation> {
 
     fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
+            chain_id: u64::read(buf)?,
             nonce: u64::read(buf)?,
             operation: Operation::read(buf)?,
         })
@@ -46,7 +62,7 @@ impl<Operation: Read<Cfg = ()>> Read for TransactionPayload<Operation> {
 
 impl<Operation: EncodeSize> EncodeSize for TransactionPayload<Operation> {
     fn encode_size(&self) -> usize {
-        self.nonce.encode_size() + self.operation.encode_size()
+        self.chain_id.encode_size() + self.nonce.encode_size() + self.operation.encode_size()
     }
 }
 
@@ -245,10 +261,10 @@ pub struct Transaction<Operation> {
 }
 
 impl<Operation: self::Operation> Transaction<Operation> {
-    pub fn sign(signer: &PrivateKey, nonce: u64, operation: Operation) -> Self {
+    pub fn sign(signer: &PrivateKey, chain_id: ChainId, nonce: u64, operation: Operation) -> Self {
         let signer_public = signer.public_key();
         let account_id = Address::external(&signer_public);
-        let payload = TransactionPayload::new(nonce, operation);
+        let payload = TransactionPayload::new(chain_id, nonce, operation);
         let authorization = Authorization::Single {
             signer: Box::new(signer_public),
             signature: signer.sign(
@@ -267,10 +283,11 @@ impl<Operation: self::Operation> Transaction<Operation> {
         account_id: Address,
         policy: MultisigPolicy,
         signers: &[&PrivateKey],
+        chain_id: ChainId,
         nonce: u64,
         operation: Operation,
     ) -> Self {
-        let payload = TransactionPayload::new(nonce, operation);
+        let payload = TransactionPayload::new(chain_id, nonce, operation);
         let mut signatures: Vec<AccountSignature> = signers
             .iter()
             .map(|signer| AccountSignature::sign(signer, &account_id, &payload))

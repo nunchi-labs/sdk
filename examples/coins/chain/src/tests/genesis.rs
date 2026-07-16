@@ -232,6 +232,7 @@ fn authority_configure_bootstrap_is_closed_by_genesis() {
             .unwrap();
         let configure = AuthorityTransaction::sign(
             &attacker,
+            nunchi_common::DEFAULT_CHAIN_ID,
             attacker_nonce,
             AuthorityOperation::Configure {
                 policy: nunchi_authority::MultisigPolicy {

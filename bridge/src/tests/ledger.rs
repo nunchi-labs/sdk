@@ -42,6 +42,7 @@ fn lock_tx(
 ) -> Transaction {
     Transaction::sign(
         signer,
+        nunchi_common::DEFAULT_CHAIN_ID,
         nonce,
         BridgeOperation::Lock {
             destination_chain_id: destination,
@@ -273,12 +274,7 @@ fn lock_rejects_multisig_authorization() {
         let b = signer(2);
         let policy = MultisigPolicy::new(2, vec![a.public_key(), b.public_key()]).unwrap();
         let account = Address::multisig(&policy);
-        let tx = Transaction::sign_multisig(
-            account,
-            policy,
-            &[&a, &b],
-            0,
-            BridgeOperation::Lock {
+        let tx = Transaction::sign_multisig(account, policy, &[&a, &b], nunchi_common::DEFAULT_CHAIN_ID, 0, BridgeOperation::Lock {
                 destination_chain_id: dest_chain(),
                 local_asset: coin(),
                 amount: 1_000,

@@ -56,10 +56,7 @@ impl MempoolIngress for MockIngress {
 
 fn sample_transaction() -> Transaction {
     let signer = PrivateKey::ed25519_from_seed(1);
-    Transaction::sign(
-        &signer,
-        0,
-        CoinOperation::CreateToken {
+    Transaction::sign(&signer, nunchi_common::DEFAULT_CHAIN_ID, 0, CoinOperation::CreateToken {
             spec: CoinSpec::new(
                 TokenSymbol::new("GOLD").unwrap(),
                 TokenName::new("Gold").unwrap(),
