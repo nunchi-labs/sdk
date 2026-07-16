@@ -30,7 +30,7 @@ install-deps:
     for tool in cargo-udeps cargo-llvm-cov cargo-nextest; do \
         if ! command -v $tool > /dev/null; then \
         echo "Installing $tool..."; \
-        cargo install $tool --locked; \
+        cargo install $tool; \
         else \
         echo "$tool is already installed."; \
         fi; \
