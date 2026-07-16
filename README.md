@@ -67,3 +67,13 @@ This repository will contain modules for building public and private blockchains
 * [`coins-chain`](examples/coins/chain) - default PoA chain
 * [`bridge-chain`](examples/bridge-chain) - two chains bridging consensus certificates
 * [`custom-module`](examples/custom-module) - starter template for creating a custom nunchi module
+
+## Commonware compatibility
+
+This workspace pins `commonware-*` crates to **2026.7.0**.
+
+When upgrading nodes:
+
+* Do not run mixed commonware versions in the same peer set (marshal coding / ZODA shards and other wire formats are not interchangeable).
+* Mid-sync glue metadata from v2026.5.0 cannot resume after upgrading to v2026.7.0; clear or re-sync any node that crashed mid state-sync before the bump.
+* Peer QMDB state sync remains disabled for variable-value (`Vec<u8>`) state until the glue p2p resolver accepts a non-unit operation codec config. Engines recover via marshal backfill; floor-probe actors still serve finalizations on the `PROBE` channel for when sync is enabled.

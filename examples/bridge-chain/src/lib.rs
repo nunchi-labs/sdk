@@ -45,6 +45,8 @@ pub mod channels {
     pub const BROADCAST: u64 = 3;
     pub const DKG: u64 = 4;
     pub const BACKFILL: u64 = 5;
+    /// Floor-probe channel (finalization discovery / service for state-sync floors).
+    pub const PROBE: u64 = 6;
 }
 
 /// The consensus epoch. The example chain uses one validator set at startup.

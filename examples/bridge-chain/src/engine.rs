@@ -12,30 +12,31 @@ use commonware_consensus::{
         standard::{Deferred, Standard},
     },
     simplex::elector::Random,
-    types::{FixedEpocher, Height, ViewDelta},
+    types::{Epoch, FixedEpocher, Height, ViewDelta},
 };
 use commonware_cryptography::{
     bls12381::{
         dkg::feldman_desmedt::Output,
         primitives::{group, variant::MinSig},
     },
-    certificate::Scheme as _,
+    certificate::Verifier as _,
     ed25519::{self, Batch},
     sha256::Digest,
     BatchVerifier, Digestible, Hasher, Signer,
 };
 use commonware_glue::stateful::{
-    db::ManagedDb as _, Config as StatefulConfig, Mailbox as StatefulMailbox,
-    Stateful as StatefulActor, SyncPlan,
+    db::ManagedDb as _,
+    probe::{Config as ProbeConfig, Probe},
+    Config as StatefulConfig, Mailbox as StatefulMailbox, Stateful as StatefulActor, SyncPlan,
 };
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     buffer::paged::CacheRef, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics,
-    Network, Spawner, Storage, ThreadPooler,
+    Network, Spawner, Storage, Strategizer,
 };
 use commonware_storage::archive::immutable;
-use commonware_utils::union;
+use commonware_utils::{union, NZDuration};
 use futures::{future::try_join_all, lock::Mutex as AsyncMutex};
 use governor::clock::Clock as GClock;
 use nunchi_bridge::{BridgeExtension, BridgeMailbox};
@@ -44,7 +45,6 @@ use nunchi_common::{QmdbBackend, QmdbState};
 use nunchi_dkg::{self as dkg, orchestrator, PeerConfig, UpdateCallBack, MAX_SUPPORTED_MODE};
 use nunchi_mempool::{Mempool, PoolConfig};
 use rand::{CryptoRng, Rng};
-use rand_core::CryptoRngCore;
 use std::{
     marker::PhantomData,
     sync::Arc,
@@ -93,6 +93,7 @@ type Marshal<E, S> = MarshalActor<
     S,
 >;
 type Orchestrator<E, B, S> = orchestrator::Actor<E, B, Marshaled<E>, Scheme, Random, S, Block>;
+type FloorProbe<E, B, S> = Probe<E, Scheme, SchemeProvider, Standard<Block>, S, PublicKey, B>;
 
 /// The engine that drives a bridge-chain validator.
 #[allow(clippy::type_complexity)]
@@ -101,13 +102,13 @@ where
     E: BufferPooler
         + Spawner
         + Metrics
-        + CryptoRngCore
+        + CryptoRng
         + CryptoRng
         + Rng
         + Clock
         + GClock
         + Storage
-        + ThreadPooler
+        + Strategizer
         + Network,
     B: Blocker<PublicKey = PublicKey>,
     P: Manager<PublicKey = PublicKey>,
@@ -120,6 +121,7 @@ where
     buffer: buffered::Engine<E, PublicKey, Block, P>,
     buffered_mailbox: buffered::Mailbox<PublicKey, Block>,
     marshal: Marshal<E, S>,
+    probe: FloorProbe<E, B, S>,
     orchestrator: Orchestrator<E, B, S>,
     orchestrator_mailbox: orchestrator::Mailbox<MinSig, PublicKey>,
     mempool: Handle<()>,
@@ -132,13 +134,13 @@ where
     E: BufferPooler
         + Spawner
         + Metrics
-        + CryptoRngCore
+        + CryptoRng
         + CryptoRng
         + Rng
         + Clock
         + GClock
         + Storage
-        + ThreadPooler
+        + Strategizer
         + Network
         + Send
         + 'static,
@@ -289,7 +291,7 @@ where
             )
             .await
             .expect("failed to initialize empty state database for genesis commitment");
-            let target = empty.sync_target().await;
+            let target = empty.sync_target();
             nunchi_chain::StateCommitment {
                 root: target.root,
                 range: target.range,
@@ -306,9 +308,20 @@ where
         );
         let genesis = app.genesis_block();
         let genesis_digest = genesis.digest();
+        // Peer QMDB state sync is disabled (`NoStateSyncResolver`), so no floor is attached.
+        // The floor probe still runs in service mode to answer peers once a real resolver exists.
         let plan =
             SyncPlan::<_, Scheme, Standard<Block>>::init(&context, config.partition_prefix.clone())
                 .await;
+        let (probe, probe_mailbox) = Probe::new(ProbeConfig {
+            context: context.child("probe"),
+            provider: provider.clone(),
+            strategy: config.strategy.clone(),
+            capacity: MAILBOX_SIZE,
+            blocker: config.blocker.clone(),
+            minimum_epoch: Epoch::zero(),
+            retry_timeout: NZDuration!(Duration::from_secs(1)),
+        });
         let (marshal, marshal_mailbox, _processed_height) = MarshalActor::init(
             context.child("marshal"),
             finalizations_by_height,
@@ -336,6 +349,7 @@ where
             },
         )
         .await;
+        probe_mailbox.attach(marshal_mailbox.clone());
 
         let (stateful, stateful_mailbox) = StatefulActor::init(
             context.child("stateful"),
@@ -344,11 +358,11 @@ where
                 db_config,
                 input_provider: submitter,
                 marshal: marshal_mailbox.clone(),
-                max_pending_acks: MAX_PENDING_ACKS,
                 mailbox_size: MAILBOX_SIZE,
                 plan,
                 resolvers: NoStateSyncResolver,
                 sync_config: state_sync_config(),
+                prune_config: Some(state_prune_config()),
             },
         );
         let node_handle = NodeHandle::new(
@@ -392,6 +406,7 @@ where
             buffer,
             buffered_mailbox,
             marshal,
+            probe,
             orchestrator,
             orchestrator_mailbox,
             mempool,
@@ -424,6 +439,10 @@ where
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
+        probe: (
+            impl Sender<PublicKey = PublicKey>,
+            impl Receiver<PublicKey = PublicKey>,
+        ),
         marshal: (
             resolver::handler::Receiver<Digest>,
             resolver::p2p::Mailbox<Digest, PublicKey>,
@@ -438,6 +457,7 @@ where
                 resolver,
                 broadcast,
                 dkg,
+                probe,
                 marshal,
                 callback
             )
@@ -467,6 +487,10 @@ where
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
+        probe: (
+            impl Sender<PublicKey = PublicKey>,
+            impl Receiver<PublicKey = PublicKey>,
+        ),
         marshal: (
             resolver::handler::Receiver<Digest>,
             resolver::p2p::Mailbox<Digest, PublicKey>,
@@ -485,6 +509,7 @@ where
         let marshal_handle = self
             .marshal
             .start(reporters, self.buffered_mailbox, marshal);
+        let probe_handle = self.probe.start(probe);
         let stateful_handle = self.stateful.start();
         let orchestrator_handle = self.orchestrator.start(votes, certificates, resolver);
 
@@ -492,6 +517,7 @@ where
             dkg_handle,
             buffer_handle,
             marshal_handle,
+            probe_handle,
             stateful_handle,
             orchestrator_handle,
             self.mempool,

@@ -27,7 +27,7 @@ use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
 use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16};
-use rand_core::CryptoRngCore;
+use rand::CryptoRng;
 use std::{
     collections::BTreeMap,
     marker::PhantomData,
@@ -72,7 +72,7 @@ where
 
 pub struct Actor<E, B, A, S, L, T, Blk>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
+    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Storage + Network,
     B: Blocker<PublicKey = ed25519::PublicKey>,
     A: CertifiableAutomaton<Context = Context<Digest, ed25519::PublicKey>, Digest = Digest>
         + Relay<Digest = Digest, PublicKey = ed25519::PublicKey, Plan = Plan<ed25519::PublicKey>>,
@@ -114,7 +114,7 @@ where
 
 impl<E, B, A, S, L, T, Blk> Actor<E, B, A, S, L, T, Blk>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
+    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Storage + Network,
     B: Blocker<PublicKey = ed25519::PublicKey>,
     A: CertifiableAutomaton<Context = Context<Digest, ed25519::PublicKey>, Digest = Digest>
         + Relay<Digest = Digest, PublicKey = ed25519::PublicKey, Plan = Plan<ed25519::PublicKey>>,

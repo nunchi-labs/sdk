@@ -48,6 +48,7 @@ const DKG_CHANNEL: u64 = nunchi_coins_chain::channels::DKG;
 const BACKFILL_CHANNEL: u64 = nunchi_coins_chain::channels::BACKFILL;
 const MEMPOOL_CHANNEL: u64 = nunchi_coins_chain::channels::MEMPOOL;
 const CLOB_CHANNEL: u64 = nunchi_coins_chain::channels::CLOB;
+const PROBE_CHANNEL: u64 = nunchi_coins_chain::channels::PROBE;
 
 type Channel = (
     Sender<PublicKey, deterministic::Context>,
@@ -66,7 +67,7 @@ pub(crate) struct ThresholdFixture {
 }
 
 impl ThresholdFixture {
-    pub(crate) fn new(rng: impl rand_core::CryptoRngCore, validators: u32) -> Self {
+    pub(crate) fn new(rng: impl rand_core::CryptoRng, validators: u32) -> Self {
         let private_keys = (0..validators)
             .map(|seed| ed25519::PrivateKey::from_seed(seed as u64))
             .collect::<Vec<_>>();
@@ -127,6 +128,7 @@ struct ValidatorChannels {
     backfill: Channel,
     mempool: Channel,
     clob: Channel,
+    probe: Channel,
 }
 
 pub(crate) struct TestNetworkBuilder {
@@ -410,6 +412,26 @@ impl TestNetwork<'_> {
         }
     }
 
+    /// Wait until every started validator has the same committed state root.
+    ///
+    /// Account nonces can match while tips still differ by empty or other
+    /// blocks; those later commits change the authenticated root.
+    pub(crate) async fn run_until_state_converged(&self) {
+        loop {
+            let ledgers = self.ledgers().await;
+            if ledgers.len() == self.participants.len() {
+                let mut roots = Vec::with_capacity(ledgers.len());
+                for ledger in &ledgers {
+                    roots.push(ledger.db().root().await);
+                }
+                if roots.iter().all(|root| *root == roots[0]) {
+                    return;
+                }
+            }
+            self.context.sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     async fn all_nonces_reached(&self, expected: &[(Address, u64)]) -> bool {
         let ledgers = self.ledgers().await;
         if ledgers.len() != self.participants.len() {
@@ -515,6 +537,7 @@ async fn start_validator(
         channels.dkg,
         channels.mempool,
         channels.clob,
+        channels.probe,
         marshal_resolver,
         ContinueOnUpdate::boxed(),
     );
@@ -569,6 +592,7 @@ async fn register_validators(
         let backfill = oracle.register(BACKFILL_CHANNEL, TEST_QUOTA).await.unwrap();
         let mempool = oracle.register(MEMPOOL_CHANNEL, TEST_QUOTA).await.unwrap();
         let clob = oracle.register(CLOB_CHANNEL, TEST_QUOTA).await.unwrap();
+        let probe = oracle.register(PROBE_CHANNEL, TEST_QUOTA).await.unwrap();
         registrations.insert(
             validator.clone(),
             ValidatorChannels {
@@ -580,6 +604,7 @@ async fn register_validators(
                 backfill,
                 mempool,
                 clob,
+                probe,
             },
         );
     }

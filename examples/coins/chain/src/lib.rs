@@ -55,6 +55,8 @@ pub mod channels {
     pub const BACKFILL: u64 = 5;
     pub const MEMPOOL: u64 = 6;
     pub const CLOB: u64 = 7;
+    /// Floor-probe channel (finalization discovery / service for state-sync floors).
+    pub const PROBE: u64 = 8;
 }
 
 /// The consensus epoch. The demo chain never reconfigures, so the epoch is hardcoded to 0.

@@ -14,30 +14,31 @@ use commonware_consensus::{
         standard::{Deferred, Standard},
     },
     simplex::elector::Random,
-    types::{FixedEpocher, Height, ViewDelta},
+    types::{Epoch, FixedEpocher, Height, ViewDelta},
 };
 use commonware_cryptography::{
     bls12381::{
         dkg::feldman_desmedt::Output,
         primitives::{group, variant::MinSig},
     },
-    certificate::Scheme as _,
+    certificate::Verifier as _,
     ed25519::{self, Batch},
     sha256::Digest,
     BatchVerifier, Digestible, Signer,
 };
 use commonware_glue::stateful::{
-    db::ManagedDb as _, Config as StatefulConfig, Mailbox as StatefulMailbox,
-    Stateful as StatefulActor, SyncPlan,
+    db::ManagedDb as _,
+    probe::{Config as ProbeConfig, Probe},
+    Config as StatefulConfig, Mailbox as StatefulMailbox, Stateful as StatefulActor, SyncPlan,
 };
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     buffer::paged::CacheRef, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics,
-    Network, Spawner, Storage, ThreadPooler,
+    Network, Spawner, Storage, Strategizer,
 };
 use commonware_storage::archive::immutable;
-use commonware_utils::union;
+use commonware_utils::{union, NZDuration};
 use futures::lock::Mutex as AsyncMutex;
 use governor::clock::Clock as GClock;
 use nunchi_chain::engine::*;
@@ -46,7 +47,6 @@ use nunchi_common::{QmdbBackend, QmdbState};
 use nunchi_dkg::{self as dkg, orchestrator, PeerConfig, UpdateCallBack, MAX_SUPPORTED_MODE};
 use nunchi_mempool::{Mempool, PoolConfig};
 use rand::{CryptoRng, Rng};
-use rand_core::CryptoRngCore;
 use std::{
     marker::PhantomData,
     sync::Arc,
@@ -105,6 +105,7 @@ type Marshal<E, S> = MarshalActor<
     S,
 >;
 type Orchestrator<E, B, S> = orchestrator::Actor<E, B, Marshaled<E>, Scheme, Random, S, Block>;
+type FloorProbe<E, B, S> = Probe<E, Scheme, SchemeProvider, Standard<Block>, S, PublicKey, B>;
 
 /// The engine that drives the coins-chain [Application].
 #[allow(clippy::type_complexity)]
@@ -113,13 +114,13 @@ where
     E: BufferPooler
         + Spawner
         + Metrics
-        + CryptoRngCore
+        + CryptoRng
         + CryptoRng
         + Rng
         + Clock
         + GClock
         + Storage
-        + ThreadPooler
+        + Strategizer
         + Network,
     B: Blocker<PublicKey = PublicKey>,
     P: Manager<PublicKey = PublicKey>,
@@ -132,6 +133,7 @@ where
     buffer: buffered::Engine<E, PublicKey, Block, P>,
     buffered_mailbox: buffered::Mailbox<PublicKey, Block>,
     marshal: Marshal<E, S>,
+    probe: FloorProbe<E, B, S>,
     orchestrator: Orchestrator<E, B, S>,
     orchestrator_mailbox: orchestrator::Mailbox<MinSig, PublicKey>,
     mempool: Mempool<Transaction>,
@@ -145,13 +147,13 @@ where
     E: BufferPooler
         + Spawner
         + Metrics
-        + CryptoRngCore
+        + CryptoRng
         + CryptoRng
         + Rng
         + Clock
         + GClock
         + Storage
-        + ThreadPooler
+        + Strategizer
         + Network
         + Send
         + 'static,
@@ -316,7 +318,7 @@ where
             )
             .await
             .expect("failed to initialize empty state database for genesis commitment");
-            state_commitment(empty.sync_target().await)
+            state_commitment(empty.sync_target())
         };
         let genesis_state = if let Some(genesis) = &config.genesis {
             let fingerprint = commonware_formatting::hex(
@@ -344,7 +346,7 @@ where
                 .apply_to_state(&mut state, &empty_state)
                 .await
                 .expect("failed to seed state database with genesis");
-            let actual = state_commitment(state.sync_target().await);
+            let actual = state_commitment(state.sync_target());
             assert_eq!(
                 expected, actual,
                 "state database genesis commitment must match the genesis block commitment"
@@ -367,10 +369,21 @@ where
         let genesis_digest = genesis.digest();
         // The sync plan drives both marshal (its startup anchor below) and the stateful actor
         // (via `StatefulConfig::plan`), so the two always agree on the startup decision. No
-        // finalized floor is ever attached here, so nodes recover via marshal backfill.
+        // finalized floor is attached: peer QMDB state sync is disabled (`NoStateSyncResolver`),
+        // so nodes recover via marshal backfill. The floor probe still runs in service mode to
+        // answer peers once a real resolver exists.
         let plan =
             SyncPlan::<_, Scheme, Standard<Block>>::init(&context, config.partition_prefix.clone())
                 .await;
+        let (probe, probe_mailbox) = Probe::new(ProbeConfig {
+            context: context.child("probe"),
+            provider: provider.clone(),
+            strategy: config.strategy.clone(),
+            capacity: MAILBOX_SIZE,
+            blocker: config.blocker.clone(),
+            minimum_epoch: Epoch::zero(),
+            retry_timeout: NZDuration!(Duration::from_secs(1)),
+        });
         let (marshal, marshal_mailbox, _processed_height) = MarshalActor::init(
             context.child("marshal"),
             finalizations_by_height,
@@ -398,6 +411,8 @@ where
             },
         )
         .await;
+        // Enter probe service without discovering a floor (join via with_floor stays disabled).
+        probe_mailbox.attach(marshal_mailbox.clone());
 
         let (stateful, stateful_mailbox) = StatefulActor::init(
             context.child("stateful"),
@@ -406,11 +421,11 @@ where
                 db_config,
                 input_provider: submitter.clone(),
                 marshal: marshal_mailbox.clone(),
-                max_pending_acks: MAX_PENDING_ACKS,
                 mailbox_size: MAILBOX_SIZE,
                 plan,
                 resolvers: NoStateSyncResolver,
                 sync_config: state_sync_config(),
+                prune_config: Some(state_prune_config()),
             },
         );
         let node_handle = NodeHandle::new(
@@ -454,6 +469,7 @@ where
             buffer,
             buffered_mailbox,
             marshal,
+            probe,
             orchestrator,
             orchestrator_mailbox,
             mempool,
@@ -495,6 +511,10 @@ where
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
+        probe: (
+            impl Sender<PublicKey = PublicKey>,
+            impl Receiver<PublicKey = PublicKey>,
+        ),
         marshal: (
             resolver::handler::Receiver<Digest>,
             resolver::p2p::Mailbox<Digest, PublicKey>,
@@ -511,6 +531,7 @@ where
                 dkg,
                 mempool,
                 clob,
+                probe,
                 marshal,
                 callback
             )
@@ -548,6 +569,10 @@ where
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
+        probe: (
+            impl Sender<PublicKey = PublicKey>,
+            impl Receiver<PublicKey = PublicKey>,
+        ),
         marshal: (
             resolver::handler::Receiver<Digest>,
             resolver::p2p::Mailbox<Digest, PublicKey>,
@@ -566,6 +591,7 @@ where
         let marshal_handle = self
             .marshal
             .start(reporters, self.buffered_mailbox, marshal);
+        let probe_handle = self.probe.start(probe);
         let stateful_handle = self.stateful.start();
         let orchestrator_handle = self.orchestrator.start(votes, certificates, resolver);
         let mempool_handle = self
@@ -586,6 +612,7 @@ where
             result = dkg_handle => unexpected_exit("dkg", result),
             result = buffer_handle => unexpected_exit("buffer", result),
             result = marshal_handle => unexpected_exit("marshal", result),
+            result = probe_handle => unexpected_exit("probe", result),
             result = stateful_handle => unexpected_exit("stateful", result),
             result = orchestrator_handle => unexpected_exit("orchestrator", result),
             result = mempool_handle => unexpected_exit("mempool", result),

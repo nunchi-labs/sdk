@@ -7,7 +7,7 @@ use commonware_codec::{Encode, RangeCfg, ReadExt};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
     bls12381::{
-        dkg::feldman_desmedt::{DealerPrivMsg, DealerPubMsg, Info, PlayerAck},
+        dkg::feldman_desmedt::{DealerPrivMsg, DealerPubMsg, Info, PlayerAck, Verdict},
         primitives::{
             group::{Private, Scalar, Share},
             sharing::Mode,
@@ -27,8 +27,8 @@ use commonware_storage::{
     metadata::{Config as MetadataConfig, Metadata},
     Context as StorageContext,
 };
-use commonware_utils::{ordered::Set, test_rng, test_rng_seeded, N3f1, Participant, NZU32};
-use rand_core::CryptoRngCore;
+use commonware_utils::{ordered::Set, test_rng, TestRng, N3f1, Participant, NZU32};
+use rand::CryptoRng;
 use std::collections::BTreeMap;
 
 const TEST_NAMESPACE: &[u8] = b"test_dkg";
@@ -38,7 +38,7 @@ const WRONG_STORAGE_KEY: [u8; 32] = [8u8; 32];
 fn create_test_signers(n: usize) -> Vec<ed25519::PrivateKey> {
     (0..n)
         .map(|i| {
-            let mut rng = test_rng_seeded(i as u64);
+            let mut rng = TestRng::new(i as u64);
             ed25519::PrivateKey::random(&mut rng)
         })
         .collect()
@@ -66,7 +66,7 @@ async fn init_storage<E>(
     public_key: ed25519::PublicKey,
 ) -> Storage<E, MinPk, ed25519::PublicKey>
 where
-    E: BufferPooler + Clock + RuntimeStorage + Metrics + CryptoRngCore,
+    E: BufferPooler + Clock + RuntimeStorage + Metrics + CryptoRng,
 {
     Storage::<_, MinPk, ed25519::PublicKey>::init(
         context,
@@ -87,7 +87,7 @@ fn epoch_state<E>(
     share: Option<Share>,
 ) -> EpochState<MinPk, ed25519::PublicKey>
 where
-    E: CryptoRngCore,
+    E: CryptoRng,
 {
     EpochState {
         round,
@@ -489,7 +489,7 @@ fn test_dealer_handle_returns_false_when_player_not_in_unsent() {
         let mut dealer = Dealer::new(Some(crypto_dealer), pub_msg, unsent);
 
         let unknown_player = {
-            let mut rng = test_rng_seeded(100);
+            let mut rng = TestRng::new(100);
             ed25519::PrivateKey::random(&mut rng).public_key()
         };
         let fake_ack = PlayerAck::read(&mut signers[1].sign(b"ns", b"msg").encode().as_ref())
@@ -598,9 +598,13 @@ fn test_dealer_handle_returns_true_for_valid_ack() {
                 player_signer,
             )
             .expect("valid player");
-        let ack = crypto_player
-            .dealer_message::<N3f1>(dealer_signer.public_key(), pub_msg, player_priv_msg)
-            .expect("valid ack");
+        let Verdict::Valid(ack) = crypto_player.dealer_message::<N3f1>(
+            dealer_signer.public_key(),
+            pub_msg,
+            player_priv_msg,
+        ) else {
+            panic!("valid ack");
+        };
 
         let result = dealer
             .handle(&mut storage, Epoch::zero(), player_pk, ack)
@@ -654,9 +658,13 @@ fn test_dealer_handle_returns_false_for_duplicate_ack() {
                 player_signer,
             )
             .expect("valid player");
-        let ack = crypto_player
-            .dealer_message::<N3f1>(dealer_signer.public_key(), pub_msg, player_priv_msg)
-            .expect("valid ack");
+        let Verdict::Valid(ack) = crypto_player.dealer_message::<N3f1>(
+            dealer_signer.public_key(),
+            pub_msg,
+            player_priv_msg,
+        ) else {
+            panic!("valid ack");
+        };
 
         let result = dealer
             .handle(&mut storage, Epoch::zero(), player_pk.clone(), ack.clone())

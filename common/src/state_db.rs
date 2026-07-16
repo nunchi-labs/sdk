@@ -18,7 +18,7 @@ use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, Write};
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_glue::stateful::db::{
     any::{AnyMerkleized, AnyUnmerkleized},
-    ManagedDb as _, Unmerkleized as _,
+    ManagedDb as _, Shared, Unmerkleized as _,
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::paged::CacheRef, BufferPooler};
@@ -26,7 +26,7 @@ use commonware_storage::{
     index::unordered::Index as UnorderedIndex,
     journal::contiguous::variable::Config as JournalConfig,
     journal::contiguous::variable::Journal as VariableJournal,
-    merkle::{full::Config as MerkleConfig, hasher::Standard, Bagging, Location, Proof},
+    merkle::{full::Config as MerkleConfig, Location, Proof},
     mmr::Family,
     qmdb::{
         any::{
@@ -39,7 +39,7 @@ use commonware_storage::{
     translator::TwoCap,
     Context,
 };
-use commonware_utils::{sync::AsyncRwLock, NZUsize, NZU16, NZU64};
+use commonware_utils::{sync::TracedAsyncRwLock, NZUsize, NZU16, NZU64};
 use thiserror::Error;
 
 /// Errors surfaced by the shared state backend.
@@ -142,7 +142,12 @@ pub type QmdbUpdate = AnyUpdate<Digest, Vec<u8>>;
 pub type QmdbJournal<E> = VariableJournal<E, QmdbOperation>;
 pub type QmdbIndex = UnorderedIndex<TwoCap, Location<Family>>;
 pub type QmdbConfig = VariableConfig<TwoCap, <QmdbOperation as Read>::Cfg, Sequential>;
-pub type QmdbDatabaseSet<E> = Arc<AsyncRwLock<QmdbBackend<E>>>;
+pub type QmdbDatabaseSet<E> = Shared<QmdbBackend<E>>;
+
+/// Wrap an opened backend in the shared lock type expected by `commonware-glue`.
+pub fn shared_database<E: Context>(db: QmdbBackend<E>) -> QmdbDatabaseSet<E> {
+    Arc::new(TracedAsyncRwLock::new("stateful.db", db))
+}
 pub type QmdbUnmerkleized<E> =
     AnyUnmerkleized<Family, E, QmdbJournal<E>, QmdbIndex, Sha256, QmdbUpdate, Sequential>;
 pub type QmdbMerkleized<E> =
@@ -188,6 +193,9 @@ impl<E: Context + BufferPooler> QmdbState<E> {
                 write_buffer: NZUsize!(65536),
             },
             translator: TwoCap,
+            // Bounded location-to-key cache during snapshot rebuild on open/recovery.
+            // Matches commonware's sync examples (`1 << 16`).
+            init_cache_size: Some(NZUsize!(1 << 16)),
         }
     }
 
@@ -210,8 +218,8 @@ impl<E: Context + BufferPooler> QmdbState<E> {
     }
 
     /// Return the committed sync target for the underlying authenticated database.
-    pub async fn sync_target(&self) -> Target<Family, Digest> {
-        self.db.sync_target().await
+    pub fn sync_target(&self) -> Target<Family, Digest> {
+        self.db.sync_target()
     }
 }
 
@@ -235,11 +243,26 @@ impl<E: Context> StateStore for QmdbState<E> {
 impl<E: Context> CommitState for QmdbState<E> {
     async fn commit(&mut self) -> Result<Digest, StateError> {
         if !self.overlay.is_empty() {
-            let mut batch = self.db.new_batch();
-            for (key, value) in std::mem::take(&mut self.overlay) {
-                batch = batch.write(key, value);
-            }
-            let merkleized = batch.merkleize(&self.db, None).await.map_err(backend_err)?;
+            // Stage the write-set keys so merkleize reuses locations resolved at read time
+            // instead of re-probing the index for each mutation.
+            let overlay = std::mem::take(&mut self.overlay);
+            let keys: Vec<Digest> = overlay.keys().copied().collect();
+            let key_refs: Vec<&Digest> = keys.iter().collect();
+            let (_values, staged) = self
+                .db
+                .new_batch()
+                .stage(&key_refs, &self.db)
+                .await
+                .map_err(backend_err)?;
+            let updates: Vec<(usize, Option<Vec<u8>>)> = keys
+                .iter()
+                .enumerate()
+                .map(|(i, key)| (i, overlay[key].clone()))
+                .collect();
+            let merkleized = staged
+                .merkleize(updates, Vec::new(), None, &self.db)
+                .await
+                .map_err(backend_err)?;
             self.db.apply_batch(merkleized).await.map_err(backend_err)?;
         }
         self.db.commit().await.map_err(backend_err)?;
@@ -283,8 +306,8 @@ impl StateProof {
 
 impl<E: Context> QmdbState<E> {
     /// The active operation range in the committed authenticated log.
-    pub async fn operation_bounds(&self) -> std::ops::Range<Location<Family>> {
-        self.db.bounds().await
+    pub fn operation_bounds(&self) -> std::ops::Range<Location<Family>> {
+        self.db.bounds()
     }
 
     /// Generate an inclusion proof for up to `max_ops` operations starting at `start`, verifiable
@@ -334,8 +357,7 @@ impl<E: Context> QmdbState<E> {
 /// Standalone (no database handle), so a remote verifier can check a proof against a state root it
 /// obtained elsewhere (for example a finalized foreign block).
 pub fn verify_state_proof(proof: &StateProof, root: &Digest) -> bool {
-    verify_proof::<Family, QmdbOperation, Sha256, Digest>(
-        &Standard::new(Bagging::ForwardFold),
+    verify_proof::<Sha256, Family, QmdbOperation>(
         &proof.proof,
         proof.start,
         &proof.operations,
@@ -408,20 +430,38 @@ impl Read for StateProof {
 }
 
 /// A speculative QMDB batch used by `commonware_glue::stateful` execution.
+///
+/// Mutations accumulate in [`QmdbBatch::pending`] so [`QmdbBatch::merkleize`] can use the
+/// staged read-then-write path (location reuse) instead of write-then-merkleize.
 pub struct QmdbBatch<E: Context> {
     inner: Option<QmdbUnmerkleized<E>>,
+    pending: BTreeMap<Digest, Option<Vec<u8>>>,
 }
 
 impl<E: Context> QmdbBatch<E> {
     pub fn new(inner: QmdbUnmerkleized<E>) -> Self {
-        Self { inner: Some(inner) }
+        Self {
+            inner: Some(inner),
+            pending: BTreeMap::new(),
+        }
     }
 
     pub async fn merkleize(mut self) -> Result<QmdbMerkleized<E>, StateError> {
-        self.inner
-            .take()
-            .expect("QMDB batch already consumed")
-            .merkleize()
+        let batch = self.inner.take().expect("QMDB batch already consumed");
+        if self.pending.is_empty() {
+            return batch.merkleize().await.map_err(backend_err);
+        }
+        let pending = std::mem::take(&mut self.pending);
+        let keys: Vec<Digest> = pending.keys().copied().collect();
+        let key_refs: Vec<&Digest> = keys.iter().collect();
+        let (_values, staged) = batch.stage(&key_refs).await.map_err(backend_err)?;
+        let updates: Vec<(usize, Option<Vec<u8>>)> = keys
+            .iter()
+            .enumerate()
+            .map(|(i, key)| (i, pending[key].clone()))
+            .collect();
+        staged
+            .merkleize(updates, Vec::new())
             .await
             .map_err(backend_err)
     }
@@ -429,25 +469,22 @@ impl<E: Context> QmdbBatch<E> {
     fn inner(&self) -> &QmdbUnmerkleized<E> {
         self.inner.as_ref().expect("QMDB batch already consumed")
     }
-
-    fn replace(&mut self, next: QmdbUnmerkleized<E>) {
-        self.inner = Some(next);
-    }
 }
 
 impl<E: Context> StateStore for QmdbBatch<E> {
     async fn get(&self, key: &Digest) -> Result<Option<Vec<u8>>, StateError> {
+        if let Some(staged) = self.pending.get(key) {
+            return Ok(staged.clone());
+        }
         self.inner().get(key).await.map_err(backend_err)
     }
 
     fn set(&mut self, key: Digest, value: Vec<u8>) {
-        let inner = self.inner.take().expect("QMDB batch already consumed");
-        self.replace(inner.write(key, Some(value)));
+        self.pending.insert(key, Some(value));
     }
 
     fn remove(&mut self, key: Digest) {
-        let inner = self.inner.take().expect("QMDB batch already consumed");
-        self.replace(inner.write(key, None));
+        self.pending.insert(key, None);
     }
 }
 

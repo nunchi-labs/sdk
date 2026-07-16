@@ -31,7 +31,7 @@ use nunchi_dkg::{
     ContinueOnUpdate, EpochProvider, PeerConfig, Provider, StorageKey, MAX_SUPPORTED_MODE,
 };
 use nunchi_mempool::PoolConfig;
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -536,6 +536,7 @@ async fn start_node(
     let broadcast = register(channels::BROADCAST);
     let dkg = register(channels::DKG);
     let backfill = register(channels::BACKFILL);
+    let probe = register(channels::PROBE);
     network.start();
 
     let engine_config: EngineConfig<_, _, _> = EngineConfig {
@@ -579,6 +580,7 @@ async fn start_node(
         resolver,
         broadcast,
         dkg,
+        probe,
         marshal_resolver,
         ContinueOnUpdate::boxed(),
     );

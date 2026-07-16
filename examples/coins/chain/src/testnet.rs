@@ -31,7 +31,7 @@ use commonware_utils::{ordered::Set, N3f1, NZUsize, NZU32};
 use governor::Quota;
 use nunchi_dkg::{ContinueOnUpdate, PeerConfig, StorageKey, MAX_SUPPORTED_MODE};
 use nunchi_mempool::PoolConfig;
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -322,7 +322,7 @@ pub fn run_node(config_path: impl AsRef<Path>) -> Result<(), Error> {
     runtime.start(|context| async move {
         tokio::telemetry::init(
             context.child("telemetry"),
-            tokio::telemetry::Logging {
+            tokio::telemetry::Logs {
                 level: log_level_from_env(),
                 json: false,
             },
@@ -456,6 +456,7 @@ async fn start_node(
     let backfill = register(channels::BACKFILL);
     let mempool = register(channels::MEMPOOL);
     let clob = register(channels::CLOB);
+    let probe = register(channels::PROBE);
     network.start();
 
     let engine_config: EngineConfig<_, _, _> = EngineConfig {
@@ -500,6 +501,7 @@ async fn start_node(
         dkg,
         mempool,
         clob,
+        probe,
         marshal_resolver,
         ContinueOnUpdate::boxed(),
     );

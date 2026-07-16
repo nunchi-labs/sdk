@@ -76,7 +76,7 @@ fn sample_genesis() -> ChainGenesis {
 
 async fn empty_commitment(context: deterministic::Context, partition: &str) -> StateCommitment {
     let state = QmdbState::init(context, partition).await.unwrap();
-    state_commitment(state.sync_target().await)
+    state_commitment(state.sync_target())
 }
 
 #[test]
@@ -116,13 +116,13 @@ fn same_genesis_produces_same_commitment() {
             .await
             .unwrap();
         genesis.apply_to_state(&mut first, &empty).await.unwrap();
-        let first = state_commitment(first.sync_target().await);
+        let first = state_commitment(first.sync_target());
 
         let mut second = QmdbState::init(context.child("second"), "genesis-second")
             .await
             .unwrap();
         genesis.apply_to_state(&mut second, &empty).await.unwrap();
-        let second = state_commitment(second.sync_target().await);
+        let second = state_commitment(second.sync_target());
 
         assert_eq!(first, second);
     });
@@ -155,9 +155,9 @@ fn applying_same_genesis_twice_is_noop() {
             .unwrap();
 
         genesis.apply_to_state(&mut state, &empty).await.unwrap();
-        let first = state_commitment(state.sync_target().await);
+        let first = state_commitment(state.sync_target());
         genesis.apply_to_state(&mut state, &empty).await.unwrap();
-        let second = state_commitment(state.sync_target().await);
+        let second = state_commitment(state.sync_target());
 
         assert_eq!(first, second);
     });
