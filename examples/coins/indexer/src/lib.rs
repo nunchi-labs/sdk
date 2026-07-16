@@ -14,25 +14,20 @@ use axum::{
 };
 use commonware_codec::{Decode, DecodeExt, Encode, EncodeSize, FixedSize, Write};
 use commonware_consensus::{
-    types::{Epoch, EpochInfo, Epocher, FixedEpocher, View},
-    Viewable,
+    types::{Epoch, EpochInfo, Epocher, FixedEpocher, Round, View},
+    Epochable, Viewable,
 };
 use commonware_cryptography::{
     bls12381::{
-        dkg::feldman_desmedt::{observe, Info, Logs, Output},
-        primitives::{
-            sharing::{Mode, ModeVersion},
-            variant::MinSig,
-        },
+        dkg::feldman_desmedt::Output,
+        primitives::{sharing::ModeVersion, variant::MinSig},
     },
-    ed25519::Batch,
     sha256::Digest,
     Digestible,
 };
 use commonware_formatting::{from_hex, hex};
 use commonware_parallel::Sequential;
 use commonware_utils::union;
-use commonware_utils::N3f1;
 use futures::{SinkExt, StreamExt};
 use nunchi_coins_chain::{
     Block, Finalized, Identity, Notarized, PublicKey, Scheme, Seed, BLOCKS_PER_EPOCH,
@@ -60,7 +55,6 @@ const DKG_OUTPUT_STATE_FILE: &str = "dkg-output.latest";
 type BlockCfg = (NonZeroU32, ());
 type DkgOutputCfg = (NonZeroU32, ModeVersion);
 pub type DkgOutput = Output<MinSig, PublicKey>;
-type DkgLogs = Logs<MinSig, PublicKey, N3f1>;
 
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
 struct ArtifactKey {
@@ -76,10 +70,10 @@ pub enum Kind {
 }
 
 pub struct Store {
-    seeds: BTreeMap<View, Seed>,
+    seeds: BTreeMap<Round, Seed>,
     notarizations: BTreeMap<ArtifactKey, Notarized>,
     finalizations: BTreeMap<ArtifactKey, Finalized>,
-    seed_uploads: BTreeSet<View>,
+    seed_uploads: BTreeSet<Round>,
     notarization_uploads: BTreeSet<ArtifactKey>,
     finalization_uploads: BTreeSet<ArtifactKey>,
     finalized_height_to_key: BTreeMap<u64, ArtifactKey>,
@@ -108,117 +102,46 @@ impl Store {
 }
 
 struct VerifierState {
-    schemes: BTreeMap<Epoch, Scheme>,
+    scheme: Scheme,
     latest_epoch: Epoch,
     output: Option<DkgOutput>,
-    logs: BTreeMap<Epoch, DkgLogs>,
-    pending_boundaries: BTreeSet<Epoch>,
 }
 
 impl VerifierState {
     fn new(initial_epoch: Epoch, initial_scheme: Scheme, output: Option<DkgOutput>) -> Self {
         Self {
-            schemes: BTreeMap::from([(initial_epoch, initial_scheme)]),
+            scheme: initial_scheme,
             latest_epoch: initial_epoch,
             output,
-            logs: BTreeMap::new(),
-            pending_boundaries: BTreeSet::new(),
         }
     }
 
-    fn latest_scheme(&self) -> Option<Scheme> {
-        self.schemes.get(&self.latest_epoch).cloned()
+    fn scheme(&self, _: Epoch) -> Scheme {
+        self.scheme.clone()
     }
 
-    fn scheme(&self, epoch: Epoch) -> Option<Scheme> {
-        self.schemes.get(&epoch).cloned().or_else(|| {
-            (self.output.is_none())
-                .then(|| self.latest_scheme())
-                .flatten()
-        })
-    }
-
-    fn observe_block(&mut self, namespace: &[u8], block: &Block) {
-        let Some(bounds) = block_epoch_info(block) else {
-            return;
-        };
-        let epoch = bounds.epoch();
-        if self.schemes.contains_key(&epoch.next()) {
-            return;
+    fn install_output(&mut self, epoch: Epoch, output: DkgOutput) -> Result<bool, &'static str> {
+        if output.public().public() != self.scheme.identity() {
+            return Err("DKG output changed the threshold identity");
+        }
+        if epoch < self.latest_epoch {
+            return Ok(false);
+        }
+        if epoch == self.latest_epoch && self.output.as_ref() == Some(&output) {
+            return Ok(false);
+        }
+        if epoch == self.latest_epoch && self.output.is_some() {
+            return Err("conflicting DKG output for current epoch");
         }
 
-        let Some(info) = self.round_info(namespace, epoch) else {
-            return;
-        };
-
-        if let Some(signed) = block.reshare_log.clone() {
-            if let Some((dealer, log)) = signed.check(&info) {
-                self.logs
-                    .entry(epoch)
-                    .or_insert_with(|| DkgLogs::new(info.clone()))
-                    .record(dealer, log);
-            }
-        }
-
-        if block.height >= bounds.last() {
-            self.pending_boundaries.insert(epoch);
-        }
-
-        if self.pending_boundaries.contains(&epoch) {
-            self.try_observe_epoch(namespace, epoch, info);
-        }
-    }
-
-    fn round_info(&self, namespace: &[u8], epoch: Epoch) -> Option<Info<MinSig, PublicKey>> {
-        let output = self.output.clone()?;
-        let dealers = output.players().clone();
-        let players = output.players().clone();
-        Info::new::<N3f1>(
-            namespace,
-            epoch.get(),
-            Some(output),
-            Mode::NonZeroCounter,
-            dealers,
-            players,
-        )
-        .ok()
-    }
-
-    fn try_observe_epoch(&mut self, namespace: &[u8], epoch: Epoch, info: Info<MinSig, PublicKey>) {
-        let logs = self
-            .logs
-            .remove(&epoch)
-            .unwrap_or_else(|| DkgLogs::new(info));
-        let Ok(next_output) =
-            observe::<_, _, N3f1, Batch>(&mut rand::rngs::OsRng, logs.clone(), &Sequential)
-        else {
-            self.logs.insert(epoch, logs);
-            warn!(%epoch, "could not derive next indexer verifier yet");
-            return;
-        };
-        let next_epoch = epoch.next();
-        let scheme = Scheme::certificate_verifier(namespace, *next_output.public().public());
-        self.output = Some(next_output);
-        self.schemes.insert(next_epoch, scheme);
-        self.latest_epoch = next_epoch;
-        self.pending_boundaries.remove(&epoch);
-    }
-
-    fn install_output(&mut self, namespace: &[u8], epoch: Epoch, output: DkgOutput) {
-        let scheme = Scheme::certificate_verifier(namespace, *output.public().public());
-        self.schemes.insert(epoch, scheme);
-        if epoch >= self.latest_epoch {
-            self.output = Some(output);
-            self.latest_epoch = epoch;
-            self.logs.retain(|logged_epoch, _| *logged_epoch >= epoch);
-            self.pending_boundaries.retain(|pending| *pending >= epoch);
-        }
+        self.output = Some(output);
+        self.latest_epoch = epoch;
+        Ok(true)
     }
 }
 
 #[derive(Clone)]
 pub struct Indexer {
-    namespace: Vec<u8>,
     participants: NonZeroU32,
     dkg_output_state_dir: Option<PathBuf>,
     store: Arc<RwLock<Store>>,
@@ -230,7 +153,7 @@ impl Indexer {
     pub fn new(identity: Identity, participants: NonZeroU32) -> Self {
         let namespace = union(NAMESPACE, b"_CONSENSUS");
         let scheme = Scheme::certificate_verifier(&namespace, identity);
-        Self::from_scheme(namespace, participants, Epoch::zero(), scheme, None)
+        Self::from_scheme(participants, Epoch::zero(), scheme, None)
     }
 
     pub fn new_from_output(output: DkgOutput, participants: NonZeroU32) -> Self {
@@ -240,11 +163,10 @@ impl Indexer {
     pub fn new_from_output_at(epoch: Epoch, output: DkgOutput, participants: NonZeroU32) -> Self {
         let namespace = union(NAMESPACE, b"_CONSENSUS");
         let scheme = Scheme::certificate_verifier(&namespace, *output.public().public());
-        Self::from_scheme(namespace, participants, epoch, scheme, Some(output))
+        Self::from_scheme(participants, epoch, scheme, Some(output))
     }
 
     fn from_scheme(
-        namespace: Vec<u8>,
         participants: NonZeroU32,
         initial_epoch: Epoch,
         scheme: Scheme,
@@ -253,7 +175,6 @@ impl Indexer {
         let (consensus_tx, _) = broadcast::channel(1024);
         let (summary_tx, _) = broadcast::channel(1024);
         Self {
-            namespace,
             participants,
             dkg_output_state_dir: None,
             store: Arc::new(RwLock::new(Store::new(initial_epoch, scheme, output))),
@@ -275,41 +196,39 @@ impl Indexer {
         (self.participants, MAX_SUPPORTED_MODE)
     }
 
-    pub fn submit_dkg_output(&self, epoch: Epoch, output: DkgOutput) {
-        {
+    pub fn submit_dkg_output(&self, epoch: Epoch, output: DkgOutput) -> Result<(), &'static str> {
+        let installed = {
             let mut store = self.store.write().unwrap();
-            store
-                .verifier
-                .install_output(&self.namespace, epoch, output.clone());
-        }
-        if let Some(path) = &self.dkg_output_state_dir {
-            if let Err(error) = persist_dkg_output(path, epoch, &output) {
-                warn!(%epoch, %error, "failed to persist DKG output");
+            store.verifier.install_output(epoch, output.clone())?
+        };
+        if installed {
+            if let Some(path) = &self.dkg_output_state_dir {
+                if let Err(error) = persist_dkg_output(path, epoch, &output) {
+                    warn!(%epoch, %error, "failed to persist DKG output");
+                }
             }
         }
+        Ok(())
     }
 
     pub fn submit_seed(&self, seed: Seed) -> Result<(), &'static str> {
+        let round = seed.round();
         let view = seed.view();
         let scheme = {
             let mut store = self.store.write().unwrap();
-            if store.seeds.contains_key(&view) || !store.seed_uploads.insert(view) {
+            if store.seeds.contains_key(&round) || !store.seed_uploads.insert(round) {
                 return Ok(());
             }
-            store.verifier.latest_scheme()
-        };
-        let Some(scheme) = scheme else {
-            self.store.write().unwrap().seed_uploads.remove(&view);
-            return Err("missing verifier");
+            store.verifier.scheme(seed.epoch())
         };
         if !seed.verify(&scheme) {
-            self.store.write().unwrap().seed_uploads.remove(&view);
+            self.store.write().unwrap().seed_uploads.remove(&round);
             return Err("invalid seed signature");
         }
 
         let mut store = self.store.write().unwrap();
-        store.seed_uploads.remove(&view);
-        if store.seeds.insert(view, seed.clone()).is_some() {
+        store.seed_uploads.remove(&round);
+        if store.seeds.insert(round, seed.clone()).is_some() {
             return Ok(());
         }
 
@@ -335,7 +254,12 @@ impl Indexer {
             store.seeds.last_key_value().map(|(_, seed)| seed.clone())
         } else {
             let view = parse_index(query)?;
-            store.seeds.get(&View::new(view)).cloned()
+            store
+                .seeds
+                .iter()
+                .rev()
+                .find(|(round, _)| round.view() == View::new(view))
+                .map(|(_, seed)| seed.clone())
         }
     }
 
@@ -351,14 +275,6 @@ impl Indexer {
                 return Ok(());
             }
             store.verifier.scheme(epoch)
-        };
-        let Some(scheme) = scheme else {
-            self.store
-                .write()
-                .unwrap()
-                .notarization_uploads
-                .remove(&key);
-            return Err("missing verifier");
         };
         if !notarized.verify(&scheme, &Sequential) {
             self.store
@@ -420,14 +336,6 @@ impl Indexer {
             }
             store.verifier.scheme(epoch)
         };
-        let Some(scheme) = scheme else {
-            self.store
-                .write()
-                .unwrap()
-                .finalization_uploads
-                .remove(&key);
-            return Err("missing verifier");
-        };
         if !finalized.verify(&scheme, &Sequential) {
             self.store
                 .write()
@@ -449,10 +357,6 @@ impl Indexer {
         store
             .finalized_height_to_key
             .insert(finalized.block.height.get(), key);
-        store
-            .verifier
-            .observe_block(&self.namespace, &finalized.block);
-
         let mut data = vec![0u8; u8::SIZE + finalized.encode_size()];
         data[0] = Kind::Finalization as u8;
         finalized.write(&mut data[1..].as_mut());
@@ -479,12 +383,6 @@ impl Indexer {
                 .find(|(key, _)| key.view == View::new(view))
                 .map(|(_, finalized)| finalized.clone())
         }
-    }
-
-    pub fn submit_block(&self, block: Block) {
-        let mut store = self.store.write().unwrap();
-        store.verifier.observe_block(&self.namespace, &block);
-        store.blocks_by_digest.insert(block.digest(), block);
     }
 
     pub fn get_block(&self, query: &str) -> Option<BlockResult> {
@@ -608,7 +506,6 @@ impl Api {
             .route("/notarization/{query}", get(notarization_get))
             .route("/finalization", post(finalization_upload))
             .route("/finalization/{query}", get(finalization_get))
-            .route("/block", post(block_upload))
             .route("/block/{query}", get(block_get))
             .route("/dkg-output/{epoch}", post(dkg_output_upload))
             .route("/consensus/ws", get(consensus_ws))
@@ -692,19 +589,6 @@ async fn finalization_get(
     }
 }
 
-async fn block_upload(
-    AxumState(indexer): AxumState<Arc<Indexer>>,
-    body: Bytes,
-) -> impl IntoResponse {
-    match Block::decode_cfg(body.as_ref(), &indexer.block_cfg()) {
-        Ok(block) => {
-            indexer.submit_block(block);
-            StatusCode::OK
-        }
-        Err(_) => StatusCode::BAD_REQUEST,
-    }
-}
-
 async fn block_get(
     AxumState(indexer): AxumState<Arc<Indexer>>,
     Path(query): Path<String>,
@@ -726,10 +610,10 @@ async fn dkg_output_upload(
     body: Bytes,
 ) -> impl IntoResponse {
     match DkgOutput::decode_cfg(body.as_ref(), &indexer.dkg_output_cfg()) {
-        Ok(output) => {
-            indexer.submit_dkg_output(Epoch::new(epoch), output);
-            StatusCode::OK
-        }
+        Ok(output) => match indexer.submit_dkg_output(Epoch::new(epoch), output) {
+            Ok(()) => StatusCode::OK,
+            Err(_) => StatusCode::UNAUTHORIZED,
+        },
         Err(_) => StatusCode::BAD_REQUEST,
     }
 }
@@ -853,4 +737,158 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_consensus::simplex::{
+        scheme::bls12381_threshold::vrf as bls12381_threshold,
+        types::{
+            Finalization as ConsensusFinalization, Finalize, Notarization as ConsensusNotarization,
+            Notarize, Proposal,
+        },
+    };
+    use commonware_consensus::types::Height;
+    use commonware_cryptography::{
+        bls12381::dkg::feldman_desmedt::deal, certificate::mocks::Fixture, ed25519, sha256::Sha256,
+        Digest as _, Hasher, Signer,
+    };
+    use commonware_storage::mmr::Location;
+    use commonware_utils::{
+        ordered::Set, range::NonEmptyRange, test_rng, test_rng_seeded, N3f1, NZU32,
+    };
+    use nunchi_coins_chain::{Context, Seedable, StateCommitment};
+
+    fn schemes() -> Vec<Scheme> {
+        let mut rng = test_rng();
+        let namespace = union(NAMESPACE, b"_CONSENSUS");
+        let Fixture { schemes, .. } =
+            bls12381_threshold::fixture::<MinSig, _>(&mut rng, &namespace, 4);
+        schemes
+    }
+
+    fn seed(schemes: &[Scheme], epoch: u64, view: u64) -> Seed {
+        let round = Round::new(Epoch::new(epoch), View::new(view));
+        let proposal = Proposal::new(round, View::zero(), Sha256::hash(&round.encode()));
+        let notarizes = schemes
+            .iter()
+            .map(|scheme| Notarize::sign(scheme, proposal.clone()).expect("sign notarize"))
+            .collect::<Vec<_>>();
+        ConsensusNotarization::from_notarizes(&schemes[0], &notarizes, &Sequential)
+            .expect("build notarization")
+            .seed()
+    }
+
+    fn output(seed: u64) -> DkgOutput {
+        let players = Set::from_iter_dedup(
+            (0..4).map(|offset| ed25519::PrivateKey::from_seed(seed + offset).public_key()),
+        );
+        let mut rng = test_rng_seeded(seed);
+        deal::<MinSig, _, N3f1>(&mut rng, Default::default(), players)
+            .expect("deal")
+            .0
+    }
+
+    fn finalized(schemes: &[Scheme], epoch: u64, view: u64, height: u64) -> Finalized {
+        let round = Round::new(Epoch::new(epoch), View::new(view));
+        let block = Block::new(
+            Context {
+                round,
+                leader: ed25519::PrivateKey::from_seed(100).public_key(),
+                parent: (View::zero(), Digest::EMPTY),
+            },
+            Sha256::hash(b"parent"),
+            Height::new(height),
+            1_000,
+            Vec::new(),
+            None,
+            (),
+            StateCommitment {
+                root: Sha256::hash(b"state"),
+                range: NonEmptyRange::new(Location::new(1)..Location::new(2)).unwrap(),
+            },
+        );
+        let proposal = Proposal::new(round, View::zero(), block.digest());
+        let finalizes = schemes
+            .iter()
+            .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("sign finalize"))
+            .collect::<Vec<_>>();
+        Finalized::new(
+            ConsensusFinalization::from_finalizes(&schemes[0], &finalizes, &Sequential)
+                .expect("build finalization"),
+            block,
+        )
+    }
+
+    #[test]
+    fn seeds_with_reused_views_are_indexed_by_round() {
+        let schemes = schemes();
+        let indexer = Indexer::new(*schemes[0].identity(), NZU32!(4));
+
+        indexer.submit_seed(seed(&schemes, 0, 1)).unwrap();
+        indexer.submit_seed(seed(&schemes, 1, 1)).unwrap();
+
+        let store = indexer.store.read().unwrap();
+        assert_eq!(store.seeds.len(), 2);
+        assert!(store
+            .seeds
+            .contains_key(&Round::new(Epoch::zero(), View::new(1))));
+        assert!(store
+            .seeds
+            .contains_key(&Round::new(Epoch::new(1), View::new(1))));
+    }
+
+    #[test]
+    fn finalization_after_transition_does_not_wait_for_dkg_upload() {
+        let schemes = schemes();
+        let indexer = Indexer::new(*schemes[0].identity(), NZU32!(4));
+        let finalized = finalized(&schemes, 1, 1, BLOCKS_PER_EPOCH.get() + 1);
+
+        indexer.submit_finalization(finalized).unwrap();
+
+        assert!(indexer.get_finalization(LATEST).is_some());
+    }
+
+    #[test]
+    fn dkg_checkpoint_cannot_change_threshold_identity() {
+        let initial = output(10);
+        let replacement = output(20);
+        assert_ne!(initial.public().public(), replacement.public().public());
+        let indexer = Indexer::new_from_output(initial, NZU32!(4));
+
+        let result = indexer.submit_dkg_output(Epoch::new(1), replacement);
+
+        assert_eq!(result, Err("DKG output changed the threshold identity"));
+        assert_eq!(
+            indexer.store.read().unwrap().verifier.latest_epoch,
+            Epoch::zero()
+        );
+    }
+
+    #[test]
+    fn stale_dkg_checkpoint_does_not_replace_persisted_latest() {
+        let path = std::env::temp_dir().join(format!(
+            "coins-indexer-dkg-checkpoint-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&path);
+        let output = output(30);
+        let indexer = Indexer::new_from_output(output.clone(), NZU32!(4))
+            .with_dkg_output_state_dir(path.clone());
+
+        indexer
+            .submit_dkg_output(Epoch::new(2), output.clone())
+            .unwrap();
+        indexer
+            .submit_dkg_output(Epoch::new(1), output.clone())
+            .unwrap();
+
+        let (epoch, persisted) = load_dkg_output(&path, NZU32!(4))
+            .unwrap()
+            .expect("persisted checkpoint");
+        assert_eq!(epoch, Epoch::new(2));
+        assert_eq!(persisted, output);
+        let _ = fs::remove_dir_all(path);
+    }
 }

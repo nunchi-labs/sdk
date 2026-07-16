@@ -8,8 +8,6 @@ type Connection = "offline" | "connecting" | "online";
 
 type Settings = {
   backendUrl: string;
-  identity: string;
-  participants: string;
 };
 
 type EventRow = {
@@ -54,8 +52,6 @@ const DEFAULT_BACKEND_URL =
   import.meta.env.VITE_INDEXER_URL ?? (window.location.port === "5173" ? LOCAL_INDEXER_URL : window.location.origin);
 const DEFAULT_SETTINGS: Settings = {
   backendUrl: DEFAULT_BACKEND_URL,
-  identity: import.meta.env.VITE_INDEXER_IDENTITY ?? "",
-  participants: import.meta.env.VITE_INDEXER_PARTICIPANTS ?? "1",
 };
 
 function readSettings(): Settings {

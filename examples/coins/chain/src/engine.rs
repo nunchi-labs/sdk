@@ -12,7 +12,8 @@ use commonware_consensus::{
         self,
         core::Actor as MarshalActor,
         resolver,
-        standard::{Deferred, Standard},
+        standard::{Inline, Standard},
+        store::{Blocks as _, Certificates},
     },
     simplex::elector::Random,
     types::{FixedEpocher, Height, ViewDelta},
@@ -29,6 +30,7 @@ use commonware_cryptography::{
     BatchVerifier, Digestible, Signer,
 };
 use commonware_glue::stateful::{
+    Application as StatefulApplication,
     db::ManagedDb as _, Config as StatefulConfig, Mailbox as StatefulMailbox,
     Stateful as StatefulActor, SyncPlan,
 };
@@ -38,8 +40,12 @@ use commonware_runtime::{
     buffer::paged::CacheRef, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics,
     Network, Spawner, Storage, ThreadPooler,
 };
-use commonware_storage::{archive::immutable, queue};
-use commonware_utils::{union, NZU64};
+use commonware_storage::{
+    archive::{immutable, Identifier as ArchiveIdentifier},
+    metadata::{self, Metadata},
+    queue,
+};
+use commonware_utils::{sequence::U64, union, NZU64};
 use futures::lock::Mutex as AsyncMutex;
 use governor::clock::Clock as GClock;
 use nunchi_chain::engine::*;
@@ -93,7 +99,9 @@ type DkgActor<E, P> = nunchi_chain::DkgActor<E, P, Transaction>;
 type DkgMailbox = nunchi_chain::DkgMailbox<Transaction>;
 type StatefulApp<E> = StatefulActor<E, Application, Scheme, Standard<Block>, NoStateSyncResolver>;
 type StatefulAppMailbox<E> = StatefulMailbox<E, Application>;
-type Marshaled<E> = Deferred<E, Scheme, StatefulAppMailbox<E>, Block, FixedEpocher>;
+type LimitedStatefulAppMailbox<E> = VerifyLimiter<StatefulAppMailbox<E>>;
+type InlineApp<E> = Inline<E, Scheme, LimitedStatefulAppMailbox<E>, Block, FixedEpocher>;
+type Marshaled<E> = BoxedAutomaton<InlineApp<E>>;
 type SchemeProvider = Provider<Scheme, ed25519::PrivateKey>;
 type FinalizationsArchive<E> = immutable::Archive<E, Digest, Finalization>;
 type BlocksArchive<E> = immutable::Archive<E, Digest, Block>;
@@ -292,6 +300,18 @@ where
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
+        let recovered_height = Certificates::last_index(&finalizations_by_height);
+        let mut recovered_floor = if let Some(height) = recovered_height {
+            Certificates::get(
+                &finalizations_by_height,
+                ArchiveIdentifier::Index(height.get()),
+            )
+            .await
+            .expect("failed to read recovered finalization floor")
+        } else {
+            None
+        };
+
         let certificate_verifier = <SchemeProvider as EpochProvider>::certificate_verifier(
             &consensus_namespace,
             &config.output,
@@ -354,6 +374,26 @@ where
         } else {
             empty_state
         };
+        let current_state_target = {
+            let state = QmdbState::init_with_config(
+                context.child("startup_state_probe"),
+                db_config.clone(),
+            )
+            .await
+            .expect("failed to initialize state database for startup probe");
+            state.sync_target().await
+        };
+        clear_disabled_state_sync_metadata(&context, &config.partition_prefix).await;
+        if repair_marshal_progress_if_state_is_behind(
+            &context,
+            &config.partition_prefix,
+            &finalized_blocks,
+            &current_state_target,
+        )
+        .await
+        {
+            recovered_floor = None;
+        }
         let applied_height = Arc::new(AsyncMutex::new(Height::zero()));
         let app = Application::with_dkg(
             submitter.clone(),
@@ -365,12 +405,14 @@ where
         );
         let genesis = app.genesis_block();
         let genesis_digest = genesis.digest();
-        // The sync plan drives both marshal (its startup anchor below) and the stateful actor
-        // (via `StatefulConfig::plan`), so the two always agree on the startup decision. No
-        // finalized floor is ever attached here, so nodes recover via marshal backfill.
+        // Fresh nodes recover through marshal backfill. Existing nodes reuse the finalized floor
+        // recovered above so marshal, stateful execution, and Simplex restart from one anchor.
         let plan =
             SyncPlan::<_, Scheme, Standard<Block>>::init(&context, config.partition_prefix.clone())
                 .await;
+        let marshal_start = recovered_floor
+            .clone()
+            .map_or_else(|| plan.marshal_start(genesis), marshal::Start::Floor);
         let (marshal, marshal_mailbox, _processed_height) = MarshalActor::init(
             context.child("marshal"),
             finalizations_by_height,
@@ -378,7 +420,7 @@ where
             marshal::Config {
                 provider: provider.clone(),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                start: plan.marshal_start(genesis),
+                start: marshal_start,
                 partition_prefix: format!("{}_marshal", config.partition_prefix),
                 mailbox_size: MAILBOX_SIZE,
                 view_retention_timeout: ViewDelta::new(
@@ -415,15 +457,23 @@ where
         );
         let node_handle = NodeHandle::new(submitter, stateful_mailbox.clone(), applied_height);
 
-        let application = Deferred::new(
+        let verify_limiter_context = context.child("application_verify");
+        let application = BoxedAutomaton::new(Inline::new(
             context.child("application"),
-            stateful_mailbox.clone(),
+            VerifyLimiter::new(
+                &verify_limiter_context,
+                stateful_mailbox.clone(),
+                APPLICATION_VERIFY_CONCURRENCY,
+            ),
             marshal_mailbox.clone(),
             FixedEpocher::new(BLOCKS_PER_EPOCH),
-        );
+        ));
 
         let (indexer_producer, indexer_pusher, indexer_consumer) =
             if let Some(client) = config.indexer.clone() {
+                let indexer_context = context.child("indexer");
+                let indexer_metrics = indexer::IndexerMetrics::register(&indexer_context);
+                let client = client.with_metrics(indexer_metrics.clone());
                 let queue = queue::shared::init(
                     context.child("indexer_queue"),
                     queue::Config {
@@ -438,13 +488,16 @@ where
                 .await
                 .expect("failed to initialize indexer queue");
                 let indexer = indexer::Indexer::new(
-                    context.child("indexer"),
+                    indexer_context,
                     client,
                     marshal_mailbox.clone(),
                     queue,
-                    MAILBOX_SIZE,
-                    commonware_utils::NZUsize!(16),
-                    Duration::from_millis(500),
+                    indexer::Config {
+                        mailbox_size: MAILBOX_SIZE,
+                        backfiller_max_active: commonware_utils::NZUsize!(16),
+                        backfiller_retry: Duration::from_millis(500),
+                        metrics: indexer_metrics,
+                    },
                 )
                 .await;
                 let (producer, pusher, consumer) = indexer.split();
@@ -469,6 +522,7 @@ where
                 partition_prefix: format!("{}_consensus", config.partition_prefix),
                 epoch_length: BLOCKS_PER_EPOCH,
                 genesis_digest,
+                recovered_floor,
                 _phantom: PhantomData,
             },
         );
@@ -642,5 +696,98 @@ fn unexpected_exit(
     match result {
         Ok(()) => Err(EngineError::UnexpectedExit(component)),
         Err(error) => Err(error.into()),
+    }
+}
+
+const MARSHAL_PROCESSED_KEY: U64 = U64::new(0xFF);
+const STATE_SYNC_METADATA_SUFFIX: &str = "state_sync_metadata";
+
+async fn repair_marshal_progress_if_state_is_behind<E>(
+    context: &E,
+    partition_prefix: &str,
+    finalized_blocks: &BlocksArchive<E>,
+    current_target: &commonware_storage::qmdb::sync::Target<commonware_storage::mmr::Family, Digest>,
+) -> bool
+where
+    E: BufferPooler
+        + Clock
+        + Metrics
+        + Network
+        + Rng
+        + Spawner
+        + Storage
+        + ThreadPooler
+        + Send
+        + Sync
+        + 'static,
+{
+    let marshal_metadata_partition = format!("{partition_prefix}_marshal-application-metadata");
+    let metadata = Metadata::<E, U64, Height>::init(
+        context.child("marshal_progress_probe"),
+        metadata::Config {
+            partition: marshal_metadata_partition.clone(),
+            codec_config: (),
+        },
+    )
+    .await
+    .expect("failed to initialize marshal progress metadata probe");
+    let Some(processed_height) = metadata.get(&MARSHAL_PROCESSED_KEY).copied() else {
+        return false;
+    };
+    drop(metadata);
+
+    let Some(processed_block) = finalized_blocks
+        .get(ArchiveIdentifier::Index(processed_height.get()))
+        .await
+        .expect("failed to read processed block for state repair")
+    else {
+        warn!(
+            %processed_height,
+            "marshal progress references a missing finalized block; clearing startup metadata to replay"
+        );
+        remove_partition_if_exists(context, &marshal_metadata_partition).await;
+        clear_disabled_state_sync_metadata(context, partition_prefix).await;
+        return true;
+    };
+    let processed_target = <Application as StatefulApplication<E>>::sync_targets(&processed_block);
+    let current_size = current_target.range.end().as_u64();
+    let processed_size = processed_target.range.end().as_u64();
+    if current_size >= processed_size {
+        return false;
+    }
+
+    warn!(
+        %processed_height,
+        current_size,
+        processed_size,
+        "state database is behind marshal progress; clearing startup metadata to replay finalized blocks"
+    );
+    remove_partition_if_exists(context, &marshal_metadata_partition).await;
+    remove_partition_if_exists(
+        context,
+        &format!("{partition_prefix}{STATE_SYNC_METADATA_SUFFIX}"),
+    )
+    .await;
+    true
+}
+
+async fn clear_disabled_state_sync_metadata<E>(context: &E, partition_prefix: &str)
+where
+    E: Storage,
+{
+    remove_partition_if_exists(
+        context,
+        &format!("{partition_prefix}{STATE_SYNC_METADATA_SUFFIX}"),
+    )
+    .await;
+}
+
+async fn remove_partition_if_exists<E>(context: &E, partition: &str)
+where
+    E: Storage,
+{
+    match context.remove(partition, None).await {
+        Ok(()) | Err(commonware_runtime::Error::PartitionMissing(_)) => {}
+        Err(error) => panic!("failed to remove partition {partition}: {error}"),
     }
 }

@@ -12,7 +12,7 @@ use crate::{
     genesis::{ChainGenesis, GenesisError},
     indexer, rpc, PublicKey, NAMESPACE,
 };
-use commonware_codec::{Decode, DecodeExt, Encode};
+use commonware_codec::{Decode, DecodeExt, Encode, EncodeSize};
 use commonware_consensus::marshal;
 use commonware_cryptography::{
     bls12381::{
@@ -44,7 +44,7 @@ use std::{
     num::{NonZeroU32, TryFromIntError},
     path::{Path, PathBuf},
     str::FromStr,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tracing::{info, warn, Level};
 
@@ -512,19 +512,14 @@ async fn start_node(
     let mempool = register(channels::MEMPOOL);
     network.start();
 
-    let indexer_client = config.indexer_url.as_deref().map(indexer::HttpClient::new);
-    if let Some(client) = indexer_client.clone() {
-        upload_current_dkg_output(
-            context,
-            &config.name,
-            dkg_storage_key,
-            public_key.clone(),
-            max_participants,
-            client,
+    let indexer_client = config.indexer_url.as_deref().map(|url| {
+        let metrics = indexer::IndexerMetrics::register(&context.child("indexer"));
+        (
+            indexer::HttpClient::new(url).with_metrics(metrics.clone()),
+            metrics,
         )
-        .await;
-    }
-    if let Some(client) = indexer_client.clone() {
+    });
+    if let Some((client, metrics)) = indexer_client.clone() {
         spawn_current_dkg_output_uploader(
             context,
             config.name.clone(),
@@ -532,6 +527,7 @@ async fn start_node(
             public_key.clone(),
             max_participants,
             client,
+            metrics,
         );
     }
     let engine_config: EngineConfig<_, _, _> = EngineConfig {
@@ -555,12 +551,9 @@ async fn start_node(
         max_block_transactions: config.max_block_transactions,
         pool_config: PoolConfig::default(),
         genesis: read_genesis(config.genesis_path.as_ref())?,
-        indexer: indexer_client.clone(),
+        indexer: indexer_client.map(|(client, _metrics)| client),
     };
-    let dkg_callback: Box<dyn UpdateCallBack<MinSig, PublicKey>> = match indexer_client {
-        Some(client) => indexer::DkgOutputPusher::boxed(client),
-        None => ContinueOnUpdate::boxed(),
-    };
+    let dkg_callback: Box<dyn UpdateCallBack<MinSig, PublicKey>> = ContinueOnUpdate::boxed();
 
     let resolver_config = marshal::resolver::p2p::Config {
         public_key,
@@ -609,7 +602,9 @@ async fn upload_current_dkg_output(
     public_key: PublicKey,
     max_participants: NonZeroU32,
     client: indexer::HttpClient,
+    metrics: indexer::IndexerMetrics,
 ) {
+    let started = Instant::now();
     let storage = match DkgStorage::<_, MinSig, PublicKey>::init(
         context.child("dkg_output_seed"),
         node_name,
@@ -624,18 +619,30 @@ async fn upload_current_dkg_output(
         Ok(storage) => storage,
         Err(error) => {
             warn!(%error, "failed to open DKG storage for indexer upload");
+            metrics.dkg_upload_completed(indexer::DkgUploadStatus::Failure, started.elapsed());
             return;
         }
     };
     let Some((epoch, state)) = storage.epoch() else {
+        metrics.dkg_upload_completed(indexer::DkgUploadStatus::NoEpoch, started.elapsed());
         return;
     };
+    metrics.dkg_upload_last_attempt_epoch(epoch.get());
     let Some(output) = state.output else {
+        metrics.dkg_upload_completed(indexer::DkgUploadStatus::NoOutput, started.elapsed());
         return;
     };
+    metrics.dkg_upload_output_bytes(output.encode_size() as u64);
     match client.dkg_output_upload(epoch, output).await {
-        Ok(()) => info!(%epoch, "uploaded current DKG output to indexer"),
-        Err(error) => warn!(%epoch, %error, "failed to upload current DKG output to indexer"),
+        Ok(()) => {
+            metrics.dkg_upload_last_success_epoch(epoch.get());
+            metrics.dkg_upload_completed(indexer::DkgUploadStatus::Success, started.elapsed());
+            info!(%epoch, "uploaded current DKG output to indexer");
+        }
+        Err(error) => {
+            metrics.dkg_upload_completed(indexer::DkgUploadStatus::Failure, started.elapsed());
+            warn!(%epoch, %error, "failed to upload current DKG output to indexer");
+        }
     }
 }
 
@@ -646,12 +653,12 @@ fn spawn_current_dkg_output_uploader(
     public_key: PublicKey,
     max_participants: NonZeroU32,
     client: indexer::HttpClient,
+    metrics: indexer::IndexerMetrics,
 ) {
     context
         .child("dkg_output_uploader")
         .spawn(move |context| async move {
             loop {
-                context.sleep(Duration::from_secs(60)).await;
                 upload_current_dkg_output(
                     &context,
                     &node_name,
@@ -659,8 +666,10 @@ fn spawn_current_dkg_output_uploader(
                     public_key.clone(),
                     max_participants,
                     client.clone(),
+                    metrics.clone(),
                 )
                 .await;
+                context.sleep(Duration::from_secs(60)).await;
             }
         });
 }

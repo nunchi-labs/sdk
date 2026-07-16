@@ -8,7 +8,6 @@ use crate::{
 use commonware_codec::DecodeExt;
 use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
 use nunchi_common::{NoopEventSink, QmdbState, VecEventSink};
-use nunchi_crypto::SignatureError;
 
 async fn ledger(context: deterministic::Context) -> Ledger<QmdbState<deterministic::Context>> {
     let db = QmdbState::init(context, "coins-test")
@@ -218,11 +217,7 @@ fn rejects_transaction_with_bad_signature() {
             amount: 1,
         };
 
-        let err = ledger.apply_transaction(&tx, NoopEventSink).await.unwrap_err();
-        assert_eq!(
-            err,
-            LedgerError::BadSignature(SignatureError::InvalidSignature)
-        );
+        assert!(tx.verify().is_err());
     });
 }
 
@@ -330,12 +325,7 @@ fn rejects_multisig_transaction_below_threshold() {
             },
         );
 
-        // Threshold enforcement is part of stateless verification, which runs
-        // before execution; `validate_authorization` covers it.
-        assert_eq!(
-            ledger.apply_transaction(&tx, NoopEventSink).await.unwrap_err(),
-            LedgerError::BadSignature(SignatureError::InvalidSignature)
-        );
+        assert!(tx.verify().is_err());
     });
 }
 
@@ -576,10 +566,7 @@ fn rejects_cross_account_multisig_replay() {
 
         // The replayed signatures commit to account_a's id, so stateless
         // verification rejects the transaction before execution.
-        assert_eq!(
-            ledger.apply_transaction(&tx, NoopEventSink).await.unwrap_err(),
-            LedgerError::BadSignature(SignatureError::InvalidSignature)
-        );
+        assert!(tx.verify().is_err());
     });
 }
 

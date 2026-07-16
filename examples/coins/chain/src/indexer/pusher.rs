@@ -1,4 +1,7 @@
-use super::{Client, SharedState};
+use super::{
+    metrics::{BlockMetricSource, LiveUploadArtifact, SharedCacheSource},
+    Client, IndexerMetrics, SharedState,
+};
 use crate::{Activity, Block, Finalized, Notarized, Scheme, Seed, Seedable};
 use commonware_actor::Feedback;
 use commonware_consensus::{
@@ -7,41 +10,45 @@ use commonware_consensus::{
     Reporter, Viewable,
 };
 use commonware_cryptography::sha256::Digest;
-use commonware_runtime::{Metrics, Spawner};
+use commonware_runtime::{Clock, Metrics, Spawner};
 use std::{future::Future, sync::Arc};
 use tracing::{debug, warn};
 
 /// Uploads live seeds and certificate-bearing objects to the indexer.
-pub(crate) struct Pusher<E: Spawner + Metrics, C: Client> {
+pub(crate) struct Pusher<E: Spawner + Metrics + Clock, C: Client> {
     context: Arc<E>,
     client: C,
     marshal: MarshalMailbox<Scheme, Standard<Block>>,
     uploads: SharedState,
+    metrics: IndexerMetrics,
 }
 
-impl<E: Spawner + Metrics, C: Client> Clone for Pusher<E, C> {
+impl<E: Spawner + Metrics + Clock, C: Client> Clone for Pusher<E, C> {
     fn clone(&self) -> Self {
         Self {
             context: self.context.clone(),
             client: self.client.clone(),
             marshal: self.marshal.clone(),
             uploads: self.uploads.clone(),
+            metrics: self.metrics.clone(),
         }
     }
 }
 
-impl<E: Spawner + Metrics, C: Client> Pusher<E, C> {
+impl<E: Spawner + Metrics + Clock, C: Client> Pusher<E, C> {
     pub(crate) fn new(
         context: E,
         client: C,
         marshal: MarshalMailbox<Scheme, Standard<Block>>,
         uploads: SharedState,
+        metrics: IndexerMetrics,
     ) -> Self {
         Self {
             context: Arc::new(context),
             client,
             marshal,
             uploads,
+            metrics,
         }
     }
 }
@@ -63,7 +70,9 @@ impl CertificateUploadGuard {
     }
 
     fn cache_block(&self, block: Block) {
-        self.uploads.lock().cache_block(block);
+        self.uploads
+            .lock()
+            .cache_block(block, SharedCacheSource::LiveCertificate);
     }
 
     fn mark_uploaded(&mut self, height: u64) {
@@ -79,15 +88,19 @@ impl Drop for CertificateUploadGuard {
     }
 }
 
-impl<E: Spawner + Metrics, C: Client> Pusher<E, C> {
-    fn spawn_seed_upload(&self, label: &'static str, seed: Seed, view: View) {
-        self.context.child(label).spawn({
+impl<E: Spawner + Metrics + Clock, C: Client> Pusher<E, C> {
+    fn spawn_seed_upload(&self, artifact: LiveUploadArtifact, seed: Seed, view: View) {
+        self.metrics.live_upload_spawned(artifact);
+        self.context.child(artifact.as_str()).spawn({
             let client = self.client.clone();
-            move |_| async move {
+            let metrics = self.metrics.clone();
+            move |context| async move {
+                let mut upload = metrics.start_live_upload(context, artifact);
                 if let Err(e) = client.seed_upload(seed).await {
                     warn!(?e, "failed to upload seed");
                     return;
                 }
+                upload.succeed();
                 debug!(%view, "seed uploaded to indexer");
             }
         });
@@ -95,57 +108,75 @@ impl<E: Spawner + Metrics, C: Client> Pusher<E, C> {
 
     fn spawn_certificate_upload<F, Fut>(
         &self,
-        label: &'static str,
+        artifact: LiveUploadArtifact,
         view: View,
         round: Round,
         digest: Digest,
+        mark_finalized: bool,
         upload_fn: F,
     ) where
         F: Fn(C, Block) -> Fut + Send + 'static,
         Fut: Future<Output = Result<(), C::Error>> + Send,
     {
-        self.context.child(label).spawn({
+        self.metrics.live_upload_spawned(artifact);
+        self.context.child(artifact.as_str()).spawn({
             let client = self.client.clone();
             let marshal = self.marshal.clone();
             let uploads = self.uploads.clone();
-            move |_| async move {
+            let metrics = self.metrics.clone();
+            move |context| async move {
+                let mut upload = metrics.start_live_upload(context, artifact);
                 let mut guard = CertificateUploadGuard::new(uploads, digest);
 
+                let mut wait = upload.start_marshal_wait();
                 let block = marshal
                     .subscribe_by_digest(digest, DigestFallback::FetchByRound { round })
                     .await;
                 let Ok(block) = block else {
+                    drop(wait);
+                    upload.marshal_cancelled();
                     warn!(%view, "subscription for block cancelled");
                     return;
                 };
+                wait.found();
+                drop(wait);
 
                 let height = block.height.get();
+                metrics.observe_block(BlockMetricSource::LiveCertificate, &block);
                 guard.cache_block(block.clone());
                 if let Err(e) = upload_fn(client, block).await {
-                    warn!(?e, %view, label, "failed to upload certificate");
+                    warn!(?e, %view, label = artifact.as_str(), "failed to upload certificate");
                     return;
                 }
 
-                guard.mark_uploaded(height);
-                debug!(%view, label, "certificate uploaded to indexer");
+                if mark_finalized {
+                    guard.mark_uploaded(height);
+                }
+                upload.succeed();
+                debug!(%view, label = artifact.as_str(), "certificate uploaded to indexer");
             }
         });
     }
 }
 
-impl<E: Spawner + Metrics, C: Client> Reporter for Pusher<E, C> {
+impl<E: Spawner + Metrics + Clock, C: Client> Reporter for Pusher<E, C> {
     type Activity = Activity;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         match activity {
             Activity::Notarization(notarization) | Activity::Certification(notarization) => {
                 let view = notarization.view();
-                self.spawn_seed_upload("notarized_seed", notarization.seed(), view);
+                self.spawn_seed_upload(
+                    LiveUploadArtifact::NotarizedSeed,
+                    notarization.seed(),
+                    view,
+                );
                 self.spawn_certificate_upload(
-                    "notarized_block",
+                    LiveUploadArtifact::NotarizedBlock,
                     view,
                     notarization.round(),
                     notarization.proposal.payload,
+                    false,
                     move |indexer, block| {
                         let notarization = notarization.clone();
                         async move {
@@ -158,12 +189,17 @@ impl<E: Spawner + Metrics, C: Client> Reporter for Pusher<E, C> {
             }
             Activity::Finalization(finalization) => {
                 let view = finalization.view();
-                self.spawn_seed_upload("finalized_seed", finalization.seed(), view);
+                self.spawn_seed_upload(
+                    LiveUploadArtifact::FinalizedSeed,
+                    finalization.seed(),
+                    view,
+                );
                 self.spawn_certificate_upload(
-                    "finalized_block",
+                    LiveUploadArtifact::FinalizedBlock,
                     view,
                     finalization.round(),
                     finalization.proposal.payload,
+                    true,
                     move |indexer, block| {
                         let finalization = finalization.clone();
                         async move {
