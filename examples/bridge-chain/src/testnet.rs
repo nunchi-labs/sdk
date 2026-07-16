@@ -118,6 +118,9 @@ pub struct NodeConfig {
     pub storage_dir: PathBuf,
     pub consensus: ConsensusConfig,
     pub networking: NetworkConfig,
+    /// Enable one-time peer QMDB state sync for a fresh joining node.
+    #[serde(default)]
+    pub state_sync: bool,
 }
 
 impl NodeConfig {
@@ -372,6 +375,7 @@ fn write_chain(
             storage_dir: storage_dir.clone(),
             consensus: ConsensusConfig::default(),
             networking: NetworkConfig::default(),
+            state_sync: false,
         };
         node_config.write(&config_path)?;
         nodes.push(ManifestNode {
@@ -537,6 +541,7 @@ async fn start_node(
     let dkg = register(channels::DKG);
     let backfill = register(channels::BACKFILL);
     let probe = register(channels::PROBE);
+    let state_sync = register(channels::STATE_SYNC);
     network.start();
 
     let engine_config: EngineConfig<_, _, _> = EngineConfig {
@@ -554,6 +559,7 @@ async fn start_node(
         leader_timeout: Duration::from_millis(config.consensus.leader_timeout_ms),
         certification_timeout: Duration::from_millis(config.consensus.certification_timeout_ms),
         strategy: Sequential,
+        state_sync: config.state_sync,
         pool_config: PoolConfig::default(),
         bridge: bridge_mailbox,
         bridge_handle,
@@ -573,14 +579,19 @@ async fn start_node(
     let marshal_resolver =
         marshal::resolver::p2p::init(context.child("backfill"), resolver_config, backfill);
 
-    let (engine, node_handle) = Engine::new(context.child("engine"), engine_config).await;
+    let (engine, node_handle) = Engine::new(
+        context.child("engine"),
+        engine_config,
+        probe,
+        state_sync,
+    )
+    .await;
     let engine_handle = engine.start(
         pending,
         recovered,
         resolver,
         broadcast,
         dkg,
-        probe,
         marshal_resolver,
         ContinueOnUpdate::boxed(),
     );

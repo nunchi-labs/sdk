@@ -6,7 +6,7 @@ use commonware_runtime::{deterministic, Runner as _};
 
 use crate::state_db::{
     verify_state_proof, verify_state_update, CommitState, Namespace, QmdbState, StateProof,
-    StateProofCfg, StateStore,
+    StateError, StateProofCfg, StateStore, MAX_STATE_VALUE_SIZE,
 };
 
 #[test]
@@ -161,5 +161,24 @@ fn state_proof_codec_roundtrips() {
         assert!(verify_state_proof(&decoded, &root));
         assert!(verify_state_update(&decoded, &root, &key, b"balance"));
         assert_eq!(decoded.operations().len(), proof.operations().len());
+    });
+}
+
+#[test]
+fn state_commit_rejects_oversized_values() {
+    deterministic::Runner::default().start(|context| async move {
+        let mut state = QmdbState::init(context, "state-value-bound-test")
+            .await
+            .expect("init state");
+        let key = Namespace::new(b"test-ns").key(0u8, b"oversized");
+        state.set(key, vec![0; MAX_STATE_VALUE_SIZE + 1]);
+
+        assert!(matches!(
+            state.commit().await,
+            Err(StateError::ValueTooLarge {
+                size,
+                max: MAX_STATE_VALUE_SIZE,
+            }) if size == MAX_STATE_VALUE_SIZE + 1
+        ));
     });
 }

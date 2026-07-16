@@ -57,6 +57,8 @@ pub mod channels {
     pub const CLOB: u64 = 7;
     /// Floor-probe channel (finalization discovery / service for state-sync floors).
     pub const PROBE: u64 = 8;
+    /// QMDB operation/proof transfer for peer state sync.
+    pub const STATE_SYNC: u64 = 9;
 }
 
 /// The consensus epoch. The demo chain never reconfigures, so the epoch is hardcoded to 0.

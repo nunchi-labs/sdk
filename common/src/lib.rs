@@ -16,9 +16,10 @@ pub use account::{
 pub use events::{Event, EventSink, NoopEventSink, VecEventSink};
 pub use runtime::{Runtime, RuntimeContext};
 pub use state_db::{
-    shared_database, CommitState, Namespace, Overlay, QmdbBackend, QmdbBatch, QmdbConfig,
-    QmdbDatabaseSet, QmdbMerkleized, QmdbOperation, QmdbReader, QmdbState, QmdbUnmerkleized,
-    StateDb, StateError, StateStore,
+    qmdb_operation_codec_config, shared_database, CommitState, Namespace, Overlay, QmdbBackend,
+    QmdbBatch, QmdbConfig, QmdbDatabaseSet, QmdbMerkleized, QmdbOperation, QmdbOperationCfg,
+    QmdbReader, QmdbState, QmdbUnmerkleized, QmdbUpdate, StateDb, StateError, StateStore,
+    MAX_STATE_VALUE_SIZE,
 };
 pub use transaction::{
     AccountSignature, Authorization, Operation, Transaction, TransactionPayload,

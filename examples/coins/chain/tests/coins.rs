@@ -87,10 +87,10 @@ fn reaches_height_100() {
 }
 
 #[test_traced]
-fn backfills_late_validator() {
-    let executor = deterministic::Runner::timed(Duration::from_secs(30));
+fn state_syncs_late_validator() {
+    let executor = deterministic::Runner::timed(Duration::from_secs(60));
     executor.start(|mut context| async move {
-        let mut network = TestNetworkBuilder::new(5)
+        let mut network = TestNetworkBuilder::new(4)
             .without_initial_links()
             .build(&mut context)
             .await;
@@ -100,18 +100,18 @@ fn backfills_late_validator() {
             .link_where(link.clone(), |from, to| ![from, to].contains(&0usize))
             .await;
 
-        for index in 1..5 {
+        for index in 1..4 {
             network.start_validator(index).await;
         }
-        network.run_until_height(10).await;
+        network.run_until_height(3).await;
 
         network
             .link_where(link, |from, to| {
                 [from, to].contains(&0usize) && ![from, to].contains(&1usize)
             })
             .await;
-        network.start_validator(0).await;
-        network.run_until_height(20).await;
+        network.start_validator_with_state_sync(0).await;
+        network.run_until_height(5).await;
     });
 }
 

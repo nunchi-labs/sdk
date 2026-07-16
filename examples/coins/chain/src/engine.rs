@@ -42,6 +42,10 @@ use commonware_utils::{union, NZDuration};
 use futures::lock::Mutex as AsyncMutex;
 use governor::clock::Clock as GClock;
 use nunchi_chain::engine::*;
+use nunchi_chain::state_sync::{
+    Actor as StateSyncActor, Config as StateSyncConfig, FloorProvider,
+    Mailbox as StateSyncMailbox,
+};
 use nunchi_clob::{ClobActor, ClobConfig, ClobExtension};
 use nunchi_common::{QmdbBackend, QmdbState};
 use nunchi_dkg::{self as dkg, orchestrator, PeerConfig, UpdateCallBack, MAX_SUPPORTED_MODE};
@@ -82,6 +86,8 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
     pub leader_timeout: Duration,
     pub certification_timeout: Duration,
     pub strategy: S,
+    /// Discover a finalized floor and perform peer QMDB state sync on a fresh database.
+    pub state_sync: bool,
     pub max_block_transactions: usize,
     pub pool_config: PoolConfig,
     pub genesis: Option<ChainGenesis>,
@@ -89,7 +95,7 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
 
 type DkgActor<E, P> = nunchi_chain::DkgActor<E, P, Transaction, ClobExtension>;
 type DkgMailbox = nunchi_chain::DkgMailbox<Transaction, ClobExtension>;
-type StatefulApp<E> = StatefulActor<E, Application, Scheme, Standard<Block>, NoStateSyncResolver>;
+type StatefulApp<E> = StatefulActor<E, Application, Scheme, Standard<Block>, StateSyncMailbox<E>>;
 type StatefulAppMailbox<E> = StatefulMailbox<E, Application>;
 type Marshaled<E> = Deferred<E, Scheme, StatefulAppMailbox<E>, Block, FixedEpocher>;
 type SchemeProvider = Provider<Scheme, ed25519::PrivateKey>;
@@ -105,7 +111,6 @@ type Marshal<E, S> = MarshalActor<
     S,
 >;
 type Orchestrator<E, B, S> = orchestrator::Actor<E, B, Marshaled<E>, Scheme, Random, S, Block>;
-type FloorProbe<E, B, S> = Probe<E, Scheme, SchemeProvider, Standard<Block>, S, PublicKey, B>;
 
 /// The engine that drives the coins-chain [Application].
 #[allow(clippy::type_complexity)]
@@ -133,7 +138,8 @@ where
     buffer: buffered::Engine<E, PublicKey, Block, P>,
     buffered_mailbox: buffered::Mailbox<PublicKey, Block>,
     marshal: Marshal<E, S>,
-    probe: FloorProbe<E, B, S>,
+    probe_handle: Handle<()>,
+    state_sync_handle: Handle<()>,
     orchestrator: Orchestrator<E, B, S>,
     orchestrator_mailbox: orchestrator::Mailbox<MinSig, PublicKey>,
     mempool: Mempool<Transaction>,
@@ -163,7 +169,18 @@ where
     Batch: BatchVerifier<PublicKey = PublicKey>,
 {
     /// Create a new [Engine].
-    pub async fn new(context: E, config: Config<B, P, S>) -> (Self, NodeHandle<E>) {
+    pub async fn new(
+        context: E,
+        config: Config<B, P, S>,
+        probe_network: (
+            impl Sender<PublicKey = PublicKey>,
+            impl Receiver<PublicKey = PublicKey>,
+        ),
+        state_sync_network: (
+            impl Sender<PublicKey = PublicKey>,
+            impl Receiver<PublicKey = PublicKey>,
+        ),
+    ) -> (Self, NodeHandle<E>) {
         let (mempool, submitter) = Mempool::<Transaction>::new(config.pool_config.clone());
         let (clob, clob_mailbox) = ClobActor::new(ClobConfig::default());
         if let Some(clob_genesis) = config.genesis.as_ref().and_then(|genesis| genesis.clob.as_ref())
@@ -297,11 +314,22 @@ where
             &consensus_namespace,
             &config.output,
         );
+        let floor_verifier = certificate_verifier
+            .clone()
+            .expect("threshold scheme must support epoch-independent certificates");
         let provider = Provider::new(
             consensus_namespace.clone(),
             config.signer.clone(),
             certificate_verifier,
         );
+        let floor_sizing_scheme =
+            provider.scheme_for_epoch(&orchestrator::EpochTransition {
+                epoch: Epoch::zero(),
+                poly: Some(config.output.public().clone()),
+                share: config.share.clone(),
+                dealers: config.peer_config.dealers(0),
+            });
+        let floor_provider = FloorProvider::new(floor_verifier, floor_sizing_scheme);
         let state_partition = format!("{}-coins", config.partition_prefix);
         let db_config =
             QmdbState::<E>::config_with_page_cache(&state_partition, page_cache.clone());
@@ -367,23 +395,47 @@ where
         );
         let genesis = app.genesis_block();
         let genesis_digest = genesis.digest();
-        // The sync plan drives both marshal (its startup anchor below) and the stateful actor
-        // (via `StatefulConfig::plan`), so the two always agree on the startup decision. No
-        // finalized floor is attached: peer QMDB state sync is disabled (`NoStateSyncResolver`),
-        // so nodes recover via marshal backfill. The floor probe still runs in service mode to
-        // answer peers once a real resolver exists.
-        let plan =
+        // The sync plan drives both marshal and stateful startup. Fresh joining nodes can discover
+        // a floor and sync QMDB directly; bootstrap nodes leave `state_sync` disabled and start
+        // from genesis. Interrupted state sync resumes from its persisted floor.
+        let mut plan =
             SyncPlan::<_, Scheme, Standard<Block>>::init(&context, config.partition_prefix.clone())
                 .await;
+        let (state_sync, state_sync_mailbox) = StateSyncActor::new(
+            context.child("state_sync_resolver"),
+            StateSyncConfig {
+                peer_provider: config.manager.clone(),
+                blocker: config.blocker.clone(),
+                database: None,
+                operation_codec_config: nunchi_common::qmdb_operation_codec_config(),
+                mailbox_size: MAILBOX_SIZE,
+                me: Some(config.signer.public_key()),
+                initial: STATE_SYNC_RESOLVER_INITIAL,
+                timeout: STATE_SYNC_RESOLVER_TIMEOUT,
+                fetch_retry_timeout: STATE_SYNC_RESOLVER_RETRY,
+                max_serve_ops: STATE_SYNC_FETCH_BATCH_SIZE,
+                priority_requests: false,
+                priority_responses: false,
+            },
+        );
+        let state_sync_handle = state_sync.start(state_sync_network);
         let (probe, probe_mailbox) = Probe::new(ProbeConfig {
             context: context.child("probe"),
-            provider: provider.clone(),
+            provider: floor_provider,
             strategy: config.strategy.clone(),
             capacity: MAILBOX_SIZE,
             blocker: config.blocker.clone(),
             minimum_epoch: Epoch::zero(),
             retry_timeout: NZDuration!(Duration::from_secs(1)),
         });
+        let probe_handle = probe.start(probe_network);
+        if plan.should_state_sync(config.state_sync) && plan.floor().is_none() {
+            let floor = probe_mailbox
+                .subscribe()
+                .await
+                .expect("state-sync floor probe stopped");
+            plan = plan.with_floor(floor);
+        }
         let (marshal, marshal_mailbox, _processed_height) = MarshalActor::init(
             context.child("marshal"),
             finalizations_by_height,
@@ -411,7 +463,7 @@ where
             },
         )
         .await;
-        // Enter probe service without discovering a floor (join via with_floor stays disabled).
+        // Once startup floor selection is complete, serve our latest finalization to peers.
         probe_mailbox.attach(marshal_mailbox.clone());
 
         let (stateful, stateful_mailbox) = StatefulActor::init(
@@ -423,7 +475,7 @@ where
                 marshal: marshal_mailbox.clone(),
                 mailbox_size: MAILBOX_SIZE,
                 plan,
-                resolvers: NoStateSyncResolver,
+                resolvers: state_sync_mailbox,
                 sync_config: state_sync_config(),
                 prune_config: Some(state_prune_config()),
             },
@@ -469,7 +521,8 @@ where
             buffer,
             buffered_mailbox,
             marshal,
-            probe,
+            probe_handle,
+            state_sync_handle,
             orchestrator,
             orchestrator_mailbox,
             mempool,
@@ -511,10 +564,6 @@ where
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
-        probe: (
-            impl Sender<PublicKey = PublicKey>,
-            impl Receiver<PublicKey = PublicKey>,
-        ),
         marshal: (
             resolver::handler::Receiver<Digest>,
             resolver::p2p::Mailbox<Digest, PublicKey>,
@@ -531,7 +580,6 @@ where
                 dkg,
                 mempool,
                 clob,
-                probe,
                 marshal,
                 callback
             )
@@ -569,10 +617,6 @@ where
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
-        probe: (
-            impl Sender<PublicKey = PublicKey>,
-            impl Receiver<PublicKey = PublicKey>,
-        ),
         marshal: (
             resolver::handler::Receiver<Digest>,
             resolver::p2p::Mailbox<Digest, PublicKey>,
@@ -591,7 +635,8 @@ where
         let marshal_handle = self
             .marshal
             .start(reporters, self.buffered_mailbox, marshal);
-        let probe_handle = self.probe.start(probe);
+        let probe_handle = self.probe_handle;
+        let state_sync_handle = self.state_sync_handle;
         let stateful_handle = self.stateful.start();
         let orchestrator_handle = self.orchestrator.start(votes, certificates, resolver);
         let mempool_handle = self
@@ -613,6 +658,7 @@ where
             result = buffer_handle => unexpected_exit("buffer", result),
             result = marshal_handle => unexpected_exit("marshal", result),
             result = probe_handle => unexpected_exit("probe", result),
+            result = state_sync_handle => unexpected_exit("state sync resolver", result),
             result = stateful_handle => unexpected_exit("stateful", result),
             result = orchestrator_handle => unexpected_exit("orchestrator", result),
             result = mempool_handle => unexpected_exit("mempool", result),

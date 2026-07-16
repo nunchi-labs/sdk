@@ -2633,12 +2633,15 @@ name = "nunchi-chain"
 version = "2026.6.0"
 dependencies = [
  "bytes",
+ "commonware-actor",
  "commonware-codec",
  "commonware-consensus",
  "commonware-cryptography",
  "commonware-glue",
  "commonware-macros",
+ "commonware-p2p",
  "commonware-parallel",
+ "commonware-resolver",
  "commonware-runtime",
  "commonware-storage",
  "commonware-utils",

@@ -76,4 +76,4 @@ When upgrading nodes:
 
 * Do not run mixed commonware versions in the same peer set (marshal coding / ZODA shards and other wire formats are not interchangeable).
 * Mid-sync glue metadata from v2026.5.0 cannot resume after upgrading to v2026.7.0; clear or re-sync any node that crashed mid state-sync before the bump.
-* Peer QMDB state sync remains disabled for variable-value (`Vec<u8>`) state until the glue p2p resolver accepts a non-unit operation codec config. Engines recover via marshal backfill; floor-probe actors still serve finalizations on the `PROBE` channel for when sync is enabled.
+* Fresh joining nodes can enable peer QMDB state sync with `state_sync = true`. Nunchi's resolver preserves Commonware's standard wire layout while decoding variable-value operations with the chain-wide 512 KiB value bound.

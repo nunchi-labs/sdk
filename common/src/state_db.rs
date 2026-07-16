@@ -42,12 +42,27 @@ use commonware_storage::{
 use commonware_utils::{sync::TracedAsyncRwLock, NZUsize, NZU16, NZU64};
 use thiserror::Error;
 
+/// Maximum encoded value accepted by the shared state database and peer state sync.
+///
+/// The largest current value is a CLOB book index (about 256 KiB). This leaves headroom while
+/// keeping every untrusted state-sync allocation below the examples' 1 MiB network message cap.
+pub const MAX_STATE_VALUE_SIZE: usize = 512 * 1024;
+
 /// Errors surfaced by the shared state backend.
 #[derive(Debug, Error)]
 pub enum StateError {
     /// A failure originating from the underlying authenticated storage.
     #[error("state backend error: {0}")]
     Backend(String),
+
+    /// A state value exceeds the chain-wide limit.
+    #[error("state value is too large: size {size}, maximum {max}")]
+    ValueTooLarge {
+        /// Encoded value size.
+        size: usize,
+        /// Maximum accepted size.
+        max: usize,
+    },
 }
 
 /// A deterministic, collision-resistant view into the shared keyspace owned by a single module.
@@ -139,6 +154,7 @@ impl<T: CommitState + Send + ?Sized> CommitState for &mut T {
 pub type QmdbBackend<E> = AnyDb<Family, E, Digest, Vec<u8>, Sha256, TwoCap, Sequential>;
 pub type QmdbOperation = AnyOperation<Family, Digest, Vec<u8>>;
 pub type QmdbUpdate = AnyUpdate<Digest, Vec<u8>>;
+pub type QmdbOperationCfg = <QmdbOperation as Read>::Cfg;
 pub type QmdbJournal<E> = VariableJournal<E, QmdbOperation>;
 pub type QmdbIndex = UnorderedIndex<TwoCap, Location<Family>>;
 pub type QmdbConfig = VariableConfig<TwoCap, <QmdbOperation as Read>::Cfg, Sequential>;
@@ -155,6 +171,31 @@ pub type QmdbMerkleized<E> =
 
 fn backend_err(err: QmdbError<Family>) -> StateError {
     StateError::Backend(err.to_string())
+}
+
+/// Bounded operation codec configuration used for journal recovery and peer state sync.
+pub fn qmdb_operation_codec_config() -> QmdbOperationCfg {
+    (
+        (),
+        (
+            commonware_codec::RangeCfg::from(..=MAX_STATE_VALUE_SIZE),
+            (),
+        ),
+    )
+}
+
+fn validate_state_values<'a>(
+    values: impl Iterator<Item = &'a Option<Vec<u8>>>,
+) -> Result<(), StateError> {
+    for value in values.flatten() {
+        if value.len() > MAX_STATE_VALUE_SIZE {
+            return Err(StateError::ValueTooLarge {
+                size: value.len(),
+                max: MAX_STATE_VALUE_SIZE,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// A [`StateDb`] backed by a [`commonware_storage::qmdb`] authenticated database.
@@ -188,7 +229,7 @@ impl<E: Context + BufferPooler> QmdbState<E> {
                 partition: format!("{partition}-log-journal"),
                 items_per_section: NZU64!(4096),
                 compression: None,
-                codec_config: ((), (commonware_codec::RangeCfg::from(..), ())),
+                codec_config: qmdb_operation_codec_config(),
                 page_cache,
                 write_buffer: NZUsize!(65536),
             },
@@ -243,6 +284,7 @@ impl<E: Context> StateStore for QmdbState<E> {
 impl<E: Context> CommitState for QmdbState<E> {
     async fn commit(&mut self) -> Result<Digest, StateError> {
         if !self.overlay.is_empty() {
+            validate_state_values(self.overlay.values())?;
             // Stage the write-set keys so merkleize reuses locations resolved at read time
             // instead of re-probing the index for each mutation.
             let overlay = std::mem::take(&mut self.overlay);
@@ -451,6 +493,7 @@ impl<E: Context> QmdbBatch<E> {
         if self.pending.is_empty() {
             return batch.merkleize().await.map_err(backend_err);
         }
+        validate_state_values(self.pending.values())?;
         let pending = std::mem::take(&mut self.pending);
         let keys: Vec<Digest> = pending.keys().copied().collect();
         let key_refs: Vec<&Digest> = keys.iter().collect();

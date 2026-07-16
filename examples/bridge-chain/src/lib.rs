@@ -47,6 +47,8 @@ pub mod channels {
     pub const BACKFILL: u64 = 5;
     /// Floor-probe channel (finalization discovery / service for state-sync floors).
     pub const PROBE: u64 = 6;
+    /// QMDB operation/proof transfer for peer state sync.
+    pub const STATE_SYNC: u64 = 7;
 }
 
 /// The consensus epoch. The example chain uses one validator set at startup.
