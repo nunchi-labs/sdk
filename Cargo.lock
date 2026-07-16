@@ -2922,6 +2922,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "nunchi-lending"
+version = "2026.6.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-runtime",
+ "nunchi-coins",
+ "nunchi-common",
+ "nunchi-crypto",
+ "reqwest",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "nunchi-mcp"
 version = "2026.6.0"
 dependencies = [

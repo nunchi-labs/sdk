@@ -8,6 +8,7 @@ members = [
     "coins",
     "crypto",
     "dkg",
+    "lending",
     "narae",
     "xtask",
     "mempool",
@@ -44,6 +45,7 @@ nunchi-clob = { version = "2026.5.0", path = "clob" }
 nunchi-common = { version = "2026.5.0", path = "common" }
 nunchi-crypto = { version = "2026.5.0", path = "crypto" }
 nunchi-dkg = { version = "2026.5.0", path = "dkg" }
+nunchi-lending = { version = "2026.5.0", path = "lending" }
 nunchi-mempool = { version = "2026.5.0", path = "mempool" }
 nunchi-oracle = { version = "2026.5.0", path = "oracle" }
 nunchi-rpc = { version = "2026.5.0", path = "rpc" }
