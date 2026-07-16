@@ -1,4 +1,6 @@
 mod genesis;
+mod rpc;
+mod transaction;
 
 use std::collections::BTreeMap;
 
@@ -273,6 +275,7 @@ fn long_position_blocks_unsafe_withdrawal_then_liquidates_after_price_drop() {
     assert_eq!(balance(&ledger, &insurance_fund_account()), 950);
 }
 
+#[cfg(feature = "mock-execution")]
 #[test]
 fn collateral_moves_through_escrow_on_open_adjust_and_close() {
     let writer = oracle_writer();
@@ -330,6 +333,7 @@ fn funding_accrual_is_capped_and_interval_based() {
     assert_eq!(market_state.last_funding_ms, 7_201_500);
 }
 
+#[cfg(feature = "mock-execution")]
 #[test]
 fn funding_reduces_long_close_payout_when_mark_exceeds_index() {
     let writer = oracle_writer();
@@ -357,6 +361,7 @@ fn funding_reduces_long_close_payout_when_mark_exceeds_index() {
     assert_eq!(escrow_balance(&ledger), 1_050);
 }
 
+#[cfg(feature = "mock-execution")]
 #[test]
 fn funding_increases_short_close_payout_when_mark_exceeds_index() {
     let writer = oracle_writer();
@@ -399,6 +404,7 @@ fn update_mark_price_keeps_index_from_oracle() {
     assert_eq!(market.mark_price, 4_500_000);
 }
 
+#[cfg(feature = "mock-execution")]
 #[test]
 fn profitable_close_draws_from_insurance_when_escrow_is_insufficient() {
     let writer = oracle_writer();

@@ -4,7 +4,7 @@ use commonware_runtime::{deterministic, Clock, Runner as _, Supervisor};
 use commonware_utils::{NZUsize, NZU32};
 use governor::Quota;
 use nunchi_clob::{
-    market_id, AssetId, ClobOperation, OrderStatus, Side, TimeInForce, Transaction,
+    market_id, AssetId, ClobOperation, MatchBatch, OrderStatus, Side, TimeInForce, Transaction,
 };
 use nunchi_common::RuntimeContext;
 use nunchi_crypto::PrivateKey;
@@ -209,4 +209,54 @@ fn memclob_gossips_orders_between_validators() {
         }
         panic!("gossiped memclob orders did not converge");
     });
+}
+
+#[test]
+fn memclob_rejects_on_chain_only_operations() {
+    let mut engine = crate::MemBookEngine::default();
+    let maker = PrivateKey::from_seed(4);
+    let market = market();
+
+    engine
+        .apply_transaction(
+            &Transaction::sign(
+                &PrivateKey::from_seed(1),
+                0,
+                ClobOperation::CreateMarket {
+                    base_asset: asset(1),
+                    quote_asset: asset(2),
+                    tick_size: 1,
+                    lot_size: 1,
+                },
+            ),
+            block_context(1),
+        )
+        .unwrap();
+
+    let ask = Transaction::sign(
+        &maker,
+        0,
+        ClobOperation::PlaceOrder {
+            market,
+            side: Side::Ask,
+            price: 100,
+            base_quantity: 5,
+            time_in_force: TimeInForce::GoodTilCancelled,
+        },
+    );
+    engine.apply_transaction(&ask, block_context(2)).unwrap();
+
+    let err = engine
+        .apply_transaction(
+            &Transaction::sign(
+                &maker,
+                1,
+                ClobOperation::ApplyMatchBatch {
+                    batch: MatchBatch::default(),
+                },
+            ),
+            block_context(3),
+        )
+        .unwrap_err();
+    assert_eq!(err.to_string(), "signed order intents are off-chain only");
 }

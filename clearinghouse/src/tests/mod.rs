@@ -1,3 +1,5 @@
+mod transaction;
+
 use std::collections::BTreeMap;
 
 use commonware_codec::Encode;
