@@ -756,8 +756,92 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_actor::Feedback;
     use commonware_codec::DecodeExt;
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_cryptography::ed25519;
+    use commonware_p2p::{Provider, TrackedPeers};
+    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
+    use commonware_utils::{channel::oneshot, vec::NonEmptyVec, NZUsize};
+    use nunchi_common::{
+        qmdb_operation_codec_config, shared_database, QmdbBackend, QmdbState,
+    };
+    use std::collections::hash_map::DefaultHasher;
+    use std::time::Duration;
+
+    #[derive(Clone, Debug)]
+    struct DummyProvider;
+
+    impl Provider for DummyProvider {
+        type PublicKey = ed25519::PublicKey;
+
+        async fn peer_set(&mut self, _id: u64) -> Option<TrackedPeers<Self::PublicKey>> {
+            None
+        }
+
+        async fn subscribe(&mut self) -> commonware_p2p::PeerSetSubscription<Self::PublicKey> {
+            let (_tx, rx) = commonware_utils::channel::mpsc::unbounded_channel();
+            rx
+        }
+    }
+
+    #[derive(Clone)]
+    struct DummyBlocker;
+
+    impl commonware_p2p::Blocker for DummyBlocker {
+        type PublicKey = ed25519::PublicKey;
+
+        fn block(&mut self, _peer: Self::PublicKey) -> Feedback {
+            Feedback::Ok
+        }
+    }
+
+    type TestActor =
+        Actor<deterministic::Context, ed25519::PublicKey, DummyProvider, DummyBlocker>;
+    type TestPending = PendingSubscriber;
+    type TestPendingResult = oneshot::Receiver<ResolverResult>;
+
+    fn test_config(
+        database: Option<QmdbDatabaseSet<deterministic::Context>>,
+    ) -> Config<deterministic::Context, ed25519::PublicKey, DummyProvider, DummyBlocker> {
+        Config {
+            peer_provider: DummyProvider,
+            blocker: DummyBlocker,
+            database,
+            operation_codec_config: qmdb_operation_codec_config(),
+            mailbox_size: NZUsize!(16),
+            me: None,
+            initial: Duration::from_millis(10),
+            timeout: Duration::from_millis(10),
+            fetch_retry_timeout: Duration::from_millis(10),
+            max_serve_ops: NonZeroU64::new(16).unwrap(),
+            priority_requests: false,
+            priority_responses: false,
+        }
+    }
+
+    fn test_request_at(op_count: Location) -> Request {
+        Request {
+            op_count,
+            start_loc: Location::new(0),
+            max_ops: NonZeroU64::new(1).unwrap(),
+            include_pinned_nodes: false,
+        }
+    }
+
+    fn test_subscriber() -> (TestPending, TestPendingResult) {
+        oneshot::channel()
+    }
+
+    async fn init_db(
+        context: deterministic::Context,
+        partition: &str,
+    ) -> QmdbDatabaseSet<deterministic::Context> {
+        let cfg = QmdbState::config(&context, partition);
+        let db = QmdbBackend::init(context, cfg)
+            .await
+            .expect("db init should succeed");
+        shared_database(db)
+    }
 
     fn response(value: Vec<u8>) -> Response {
         Response {
@@ -772,6 +856,19 @@ mod tests {
             )],
             pinned_nodes: None,
         }
+    }
+
+    fn encoded_fetch_payload() -> Bytes {
+        Response {
+            proof: Proof {
+                leaves: Location::new(0),
+                inactive_peaks: 0,
+                digests: Vec::new(),
+            },
+            operations: Vec::new(),
+            pinned_nodes: None,
+        }
+        .encode()
     }
 
     #[test]
@@ -790,6 +887,24 @@ mod tests {
     }
 
     #[test]
+    fn response_codec_roundtrips_with_pinned_nodes() {
+        let response = Response {
+            proof: Proof {
+                leaves: Location::new(10),
+                inactive_peaks: 0,
+                digests: vec![Digest::from([7; 32])],
+            },
+            operations: vec![QmdbOperation::CommitFloor(None, Location::new(0))],
+            pinned_nodes: Some(vec![Digest::from([9; 32])]),
+        };
+        let encoded = response.encode();
+        let decoded = Response::decode_cfg(encoded, &(1, qmdb_operation_codec_config())).unwrap();
+        assert_eq!(decoded.operations.len(), 1);
+        assert_eq!(decoded.pinned_nodes.as_ref().unwrap().len(), 1);
+        assert_eq!(decoded.proof.leaves, Location::new(10));
+    }
+
+    #[test]
     fn request_codec_round_trips() {
         let request = Request {
             op_count: Location::new(128),
@@ -799,16 +914,49 @@ mod tests {
         };
         let decoded = Request::decode(request.encode()).unwrap();
         assert_eq!(request, decoded);
+        assert!(request < test_request_at(Location::new(200)));
+        assert!(format!("{request}").contains("pinned=true"));
+        assert!(format!("{request}").contains("max=16"));
+
+        let mut hasher = DefaultHasher::new();
+        request.hash(&mut hasher);
+        let mut hasher2 = DefaultHasher::new();
+        decoded.hash(&mut hasher2);
+        assert_eq!(hasher.finish(), hasher2.finish());
+    }
+
+    #[test]
+    fn request_decode_rejects_invalid_pinned_flag() {
+        let mut encoded = Request {
+            op_count: Location::new(128),
+            start_loc: Location::new(64),
+            max_ops: NonZeroU64::new(16).unwrap(),
+            include_pinned_nodes: true,
+        }
+        .encode()
+        .to_vec();
+        *encoded
+            .last_mut()
+            .expect("request encoding must include pinned_nodes flag") = 2;
+        assert!(matches!(
+            Request::decode(Bytes::from(encoded)),
+            Err(CodecError::InvalidBool)
+        ));
     }
 
     #[test]
     fn mailbox_cancellation_is_forwarded() {
         deterministic::Runner::default().start(|context| async move {
-            let (sender, mut receiver) = actor_mailbox::new(context, NonZeroUsize::new(4).unwrap());
+            let (sender, mut receiver) = actor_mailbox::new(context, NZUsize!(4));
             let mailbox = Mailbox::<deterministic::Context>::new(sender);
             let (cancel_tx, cancel_rx) = oneshot::channel();
-            let get =
-                mailbox.get_operations(Location::new(10), Location::new(3), NonZeroU64::MIN, false, cancel_rx);
+            let get = mailbox.get_operations(
+                Location::new(10),
+                Location::new(3),
+                NonZeroU64::MIN,
+                false,
+                cancel_rx,
+            );
             let observe = async move {
                 let response = match receiver.recv().await.unwrap() {
                     Message::GetOperations { response, .. } => response,
@@ -823,6 +971,389 @@ mod tests {
             };
             let (result, _) = futures::join!(get, observe);
             assert!(matches!(result, Err(ResponseDropped)));
+        });
+    }
+
+    #[test]
+    fn mailbox_returns_completed_response_before_cancel() {
+        deterministic::Runner::default().start(|context| async move {
+            let (sender, mut receiver) = actor_mailbox::new(context, NZUsize!(4));
+            let mailbox = Mailbox::<deterministic::Context>::new(sender);
+            let (cancel_tx, cancel_rx) = oneshot::channel();
+            let get = mailbox.get_operations(
+                Location::new(1),
+                Location::new(0),
+                NonZeroU64::MIN,
+                false,
+                cancel_rx,
+            );
+            let observe = async move {
+                let Message::GetOperations { response, .. } =
+                    receiver.recv().await.expect("request queued")
+                else {
+                    panic!("expected get operations");
+                };
+                response
+                    .send(Ok(FetchResult::new(
+                        Proof {
+                            leaves: Location::new(0),
+                            inactive_peaks: 0,
+                            digests: Vec::new(),
+                        },
+                        Vec::new(),
+                        None,
+                    )))
+                    .unwrap();
+                drop(cancel_tx);
+            };
+            let (result, _) = futures::join!(get, observe);
+            assert!(result.is_ok());
+        });
+    }
+
+    #[test]
+    fn attach_database_message_is_retained_in_overflow() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = init_db(context.child("db"), "overflow-attach").await;
+            let mut overflow = Pending::<deterministic::Context>::default();
+            assert!(overflow.is_empty());
+
+            Policy::handle(
+                &mut overflow,
+                Message::AttachDatabase(db.clone()),
+            );
+            assert!(!overflow.is_empty());
+
+            let mut seen = false;
+            overflow.drain(|message| {
+                seen = matches!(message, Message::AttachDatabase(_));
+                None
+            });
+            assert!(seen);
+            assert!(overflow.is_empty());
+        });
+    }
+
+    #[test]
+    fn engine_pending_skips_closed_responses() {
+        let mut overflow = EnginePending::default();
+        let (tx, rx) = oneshot::channel();
+        drop(rx);
+        Policy::handle(
+            &mut overflow,
+            EngineMessage::Produce {
+                key: test_request_at(Location::new(1)),
+                response: tx,
+            },
+        );
+        assert!(overflow.is_empty());
+
+        let (tx, _rx) = oneshot::channel();
+        Policy::handle(
+            &mut overflow,
+            EngineMessage::Deliver {
+                key: test_request_at(Location::new(2)),
+                value: Bytes::new(),
+                response: tx,
+            },
+        );
+        assert!(!overflow.is_empty());
+        overflow.drain(|_| None);
+        assert!(overflow.is_empty());
+    }
+
+    #[test]
+    fn handler_enqueues_deliver_and_produce() {
+        deterministic::Runner::default().start(|context| async move {
+            let (sender, mut receiver) = actor_mailbox::new(context, NZUsize!(4));
+            let mut handler = Handler::new(sender);
+            let request = test_request_at(Location::new(3));
+
+            let deliver_rx = commonware_resolver::Consumer::deliver(
+                &mut handler,
+                Delivery {
+                    key: request.clone(),
+                    subscribers: NonEmptyVec::new(((), tracing::Span::none())),
+                },
+                Bytes::from_static(b"payload"),
+            );
+            let EngineMessage::Deliver { key, value, response } =
+                receiver.recv().await.expect("deliver queued")
+            else {
+                panic!("expected deliver");
+            };
+            assert_eq!(key, request);
+            assert_eq!(value.as_ref(), b"payload");
+            response.send_lossy(true);
+            assert!(deliver_rx.await.unwrap());
+
+            let produce_rx = p2p::Producer::produce(&mut handler, request.clone());
+            let EngineMessage::Produce { key, response } =
+                receiver.recv().await.expect("produce queued")
+            else {
+                panic!("expected produce");
+            };
+            assert_eq!(key, request);
+            response.send_lossy(Bytes::from_static(b"ops"));
+            assert_eq!(produce_rx.await.unwrap().as_ref(), b"ops");
+        });
+    }
+
+    #[test]
+    fn produce_denied_before_attach() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
+            let (response_tx, response_rx) = oneshot::channel();
+            actor
+                .handle_produce(test_request_at(Location::new(1)), response_tx)
+                .await;
+            assert!(response_rx.await.is_err());
+        });
+    }
+
+    #[test]
+    fn same_request_served_after_attach() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
+            let db = init_db(context.child("resolver_db"), "resolver_after_attach").await;
+            let op_count = db.read().await.bounds().end;
+            let action = actor.handle_mailbox_message(Message::AttachDatabase(db));
+            assert!(matches!(action, MailboxAction::None));
+
+            let (response_tx, response_rx) = oneshot::channel();
+            actor
+                .handle_produce(test_request_at(op_count), response_tx)
+                .await;
+
+            let payload = response_rx
+                .await
+                .expect("response should be available after attach");
+            assert!(!payload.is_empty());
+        });
+    }
+
+    #[test]
+    fn produce_rejects_request_above_max_serve_ops() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = init_db(context.child("resolver_db"), "resolver-unbounded-max-ops").await;
+            let op_count = db.read().await.bounds().end;
+            let (mut actor, _mailbox) =
+                TestActor::new(context.child("actor"), test_config(Some(db)));
+
+            let request = Request {
+                op_count,
+                start_loc: Location::new(0),
+                max_ops: NonZeroU64::new(1_000).unwrap(),
+                include_pinned_nodes: false,
+            };
+            let (response_tx, response_rx) = oneshot::channel();
+            actor.handle_produce(request, response_tx).await;
+            assert!(response_rx.await.is_err());
+        });
+    }
+
+    #[test]
+    fn deliver_with_dropped_response_receiver_is_treated_as_valid() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
+            let request = test_request_at(Location::new(1));
+
+            let (subscriber_tx, subscriber_rx) = test_subscriber();
+            drop(subscriber_rx);
+            actor.pending.insert(request.clone(), vec![subscriber_tx]);
+
+            let (ack_tx, ack_rx) = oneshot::channel();
+            actor
+                .handle_deliver(request, encoded_fetch_payload(), ack_tx)
+                .await;
+            assert!(ack_rx.await.unwrap());
+        });
+    }
+
+    #[test]
+    fn deliver_rejects_invalid_payload_and_keeps_pending() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
+            let request = test_request_at(Location::new(1));
+
+            let (subscriber_tx, _subscriber_rx) = test_subscriber();
+            actor.pending.insert(request.clone(), vec![subscriber_tx]);
+
+            let (ack_tx, ack_rx) = oneshot::channel();
+            actor
+                .handle_deliver(request.clone(), Bytes::from_static(b"not-a-response"), ack_tx)
+                .await;
+            assert!(!ack_rx.await.unwrap());
+            assert!(actor.pending.contains_key(&request));
+        });
+    }
+
+    #[test]
+    fn deliver_with_rejected_subscriber_blocks_peer() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
+            let request = test_request_at(Location::new(1));
+
+            let (sub1_tx, sub1_rx) = test_subscriber();
+            let (sub2_tx, sub2_rx) = test_subscriber();
+            actor
+                .pending
+                .insert(request.clone(), vec![sub1_tx, sub2_tx]);
+
+            let (ack_tx, ack_rx) = oneshot::channel();
+            futures::join!(
+                actor.handle_deliver(request, encoded_fetch_payload(), ack_tx),
+                async {
+                    let fetch = sub1_rx.await.unwrap().unwrap();
+                    fetch
+                        .callback
+                        .expect("deliveries should include feedback")
+                        .send(true)
+                        .unwrap();
+                },
+                async {
+                    let fetch = sub2_rx.await.unwrap().unwrap();
+                    fetch
+                        .callback
+                        .expect("deliveries should include feedback")
+                        .send(false)
+                        .unwrap();
+                }
+            );
+
+            assert!(!ack_rx.await.unwrap());
+        });
+    }
+
+    #[test]
+    fn deliver_ignores_dropped_subscriber_approval() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
+            let request = test_request_at(Location::new(1));
+
+            let (sub1_tx, sub1_rx) = test_subscriber();
+            let (sub2_tx, sub2_rx) = test_subscriber();
+            actor
+                .pending
+                .insert(request.clone(), vec![sub1_tx, sub2_tx]);
+
+            let (ack_tx, ack_rx) = oneshot::channel();
+            futures::join!(
+                actor.handle_deliver(request, encoded_fetch_payload(), ack_tx),
+                async {
+                    let fetch = sub1_rx.await.unwrap().unwrap();
+                    drop(fetch);
+                },
+                async {
+                    let fetch = sub2_rx.await.unwrap().unwrap();
+                    fetch
+                        .callback
+                        .expect("deliveries should include feedback")
+                        .send(true)
+                        .unwrap();
+                }
+            );
+
+            assert!(ack_rx.await.unwrap());
+        });
+    }
+
+    #[test]
+    fn deliver_without_pending_subscribers_is_treated_as_valid() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
+            let (ack_tx, ack_rx) = oneshot::channel();
+            actor
+                .handle_deliver(
+                    test_request_at(Location::new(1)),
+                    Bytes::from_static(b"late-response"),
+                    ack_tx,
+                )
+                .await;
+            assert!(ack_rx.await.unwrap());
+        });
+    }
+
+    #[test]
+    fn get_operations_coalesces_active_subscribers() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
+            let request = test_request_at(Location::new(1));
+
+            let (first_tx, _first_rx) = test_subscriber();
+            let action = actor.handle_mailbox_message(Message::GetOperations {
+                request: request.clone(),
+                response: first_tx,
+            });
+            assert!(matches!(action, MailboxAction::Fetch(ref key) if key == &request));
+
+            let (second_tx, _second_rx) = test_subscriber();
+            let action = actor.handle_mailbox_message(Message::GetOperations {
+                request: request.clone(),
+                response: second_tx,
+            });
+            assert!(matches!(action, MailboxAction::None));
+            assert_eq!(actor.pending.get(&request).unwrap().len(), 2);
+        });
+    }
+
+    #[test]
+    fn get_operations_refetches_when_pending_subscribers_are_closed() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
+            let request = test_request_at(Location::new(1));
+
+            let (stale_tx, stale_rx) = test_subscriber();
+            drop(stale_rx);
+            actor.pending.insert(request.clone(), vec![stale_tx]);
+
+            let (fresh_tx, _fresh_rx) = test_subscriber();
+            let action = actor.handle_mailbox_message(Message::GetOperations {
+                request: request.clone(),
+                response: fresh_tx,
+            });
+
+            assert!(matches!(action, MailboxAction::Fetch(ref key) if key == &request));
+            let pending = actor.pending.get(&request).unwrap();
+            assert_eq!(pending.len(), 1);
+            assert!(!pending[0].is_closed());
+        });
+    }
+
+    #[test]
+    fn cancel_operations_removes_idle_requests() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
+            let request = test_request_at(Location::new(1));
+
+            let (stale_tx, stale_rx) = test_subscriber();
+            drop(stale_rx);
+            actor.pending.insert(request.clone(), vec![stale_tx]);
+
+            let action = actor.handle_mailbox_message(Message::CancelOperations {
+                request: request.clone(),
+            });
+            assert!(matches!(action, MailboxAction::Cancel(ref key) if key == &request));
+            assert!(!actor.pending.contains_key(&request));
+
+            let (live_tx, _live_rx) = test_subscriber();
+            actor.pending.insert(request.clone(), vec![live_tx]);
+            let action = actor.handle_mailbox_message(Message::CancelOperations { request });
+            assert!(matches!(action, MailboxAction::None));
+        });
+    }
+
+    #[test]
+    fn attachable_resolver_forwards_database() {
+        deterministic::Runner::default().start(|context| async move {
+            let (sender, mut receiver) = actor_mailbox::new(context.child("mb"), NZUsize!(4));
+            let mailbox = Mailbox::<deterministic::Context>::new(sender);
+            let db = init_db(context.child("db"), "attachable-resolver").await;
+            AttachableResolver::attach_database(&mailbox, db).await;
+            assert!(matches!(
+                receiver.recv().await.unwrap(),
+                Message::AttachDatabase(_)
+            ));
         });
     }
 }
