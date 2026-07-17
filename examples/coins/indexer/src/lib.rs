@@ -51,6 +51,7 @@ use tracing::warn;
 
 pub const LATEST: &str = "latest";
 const DKG_OUTPUT_STATE_FILE: &str = "dkg-output.latest";
+const UPLOAD_PENDING: &str = "upload pending";
 
 type BlockCfg = (NonZeroU32, ());
 type DkgOutputCfg = (NonZeroU32, ModeVersion);
@@ -216,8 +217,11 @@ impl Indexer {
         let view = seed.view();
         let scheme = {
             let mut store = self.store.write().unwrap();
-            if store.seeds.contains_key(&round) || !store.seed_uploads.insert(round) {
+            if store.seeds.contains_key(&round) {
                 return Ok(());
+            }
+            if !store.seed_uploads.insert(round) {
+                return Err(UPLOAD_PENDING);
             }
             store.verifier.scheme(seed.epoch())
         };
@@ -271,8 +275,11 @@ impl Indexer {
         let key = ArtifactKey { epoch, view };
         let scheme = {
             let mut store = self.store.write().unwrap();
-            if store.notarizations.contains_key(&key) || !store.notarization_uploads.insert(key) {
+            if store.notarizations.contains_key(&key) {
                 return Ok(());
+            }
+            if !store.notarization_uploads.insert(key) {
+                return Err(UPLOAD_PENDING);
             }
             store.verifier.scheme(epoch)
         };
@@ -331,8 +338,11 @@ impl Indexer {
         let key = ArtifactKey { epoch, view };
         let scheme = {
             let mut store = self.store.write().unwrap();
-            if store.finalizations.contains_key(&key) || !store.finalization_uploads.insert(key) {
+            if store.finalizations.contains_key(&key) {
                 return Ok(());
+            }
+            if !store.finalization_uploads.insert(key) {
+                return Err(UPLOAD_PENDING);
             }
             store.verifier.scheme(epoch)
         };
@@ -525,10 +535,7 @@ async fn seed_upload(
     body: Bytes,
 ) -> impl IntoResponse {
     match Seed::decode(body.as_ref()) {
-        Ok(seed) => match indexer.submit_seed(seed) {
-            Ok(()) => StatusCode::OK,
-            Err(_) => StatusCode::UNAUTHORIZED,
-        },
+        Ok(seed) => upload_status(indexer.submit_seed(seed)),
         Err(_) => StatusCode::BAD_REQUEST,
     }
 }
@@ -548,10 +555,7 @@ async fn notarization_upload(
     body: Bytes,
 ) -> impl IntoResponse {
     match Notarized::decode_cfg(body.as_ref(), &indexer.block_cfg()) {
-        Ok(notarized) => match indexer.submit_notarization(notarized) {
-            Ok(()) => StatusCode::OK,
-            Err(_) => StatusCode::UNAUTHORIZED,
-        },
+        Ok(notarized) => upload_status(indexer.submit_notarization(notarized)),
         Err(_) => StatusCode::BAD_REQUEST,
     }
 }
@@ -571,10 +575,7 @@ async fn finalization_upload(
     body: Bytes,
 ) -> impl IntoResponse {
     match Finalized::decode_cfg(body.as_ref(), &indexer.block_cfg()) {
-        Ok(finalized) => match indexer.submit_finalization(finalized) {
-            Ok(()) => StatusCode::OK,
-            Err(_) => StatusCode::UNAUTHORIZED,
-        },
+        Ok(finalized) => upload_status(indexer.submit_finalization(finalized)),
         Err(_) => StatusCode::BAD_REQUEST,
     }
 }
@@ -615,6 +616,14 @@ async fn dkg_output_upload(
             Err(_) => StatusCode::UNAUTHORIZED,
         },
         Err(_) => StatusCode::BAD_REQUEST,
+    }
+}
+
+fn upload_status(result: Result<(), &'static str>) -> StatusCode {
+    match result {
+        Ok(()) => StatusCode::OK,
+        Err(UPLOAD_PENDING) => StatusCode::SERVICE_UNAVAILABLE,
+        Err(_) => StatusCode::UNAUTHORIZED,
     }
 }
 
@@ -888,5 +897,27 @@ mod tests {
         assert_eq!(epoch, Epoch::new(2));
         assert_eq!(persisted, output);
         let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn pending_duplicate_finalization_is_retryable() {
+        let schemes = schemes();
+        let indexer = Indexer::new(*schemes[0].identity(), NZU32!(4));
+        let finalized = finalized(&schemes, 0, 1, 1);
+        let key = ArtifactKey {
+            epoch: block_epoch(&finalized.block).expect("block epoch"),
+            view: finalized.proof.view(),
+        };
+        indexer
+            .store
+            .write()
+            .unwrap()
+            .finalization_uploads
+            .insert(key);
+
+        let result = indexer.submit_finalization(finalized);
+
+        assert_eq!(result, Err(UPLOAD_PENDING));
+        assert_eq!(upload_status(result), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

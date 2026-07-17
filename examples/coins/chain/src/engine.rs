@@ -425,7 +425,6 @@ where
             .expect("failed to initialize state database for startup probe");
             state.sync_target()
         };
-        clear_disabled_state_sync_metadata(&context, &config.partition_prefix).await;
         if repair_marshal_progress_if_state_is_behind(
             &context,
             &config.partition_prefix,
