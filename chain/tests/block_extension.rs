@@ -4,7 +4,10 @@ use commonware_consensus::types::{Epoch, Height, Round, View};
 use commonware_cryptography::{ed25519, sha256, Digest as _, Digestible as _, Signer};
 use commonware_storage::mmr::Location;
 use commonware_utils::{non_empty_range, NZU32};
-use nunchi_chain::{Block, BlockExtension, Composite, ConsensusExtension, StateCommitment};
+use nunchi_chain::{
+    Block, BlockExtension, Composite, ConsensusExtension, NoConsensusExtension, StateCommitment,
+};
+use nunchi_common::{RuntimeContext, StateError, StateStore};
 use nunchi_dkg::{Context, ReshareBlock};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -65,6 +68,31 @@ impl ConsensusExtension for TestConsensusExtension {
     ) -> impl std::future::Future<Output = bool> + Send {
         std::future::ready(payload.0 == self.0)
     }
+
+    async fn apply_payload<S>(
+        &mut self,
+        _: &mut S,
+        _: RuntimeContext,
+        payload: &Self::Payload,
+    ) -> bool
+    where
+        S: StateStore + Send + Sync,
+    {
+        payload.0 == self.0
+    }
+}
+
+#[derive(Default)]
+struct NoopState;
+
+impl StateStore for NoopState {
+    async fn get(&self, _: &sha256::Digest) -> Result<Option<Vec<u8>>, StateError> {
+        Ok(None)
+    }
+
+    fn set(&mut self, _: sha256::Digest, _: Vec<u8>) {}
+
+    fn remove(&mut self, _: sha256::Digest) {}
 }
 
 fn context() -> Context {
@@ -203,6 +231,35 @@ fn composite_consensus_extension_verifies_both_payloads() {
     assert!(!futures::executor::block_on(
         extension.verify_payload(&(TestPayload(0), TestPayload(2)))
     ));
+}
+
+#[test]
+fn default_consensus_extension_applies_noop_payload() {
+    let mut extension = NoConsensusExtension;
+    let mut state = NoopState;
+
+    assert!(futures::executor::block_on(extension.apply_payload(
+        &mut state,
+        RuntimeContext::default(),
+        &()
+    )));
+}
+
+#[test]
+fn composite_consensus_extension_applies_both_payloads() {
+    let mut extension = Composite::new(TestConsensusExtension(1), TestConsensusExtension(2));
+    let mut state = NoopState;
+
+    assert!(futures::executor::block_on(extension.apply_payload(
+        &mut state,
+        RuntimeContext::default(),
+        &(TestPayload(1), TestPayload(2))
+    )));
+    assert!(!futures::executor::block_on(extension.apply_payload(
+        &mut state,
+        RuntimeContext::default(),
+        &(TestPayload(1), TestPayload(3))
+    )));
 }
 
 #[test]

@@ -273,13 +273,78 @@ where
         Some((included, merkleized))
     }
 
+    async fn build_proposal_state<E: Storage + Clock + Metrics>(
+        &mut self,
+        timing: Option<(&E, &ApplicationMetrics)>,
+        batches: <QmdbDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
+        context: RuntimeContext,
+        candidates: Vec<R::Transaction>,
+    ) -> Option<(Vec<R::Transaction>, Ext::Payload, QmdbMerkleized<E>)> {
+        let mut batch = QmdbBatch::new(batches);
+        let mut included = Vec::new();
+
+        let validate_start = timing.map(|(runtime_context, _)| runtime_context.current());
+        for transaction in candidates {
+            if included.len() == self.max_block_transactions {
+                break;
+            }
+            let mut overlay = Overlay::new(&mut batch);
+            match R::validate(&mut overlay, context, &transaction).await {
+                Ok(()) => {
+                    overlay.commit();
+                    included.push(transaction);
+                }
+                Err(error) if R::is_storage_error(&error) => {
+                    error!(?error, "storage failure while building block");
+                    return None;
+                }
+                Err(error) => {
+                    debug!(?error, "skipping non-executable txpool transaction");
+                }
+            }
+        }
+        if let Some(((runtime_context, metrics), validate_start)) = timing.zip(validate_start) {
+            metrics
+                .proposal_validate_duration
+                .observe_between(validate_start, runtime_context.current());
+        }
+
+        let extension = self.consensus.propose().await;
+        if !self
+            .consensus
+            .apply_payload(&mut batch, context, &extension)
+            .await
+        {
+            return None;
+        }
+
+        let merkleize_start = timing.map(|(runtime_context, _)| runtime_context.current());
+        let merkleized = match batch.merkleize().await {
+            Ok(merkleized) => merkleized,
+            Err(error) => {
+                error!(?error, "merkleization failed while building block");
+                return None;
+            }
+        };
+        if let Some(((runtime_context, metrics), merkleize_start)) = timing.zip(merkleize_start) {
+            metrics
+                .proposal_merkleize_duration
+                .observe_between(merkleize_start, runtime_context.current());
+        }
+        Some((included, extension, merkleized))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn execute_block<E, EventHandler>(
+        &mut self,
         runtime_context: &E,
         metrics: &ApplicationMetrics,
         batches: <QmdbDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
         context: RuntimeContext,
         transactions: &[R::Transaction],
+        extension: &Ext::Payload,
         events: &EventHandler,
+        commit_extension: bool,
     ) -> Option<QmdbMerkleized<E>>
     where
         E: Storage + Clock + Metrics,
@@ -308,6 +373,21 @@ where
                     return None;
                 }
             }
+        }
+        if !self
+            .consensus
+            .apply_payload(&mut batch, context, extension)
+            .await
+        {
+            if let Some(digest) = context.block_digest {
+                events.discard_block(digest).await;
+            }
+            return None;
+        }
+        if commit_extension {
+            self.consensus
+                .commit_payload(&mut batch, context, extension)
+                .await;
         }
         metrics
             .apply_transactions_duration
@@ -551,8 +631,8 @@ where
             parent.height.next(),
             timestamp,
         );
-        let (transactions, merkleized) = self
-            .build_valid_transactions_inner(
+        let (transactions, extension, merkleized) = self
+            .build_proposal_state(
                 Some((&runtime_context, &metrics)),
                 batches,
                 execution_context,
@@ -564,7 +644,6 @@ where
             Some(dkg) => dkg.act().await,
             None => None,
         };
-        let extension = self.consensus.propose().await;
         let block = Block::new(
             context,
             parent.digest(),
@@ -619,15 +698,18 @@ where
         }
 
         let execution_context = Self::block_runtime_context(&block);
-        let merkleized = Self::execute_block(
-            &runtime_context,
-            &metrics,
-            batches,
-            execution_context,
-            &block.transactions,
-            &NoopEventConsumer,
-        )
-        .await?;
+        let merkleized = self
+            .execute_block(
+                &runtime_context,
+                &metrics,
+                batches,
+                execution_context,
+                &block.transactions,
+                &block.extension,
+                &NoopEventConsumer,
+                false,
+            )
+            .await?;
         let state_range = Self::state_range(&merkleized);
         if merkleized.root() != block.state_root || state_range != block.state_range {
             return None;
@@ -643,16 +725,20 @@ where
     ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
         let metrics = self.metrics(&runtime_context);
         let execution_context = Self::block_runtime_context(block);
-        let merkleized = Self::execute_block(
-            &runtime_context,
-            &metrics,
-            batches,
-            execution_context,
-            &block.transactions,
-            &self.events,
-        )
-        .await
-        .expect("certified block failed deterministic execution");
+        let events = self.events.clone();
+        let merkleized = self
+            .execute_block(
+                &runtime_context,
+                &metrics,
+                batches,
+                execution_context,
+                &block.transactions,
+                &block.extension,
+                &events,
+                true,
+            )
+            .await
+            .expect("certified block failed deterministic execution");
         let state_range = Self::state_range(&merkleized);
         assert_eq!(
             merkleized.root(),

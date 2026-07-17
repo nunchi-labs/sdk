@@ -803,7 +803,7 @@ mod tests {
             1_000,
             Vec::new(),
             None,
-            (),
+            Default::default(),
             StateCommitment {
                 root: Sha256::hash(b"state"),
                 range: NonEmptyRange::new(Location::new(1)..Location::new(2)).unwrap(),

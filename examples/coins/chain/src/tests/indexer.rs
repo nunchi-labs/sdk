@@ -48,7 +48,7 @@ fn block(view: u64, height: u64, label: &[u8]) -> Block {
         height,
         Vec::<Transaction>::new(),
         None,
-        (),
+        Default::default(),
         state(height),
     )
 }

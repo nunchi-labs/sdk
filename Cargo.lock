@@ -2778,6 +2778,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "nunchi-clob"
+version = "2026.6.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-formatting",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-runtime",
+ "commonware-utils",
+ "futures",
+ "governor",
+ "jsonrpsee",
+ "nunchi-chain",
+ "nunchi-common",
+ "nunchi-crypto",
+ "nunchi-rpc",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "nunchi-coins"
 version = "2026.6.0"
 dependencies = [
@@ -2826,6 +2852,7 @@ dependencies = [
  "nunchi-authority",
  "nunchi-bridge",
  "nunchi-chain",
+ "nunchi-clob",
  "nunchi-coins",
  "nunchi-common",
  "nunchi-crypto",

@@ -232,7 +232,7 @@ mod tests {
             height,
             Vec::<Transaction>::new(),
             None,
-            (),
+            Default::default(),
             state(height),
         )
     }

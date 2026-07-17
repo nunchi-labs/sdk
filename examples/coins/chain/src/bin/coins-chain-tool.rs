@@ -266,6 +266,7 @@ fn write_genesis(args: GenesisArgs) -> Result<(), Box<dyn Error>> {
             fees: None,
         }),
         oracle: None,
+        clob: None,
     };
 
     if let Some(parent) = args

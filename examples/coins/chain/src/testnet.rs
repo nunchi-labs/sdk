@@ -510,6 +510,7 @@ async fn start_node(
     let dkg = register(channels::DKG);
     let backfill = register(channels::BACKFILL);
     let mempool = register(channels::MEMPOOL);
+    let clob = register(channels::CLOB);
     network.start();
 
     let indexer_client = config.indexer_url.as_deref().map(|url| {
@@ -577,6 +578,7 @@ async fn start_node(
         broadcast,
         dkg,
         mempool,
+        clob,
         marshal_resolver,
         dkg_callback,
     );
