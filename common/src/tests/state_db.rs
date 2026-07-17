@@ -6,7 +6,7 @@ use commonware_runtime::{deterministic, Runner as _};
 
 use crate::state_db::{
     verify_state_proof, verify_state_update, CommitState, Namespace, QmdbState, StateProof,
-    StateProofCfg, StateStore,
+    StateError, StateProofCfg, StateStore, MAX_STATE_VALUE_SIZE,
 };
 
 #[test]
@@ -22,7 +22,7 @@ fn state_proof_roundtrips_and_rejects_wrong_root() {
         let root = state.commit().await.expect("commit");
 
         // Prove the committed operations and verify against the root.
-        let bounds = state.operation_bounds().await;
+        let bounds = state.operation_bounds();
         let proof = state
             .proof(bounds.start, NonZeroU64::new(1024).unwrap())
             .await
@@ -58,7 +58,7 @@ fn historical_proof_verifies_against_past_root() {
         // produced that root).
         state.set(key1, b"balance".to_vec());
         let root1 = state.commit().await.expect("first commit");
-        let bounds1 = state.operation_bounds().await;
+        let bounds1 = state.operation_bounds();
         let size1 = bounds1.end;
 
         // Advance the state to a distinct root R2.
@@ -99,7 +99,7 @@ fn verify_state_update_checks_operation_membership() {
         state.set(key, b"balance".to_vec());
         let root = state.commit().await.expect("commit");
 
-        let bounds = state.operation_bounds().await;
+        let bounds = state.operation_bounds();
         let proof = state
             .proof(bounds.start, NonZeroU64::new(1024).unwrap())
             .await
@@ -142,7 +142,7 @@ fn state_proof_codec_roundtrips() {
         state.set(key, b"balance".to_vec());
         let root = state.commit().await.expect("commit");
 
-        let bounds = state.operation_bounds().await;
+        let bounds = state.operation_bounds();
         let proof = state
             .proof(bounds.start, NonZeroU64::new(1024).unwrap())
             .await
@@ -161,5 +161,24 @@ fn state_proof_codec_roundtrips() {
         assert!(verify_state_proof(&decoded, &root));
         assert!(verify_state_update(&decoded, &root, &key, b"balance"));
         assert_eq!(decoded.operations().len(), proof.operations().len());
+    });
+}
+
+#[test]
+fn state_commit_rejects_oversized_values() {
+    deterministic::Runner::default().start(|context| async move {
+        let mut state = QmdbState::init(context, "state-value-bound-test")
+            .await
+            .expect("init state");
+        let key = Namespace::new(b"test-ns").key(0u8, b"oversized");
+        state.set(key, vec![0; MAX_STATE_VALUE_SIZE + 1]);
+
+        assert!(matches!(
+            state.commit().await,
+            Err(StateError::ValueTooLarge {
+                size,
+                max: MAX_STATE_VALUE_SIZE,
+            }) if size == MAX_STATE_VALUE_SIZE + 1
+        ));
     });
 }

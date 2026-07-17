@@ -13,11 +13,14 @@ nunchi-dkg = { workspace = true }
 nunchi-mempool = { workspace = true }
 bytes = { workspace = true }
 commonware-codec = { workspace = true }
+commonware-actor = { workspace = true }
 commonware-consensus = { workspace = true }
 commonware-cryptography = { workspace = true }
 commonware-glue = { workspace = true }
 commonware-macros = { workspace = true }
+commonware-p2p = { workspace = true }
 commonware-parallel = { workspace = true }
+commonware-resolver = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-storage = { workspace = true }
 commonware-utils = { workspace = true }

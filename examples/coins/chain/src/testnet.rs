@@ -31,7 +31,7 @@ use commonware_utils::{ordered::Set, N3f1, NZUsize, NZU32};
 use governor::Quota;
 use nunchi_dkg::{ContinueOnUpdate, PeerConfig, StorageKey, MAX_SUPPORTED_MODE};
 use nunchi_mempool::PoolConfig;
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -112,6 +112,9 @@ pub struct NodeConfig {
     pub genesis_path: Option<PathBuf>,
     pub consensus: ConsensusConfig,
     pub networking: NetworkConfig,
+    /// Enable one-time peer QMDB state sync for a fresh joining node.
+    #[serde(default)]
+    pub state_sync: bool,
     pub max_block_transactions: usize,
 }
 
@@ -277,6 +280,7 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
             genesis_path: None,
             consensus: ConsensusConfig::default(),
             networking: NetworkConfig::default(),
+            state_sync: false,
             max_block_transactions: DEFAULT_MAX_BLOCK_TRANSACTIONS,
         };
         node_config.write(&config_path)?;
@@ -322,7 +326,7 @@ pub fn run_node(config_path: impl AsRef<Path>) -> Result<(), Error> {
     runtime.start(|context| async move {
         tokio::telemetry::init(
             context.child("telemetry"),
-            tokio::telemetry::Logging {
+            tokio::telemetry::Logs {
                 level: log_level_from_env(),
                 json: false,
             },
@@ -456,6 +460,8 @@ async fn start_node(
     let backfill = register(channels::BACKFILL);
     let mempool = register(channels::MEMPOOL);
     let clob = register(channels::CLOB);
+    let probe = register(channels::PROBE);
+    let state_sync = register(channels::STATE_SYNC);
     network.start();
 
     let engine_config: EngineConfig<_, _, _> = EngineConfig {
@@ -472,6 +478,7 @@ async fn start_node(
         leader_timeout: Duration::from_millis(config.consensus.leader_timeout_ms),
         certification_timeout: Duration::from_millis(config.consensus.certification_timeout_ms),
         strategy: Sequential,
+        state_sync: config.state_sync,
         max_block_transactions: config.max_block_transactions,
         pool_config: PoolConfig::default(),
         genesis: read_genesis(config.genesis_path.as_ref())?,
@@ -491,7 +498,13 @@ async fn start_node(
     let marshal_resolver =
         marshal::resolver::p2p::init(context.child("backfill"), resolver_config, backfill);
 
-    let (engine, node_handle) = Engine::new(context.child("engine"), engine_config).await;
+    let (engine, node_handle) = Engine::new(
+        context.child("engine"),
+        engine_config,
+        probe,
+        state_sync,
+    )
+    .await;
     let engine_handle = engine.start(
         pending,
         recovered,

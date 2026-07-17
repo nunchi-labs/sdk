@@ -133,7 +133,7 @@ where
 {
     let mut state = QmdbState::init_with_config(context, config).await?;
     genesis.apply_to_state(&mut state, empty).await?;
-    Ok(state_commitment(state.sync_target().await))
+    Ok(state_commitment(state.sync_target()))
 }
 
 pub fn state_commitment(target: Target<Family, Digest>) -> StateCommitment {

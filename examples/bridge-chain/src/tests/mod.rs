@@ -13,7 +13,8 @@ use commonware_cryptography::{
 use commonware_glue::stateful::{db::DatabaseSet, Application as StatefulApplication};
 use commonware_parallel::Sequential;
 use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
-use commonware_utils::{sync::AsyncRwLock, test_rng_seeded};
+use commonware_utils::TestRng;
+use nunchi_common::shared_database;
 use nunchi_bridge::{BridgeActor, BridgeExtension, BridgePayload, SubmitResult};
 use nunchi_chain::StateCommitment;
 use nunchi_common::{QmdbBackend, QmdbDatabaseSet, QmdbMerkleized, QmdbState};
@@ -27,7 +28,7 @@ const FOREIGN_NAMESPACE: &[u8] = b"_NUNCHI_BRIDGE_CHAIN_FOREIGN";
 const WRONG_NAMESPACE: &[u8] = b"_NUNCHI_BRIDGE_CHAIN_WRONG";
 
 fn schemes(namespace: &[u8], seed: u64) -> Vec<Scheme> {
-    let mut rng = test_rng_seeded(seed);
+    let mut rng = TestRng::new(seed);
     vrf::fixture::<MinSig, _>(&mut rng, namespace, 4).schemes
 }
 
@@ -91,7 +92,7 @@ fn chain_application_proposes_and_verifies_bridge_payload() {
         let db: QmdbBackend<deterministic::Context> = QmdbBackend::init(db_context, config)
             .await
             .expect("init state db");
-        let databases: QmdbDatabaseSet<deterministic::Context> = Arc::new(AsyncRwLock::new(db));
+        let databases: QmdbDatabaseSet<deterministic::Context> = shared_database(db);
         let genesis_target = databases.committed_targets().await;
         let genesis_state = StateCommitment {
             root: genesis_target.root,
@@ -111,7 +112,7 @@ fn chain_application_proposes_and_verifies_bridge_payload() {
         let proposed = <Application as StatefulApplication<deterministic::Context>>::propose(
             &mut app,
             (context.child("propose"), consensus_context(1)),
-            futures::stream::iter([genesis.clone()]),
+            futures::stream::iter([Arc::new(genesis.clone())]),
             databases.new_batches().await,
             &mut input,
         )
@@ -125,7 +126,7 @@ fn chain_application_proposes_and_verifies_bridge_payload() {
             <Application as StatefulApplication<deterministic::Context>>::verify(
                 &mut app,
                 (context.child("verify"), proposed.block.context.clone()),
-                futures::stream::iter([proposed.block.clone(), genesis.clone()]),
+                futures::stream::iter([Arc::new(proposed.block.clone()), Arc::new(genesis.clone())]),
                 databases.new_batches().await,
             )
             .await;
@@ -166,7 +167,7 @@ fn chain_application_proposes_and_verifies_bridge_payload() {
             <Application as StatefulApplication<deterministic::Context>>::verify(
                 &mut app,
                 (context.child("verify_reject"), rejected.context.clone()),
-                futures::stream::iter([rejected, genesis]),
+                futures::stream::iter([Arc::new(rejected), Arc::new(genesis)]),
                 databases.new_batches().await,
             )
             .await;
@@ -176,7 +177,7 @@ fn chain_application_proposes_and_verifies_bridge_payload() {
         let proposed = <Application as StatefulApplication<deterministic::Context>>::propose(
             &mut app,
             (context.child("propose_empty"), consensus_context(2)),
-            futures::stream::iter([proposed.block]),
+            futures::stream::iter([Arc::new(proposed.block)]),
             databases.new_batches().await,
             &mut input,
         )

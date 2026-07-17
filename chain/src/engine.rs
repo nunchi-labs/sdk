@@ -1,14 +1,14 @@
 //! Reusable engine tuning and support types.
 
 use commonware_consensus::types::ViewDelta;
-use commonware_cryptography::sha256::Digest;
-use commonware_glue::stateful::db::{AttachableResolver, SyncEngineConfig};
-use commonware_utils::{channel::oneshot, sync::AsyncRwLock, NZUsize, NZU16, NZU64};
-use nunchi_common::{QmdbBackend, QmdbOperation};
+use commonware_glue::stateful::{
+    db::SyncEngineConfig,
+    PruneConfig,
+};
+use commonware_utils::{NZUsize, NZU16, NZU64};
 use std::{
-    future::Future,
     num::{NonZero, NonZeroU16, NonZeroUsize},
-    sync::Arc,
+    time::Duration,
 };
 
 pub const MAILBOX_SIZE: NonZeroUsize = NZUsize!(1024);
@@ -32,6 +32,15 @@ pub const STATE_SYNC_APPLY_BATCH_SIZE: usize = 4_096;
 pub const STATE_SYNC_MAX_OUTSTANDING_REQUESTS: usize = 8;
 pub const STATE_SYNC_UPDATE_CHANNEL_SIZE: NonZero<usize> = NZUsize!(256);
 pub const STATE_SYNC_MAX_RETAINED_ROOTS: usize = 32;
+pub const STATE_SYNC_RESOLVER_INITIAL: Duration = Duration::from_secs(1);
+pub const STATE_SYNC_RESOLVER_TIMEOUT: Duration = Duration::from_secs(2);
+pub const STATE_SYNC_RESOLVER_RETRY: Duration = Duration::from_millis(100);
+/// Prune cadence in finalized heights (retention floors are independent of this).
+pub const PRUNE_MAINTENANCE_INTERVAL: NonZero<usize> = NZUsize!(32);
+/// Finalized blocks retained in marshal beyond `max_pending_acks + 1` (~1 epoch buffer).
+pub const PRUNE_RETAINED_MARSHAL_BLOCKS: usize = 200;
+/// Extra QMDB history beyond the ack window for serving lagging state-sync peers.
+pub const PRUNE_RETAINED_QMDB_BLOCKS: usize = 200;
 
 pub fn state_sync_config() -> SyncEngineConfig {
     SyncEngineConfig {
@@ -43,58 +52,12 @@ pub fn state_sync_config() -> SyncEngineConfig {
     }
 }
 
-/// Placeholder for a peer state-sync resolver.
-///
-/// `commonware_glue::stateful::db::p2p::standard::Actor` would slot in here, but as of
-/// commonware 2026.5.0 it requires `Op: Codec<Cfg = ()>`, which only fixed-encoding QMDB
-/// operations satisfy; the shared state database is variable-value (`Vec<u8>`), whose
-/// operation codec config is `((), (RangeCfg, ()))`. Until upstream threads the codec config
-/// through its resolver (or a chain moves to fixed-size values), peer state sync stays disabled:
-/// no startup path attaches a state-sync floor, so nodes recover via marshal backfill and this
-/// resolver is never asked to fetch.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct NoStateSyncResolver;
-
-#[derive(Debug, thiserror::Error)]
-#[error("peer state sync resolver is not configured")]
-pub struct NoStateSyncError;
-
-impl<E> AttachableResolver<QmdbBackend<E>> for NoStateSyncResolver
-where
-    E: commonware_storage::Context + Send + Sync + 'static,
-{
-    fn attach_database(
-        &self,
-        _db: Arc<AsyncRwLock<QmdbBackend<E>>>,
-    ) -> impl Future<Output = ()> + Send {
-        std::future::ready(())
-    }
-}
-
-impl commonware_storage::qmdb::sync::resolver::Resolver for NoStateSyncResolver {
-    type Family = commonware_storage::mmr::Family;
-    type Digest = Digest;
-    type Op = QmdbOperation;
-    type Error = NoStateSyncError;
-
-    fn get_operations<'a>(
-        &'a self,
-        _op_count: commonware_storage::mmr::Location,
-        _start_loc: commonware_storage::mmr::Location,
-        _max_ops: NonZero<u64>,
-        _include_pinned_nodes: bool,
-        _cancel_rx: oneshot::Receiver<()>,
-    ) -> impl Future<
-        Output = Result<
-            commonware_storage::qmdb::sync::resolver::FetchResult<
-                Self::Family,
-                Self::Op,
-                Self::Digest,
-            >,
-            Self::Error,
-        >,
-    > + Send
-           + 'a {
-        std::future::ready(Err(NoStateSyncError))
+/// Periodic marshal + QMDB pruning; `max_pending_acks` must match marshal's config.
+pub fn state_prune_config() -> PruneConfig {
+    PruneConfig {
+        max_pending_acks: MAX_PENDING_ACKS,
+        maintenance_interval: PRUNE_MAINTENANCE_INTERVAL,
+        retained_marshal_blocks: PRUNE_RETAINED_MARSHAL_BLOCKS,
+        retained_qmdb_blocks: PRUNE_RETAINED_QMDB_BLOCKS,
     }
 }

@@ -37,7 +37,7 @@ use commonware_runtime::{
     Storage as RuntimeStorage,
 };
 use commonware_utils::{ordered::Set, Acknowledgement as _, N3f1, NZU32};
-use rand_core::CryptoRngCore;
+use rand::CryptoRng;
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use tracing::{debug, error, info, warn};
 
@@ -125,7 +125,7 @@ pub enum Execution {
 
 pub struct Actor<E, P, B>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + RuntimeStorage,
+    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + RuntimeStorage,
     P: Manager<PublicKey = ed25519::PublicKey>,
     B: ReshareBlock,
 {
@@ -151,7 +151,7 @@ where
 
 impl<E, P, B> Actor<E, P, B>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + RuntimeStorage,
+    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + RuntimeStorage,
     P: Manager<PublicKey = ed25519::PublicKey>,
     B: ReshareBlock,
     Batch: BatchVerifier<PublicKey = ed25519::PublicKey>,

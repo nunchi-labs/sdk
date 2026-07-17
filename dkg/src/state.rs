@@ -11,7 +11,7 @@ use commonware_cryptography::{
     bls12381::{
         dkg::feldman_desmedt::{
             Dealer as CryptoDealer, DealerLog, DealerPrivMsg, DealerPubMsg, Info, Logs, Output,
-            Player as CryptoPlayer, PlayerAck, SignedDealerLog,
+            Player as CryptoPlayer, PlayerAck, SignedDealerLog, Verdict,
         },
         primitives::{group::Share, sharing::ModeVersion, variant::Variant},
     },
@@ -28,7 +28,7 @@ use commonware_storage::{
 };
 use commonware_utils::{Faults, NZUsize, NZU16};
 use futures::StreamExt;
-use rand_core::CryptoRngCore;
+use rand::CryptoRng;
 use std::{
     collections::BTreeMap,
     num::{NonZeroU16, NonZeroU32, NonZeroUsize},
@@ -193,7 +193,7 @@ impl<V: Variant, P: PublicKey> Default for EpochCache<V, P> {
 /// the position/epoch confusion that can occur with position-based journals.
 pub struct Storage<E, V, P>
 where
-    E: BufferPooler + Clock + RuntimeStorage + Metrics + CryptoRngCore,
+    E: BufferPooler + Clock + RuntimeStorage + Metrics + CryptoRng,
     V: Variant,
     P: PublicKey,
 {
@@ -213,7 +213,7 @@ where
 
 impl<E, V, P> Storage<E, V, P>
 where
-    E: BufferPooler + Clock + RuntimeStorage + Metrics + CryptoRngCore,
+    E: BufferPooler + Clock + RuntimeStorage + Metrics + CryptoRng,
     V: Variant,
     P: PublicKey,
 {
@@ -239,7 +239,7 @@ where
         )
         .await?;
 
-        let msgs = SVJournal::init(
+        let mut msgs = SVJournal::init(
             context.child("msgs"),
             SVConfig {
                 partition: format!("{partition_prefix}_msgs"),
@@ -680,7 +680,7 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
         ack: PlayerAck<C::PublicKey>,
     ) -> bool
     where
-        E: BufferPooler + Clock + RuntimeStorage + Metrics + CryptoRngCore,
+        E: BufferPooler + Clock + RuntimeStorage + Metrics + CryptoRng,
     {
         if !self.unsent.contains_key(&player) {
             return false;
@@ -763,7 +763,7 @@ impl<V: Variant, C: Signer> Player<V, C> {
         priv_msg: DealerPrivMsg,
     ) -> Option<PlayerAck<C::PublicKey>>
     where
-        E: BufferPooler + Clock + RuntimeStorage + Metrics + CryptoRngCore,
+        E: BufferPooler + Clock + RuntimeStorage + Metrics + CryptoRng,
         M: Faults,
     {
         // If we've already generated an ack, return the cached version
@@ -772,31 +772,32 @@ impl<V: Variant, C: Signer> Player<V, C> {
         }
 
         // Otherwise generate a new ack
-        if let Some(ack) =
-            self.player
-                .dealer_message::<M>(dealer.clone(), pub_msg.clone(), priv_msg.clone())
+        let Verdict::Valid(ack) = self.player.dealer_message::<M>(
+            dealer.clone(),
+            pub_msg.clone(),
+            priv_msg.clone(),
+        ) else {
+            return None;
+        };
+        match storage
+            .append_dealing(epoch, dealer.clone(), pub_msg, priv_msg)
+            .await
         {
-            match storage
-                .append_dealing(epoch, dealer.clone(), pub_msg, priv_msg)
-                .await
-            {
-                Ok(true) => {}
-                Ok(false) => return None,
-                Err(err) => {
-                    error!(?epoch, ?dealer, %err, "failed to persist DKG dealing");
-                    return None;
-                }
+            Ok(true) => {}
+            Ok(false) => return None,
+            Err(err) => {
+                error!(?epoch, ?dealer, %err, "failed to persist DKG dealing");
+                return None;
             }
-            self.acks.insert(dealer, ack.clone());
-            return Some(ack);
         }
-        None
+        self.acks.insert(dealer, ack.clone());
+        Some(ack)
     }
 
     /// Finalize the player's participation in the DKG round.
     pub fn finalize<M: Faults, B: BatchVerifier<PublicKey = C::PublicKey>>(
         self,
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         logs: Logs<V, C::PublicKey, M>,
         strategy: &impl Strategy,
     ) -> Result<

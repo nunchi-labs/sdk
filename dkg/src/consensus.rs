@@ -9,7 +9,7 @@ use commonware_cryptography::{
         dkg::feldman_desmedt as dkg,
         primitives::variant::{MinSig, Variant},
     },
-    certificate::{self, Scheme as CertificateScheme},
+    certificate::{self, Scheme as CertificateScheme, Scoped},
     ed25519,
     sha256::Digest,
     PublicKey as CryptoPublicKey, Signer,
@@ -73,13 +73,16 @@ impl<S: CertificateScheme, C: Signer> certificate::Provider for Provider<S, C> {
     type Scope = Epoch;
     type Scheme = S;
 
-    fn scoped(&self, epoch: Epoch) -> Option<Arc<S>> {
-        let schemes = self.schemes.lock();
-        schemes.get(&epoch).cloned()
+    fn scoped(&self, epoch: Epoch) -> Option<Scoped<S>> {
+        if let Some(verifier) = &self.certificate_verifier {
+            return Some(Scoped::verifier(verifier.clone()));
+        }
+        self.scheme(epoch).map(Scoped::scheme)
     }
 
-    fn all(&self) -> Option<Arc<S>> {
-        self.certificate_verifier.clone()
+    fn scheme(&self, epoch: Epoch) -> Option<Arc<S>> {
+        let schemes = self.schemes.lock();
+        schemes.get(&epoch).cloned()
     }
 }
 
