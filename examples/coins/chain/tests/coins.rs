@@ -303,15 +303,11 @@ fn coin_state_converges_across_validators() {
             network.start_all().await;
 
             let (alice, bob, _carol) = submit_scenario(&network).await;
-            network.run_until_nonces(&[(alice, 4), (bob, 1)]).await;
-
-            let ledgers = network.ledgers().await;
-            assert_eq!(ledgers.len(), VALIDATORS as usize);
-
-            let mut roots = Vec::new();
-            for ledger in &ledgers {
-                roots.push(ledger.db().root().await);
-            }
+            network
+                .run_until_nonces(&[(alice.clone(), 4), (bob.clone(), 1)])
+                .await;
+            let roots = network.run_until_ledger_roots_converge().await;
+            assert_eq!(roots.len(), VALIDATORS as usize);
 
             let reference = roots[0];
             for (index, root) in roots.iter().enumerate() {

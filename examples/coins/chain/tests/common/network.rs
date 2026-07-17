@@ -4,7 +4,9 @@ use commonware_cryptography::{
         dkg::feldman_desmedt::{deal, Output},
         primitives::{group, variant::MinSig},
     },
-    ed25519, Signer,
+    ed25519,
+    sha256::Digest,
+    Signer,
 };
 use commonware_p2p::{
     simulated::{self, Link, Network, Oracle, Receiver, Sender},
@@ -407,6 +409,24 @@ impl TestNetwork<'_> {
                 break;
             }
             self.context.sleep(Duration::from_secs(1)).await;
+        }
+    }
+
+    pub(crate) async fn run_until_ledger_roots_converge(&self) -> Vec<Digest> {
+        loop {
+            let ledgers = self.ledgers().await;
+            if ledgers.len() != self.participants.len() {
+                self.context.sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+            let mut roots = Vec::with_capacity(ledgers.len());
+            for ledger in &ledgers {
+                roots.push(ledger.db().root().await);
+            }
+            if roots.windows(2).all(|window| window[0] == window[1]) {
+                return roots;
+            }
+            self.context.sleep(Duration::from_millis(100)).await;
         }
     }
 
