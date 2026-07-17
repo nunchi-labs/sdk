@@ -1,7 +1,7 @@
 //! Consensus engine orchestrator for epoch transitions.
 
 mod actor;
-pub use actor::{Actor, Config};
+pub use actor::{Actor, Config, NoopReporter};
 
 mod ingress;
 #[cfg(test)]

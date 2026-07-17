@@ -5,13 +5,14 @@
 //! as `narae` consume. [`run_node`] boots a single validator from one of those configs on the
 //! tokio runtime with authenticated peer discovery, and serves the aggregated JSON-RPC module.
 
+use crate::indexer::Client as _;
 use crate::{
     channels,
     engine::{Config as EngineConfig, Engine},
     genesis::{ChainGenesis, GenesisError},
-    rpc, PublicKey, NAMESPACE,
+    indexer, rpc, PublicKey, NAMESPACE,
 };
-use commonware_codec::{Decode, DecodeExt, Encode};
+use commonware_codec::{Decode, DecodeExt, Encode, EncodeSize};
 use commonware_consensus::marshal;
 use commonware_cryptography::{
     bls12381::{
@@ -25,26 +26,30 @@ use commonware_p2p::{
     authenticated::discovery::{self, Network},
     Ingress, Manager,
 };
-use commonware_parallel::Sequential;
-use commonware_runtime::{tokio, Handle, Runner as _, Spawner as _, Supervisor as _};
+use commonware_runtime::{
+    tokio, Clock as _, Handle, Runner as _, Spawner as _, Strategizer as _, Supervisor as _,
+};
 use commonware_utils::{ordered::Set, N3f1, NZUsize, NZU32};
 use governor::Quota;
-use nunchi_dkg::{ContinueOnUpdate, PeerConfig, StorageKey, MAX_SUPPORTED_MODE};
+use nunchi_dkg::{
+    ContinueOnUpdate, PeerConfig, Storage as DkgStorage, StorageKey, StorageProtector,
+    UpdateCallBack, MAX_SUPPORTED_MODE,
+};
 use nunchi_mempool::PoolConfig;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, SocketAddr},
     num::{NonZeroU32, TryFromIntError},
     path::{Path, PathBuf},
     str::FromStr,
-    time::Duration,
+    time::{Duration, Instant},
 };
-use tracing::{info, Level};
+use tracing::{info, warn, Level};
 
 const FREEZER_TABLE_INITIAL_SIZE: u32 = 2u32.pow(14);
-const DEFAULT_MAX_BLOCK_TRANSACTIONS: usize = 256;
+const DEFAULT_MAX_BLOCK_TRANSACTIONS: usize = 4_096;
 const DEFAULT_MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 const DEFAULT_CHANNEL_BACKLOG: usize = 1024;
 
@@ -55,6 +60,11 @@ pub struct LocalTestnetConfig {
     pub base_rpc_port: u16,
     pub base_metrics_port: u16,
     pub base_data_dir: PathBuf,
+    pub bind_ip: IpAddr,
+    pub public_ips: Option<Vec<IpAddr>>,
+    pub storage_dir: Option<PathBuf>,
+    pub genesis_path: Option<PathBuf>,
+    pub indexer_url: Option<String>,
     pub seed: u64,
 }
 
@@ -64,6 +74,8 @@ pub struct LocalTestnetConfig {
 pub struct LocalTestnetManifest {
     pub chain: String,
     pub executable_path: PathBuf,
+    #[serde(default)]
+    pub indexer: IndexerManifest,
     pub nodes: Vec<ManifestNode>,
 }
 
@@ -91,6 +103,14 @@ pub struct ManifestNode {
     pub data_dir: PathBuf,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct IndexerManifest {
+    pub identity: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub output: String,
+    pub participants: u32,
+}
+
 /// One validator's standalone configuration.
 ///
 /// Key material is hex-encoded commonware-codec bytes. The threshold `output` and `share` come
@@ -110,6 +130,8 @@ pub struct NodeConfig {
     pub bootstrappers: Vec<BootstrapperConfig>,
     pub storage_dir: PathBuf,
     pub genesis_path: Option<PathBuf>,
+    #[serde(default)]
+    pub indexer_url: Option<String>,
     pub consensus: ConsensusConfig,
     pub networking: NetworkConfig,
     /// Enable one-time peer QMDB state sync for a fresh joining node.
@@ -173,6 +195,8 @@ impl Default for NetworkConfig {
 pub enum Error {
     #[error("validator count must be non-zero")]
     EmptyValidatorSet,
+    #[error("expected {validators} public hosts, got {hosts}")]
+    PublicHostCount { validators: u32, hosts: usize },
     #[error("validator count is too large for this platform: {0}")]
     ValidatorCountTooLarge(#[from] TryFromIntError),
     #[error("port range starting at {base_port} cannot fit {validators} validators")]
@@ -218,6 +242,14 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
     check_port_range(config.base_port, config.validators)?;
     check_port_range(config.base_rpc_port, config.validators)?;
     check_port_range(config.base_metrics_port, config.validators)?;
+    if let Some(public_ips) = &config.public_ips {
+        if public_ips.len() != node_count {
+            return Err(Error::PublicHostCount {
+                validators: config.validators,
+                hosts: public_ips.len(),
+            });
+        }
+    }
 
     let private_keys = (0..config.validators)
         .map(|index| ed25519::PrivateKey::from_seed(config.seed.wrapping_add(index as u64)))
@@ -243,10 +275,23 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
         let port = config.base_port + u16::try_from(index)?;
         let rpc_port = config.base_rpc_port + u16::try_from(index)?;
         let metrics_port = config.base_metrics_port + u16::try_from(index)?;
-        let storage_dir = config.base_data_dir.join(&name);
-        fs::create_dir_all(&storage_dir)?;
+        let storage_dir = config
+            .storage_dir
+            .clone()
+            .unwrap_or_else(|| config.base_data_dir.join(&name));
+        if config.storage_dir.is_none() {
+            fs::create_dir_all(&storage_dir)?;
+        }
         let config_path = config.base_data_dir.join(format!("{name}.toml"));
-        let listen_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+        let listen_address = SocketAddr::new(config.bind_ip, port);
+        let dialable_address = SocketAddr::new(
+            config
+                .public_ips
+                .as_ref()
+                .map(|hosts| hosts[index])
+                .unwrap_or(config.bind_ip),
+            port,
+        );
         let bootstrappers = participants
             .iter()
             .enumerate()
@@ -255,7 +300,11 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
                 Ok(BootstrapperConfig {
                     public_key: encode(public_key),
                     address: SocketAddr::new(
-                        IpAddr::V4(Ipv4Addr::LOCALHOST),
+                        config
+                            .public_ips
+                            .as_ref()
+                            .map(|hosts| hosts[candidate])
+                            .unwrap_or(config.bind_ip),
                         config.base_port + u16::try_from(candidate)?,
                     ),
                 })
@@ -272,12 +321,13 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
             share: encode(share),
             peer_config: peer_config.clone(),
             listen_address,
-            dialable_address: listen_address,
-            rpc_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), rpc_port),
-            metrics_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), metrics_port),
+            dialable_address,
+            rpc_address: SocketAddr::new(config.bind_ip, rpc_port),
+            metrics_address: SocketAddr::new(config.bind_ip, metrics_port),
             bootstrappers,
             storage_dir: storage_dir.clone(),
-            genesis_path: None,
+            genesis_path: config.genesis_path.clone(),
+            indexer_url: config.indexer_url.clone(),
             consensus: ConsensusConfig::default(),
             networking: NetworkConfig::default(),
             state_sync: false,
@@ -297,6 +347,11 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
     Ok(LocalTestnetManifest {
         chain: "coins-chain".to_string(),
         executable_path: PathBuf::from("coins-chain-node"),
+        indexer: IndexerManifest {
+            identity: encode(output.public().public()),
+            output: encode(&output),
+            participants: config.validators,
+        },
         nodes,
     })
 }
@@ -464,6 +519,24 @@ async fn start_node(
     let state_sync = register(channels::STATE_SYNC);
     network.start();
 
+    let indexer_client = config.indexer_url.as_deref().map(|url| {
+        let metrics = indexer::IndexerMetrics::register(&context.child("indexer"));
+        (
+            indexer::HttpClient::new(url).with_metrics(metrics.clone()),
+            metrics,
+        )
+    });
+    if let Some((client, metrics)) = indexer_client.clone() {
+        spawn_current_dkg_output_uploader(
+            context,
+            config.name.clone(),
+            dkg_storage_key,
+            public_key.clone(),
+            max_participants,
+            client,
+            metrics,
+        );
+    }
     let engine_config: EngineConfig<_, _, _> = EngineConfig {
         blocker: oracle.clone(),
         manager: oracle.clone(),
@@ -477,12 +550,15 @@ async fn start_node(
         peer_config: config.peer_config.clone(),
         leader_timeout: Duration::from_millis(config.consensus.leader_timeout_ms),
         certification_timeout: Duration::from_millis(config.consensus.certification_timeout_ms),
-        strategy: Sequential,
+        strategy: context
+            .strategy(std::thread::available_parallelism().unwrap_or(std::num::NonZeroUsize::MIN)),
         state_sync: config.state_sync,
         max_block_transactions: config.max_block_transactions,
         pool_config: PoolConfig::default(),
         genesis: read_genesis(config.genesis_path.as_ref())?,
+        indexer: indexer_client.map(|(client, _metrics)| client),
     };
+    let dkg_callback: Box<dyn UpdateCallBack<MinSig, PublicKey>> = ContinueOnUpdate::boxed();
 
     let resolver_config = marshal::resolver::p2p::Config {
         public_key,
@@ -514,7 +590,7 @@ async fn start_node(
         mempool,
         clob,
         marshal_resolver,
-        ContinueOnUpdate::boxed(),
+        dkg_callback,
     );
 
     let rpc_module = rpc::module(
@@ -529,6 +605,85 @@ async fn start_node(
 
     info!(node = %config.name, "coins-chain validator started");
     Ok((rpc_server, engine_handle))
+}
+
+async fn upload_current_dkg_output(
+    context: &tokio::Context,
+    node_name: &str,
+    dkg_storage_key: StorageKey,
+    public_key: PublicKey,
+    max_participants: NonZeroU32,
+    client: indexer::HttpClient,
+    metrics: indexer::IndexerMetrics,
+) {
+    let started = Instant::now();
+    let storage = match DkgStorage::<_, MinSig, PublicKey>::init(
+        context.child("dkg_output_seed"),
+        node_name,
+        StorageProtector::new(dkg_storage_key),
+        NAMESPACE.to_vec(),
+        public_key,
+        max_participants,
+        MAX_SUPPORTED_MODE,
+    )
+    .await
+    {
+        Ok(storage) => storage,
+        Err(error) => {
+            warn!(%error, "failed to open DKG storage for indexer upload");
+            metrics.dkg_upload_completed(indexer::DkgUploadStatus::Failure, started.elapsed());
+            return;
+        }
+    };
+    let Some((epoch, state)) = storage.epoch() else {
+        metrics.dkg_upload_completed(indexer::DkgUploadStatus::NoEpoch, started.elapsed());
+        return;
+    };
+    metrics.dkg_upload_last_attempt_epoch(epoch.get());
+    let Some(output) = state.output else {
+        metrics.dkg_upload_completed(indexer::DkgUploadStatus::NoOutput, started.elapsed());
+        return;
+    };
+    metrics.dkg_upload_output_bytes(output.encode_size() as u64);
+    match client.dkg_output_upload(epoch, output).await {
+        Ok(()) => {
+            metrics.dkg_upload_last_success_epoch(epoch.get());
+            metrics.dkg_upload_completed(indexer::DkgUploadStatus::Success, started.elapsed());
+            info!(%epoch, "uploaded current DKG output to indexer");
+        }
+        Err(error) => {
+            metrics.dkg_upload_completed(indexer::DkgUploadStatus::Failure, started.elapsed());
+            warn!(%epoch, %error, "failed to upload current DKG output to indexer");
+        }
+    }
+}
+
+fn spawn_current_dkg_output_uploader(
+    context: &tokio::Context,
+    node_name: String,
+    dkg_storage_key: StorageKey,
+    public_key: PublicKey,
+    max_participants: NonZeroU32,
+    client: indexer::HttpClient,
+    metrics: indexer::IndexerMetrics,
+) {
+    context
+        .child("dkg_output_uploader")
+        .spawn(move |context| async move {
+            loop {
+                upload_current_dkg_output(
+                    &context,
+                    &node_name,
+                    dkg_storage_key,
+                    public_key.clone(),
+                    max_participants,
+                    client.clone(),
+                    metrics.clone(),
+                )
+                .await;
+                context.sleep(Duration::from_secs(60)).await;
+            }
+        });
 }
 
 pub(crate) fn decode_output(

@@ -8,7 +8,6 @@ use crate::{
 use commonware_codec::DecodeExt;
 use commonware_runtime::{deterministic, Runner as _};
 use nunchi_common::{QmdbState, VecEventSink};
-use nunchi_crypto::SignatureError;
 
 async fn ledger(context: deterministic::Context) -> Ledger<QmdbState<deterministic::Context>> {
     let db = QmdbState::init(context, "coins-events-test")
@@ -255,12 +254,8 @@ fn failed_transactions_emit_no_events() {
             to: carol.clone(),
             amount: 1,
         };
-        assert_no_event(
-            &mut ledger,
-            &bad_signature,
-            LedgerError::BadSignature(SignatureError::InvalidSignature),
-        )
-        .await;
+        // Bad signatures never reach execution, so they cannot emit events.
+        assert!(bad_signature.verify().is_err());
 
         let wrong_nonce = Transaction::sign(
             &alice_key,

@@ -4,7 +4,9 @@ use commonware_cryptography::{
         dkg::feldman_desmedt::{deal, Output},
         primitives::{group, variant::MinSig},
     },
-    ed25519, Signer,
+    ed25519,
+    sha256::Digest,
+    Signer,
 };
 use commonware_p2p::{
     simulated::{self, Link, Network, Oracle, Receiver, Sender},
@@ -428,17 +430,19 @@ impl TestNetwork<'_> {
     ///
     /// Account nonces can match while tips still differ by empty or other
     /// blocks; those later commits change the authenticated root.
-    pub(crate) async fn run_until_state_converged(&self) {
+    pub(crate) async fn run_until_ledger_roots_converge(&self) -> Vec<Digest> {
         loop {
             let ledgers = self.ledgers().await;
-            if ledgers.len() == self.participants.len() {
-                let mut roots = Vec::with_capacity(ledgers.len());
-                for ledger in &ledgers {
-                    roots.push(ledger.db().root().await);
-                }
-                if roots.iter().all(|root| *root == roots[0]) {
-                    return;
-                }
+            if ledgers.len() != self.participants.len() {
+                self.context.sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+            let mut roots = Vec::with_capacity(ledgers.len());
+            for ledger in &ledgers {
+                roots.push(ledger.db().root().await);
+            }
+            if roots.windows(2).all(|window| window[0] == window[1]) {
+                return roots;
             }
             self.context.sleep(Duration::from_millis(100)).await;
         }
@@ -522,6 +526,7 @@ async fn start_validator(
         max_block_transactions: MAX_BLOCK_TRANSACTIONS,
         pool_config: PoolConfig::default(),
         genesis: None,
+        indexer: None,
     };
 
     let validator_context = context.child("validator").with_attribute("id", &uid);

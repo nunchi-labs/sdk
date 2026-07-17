@@ -1,6 +1,7 @@
 use crate::application::{self, Application};
 use crate::execution::NodeHandle;
 use crate::genesis::{genesis_target, state_commitment, ChainGenesis};
+use crate::indexer;
 use crate::{
     Block, EpochProvider, Finalization, Provider, PublicKey, Scheme, Transaction, BLOCKS_PER_EPOCH,
     NAMESPACE,
@@ -11,10 +12,12 @@ use commonware_consensus::{
         self,
         core::Actor as MarshalActor,
         resolver,
-        standard::{Deferred, Standard},
+        standard::{Inline, Standard},
+        store::{Blocks as _, Certificates},
     },
     simplex::elector::Random,
     types::{Epoch, FixedEpocher, Height, ViewDelta},
+    Reporters,
 };
 use commonware_cryptography::{
     bls12381::{
@@ -27,6 +30,7 @@ use commonware_cryptography::{
     BatchVerifier, Digestible, Signer,
 };
 use commonware_glue::stateful::{
+    Application as StatefulApplication,
     db::ManagedDb as _,
     probe::{Config as ProbeConfig, Probe},
     Config as StatefulConfig, Mailbox as StatefulMailbox, Stateful as StatefulActor, SyncPlan,
@@ -37,8 +41,12 @@ use commonware_runtime::{
     buffer::paged::CacheRef, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics,
     Network, Spawner, Storage, Strategizer,
 };
-use commonware_storage::archive::immutable;
-use commonware_utils::{union, NZDuration};
+use commonware_storage::{
+    archive::{immutable, Identifier as ArchiveIdentifier},
+    metadata::{self, Metadata},
+    queue,
+};
+use commonware_utils::{sequence::U64, union, NZDuration, NZU64};
 use futures::lock::Mutex as AsyncMutex;
 use governor::clock::Clock as GClock;
 use nunchi_chain::engine::*;
@@ -91,13 +99,16 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
     pub max_block_transactions: usize,
     pub pool_config: PoolConfig,
     pub genesis: Option<ChainGenesis>,
+    pub indexer: Option<indexer::HttpClient>,
 }
 
 type DkgActor<E, P> = nunchi_chain::DkgActor<E, P, Transaction, ClobExtension>;
 type DkgMailbox = nunchi_chain::DkgMailbox<Transaction, ClobExtension>;
 type StatefulApp<E> = StatefulActor<E, Application, Scheme, Standard<Block>, StateSyncMailbox<E>>;
 type StatefulAppMailbox<E> = StatefulMailbox<E, Application>;
-type Marshaled<E> = Deferred<E, Scheme, StatefulAppMailbox<E>, Block, FixedEpocher>;
+type LimitedStatefulAppMailbox<E> = VerifyLimiter<StatefulAppMailbox<E>>;
+type InlineApp<E> = Inline<E, Scheme, LimitedStatefulAppMailbox<E>, Block, FixedEpocher>;
+type Marshaled<E> = BoxedAutomaton<InlineApp<E>>;
 type SchemeProvider = Provider<Scheme, ed25519::PrivateKey>;
 type FinalizationsArchive<E> = immutable::Archive<E, Digest, Finalization>;
 type BlocksArchive<E> = immutable::Archive<E, Digest, Block>;
@@ -110,7 +121,17 @@ type Marshal<E, S> = MarshalActor<
     FixedEpocher,
     S,
 >;
-type Orchestrator<E, B, S> = orchestrator::Actor<E, B, Marshaled<E>, Scheme, Random, S, Block>;
+type Orchestrator<E, B, S> = orchestrator::Actor<
+    E,
+    B,
+    Marshaled<E>,
+    Scheme,
+    Random,
+    S,
+    Block,
+    Option<indexer::Pusher<E, indexer::HttpClient>>,
+>;
+type IndexerConsumer<E> = indexer::Consumer<E, indexer::HttpClient>;
 
 /// The engine that drives the coins-chain [Application].
 #[allow(clippy::type_complexity)]
@@ -145,6 +166,8 @@ where
     clob: ClobActor,
     stateful: StatefulApp<E>,
     stateful_mailbox: StatefulAppMailbox<E>,
+    indexer_producer: Option<indexer::Producer>,
+    indexer_consumer: Option<IndexerConsumer<E>>,
 }
 
 impl<E, B, P, S> Engine<E, B, P, S>
@@ -308,6 +331,18 @@ where
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
+        let recovered_height = Certificates::last_index(&finalizations_by_height);
+        let mut recovered_floor = if let Some(height) = recovered_height {
+            Certificates::get(
+                &finalizations_by_height,
+                ArchiveIdentifier::Index(height.get()),
+            )
+            .await
+            .expect("failed to read recovered finalization floor")
+        } else {
+            None
+        };
+
         let certificate_verifier = <SchemeProvider as EpochProvider>::certificate_verifier(
             &consensus_namespace,
             &config.output,
@@ -381,6 +416,25 @@ where
         } else {
             empty_state
         };
+        let current_state_target = {
+            let state = QmdbState::init_with_config(
+                context.child("startup_state_probe"),
+                db_config.clone(),
+            )
+            .await
+            .expect("failed to initialize state database for startup probe");
+            state.sync_target()
+        };
+        if repair_marshal_progress_if_state_is_behind(
+            &context,
+            &config.partition_prefix,
+            &finalized_blocks,
+            &current_state_target,
+        )
+        .await
+        {
+            recovered_floor = None;
+        }
         let applied_height = Arc::new(AsyncMutex::new(Height::zero()));
         let app = Application::with_consensus(
             submitter.clone(),
@@ -434,6 +488,9 @@ where
                 .expect("state-sync floor probe stopped");
             plan = plan.with_floor(floor);
         }
+        let marshal_start = recovered_floor
+            .clone()
+            .map_or_else(|| plan.marshal_start(genesis), marshal::Start::Floor);
         let (marshal, marshal_mailbox, _processed_height) = MarshalActor::init(
             context.child("marshal"),
             finalizations_by_height,
@@ -441,7 +498,7 @@ where
             marshal::Config {
                 provider: provider.clone(),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                start: plan.marshal_start(genesis),
+                start: marshal_start,
                 partition_prefix: format!("{}_marshal", config.partition_prefix),
                 mailbox_size: MAILBOX_SIZE,
                 view_retention_timeout: ViewDelta::new(
@@ -485,12 +542,54 @@ where
             applied_height,
         );
 
-        let application = Deferred::new(
+        let verify_limiter_context = context.child("application_verify");
+        let application = BoxedAutomaton::new(Inline::new(
             context.child("application"),
-            stateful_mailbox.clone(),
+            VerifyLimiter::new(
+                &verify_limiter_context,
+                stateful_mailbox.clone(),
+                APPLICATION_VERIFY_CONCURRENCY,
+            ),
             marshal_mailbox.clone(),
             FixedEpocher::new(BLOCKS_PER_EPOCH),
-        );
+        ));
+
+        let (indexer_producer, indexer_pusher, indexer_consumer) =
+            if let Some(client) = config.indexer.clone() {
+                let indexer_context = context.child("indexer");
+                let indexer_metrics = indexer::IndexerMetrics::register(&indexer_context);
+                let client = client.with_metrics(indexer_metrics.clone());
+                let queue = queue::shared::init(
+                    context.child("indexer_queue"),
+                    queue::Config {
+                        partition: format!("{}-indexer-finalized-queue", config.partition_prefix),
+                        items_per_section: NZU64!(128),
+                        compression: None,
+                        codec_config: (),
+                        page_cache: page_cache.clone(),
+                        write_buffer: WRITE_BUFFER,
+                    },
+                )
+                .await
+                .expect("failed to initialize indexer queue");
+                let indexer = indexer::Indexer::new(
+                    indexer_context,
+                    client,
+                    marshal_mailbox.clone(),
+                    queue,
+                    indexer::Config {
+                        mailbox_size: MAILBOX_SIZE,
+                        backfiller_max_active: commonware_utils::NZUsize!(16),
+                        backfiller_retry: Duration::from_millis(500),
+                        metrics: indexer_metrics,
+                    },
+                )
+                .await;
+                let (producer, pusher, consumer) = indexer.split();
+                (Some(producer), Some(pusher), Some(consumer))
+            } else {
+                (None, None, None)
+            };
 
         let (orchestrator, orchestrator_mailbox) = orchestrator::Actor::new(
             context.child("orchestrator"),
@@ -499,6 +598,7 @@ where
                 application: application.clone(),
                 provider,
                 marshal: marshal_mailbox,
+                reporter: indexer_pusher,
                 strategy: config.strategy.clone(),
                 leader_timeout: config.leader_timeout,
                 certification_timeout: config.certification_timeout,
@@ -507,6 +607,7 @@ where
                 partition_prefix: format!("{}_consensus", config.partition_prefix),
                 epoch_length: BLOCKS_PER_EPOCH,
                 genesis_digest,
+                recovered_floor,
                 _phantom: PhantomData,
             },
         );
@@ -527,6 +628,8 @@ where
             clob,
             stateful,
             stateful_mailbox,
+            indexer_producer,
+            indexer_consumer,
         };
         (engine, node_handle)
     }
@@ -629,7 +732,10 @@ where
             callback,
         );
         let buffer_handle = self.buffer.start(broadcast);
-        let reporters = nunchi_chain::dkg_reporters(self.stateful_mailbox, self.dkg_mailbox);
+        let reporters: Reporters<_, _, indexer::Producer> = Reporters::from((
+            nunchi_chain::dkg_reporters(self.stateful_mailbox, self.dkg_mailbox),
+            self.indexer_producer,
+        ));
         let marshal_handle = self
             .marshal
             .start(reporters, self.buffered_mailbox, marshal);
@@ -640,27 +746,51 @@ where
         let mempool_handle = self
             .mempool
             .start_p2p(self.context.child("mempool"), mempool);
+        let indexer_consumer_handle = self.indexer_consumer.map(indexer::Consumer::start);
         let clob_handle = self.clob.start_p2p(self.context.child("clob"), clob);
 
         let mut shutdown = self.context.stopped();
-        commonware_macros::select! {
-            stopped = &mut shutdown => match stopped {
-                Ok(0) => {
-                    warn!("engine stopped");
-                    Ok(())
-                }
-                Ok(code) => Err(EngineError::Stopped(code)),
-                Err(_) => Err(EngineError::ShutdownSignalClosed),
-            },
-            result = dkg_handle => unexpected_exit("dkg", result),
-            result = buffer_handle => unexpected_exit("buffer", result),
-            result = marshal_handle => unexpected_exit("marshal", result),
-            result = probe_handle => unexpected_exit("probe", result),
-            result = state_sync_handle => unexpected_exit("state sync resolver", result),
-            result = stateful_handle => unexpected_exit("stateful", result),
-            result = orchestrator_handle => unexpected_exit("orchestrator", result),
-            result = mempool_handle => unexpected_exit("mempool", result),
-            result = clob_handle => unexpected_exit("clob", result),
+        if let Some(indexer_consumer_handle) = indexer_consumer_handle {
+            commonware_macros::select! {
+                stopped = &mut shutdown => match stopped {
+                    Ok(0) => {
+                        warn!("engine stopped");
+                        Ok(())
+                    }
+                    Ok(code) => Err(EngineError::Stopped(code)),
+                    Err(_) => Err(EngineError::ShutdownSignalClosed),
+                },
+                result = dkg_handle => unexpected_exit("dkg", result),
+                result = buffer_handle => unexpected_exit("buffer", result),
+                result = marshal_handle => unexpected_exit("marshal", result),
+                result = probe_handle => unexpected_exit("probe", result),
+                result = state_sync_handle => unexpected_exit("state sync resolver", result),
+                result = stateful_handle => unexpected_exit("stateful", result),
+                result = orchestrator_handle => unexpected_exit("orchestrator", result),
+                result = mempool_handle => unexpected_exit("mempool", result),
+                result = clob_handle => unexpected_exit("clob", result),
+                result = indexer_consumer_handle => unexpected_exit("indexer_consumer", result),
+            }
+        } else {
+            commonware_macros::select! {
+                stopped = &mut shutdown => match stopped {
+                    Ok(0) => {
+                        warn!("engine stopped");
+                        Ok(())
+                    }
+                    Ok(code) => Err(EngineError::Stopped(code)),
+                    Err(_) => Err(EngineError::ShutdownSignalClosed),
+                },
+                result = dkg_handle => unexpected_exit("dkg", result),
+                result = buffer_handle => unexpected_exit("buffer", result),
+                result = marshal_handle => unexpected_exit("marshal", result),
+                result = probe_handle => unexpected_exit("probe", result),
+                result = state_sync_handle => unexpected_exit("state sync resolver", result),
+                result = stateful_handle => unexpected_exit("stateful", result),
+                result = orchestrator_handle => unexpected_exit("orchestrator", result),
+                result = mempool_handle => unexpected_exit("mempool", result),
+                result = clob_handle => unexpected_exit("clob", result),
+            }
         }
     }
 }
@@ -672,5 +802,98 @@ fn unexpected_exit(
     match result {
         Ok(()) => Err(EngineError::UnexpectedExit(component)),
         Err(error) => Err(error.into()),
+    }
+}
+
+const MARSHAL_PROCESSED_KEY: U64 = U64::new(0xFF);
+const STATE_SYNC_METADATA_SUFFIX: &str = "state_sync_metadata";
+
+async fn repair_marshal_progress_if_state_is_behind<E>(
+    context: &E,
+    partition_prefix: &str,
+    finalized_blocks: &BlocksArchive<E>,
+    current_target: &commonware_storage::qmdb::sync::Target<commonware_storage::mmr::Family, Digest>,
+) -> bool
+where
+    E: BufferPooler
+        + Clock
+        + Metrics
+        + Network
+        + Rng
+        + Spawner
+        + Storage
+        + Strategizer
+        + Send
+        + Sync
+        + 'static,
+{
+    let marshal_metadata_partition = format!("{partition_prefix}_marshal-application-metadata");
+    let metadata = Metadata::<E, U64, Height>::init(
+        context.child("marshal_progress_probe"),
+        metadata::Config {
+            partition: marshal_metadata_partition.clone(),
+            codec_config: (),
+        },
+    )
+    .await
+    .expect("failed to initialize marshal progress metadata probe");
+    let Some(processed_height) = metadata.get(&MARSHAL_PROCESSED_KEY).copied() else {
+        return false;
+    };
+    drop(metadata);
+
+    let Some(processed_block) = finalized_blocks
+        .get(ArchiveIdentifier::Index(processed_height.get()))
+        .await
+        .expect("failed to read processed block for state repair")
+    else {
+        warn!(
+            %processed_height,
+            "marshal progress references a missing finalized block; clearing startup metadata to replay"
+        );
+        remove_partition_if_exists(context, &marshal_metadata_partition).await;
+        clear_disabled_state_sync_metadata(context, partition_prefix).await;
+        return true;
+    };
+    let processed_target = <Application as StatefulApplication<E>>::sync_targets(&processed_block);
+    let current_size = current_target.range.end().as_u64();
+    let processed_size = processed_target.range.end().as_u64();
+    if current_size >= processed_size {
+        return false;
+    }
+
+    warn!(
+        %processed_height,
+        current_size,
+        processed_size,
+        "state database is behind marshal progress; clearing startup metadata to replay finalized blocks"
+    );
+    remove_partition_if_exists(context, &marshal_metadata_partition).await;
+    remove_partition_if_exists(
+        context,
+        &format!("{partition_prefix}{STATE_SYNC_METADATA_SUFFIX}"),
+    )
+    .await;
+    true
+}
+
+async fn clear_disabled_state_sync_metadata<E>(context: &E, partition_prefix: &str)
+where
+    E: Storage,
+{
+    remove_partition_if_exists(
+        context,
+        &format!("{partition_prefix}{STATE_SYNC_METADATA_SUFFIX}"),
+    )
+    .await;
+}
+
+async fn remove_partition_if_exists<E>(context: &E, partition: &str)
+where
+    E: Storage,
+{
+    match context.remove(partition, None).await {
+        Ok(()) | Err(commonware_runtime::Error::PartitionMissing(_)) => {}
+        Err(error) => panic!("failed to remove partition {partition}: {error}"),
     }
 }

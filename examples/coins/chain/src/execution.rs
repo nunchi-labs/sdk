@@ -91,6 +91,10 @@ where
         self.ledger().await.nonce(&account).await
     }
 
+    async fn factory_nonce(&self) -> Result<u64, LedgerError> {
+        self.ledger().await.factory_nonce().await
+    }
+
     async fn token(&self, coin: CoinId) -> Result<Option<TokenDefinition>, LedgerError> {
         self.ledger().await.token(&coin).await
     }

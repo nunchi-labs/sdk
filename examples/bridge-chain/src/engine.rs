@@ -9,7 +9,8 @@ use commonware_consensus::{
         self,
         core::Actor as MarshalActor,
         resolver,
-        standard::{Deferred, Standard},
+        standard::{Inline, Standard},
+        store::Certificates,
     },
     simplex::elector::Random,
     types::{Epoch, FixedEpocher, Height, ViewDelta},
@@ -35,7 +36,7 @@ use commonware_runtime::{
     buffer::paged::CacheRef, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics,
     Network, Spawner, Storage, Strategizer,
 };
-use commonware_storage::archive::immutable;
+use commonware_storage::archive::{immutable, Identifier as ArchiveIdentifier};
 use commonware_utils::{union, NZDuration};
 use futures::{future::try_join_all, lock::Mutex as AsyncMutex};
 use governor::clock::Clock as GClock;
@@ -85,7 +86,9 @@ type DkgMailbox = nunchi_chain::DkgMailbox<NoopTransaction, BridgeExtension>;
 type StatefulApp<E> =
     StatefulActor<E, crate::Application, Scheme, Standard<Block>, StateSyncMailbox<E>>;
 type StatefulAppMailbox<E> = StatefulMailbox<E, crate::Application>;
-type Marshaled<E> = Deferred<E, Scheme, StatefulAppMailbox<E>, Block, FixedEpocher>;
+type LimitedStatefulAppMailbox<E> = VerifyLimiter<StatefulAppMailbox<E>>;
+type InlineApp<E> = Inline<E, Scheme, LimitedStatefulAppMailbox<E>, Block, FixedEpocher>;
+type Marshaled<E> = BoxedAutomaton<InlineApp<E>>;
 type SchemeProvider = Provider<Scheme, ed25519::PrivateKey>;
 type FinalizationsArchive<E> = immutable::Archive<E, Digest, Finalization>;
 type BlocksArchive<E> = immutable::Archive<E, Digest, Block>;
@@ -284,6 +287,18 @@ where
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
+        let recovered_floor = if let Some(height) = Certificates::last_index(&finalizations_by_height)
+        {
+            Certificates::get(
+                &finalizations_by_height,
+                ArchiveIdentifier::Index(height.get()),
+            )
+            .await
+            .expect("failed to read recovered finalization floor")
+        } else {
+            None
+        };
+
         let certificate_verifier = <SchemeProvider as EpochProvider>::certificate_verifier(
             &consensus_namespace,
             &config.output,
@@ -372,6 +387,9 @@ where
                 .expect("state-sync floor probe stopped");
             plan = plan.with_floor(floor);
         }
+        let marshal_start = recovered_floor
+            .clone()
+            .map_or_else(|| plan.marshal_start(genesis), marshal::Start::Floor);
         let (marshal, marshal_mailbox, _processed_height) = MarshalActor::init(
             context.child("marshal"),
             finalizations_by_height,
@@ -379,7 +397,7 @@ where
             marshal::Config {
                 provider: provider.clone(),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                start: plan.marshal_start(genesis),
+                start: marshal_start,
                 partition_prefix: format!("{}_marshal", config.partition_prefix),
                 mailbox_size: MAILBOX_SIZE,
                 view_retention_timeout: ViewDelta::new(
@@ -422,12 +440,17 @@ where
             applied_height,
         );
 
-        let application = Deferred::new(
+        let verify_limiter_context = context.child("application_verify");
+        let application = BoxedAutomaton::new(Inline::new(
             context.child("application"),
-            stateful_mailbox.clone(),
+            VerifyLimiter::new(
+                &verify_limiter_context,
+                stateful_mailbox.clone(),
+                APPLICATION_VERIFY_CONCURRENCY,
+            ),
             marshal_mailbox.clone(),
             FixedEpocher::new(BLOCKS_PER_EPOCH),
-        );
+        ));
 
         let (orchestrator, orchestrator_mailbox) = orchestrator::Actor::new(
             context.child("orchestrator"),
@@ -436,6 +459,7 @@ where
                 application,
                 provider,
                 marshal: marshal_mailbox,
+                reporter: orchestrator::NoopReporter::default(),
                 strategy: config.strategy.clone(),
                 leader_timeout: config.leader_timeout,
                 certification_timeout: config.certification_timeout,
@@ -444,6 +468,7 @@ where
                 partition_prefix: format!("{}_consensus", config.partition_prefix),
                 epoch_length: BLOCKS_PER_EPOCH,
                 genesis_digest,
+                recovered_floor,
                 _phantom: PhantomData,
             },
         );

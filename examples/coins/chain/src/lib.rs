@@ -19,6 +19,7 @@ pub mod application;
 pub mod engine;
 pub mod execution;
 pub mod genesis;
+pub mod indexer;
 pub mod rpc;
 pub mod runtime;
 pub mod testnet;
@@ -30,7 +31,7 @@ mod tests;
 pub use nunchi_chain::{StateCommitment, MAX_TRANSACTIONS};
 pub use nunchi_dkg::{
     Activity, Context, EdScheme, EpochProvider, Finalization, Identity, Notarization, Provider,
-    PublicKey, Scheme, Seed, Seedable, Signature, ThresholdScheme,
+    PublicKey, Scheme, Seed, Seedable, Signature, ThresholdScheme, MAX_SUPPORTED_MODE,
 };
 pub use runtime::{CoinsRuntime, RuntimeError};
 pub use transaction::Transaction;
@@ -61,12 +62,14 @@ pub mod channels {
     pub const STATE_SYNC: u64 = 9;
 }
 
-/// The consensus epoch. The demo chain never reconfigures, so the epoch is hardcoded to 0.
+/// The initial consensus epoch used by genesis and test helpers.
+///
+/// Live consensus derives later epochs from [`BLOCKS_PER_EPOCH`].
 pub const EPOCH: Epoch = Epoch::zero();
 
 /// The number of blocks in an epoch.
 ///
 /// Production systems should use a much larger value, as DKG/reshare safety depends on
 /// synchrony during the epoch window.
-pub const BLOCKS_PER_EPOCH: NonZeroU64 = commonware_utils::NZU64!(200);
+pub const BLOCKS_PER_EPOCH: NonZeroU64 = commonware_utils::NZU64!(200_000);
 });

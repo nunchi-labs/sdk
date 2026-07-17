@@ -29,6 +29,18 @@ const ALICE: u64 = 100;
 const BOB: u64 = 101;
 const CAROL: u64 = 102;
 
+const TEST_STACK_SIZE: usize = 16 * 1024 * 1024;
+
+fn with_large_stack(f: impl FnOnce() + Send + 'static) {
+    let handle = std::thread::Builder::new()
+        .stack_size(TEST_STACK_SIZE)
+        .spawn(f)
+        .expect("spawn large-stack test thread");
+    if let Err(panic) = handle.join() {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 fn key(seed: u64) -> PrivateKey {
     PrivateKey::from_seed(seed)
 }
@@ -59,121 +71,131 @@ fn oracle_namespace() -> NamespaceId {
 
 #[test_traced]
 fn reaches_height_with_reliable_links() {
-    let link = reliable_link();
-    for seed in 0..5 {
-        let state = deterministic_state(5, seed, link.clone(), 25);
-        assert_eq!(state, deterministic_state(5, seed, link.clone(), 25));
-    }
+    with_large_stack(|| {
+        let link = reliable_link();
+        for seed in 0..5 {
+            let state = deterministic_state(5, seed, link.clone(), 25);
+            assert_eq!(state, deterministic_state(5, seed, link.clone(), 25));
+        }
+    });
 }
 
 #[test_traced]
 fn reaches_height_with_lossy_links() {
-    let link = lossy_link();
-    for seed in 0..2 {
-        let state_a = deterministic_state(5, seed, link.clone(), 16);
-        let state_b = deterministic_state(5, seed, link.clone(), 16);
-        assert_eq!(state_a, state_b);
-    }
+    with_large_stack(|| {
+        let link = lossy_link();
+        for seed in 0..2 {
+            let state_a = deterministic_state(5, seed, link.clone(), 16);
+            let state_b = deterministic_state(5, seed, link.clone(), 16);
+            assert_eq!(state_a, state_b);
+        }
+    });
 }
 
 #[test_traced]
 fn reaches_height_100() {
-    let link = Link {
-        latency: Duration::from_millis(80),
-        jitter: Duration::from_millis(10),
-        success_rate: 0.98,
-    };
-    deterministic_state(10, 0, link, 100);
+    with_large_stack(|| {
+        let link = Link {
+            latency: Duration::from_millis(80),
+            jitter: Duration::from_millis(10),
+            success_rate: 0.98,
+        };
+        deterministic_state(10, 0, link, 100);
+    });
 }
 
 #[test_traced]
 fn state_syncs_late_validator() {
-    let executor = deterministic::Runner::timed(Duration::from_secs(60));
-    executor.start(|mut context| async move {
-        let mut network = TestNetworkBuilder::new(4)
-            .without_initial_links()
-            .build(&mut context)
-            .await;
+    with_large_stack(|| {
+        let executor = deterministic::Runner::timed(Duration::from_secs(60));
+        executor.start(|mut context| async move {
+            let mut network = TestNetworkBuilder::new(5)
+                .without_initial_links()
+                .build(&mut context)
+                .await;
 
-        let link = reliable_link();
-        network
-            .link_where(link.clone(), |from, to| ![from, to].contains(&0usize))
-            .await;
+            let link = reliable_link();
+            network
+                .link_where(link.clone(), |from, to| ![from, to].contains(&0usize))
+                .await;
 
-        for index in 1..4 {
-            network.start_validator(index).await;
-        }
-        network.run_until_height(3).await;
+            for index in 1..5 {
+                network.start_validator(index).await;
+            }
+            network.run_until_height(10).await;
 
-        network
-            .link_where(link, |from, to| {
-                [from, to].contains(&0usize) && ![from, to].contains(&1usize)
-            })
-            .await;
-        network.start_validator_with_state_sync(0).await;
-        network.run_until_height(5).await;
+            network
+                .link_where(link, |from, to| {
+                    [from, to].contains(&0usize) && ![from, to].contains(&1usize)
+                })
+                .await;
+            network.start_validator_with_state_sync(0).await;
+            network.run_until_height(20).await;
+        });
     });
 }
 
 #[test_traced]
 fn recovers_unclean_shutdown() {
-    let n = 5;
-    let required_container = 60;
-    let mut rng = StdRng::seed_from_u64(0);
-    let fixture = ThresholdFixture::new(&mut rng, n);
+    with_large_stack(|| {
+        let n = 5;
+        let required_container = 60;
+        let mut rng = StdRng::seed_from_u64(0);
+        let fixture = ThresholdFixture::new(&mut rng, n);
 
-    let mut runs = 0;
-    let mut prev_checkpoint = None;
-    loop {
-        let fixture = fixture.clone();
-        let f = |mut context: deterministic::Context| async move {
-            // This test restarts validators every 250..1_000ms of simulated time.
-            // Keep recovery timeouts below that window so a recovered view can
-            // either certify or timeout/nullify before the next forced shutdown.
-            let cfg = ValidatorConfig {
-                leader_timeout: Duration::from_millis(250),
-                certification_timeout: Duration::from_millis(500),
+        let mut runs = 0;
+        let mut prev_checkpoint = None;
+        loop {
+            let fixture = fixture.clone();
+            let f = |mut context: deterministic::Context| async move {
+                // This test restarts validators every 250..1_000ms of simulated time.
+                // Keep recovery timeouts below that window so a recovered view can
+                // either certify or timeout/nullify before the next forced shutdown.
+                let cfg = ValidatorConfig {
+                    leader_timeout: Duration::from_millis(250),
+                    certification_timeout: Duration::from_millis(500),
+                };
+
+                let wait =
+                    context.random_range(Duration::from_millis(250)..Duration::from_millis(1_000));
+                let mut network = TestNetworkBuilder::new(n)
+                    .with_fixture(fixture)
+                    .with_initial_link(reliable_link())
+                    .with_validator_config(cfg)
+                    .build(&mut context)
+                    .await;
+                network.start_all().await;
+
+                select! {
+                    _ = network.run_until_height_with_interval(
+                        required_container,
+                        Duration::from_millis(10),
+                    ) => {
+                        true
+                    },
+                    _ = network.context().sleep(wait) => {
+                        false
+                    }
+                }
             };
 
-            let wait =
-                context.random_range(Duration::from_millis(250)..Duration::from_millis(1_000));
-            let mut network = TestNetworkBuilder::new(n)
-                .with_fixture(fixture)
-                .with_initial_link(reliable_link())
-                .with_validator_config(cfg)
-                .build(&mut context)
-                .await;
-            network.start_all().await;
-
-            select! {
-                _ = network.run_until_height_with_interval(
-                    required_container,
-                    Duration::from_millis(10),
-                ) => {
-                    true
-                },
-                _ = network.context().sleep(wait) => {
-                    false
-                }
+            let (complete, checkpoint) = if let Some(prev_checkpoint) = prev_checkpoint {
+                deterministic::Runner::from(prev_checkpoint)
+            } else {
+                deterministic::Runner::timed(Duration::from_secs(30))
             }
-        };
+            .start_and_recover(f);
 
-        let (complete, checkpoint) = if let Some(prev_checkpoint) = prev_checkpoint {
-            deterministic::Runner::from(prev_checkpoint)
-        } else {
-            deterministic::Runner::timed(Duration::from_secs(30))
+            if complete {
+                break;
+            }
+
+            prev_checkpoint = Some(checkpoint);
+            runs += 1;
         }
-        .start_and_recover(f);
-
-        if complete {
-            break;
-        }
-
-        prev_checkpoint = Some(checkpoint);
-        runs += 1;
-    }
-    assert!(runs > 1);
-    info!(runs, "unclean shutdown recovery worked");
+        assert!(runs > 1);
+        info!(runs, "unclean shutdown recovery worked");
+    });
 }
 
 /// Submit the demo scenario, returning the accounts involved.
@@ -272,32 +294,29 @@ async fn submit_scenario(
 /// consensus on coin state, executed independently by each node from the finalized block stream.
 #[test_traced]
 fn coin_state_converges_across_validators() {
-    let executor = deterministic::Runner::timed(Duration::from_secs(120));
-    executor.start(|mut context| async move {
-        let mut network = TestNetworkBuilder::new(VALIDATORS)
-            .build(&mut context)
-            .await;
-        network.start_all().await;
+    with_large_stack(|| {
+        let executor = deterministic::Runner::timed(Duration::from_secs(120));
+        executor.start(|mut context| async move {
+            let mut network = TestNetworkBuilder::new(VALIDATORS)
+                .build(&mut context)
+                .await;
+            network.start_all().await;
 
-        let (alice, bob, _carol) = submit_scenario(&network).await;
-        network.run_until_nonces(&[(alice, 4), (bob, 1)]).await;
-        network.run_until_state_converged().await;
+            let (alice, bob, _carol) = submit_scenario(&network).await;
+            network
+                .run_until_nonces(&[(alice.clone(), 4), (bob.clone(), 1)])
+                .await;
+            let roots = network.run_until_ledger_roots_converge().await;
+            assert_eq!(roots.len(), VALIDATORS as usize);
 
-        let ledgers = network.ledgers().await;
-        assert_eq!(ledgers.len(), VALIDATORS as usize);
-
-        let mut roots = Vec::new();
-        for ledger in &ledgers {
-            roots.push(ledger.db().root().await);
-        }
-
-        let reference = roots[0];
-        for (index, root) in roots.iter().enumerate() {
-            assert_eq!(
-                *root, reference,
-                "validator {index} disagrees on the committed coin state root"
-            );
-        }
+            let reference = roots[0];
+            for (index, root) in roots.iter().enumerate() {
+                assert_eq!(
+                    *root, reference,
+                    "validator {index} disagrees on the committed coin state root"
+                );
+            }
+        });
     });
 }
 
@@ -306,186 +325,200 @@ fn coin_state_converges_across_validators() {
 /// air).
 #[test_traced]
 fn coin_balances_match_submitted_transactions() {
-    let executor = deterministic::Runner::timed(Duration::from_secs(120));
-    executor.start(|mut context| async move {
-        let mut network = TestNetworkBuilder::new(VALIDATORS)
-            .build(&mut context)
-            .await;
-        network.start_all().await;
+    with_large_stack(|| {
+        let executor = deterministic::Runner::timed(Duration::from_secs(120));
+        executor.start(|mut context| async move {
+            let mut network = TestNetworkBuilder::new(VALIDATORS)
+                .build(&mut context)
+                .await;
+            network.start_all().await;
 
-        let (alice, bob, carol) = submit_scenario(&network).await;
-        network
-            .run_until_nonces(&[(alice.clone(), 4), (bob.clone(), 1)])
-            .await;
+            let (alice, bob, carol) = submit_scenario(&network).await;
+            network
+                .run_until_nonces(&[(alice.clone(), 4), (bob.clone(), 1)])
+                .await;
 
-        // Inspect any node; convergence (asserted separately) guarantees they all agree.
-        let ledgers = network.ledgers().await;
-        let ledger = ledgers
-            .into_iter()
-            .next()
-            .expect("at least one validator ledger");
-        let coin = gold_coin();
+            // Inspect any node; convergence (asserted separately) guarantees they all agree.
+            let ledgers = network.ledgers().await;
+            let ledger = ledgers
+                .into_iter()
+                .next()
+                .expect("at least one validator ledger");
+            let coin = gold_coin();
 
-        // Alice: 1_000_000 - 300_000 (to Bob) + 50_000 (mint) - 100_000 (burn) = 650_000.
-        assert_eq!(ledger.balance(&alice, &coin).await.unwrap(), 650_000);
-        // Bob: received 300_000, forwarded 120_000 to Carol = 180_000.
-        assert_eq!(ledger.balance(&bob, &coin).await.unwrap(), 180_000);
-        // Carol: received 120_000.
-        assert_eq!(ledger.balance(&carol, &coin).await.unwrap(), 120_000);
+            // Alice: 1_000_000 - 300_000 (to Bob) + 50_000 (mint) - 100_000 (burn) = 650_000.
+            assert_eq!(ledger.balance(&alice, &coin).await.unwrap(), 650_000);
+            // Bob: received 300_000, forwarded 120_000 to Carol = 180_000.
+            assert_eq!(ledger.balance(&bob, &coin).await.unwrap(), 180_000);
+            // Carol: received 120_000.
+            assert_eq!(ledger.balance(&carol, &coin).await.unwrap(), 120_000);
 
-        // Supply: 1_000_000 initial + 50_000 mint - 100_000 burn = 950_000.
-        let token = ledger
-            .token(&coin)
-            .await
-            .unwrap()
-            .expect("token must exist");
-        assert_eq!(token.total_supply, 950_000);
+            // Supply: 1_000_000 initial + 50_000 mint - 100_000 burn = 950_000.
+            let token = ledger
+                .token(&coin)
+                .await
+                .unwrap()
+                .expect("token must exist");
+            assert_eq!(token.total_supply, 950_000);
 
-        // Conservation: all balances sum to the total supply.
-        let total = ledger.balance(&alice, &coin).await.unwrap()
-            + ledger.balance(&bob, &coin).await.unwrap()
-            + ledger.balance(&carol, &coin).await.unwrap();
-        assert_eq!(total, token.total_supply, "balances must conserve supply");
+            // Conservation: all balances sum to the total supply.
+            let total = ledger.balance(&alice, &coin).await.unwrap()
+                + ledger.balance(&bob, &coin).await.unwrap()
+                + ledger.balance(&carol, &coin).await.unwrap();
+            assert_eq!(total, token.total_supply, "balances must conserve supply");
+        });
     });
 }
 
 #[test_traced]
 fn authority_registry_updates_onchain() {
-    let executor = deterministic::Runner::timed(Duration::from_secs(120));
-    executor.start(|mut context| async move {
-        let mut network = TestNetworkBuilder::new(VALIDATORS)
-            .build(&mut context)
-            .await;
-        network.start_all().await;
+    with_large_stack(|| {
+        let executor = deterministic::Runner::timed(Duration::from_secs(120));
+        executor.start(|mut context| async move {
+            let mut network = TestNetworkBuilder::new(VALIDATORS)
+                .build(&mut context)
+                .await;
+            network.start_all().await;
 
-        let owners = [authority_key(500), authority_key(501), authority_key(502)];
-        let owner_ids = owners
-            .iter()
-            .map(nunchi_crypto::PrivateKey::public_key)
-            .collect::<Vec<_>>();
-        let initial = network.participants().to_vec();
-        let added = commonware_cryptography::ed25519::PrivateKey::from_seed(900).public_key();
-        let change = RegistryChange::AddValidator {
-            validator: added.clone(),
-        };
-        let proposal = proposal_id(&change, 3);
-        let submitter = network.submitter(0);
+            let owners = [authority_key(500), authority_key(501), authority_key(502)];
+            let owner_ids = owners
+                .iter()
+                .map(nunchi_crypto::PrivateKey::public_key)
+                .collect::<Vec<_>>();
+            let initial = network.participants().to_vec();
+            let added = commonware_cryptography::ed25519::PrivateKey::from_seed(900).public_key();
+            let change = RegistryChange::AddValidator {
+                validator: added.clone(),
+            };
+            let proposal = proposal_id(&change, 3);
+            let submitter = network.submitter(0);
 
-        submitter
-            .submit(
-                AuthorityTransaction::sign(
-                    &owners[0],
-                    0,
-                    AuthorityOperation::Configure {
-                        policy: MultisigPolicy {
-                            owners: owner_ids,
-                            threshold: 2,
+            submitter
+                .submit(
+                    AuthorityTransaction::sign(
+                        &owners[0],
+                        0,
+                        AuthorityOperation::Configure {
+                            policy: MultisigPolicy {
+                                owners: owner_ids,
+                                threshold: 2,
+                            },
+                            initial_validators: initial.clone(),
+                            epoch: 0,
                         },
-                        initial_validators: initial.clone(),
-                        epoch: 0,
-                    },
-                )
-                .into(),
-            )
-            .await
-            .expect("admit configure");
-        submitter
-            .submit(
-                AuthorityTransaction::sign(
-                    &owners[0],
-                    1,
-                    AuthorityOperation::Propose {
-                        change,
-                        effective_epoch: 3,
-                    },
-                )
-                .into(),
-            )
-            .await
-            .expect("admit propose");
-        submitter
-            .submit(
-                AuthorityTransaction::sign(&owners[1], 0, AuthorityOperation::Approve { proposal })
+                    )
                     .into(),
-            )
-            .await
-            .expect("admit approve");
-        submitter
-            .submit(
-                AuthorityTransaction::sign(&owners[2], 0, AuthorityOperation::Execute { proposal })
+                )
+                .await
+                .expect("admit configure");
+            submitter
+                .submit(
+                    AuthorityTransaction::sign(
+                        &owners[0],
+                        1,
+                        AuthorityOperation::Propose {
+                            change,
+                            effective_epoch: 3,
+                        },
+                    )
                     .into(),
-            )
-            .await
-            .expect("admit execute");
+                )
+                .await
+                .expect("admit propose");
+            submitter
+                .submit(
+                    AuthorityTransaction::sign(
+                        &owners[1],
+                        0,
+                        AuthorityOperation::Approve { proposal },
+                    )
+                    .into(),
+                )
+                .await
+                .expect("admit approve");
+            submitter
+                .submit(
+                    AuthorityTransaction::sign(
+                        &owners[2],
+                        0,
+                        AuthorityOperation::Execute { proposal },
+                    )
+                    .into(),
+                )
+                .await
+                .expect("admit execute");
 
-        network.run_until_height(12).await;
+            network.run_until_height(12).await;
 
-        let ledgers = network.authority_ledgers().await;
-        assert_eq!(ledgers.len(), VALIDATORS as usize);
+            let ledgers = network.authority_ledgers().await;
+            assert_eq!(ledgers.len(), VALIDATORS as usize);
 
-        for ledger in ledgers {
-            let epoch_4 = ledger.epoch_registry(4).await.unwrap().unwrap();
-            let epoch_5 = ledger.epoch_registry(5).await.unwrap().unwrap();
-            assert!(epoch_4.players.contains(&added));
-            assert!(!epoch_4.dealers.contains(&added));
-            assert!(epoch_5.players.contains(&added));
-            assert!(epoch_5.dealers.contains(&added));
-        }
+            for ledger in ledgers {
+                let epoch_4 = ledger.epoch_registry(4).await.unwrap().unwrap();
+                let epoch_5 = ledger.epoch_registry(5).await.unwrap().unwrap();
+                assert!(epoch_4.players.contains(&added));
+                assert!(!epoch_4.dealers.contains(&added));
+                assert!(epoch_5.players.contains(&added));
+                assert!(epoch_5.dealers.contains(&added));
+            }
+        });
     });
 }
 
 #[test_traced]
 fn oracle_updates_finalize_across_validators() {
-    let executor = deterministic::Runner::timed(Duration::from_secs(120));
-    executor.start(|mut context| async move {
-        let mut network = TestNetworkBuilder::new(VALIDATORS)
-            .build(&mut context)
-            .await;
-        network.start_all().await;
+    with_large_stack(|| {
+        let executor = deterministic::Runner::timed(Duration::from_secs(120));
+        executor.start(|mut context| async move {
+            let mut network = TestNetworkBuilder::new(VALIDATORS)
+                .build(&mut context)
+                .await;
+            network.start_all().await;
 
-        let updater = authority_key(701);
-        let submitter = network.submitter(0);
-        submitter
-            .submit(
-                OracleTransaction::sign(
-                    &updater,
-                    0,
-                    OracleOperation::AppendRecord {
-                        namespace: oracle_namespace(),
-                        interval: IntervalKey::new(3),
-                        payload: b"opaque-oracle-payload".to_vec(),
-                        proof: None,
-                    },
+            let updater = authority_key(701);
+            let submitter = network.submitter(0);
+            submitter
+                .submit(
+                    OracleTransaction::sign(
+                        &updater,
+                        0,
+                        OracleOperation::AppendRecord {
+                            namespace: oracle_namespace(),
+                            interval: IntervalKey::new(3),
+                            payload: b"opaque-oracle-payload".to_vec(),
+                            proof: None,
+                        },
+                    )
+                    .into(),
                 )
-                .into(),
-            )
-            .await
-            .expect("admit oracle update");
+                .await
+                .expect("admit oracle update");
 
-        loop {
-            let ledgers = network.oracle_ledgers().await;
-            if ledgers.len() == VALIDATORS as usize {
-                let mut all_updated = true;
-                for ledger in ledgers {
-                    let records = ledger
-                        .records_by_namespace(
-                            &oracle_namespace(),
-                            IntervalKey::new(3),
-                            IntervalKey::new(3),
-                        )
-                        .await
-                        .unwrap();
-                    if records.len() != 1 || records[0].payload != b"opaque-oracle-payload" {
-                        all_updated = false;
+            loop {
+                let ledgers = network.oracle_ledgers().await;
+                if ledgers.len() == VALIDATORS as usize {
+                    let mut all_updated = true;
+                    for ledger in ledgers {
+                        let records = ledger
+                            .records_by_namespace(
+                                &oracle_namespace(),
+                                IntervalKey::new(3),
+                                IntervalKey::new(3),
+                            )
+                            .await
+                            .unwrap();
+                        if records.len() != 1 || records[0].payload != b"opaque-oracle-payload" {
+                            all_updated = false;
+                            break;
+                        }
+                    }
+                    if all_updated {
                         break;
                     }
                 }
-                if all_updated {
-                    break;
-                }
+                network.context().sleep(Duration::from_secs(1)).await;
             }
-            network.context().sleep(Duration::from_secs(1)).await;
-        }
+        });
     });
 }
 
@@ -493,70 +526,145 @@ fn oracle_updates_finalize_across_validators() {
 /// nonce-gapped transaction is admitted but never proposed and stays pending.
 #[test_traced]
 fn mempool_tracks_status_through_finalization() {
-    let executor = deterministic::Runner::timed(Duration::from_secs(120));
-    executor.start(|mut context| async move {
-        let mut network = TestNetworkBuilder::new(VALIDATORS)
-            .build(&mut context)
-            .await;
-        network.start_all().await;
+    with_large_stack(|| {
+        let executor = deterministic::Runner::timed(Duration::from_secs(120));
+        executor.start(|mut context| async move {
+            let mut network = TestNetworkBuilder::new(VALIDATORS)
+                .build(&mut context)
+                .await;
+            network.start_all().await;
 
-        let alice = key(ALICE);
-        let alice_id = Address::from(alice.public_key());
-        let coin = gold_coin();
-        let node0 = network.submitter(0);
+            let alice = key(ALICE);
+            let alice_id = Address::from(alice.public_key());
+            let coin = gold_coin();
+            let node0 = network.submitter(0);
 
-        let mut digests = Vec::new();
-        digests.push(
-            node0
-                .submit(
-                    Transaction::sign(&alice, 0, CoinOperation::CreateToken { spec: gold_spec() })
-                        .into(),
-                )
-                .await
-                .expect("admit create token"),
-        );
-        for nonce in 1..3 {
+            let mut digests = Vec::new();
             digests.push(
                 node0
                     .submit(
                         Transaction::sign(
                             &alice,
-                            nonce,
-                            CoinOperation::Mint {
-                                coin,
-                                to: alice_id.clone(),
-                                amount: 1_000,
-                            },
+                            0,
+                            CoinOperation::CreateToken { spec: gold_spec() },
                         )
                         .into(),
                     )
                     .await
-                    .expect("admit mint"),
+                    .expect("admit create token"),
             );
-        }
-        // Nonce 5 leaves a gap at 3 and 4: admitted, but never proposable.
-        let gapped = node0
-            .submit(
-                Transaction::sign(
-                    &alice,
-                    5,
-                    CoinOperation::Mint {
-                        coin,
-                        to: alice_id.clone(),
-                        amount: 1_000,
-                    },
+            for nonce in 1..3 {
+                digests.push(
+                    node0
+                        .submit(
+                            Transaction::sign(
+                                &alice,
+                                nonce,
+                                CoinOperation::Mint {
+                                    coin,
+                                    to: alice_id.clone(),
+                                    amount: 1_000,
+                                },
+                            )
+                            .into(),
+                        )
+                        .await
+                        .expect("admit mint"),
+                );
+            }
+            // Nonce 5 leaves a gap at 3 and 4: admitted, but never proposable.
+            let gapped = node0
+                .submit(
+                    Transaction::sign(
+                        &alice,
+                        5,
+                        CoinOperation::Mint {
+                            coin,
+                            to: alice_id.clone(),
+                            amount: 1_000,
+                        },
+                    )
+                    .into(),
                 )
-                .into(),
-            )
-            .await
-            .expect("admit gapped mint");
+                .await
+                .expect("admit gapped mint");
 
-        network.run_until_nonces(&[(alice_id, 3)]).await;
+            network.run_until_nonces(&[(alice_id, 3)]).await;
 
-        // The pool learns of finalization via a fire-and-forget report, so poll briefly.
-        for digest in digests {
+            // The pool learns of finalization via a fire-and-forget report, so poll briefly.
+            for digest in digests {
+                loop {
+                    match node0.status(digest).await {
+                        Some(nunchi_mempool::TxStatus::Finalized { .. }) => break,
+                        Some(nunchi_mempool::TxStatus::Pending) => {
+                            network.context().sleep(Duration::from_millis(100)).await;
+                        }
+                        other => panic!("expected finalization, got {other:?}"),
+                    }
+                }
+            }
+            assert_eq!(
+                node0.status(gapped).await,
+                Some(nunchi_mempool::TxStatus::Pending),
+                "gapped transaction must stay pending"
+            );
+        });
+    });
+}
+
+/// Resubmitting the same nonce replaces the earlier transaction: only the replacement finalizes.
+#[test_traced]
+fn mempool_replaces_same_nonce_resubmission() {
+    with_large_stack(|| {
+        let executor = deterministic::Runner::timed(Duration::from_secs(120));
+        executor.start(|mut context| async move {
+            // Single validator: this asserts mempool replacement, not multi-peer
+            // gossip races where another proposer can still include the original.
+            let mut network = TestNetworkBuilder::new(1).build(&mut context).await;
+            network.start_all().await;
+
+            let alice = key(ALICE);
+            let alice_id = Address::from(alice.public_key());
+            let node0 = network.submitter(0);
+            let silver_spec = CoinSpec::new(
+                TokenSymbol::new("SILV").expect("valid token symbol"),
+                TokenName::new("Silver").expect("valid token name"),
+                9,
+                500_000,
+                None,
+            );
+
+            let original = node0
+                .submit(
+                    Transaction::sign(&alice, 0, CoinOperation::CreateToken { spec: gold_spec() })
+                        .into(),
+                )
+                .await
+                .expect("admit original");
+            let replacement = node0
+                .submit(
+                    Transaction::sign(
+                        &alice,
+                        0,
+                        CoinOperation::CreateToken {
+                            spec: silver_spec.clone(),
+                        },
+                    )
+                    .into(),
+                )
+                .await
+                .expect("admit replacement");
+
+            assert_eq!(
+                node0.status(original).await,
+                Some(nunchi_mempool::TxStatus::Dropped {
+                    reason: nunchi_mempool::DropReason::Replaced
+                })
+            );
+
+            network.run_until_nonces(&[(alice_id.clone(), 1)]).await;
             loop {
-                match node0.status(digest).await {
+                match node0.status(replacement).await {
                     Some(nunchi_mempool::TxStatus::Finalized { .. }) => break,
                     Some(nunchi_mempool::TxStatus::Pending) => {
                         network.context().sleep(Duration::from_millis(100)).await;
@@ -564,79 +672,12 @@ fn mempool_tracks_status_through_finalization() {
                     other => panic!("expected finalization, got {other:?}"),
                 }
             }
-        }
-        assert_eq!(
-            node0.status(gapped).await,
-            Some(nunchi_mempool::TxStatus::Pending),
-            "gapped transaction must stay pending"
-        );
-    });
-}
 
-/// Resubmitting the same nonce replaces the earlier transaction: only the replacement finalizes.
-#[test_traced]
-fn mempool_replaces_same_nonce_resubmission() {
-    let executor = deterministic::Runner::timed(Duration::from_secs(120));
-    executor.start(|mut context| async move {
-        // Single validator: this asserts mempool replacement, not multi-peer
-        // gossip races where another proposer can still include the original.
-        let mut network = TestNetworkBuilder::new(1).build(&mut context).await;
-        network.start_all().await;
-
-        let alice = key(ALICE);
-        let alice_id = Address::from(alice.public_key());
-        let node0 = network.submitter(0);
-        let silver_spec = CoinSpec::new(
-            TokenSymbol::new("SILV").expect("valid token symbol"),
-            TokenName::new("Silver").expect("valid token name"),
-            9,
-            500_000,
-            None,
-        );
-
-        let original = node0
-            .submit(
-                Transaction::sign(&alice, 0, CoinOperation::CreateToken { spec: gold_spec() })
-                    .into(),
-            )
-            .await
-            .expect("admit original");
-        let replacement = node0
-            .submit(
-                Transaction::sign(
-                    &alice,
-                    0,
-                    CoinOperation::CreateToken {
-                        spec: silver_spec.clone(),
-                    },
-                )
-                .into(),
-            )
-            .await
-            .expect("admit replacement");
-
-        assert_eq!(
-            node0.status(original).await,
-            Some(nunchi_mempool::TxStatus::Dropped {
-                reason: nunchi_mempool::DropReason::Replaced
-            })
-        );
-
-        network.run_until_nonces(&[(alice_id.clone(), 1)]).await;
-        loop {
-            match node0.status(replacement).await {
-                Some(nunchi_mempool::TxStatus::Finalized { .. }) => break,
-                Some(nunchi_mempool::TxStatus::Pending) => {
-                    network.context().sleep(Duration::from_millis(100)).await;
-                }
-                other => panic!("expected finalization, got {other:?}"),
-            }
-        }
-
-        // The chain holds Silver, not Gold: the replacement is what executed.
-        let ledger = network.ledgers().await.into_iter().next().expect("ledger");
-        let silver = TokenFactory::derive_coin_id(&alice_id, 0, &silver_spec);
-        assert!(ledger.token(&silver).await.unwrap().is_some());
-        assert!(ledger.token(&gold_coin()).await.unwrap().is_none());
+            // The chain holds Silver, not Gold: the replacement is what executed.
+            let ledger = network.ledgers().await.into_iter().next().expect("ledger");
+            let silver = TokenFactory::derive_coin_id(&alice_id, 0, &silver_spec);
+            assert!(ledger.token(&silver).await.unwrap().is_some());
+            assert!(ledger.token(&gold_coin()).await.unwrap().is_none());
+        });
     });
 }
