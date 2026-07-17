@@ -755,9 +755,7 @@ mod tests {
         Digest as _, Hasher, Signer,
     };
     use commonware_storage::mmr::Location;
-    use commonware_utils::{
-        ordered::Set, range::NonEmptyRange, test_rng, test_rng_seeded, N3f1, NZU32,
-    };
+    use commonware_utils::{ordered::Set, range::NonEmptyRange, test_rng, N3f1, TestRng, NZU32};
     use nunchi_coins_chain::{Context, Seedable, StateCommitment};
 
     fn schemes() -> Vec<Scheme> {
@@ -784,7 +782,7 @@ mod tests {
         let players = Set::from_iter_dedup(
             (0..4).map(|offset| ed25519::PrivateKey::from_seed(seed + offset).public_key()),
         );
-        let mut rng = test_rng_seeded(seed);
+        let mut rng = TestRng::new(seed);
         deal::<MinSig, _, N3f1>(&mut rng, Default::default(), players)
             .expect("deal")
             .0

@@ -37,41 +37,41 @@ unexpected_cfgs = { level = "warn", check-cfg = [
 ] }
 
 [workspace.dependencies]
-nunchi-coins = { version = "2026.5.0", path = "coins" }
-nunchi-authority = { version = "2026.5.0", path = "authority" }
-nunchi-bridge = { version = "2026.5.0", path = "bridge" }
-nunchi-chain = { version = "2026.5.0", path = "chain" }
-nunchi-clob = { version = "2026.5.0", path = "clob" }
-nunchi-common = { version = "2026.5.0", path = "common" }
-nunchi-crypto = { version = "2026.5.0", path = "crypto" }
-nunchi-dkg = { version = "2026.5.0", path = "dkg" }
-nunchi-mempool = { version = "2026.5.0", path = "mempool" }
-nunchi-oracle = { version = "2026.5.0", path = "oracle" }
-nunchi-rpc = { version = "2026.5.0", path = "rpc" }
-nunchi-coins-chain = { version = "2026.5.0", path = "examples/coins/chain" }
-nunchi-bridge-chain = { version = "2026.5.0", path = "examples/bridge-chain" }
-nunchi-xtask = { version = "2026.5.0", package = "xtask", path = "xtask" }
-commonware-actor = "2026.5.0"
-commonware-broadcast = "2026.5.0"
-commonware-codec = "2026.5.0"
-commonware-consensus = "2026.5.0"
-commonware-cryptography = "2026.5.0"
-commonware-formatting = "2026.5.0"
-commonware-glue = "2026.5.0"
-commonware-macros = "2026.5.0"
-commonware-p2p = "2026.5.0"
-commonware-resolver = "2026.5.0"
-commonware-runtime = "2026.5.0"
-commonware-storage = "2026.5.0"
-commonware-stream = "2026.5.0"
-commonware-utils = "2026.5.0"
-commonware-math = "2026.5.0"
-commonware-parallel = "2026.5.0"
+nunchi-coins = { version = "2026.6.0", path = "coins" }
+nunchi-authority = { version = "2026.6.0", path = "authority" }
+nunchi-bridge = { version = "2026.6.0", path = "bridge" }
+nunchi-chain = { version = "2026.6.0", path = "chain" }
+nunchi-clob = { version = "2026.6.0", path = "clob" }
+nunchi-common = { version = "2026.6.0", path = "common" }
+nunchi-crypto = { version = "2026.6.0", path = "crypto" }
+nunchi-dkg = { version = "2026.6.0", path = "dkg" }
+nunchi-mempool = { version = "2026.6.0", path = "mempool" }
+nunchi-oracle = { version = "2026.6.0", path = "oracle" }
+nunchi-rpc = { version = "2026.6.0", path = "rpc" }
+nunchi-coins-chain = { version = "2026.6.0", path = "examples/coins/chain" }
+nunchi-bridge-chain = { version = "2026.6.0", path = "examples/bridge-chain" }
+nunchi-xtask = { version = "2026.6.0", package = "xtask", path = "xtask" }
+commonware-actor = "2026.7.0"
+commonware-broadcast = "2026.7.0"
+commonware-codec = "2026.7.0"
+commonware-consensus = "2026.7.0"
+commonware-cryptography = "2026.7.0"
+commonware-formatting = "2026.7.0"
+commonware-glue = "2026.7.0"
+commonware-macros = "2026.7.0"
+commonware-p2p = "2026.7.0"
+commonware-resolver = "2026.7.0"
+commonware-runtime = "2026.7.0"
+commonware-storage = "2026.7.0"
+commonware-stream = "2026.7.0"
+commonware-utils = "2026.7.0"
+commonware-math = "2026.7.0"
+commonware-parallel = "2026.7.0"
 thiserror = "2.0.12"
 bytes = "1.7.1"
 chacha20poly1305 = "0.10.1"
-rand = "0.8.5"
-rand_core = "0.6.4"
+rand = "0.10.2"
+rand_core = "0.10.1"
 futures = "0.3.31"
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"

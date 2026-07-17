@@ -141,6 +141,7 @@ impl<E: Spawner + Metrics + Clock, C: Client> Pusher<E, C> {
                 wait.found();
                 drop(wait);
 
+                let block = block.as_ref().clone();
                 let height = block.height.get();
                 metrics.observe_block(BlockMetricSource::LiveCertificate, &block);
                 guard.cache_block(block.clone());

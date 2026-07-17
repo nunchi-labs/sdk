@@ -50,6 +50,8 @@ const DKG_CHANNEL: u64 = nunchi_coins_chain::channels::DKG;
 const BACKFILL_CHANNEL: u64 = nunchi_coins_chain::channels::BACKFILL;
 const MEMPOOL_CHANNEL: u64 = nunchi_coins_chain::channels::MEMPOOL;
 const CLOB_CHANNEL: u64 = nunchi_coins_chain::channels::CLOB;
+const PROBE_CHANNEL: u64 = nunchi_coins_chain::channels::PROBE;
+const STATE_SYNC_CHANNEL: u64 = nunchi_coins_chain::channels::STATE_SYNC;
 
 type Channel = (
     Sender<PublicKey, deterministic::Context>,
@@ -68,7 +70,7 @@ pub(crate) struct ThresholdFixture {
 }
 
 impl ThresholdFixture {
-    pub(crate) fn new(rng: impl rand_core::CryptoRngCore, validators: u32) -> Self {
+    pub(crate) fn new(rng: impl rand_core::CryptoRng, validators: u32) -> Self {
         let private_keys = (0..validators)
             .map(|seed| ed25519::PrivateKey::from_seed(seed as u64))
             .collect::<Vec<_>>();
@@ -129,6 +131,8 @@ struct ValidatorChannels {
     backfill: Channel,
     mempool: Channel,
     clob: Channel,
+    probe: Channel,
+    state_sync: Channel,
 }
 
 pub(crate) struct TestNetworkBuilder {
@@ -254,6 +258,15 @@ impl TestNetwork<'_> {
     }
 
     pub(crate) async fn start_validator(&mut self, index: usize) {
+        self.start_validator_inner(index, false).await;
+    }
+
+    /// Start a fresh validator by discovering a finalized floor and syncing QMDB from peers.
+    pub(crate) async fn start_validator_with_state_sync(&mut self, index: usize) {
+        self.start_validator_inner(index, true).await;
+    }
+
+    async fn start_validator_inner(&mut self, index: usize, state_sync: bool) {
         let signer = &self.private_keys[index];
         let public_key = signer.public_key();
         let channels = self
@@ -277,6 +290,7 @@ impl TestNetwork<'_> {
             },
             channels,
             self.validator_config.clone(),
+            state_sync,
         )
         .await;
         self.nodes.insert(public_key, handle);
@@ -412,6 +426,10 @@ impl TestNetwork<'_> {
         }
     }
 
+    /// Wait until every started validator has the same committed state root.
+    ///
+    /// Account nonces can match while tips still differ by empty or other
+    /// blocks; those later commits change the authenticated root.
     pub(crate) async fn run_until_ledger_roots_converge(&self) -> Vec<Digest> {
         loop {
             let ledgers = self.ledgers().await;
@@ -480,6 +498,7 @@ async fn start_validator(
     identity: ValidatorIdentity<'_>,
     channels: ValidatorChannels,
     cfg: ValidatorConfig,
+    state_sync: bool,
 ) -> NodeHandle<deterministic::Context> {
     let ValidatorIdentity {
         signer,
@@ -503,6 +522,7 @@ async fn start_validator(
         leader_timeout: cfg.leader_timeout,
         certification_timeout: cfg.certification_timeout,
         strategy: Sequential,
+        state_sync,
         max_block_transactions: MAX_BLOCK_TRANSACTIONS,
         pool_config: PoolConfig::default(),
         genesis: None,
@@ -527,7 +547,13 @@ async fn start_validator(
         channels.backfill,
     );
 
-    let (engine, handle) = Engine::new(validator_context.child("engine"), config).await;
+    let (engine, handle) = Engine::new(
+        validator_context.child("engine"),
+        config,
+        channels.probe,
+        channels.state_sync,
+    )
+    .await;
     engine.start(
         channels.pending,
         channels.recovered,
@@ -590,6 +616,11 @@ async fn register_validators(
         let backfill = oracle.register(BACKFILL_CHANNEL, TEST_QUOTA).await.unwrap();
         let mempool = oracle.register(MEMPOOL_CHANNEL, TEST_QUOTA).await.unwrap();
         let clob = oracle.register(CLOB_CHANNEL, TEST_QUOTA).await.unwrap();
+        let probe = oracle.register(PROBE_CHANNEL, TEST_QUOTA).await.unwrap();
+        let state_sync = oracle
+            .register(STATE_SYNC_CHANNEL, TEST_QUOTA)
+            .await
+            .unwrap();
         registrations.insert(
             validator.clone(),
             ValidatorChannels {
@@ -601,6 +632,8 @@ async fn register_validators(
                 backfill,
                 mempool,
                 clob,
+                probe,
+                state_sync,
             },
         );
     }

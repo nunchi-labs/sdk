@@ -2,7 +2,6 @@ use commonware_consensus::types::Height;
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_glue::stateful::db::DatabaseSet as _;
 use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
-use commonware_utils::sync::AsyncRwLock;
 use futures::lock::Mutex as AsyncMutex;
 use nunchi_chain::{ConsensusExtension, StateCommitment};
 use nunchi_clob::{
@@ -14,7 +13,8 @@ use nunchi_coins::{
     PrivateKey, TokenName, TokenSymbol, Transaction as CoinTransaction,
 };
 use nunchi_common::{
-    NoopEventSink, QmdbBackend, QmdbBatch, QmdbDatabaseSet, QmdbState, RuntimeContext,
+    shared_database, NoopEventSink, QmdbBackend, QmdbBatch, QmdbDatabaseSet, QmdbState,
+    RuntimeContext,
 };
 use nunchi_mempool::{Mempool, PoolConfig};
 use std::sync::Arc;
@@ -57,7 +57,7 @@ fn proposal_skips_unregistered_multisig() {
         let db = QmdbBackend::init(context, config)
             .await
             .expect("init state db");
-        let databases: QmdbDatabaseSet<deterministic::Context> = Arc::new(AsyncRwLock::new(db));
+        let databases: QmdbDatabaseSet<deterministic::Context> = shared_database(db);
         let genesis_target = databases.committed_targets().await;
         let genesis_state = StateCommitment {
             root: genesis_target.root,
@@ -128,7 +128,7 @@ fn profile_block_execution() {
         let db = QmdbBackend::init(context, config)
             .await
             .expect("init state db");
-        let databases: QmdbDatabaseSet<deterministic::Context> = Arc::new(AsyncRwLock::new(db));
+        let databases: QmdbDatabaseSet<deterministic::Context> = shared_database(db);
         let genesis_target = databases.committed_targets().await;
         let genesis_state = StateCommitment {
             root: genesis_target.root,

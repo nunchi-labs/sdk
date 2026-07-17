@@ -67,3 +67,13 @@ This repository will contain modules for building public and private blockchains
 * [`coins-chain`](examples/coins/chain) - default PoA chain
 * [`bridge-chain`](examples/bridge-chain) - two chains bridging consensus certificates
 * [`custom-module`](examples/custom-module) - starter template for creating a custom nunchi module
+
+## Commonware compatibility
+
+This workspace pins `commonware-*` crates to **2026.7.0**.
+
+When upgrading nodes:
+
+* Do not run mixed commonware versions in the same peer set (marshal coding / ZODA shards and other wire formats are not interchangeable).
+* Mid-sync glue metadata from v2026.5.0 cannot resume after upgrading to v2026.7.0; clear or re-sync any node that crashed mid state-sync before the bump.
+* Fresh joining nodes can enable peer QMDB state sync with `state_sync = true`. Nunchi's resolver preserves Commonware's standard wire layout while decoding variable-value operations with the chain-wide 512 KiB value bound.

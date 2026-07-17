@@ -14,10 +14,12 @@ use commonware_actor::{
     Feedback,
 };
 use commonware_consensus::{marshal::Update, Reporter};
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
+use commonware_runtime::{
+    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+};
 use commonware_storage::queue;
 use commonware_utils::{acknowledgement::Exact, Acknowledgement};
-use std::{collections::VecDeque, num::NonZeroUsize, time::Instant};
+use std::{collections::VecDeque, num::NonZeroUsize, sync::Arc, time::Instant};
 
 #[derive(Clone)]
 pub struct Producer {
@@ -26,14 +28,14 @@ pub struct Producer {
 }
 
 struct Message {
-    block: Block,
+    block: Arc<Block>,
     block_estimated_bytes: u64,
     ack: Exact,
     metrics: IndexerMetrics,
 }
 
 impl Message {
-    fn new(block: Block, ack: Exact, metrics: IndexerMetrics) -> Self {
+    fn new(block: Arc<Block>, ack: Exact, metrics: IndexerMetrics) -> Self {
         let block_estimated_bytes = estimated_block_bytes(&block);
         Self {
             block,
@@ -81,7 +83,7 @@ impl Policy for Message {
     }
 }
 
-struct Actor<E: Clock + Storage + Metrics> {
+struct Actor<E: BufferPooler + Clock + Storage + Metrics> {
     context: ContextCell<E>,
     uploads: SharedState,
     metrics: IndexerMetrics,
@@ -116,7 +118,7 @@ impl Reporter for Producer {
     }
 }
 
-impl<E: Clock + Storage + Metrics + Spawner> Actor<E> {
+impl<E: BufferPooler + Clock + Storage + Metrics + Spawner> Actor<E> {
     fn new(
         context: E,
         uploads: SharedState,
@@ -186,7 +188,7 @@ pub fn init<E>(
     mailbox_size: NonZeroUsize,
 ) -> Producer
 where
-    E: Clock + Storage + Metrics + Spawner,
+    E: BufferPooler + Clock + Storage + Metrics + Spawner,
 {
     let (actor, producer) = Actor::new(context, uploads, metrics, writer, mailbox_size);
     actor.start();
@@ -262,7 +264,10 @@ mod tests {
             let (ack, waiter) = Exact::handle();
 
             assert!(producer
-                .report(commonware_consensus::marshal::Update::Block(block, ack))
+                .report(commonware_consensus::marshal::Update::Block(
+                    block.into(),
+                    ack,
+                ))
                 .accepted());
             commonware_macros::select! {
                 result = waiter.fuse() => result.expect("acknowledged"),
@@ -301,11 +306,11 @@ mod tests {
             let second_bytes = estimated_block_bytes(&second);
 
             assert_eq!(
-                sender.enqueue(Message::new(first, ack_1, metrics.clone())),
+                sender.enqueue(Message::new(first.into(), ack_1, metrics.clone())),
                 Feedback::Ok
             );
             assert_eq!(
-                sender.enqueue(Message::new(second, ack_2, metrics.clone())),
+                sender.enqueue(Message::new(second.into(), ack_2, metrics.clone())),
                 Feedback::Backoff
             );
 

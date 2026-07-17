@@ -15,7 +15,8 @@ use commonware_consensus::types::Height;
 use commonware_cryptography::sha256::Digest;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell, telemetry::metrics::status, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    spawn_cell, telemetry::metrics::status, BufferPooler, Clock, ContextCell, Handle, Metrics,
+    Spawner, Storage,
 };
 use commonware_storage::queue;
 use commonware_utils::futures::{OptionFuture, Pool};
@@ -61,7 +62,7 @@ pub(crate) struct Config {
     pub(crate) mismatched_finalization_grace: Duration,
 }
 
-pub struct Consumer<E: Spawner + Clock + Storage + Metrics, C: Client> {
+pub struct Consumer<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> {
     context: ContextCell<E>,
     client: C,
     marshal: MarshalMailbox<Scheme, Standard<Block>>,
@@ -77,7 +78,7 @@ pub struct Consumer<E: Spawner + Clock + Storage + Metrics, C: Client> {
     mismatched_finalization_grace: Duration,
 }
 
-impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
+impl<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
     pub fn new(
         context: E,
         client: C,

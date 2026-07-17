@@ -16,7 +16,7 @@ use commonware_consensus::{
         store::{Blocks as _, Certificates},
     },
     simplex::elector::Random,
-    types::{FixedEpocher, Height, ViewDelta},
+    types::{Epoch, FixedEpocher, Height, ViewDelta},
     Reporters,
 };
 use commonware_cryptography::{
@@ -24,37 +24,41 @@ use commonware_cryptography::{
         dkg::feldman_desmedt::Output,
         primitives::{group, variant::MinSig},
     },
-    certificate::Scheme as _,
+    certificate::Verifier as _,
     ed25519::{self, Batch},
     sha256::Digest,
     BatchVerifier, Digestible, Signer,
 };
 use commonware_glue::stateful::{
     Application as StatefulApplication,
-    db::ManagedDb as _, Config as StatefulConfig, Mailbox as StatefulMailbox,
-    Stateful as StatefulActor, SyncPlan,
+    db::ManagedDb as _,
+    probe::{Config as ProbeConfig, Probe},
+    Config as StatefulConfig, Mailbox as StatefulMailbox, Stateful as StatefulActor, SyncPlan,
 };
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     buffer::paged::CacheRef, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics,
-    Network, Spawner, Storage, ThreadPooler,
+    Network, Spawner, Storage, Strategizer,
 };
 use commonware_storage::{
     archive::{immutable, Identifier as ArchiveIdentifier},
     metadata::{self, Metadata},
     queue,
 };
-use commonware_utils::{sequence::U64, union, NZU64};
+use commonware_utils::{sequence::U64, union, NZDuration, NZU64};
 use futures::lock::Mutex as AsyncMutex;
 use governor::clock::Clock as GClock;
 use nunchi_chain::engine::*;
+use nunchi_chain::state_sync::{
+    Actor as StateSyncActor, Config as StateSyncConfig, FloorProvider,
+    Mailbox as StateSyncMailbox,
+};
 use nunchi_clob::{ClobActor, ClobConfig, ClobExtension};
 use nunchi_common::{QmdbBackend, QmdbState};
 use nunchi_dkg::{self as dkg, orchestrator, PeerConfig, UpdateCallBack, MAX_SUPPORTED_MODE};
 use nunchi_mempool::{Mempool, PoolConfig};
 use rand::{CryptoRng, Rng};
-use rand_core::CryptoRngCore;
 use std::{
     marker::PhantomData,
     sync::Arc,
@@ -90,6 +94,8 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
     pub leader_timeout: Duration,
     pub certification_timeout: Duration,
     pub strategy: S,
+    /// Discover a finalized floor and perform peer QMDB state sync on a fresh database.
+    pub state_sync: bool,
     pub max_block_transactions: usize,
     pub pool_config: PoolConfig,
     pub genesis: Option<ChainGenesis>,
@@ -98,7 +104,7 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
 
 type DkgActor<E, P> = nunchi_chain::DkgActor<E, P, Transaction, ClobExtension>;
 type DkgMailbox = nunchi_chain::DkgMailbox<Transaction, ClobExtension>;
-type StatefulApp<E> = StatefulActor<E, Application, Scheme, Standard<Block>, NoStateSyncResolver>;
+type StatefulApp<E> = StatefulActor<E, Application, Scheme, Standard<Block>, StateSyncMailbox<E>>;
 type StatefulAppMailbox<E> = StatefulMailbox<E, Application>;
 type LimitedStatefulAppMailbox<E> = VerifyLimiter<StatefulAppMailbox<E>>;
 type InlineApp<E> = Inline<E, Scheme, LimitedStatefulAppMailbox<E>, Block, FixedEpocher>;
@@ -134,13 +140,12 @@ where
     E: BufferPooler
         + Spawner
         + Metrics
-        + CryptoRngCore
         + CryptoRng
         + Rng
         + Clock
         + GClock
         + Storage
-        + ThreadPooler
+        + Strategizer
         + Network,
     B: Blocker<PublicKey = PublicKey>,
     P: Manager<PublicKey = PublicKey>,
@@ -153,6 +158,8 @@ where
     buffer: buffered::Engine<E, PublicKey, Block, P>,
     buffered_mailbox: buffered::Mailbox<PublicKey, Block>,
     marshal: Marshal<E, S>,
+    probe_handle: Handle<()>,
+    state_sync_handle: Handle<()>,
     orchestrator: Orchestrator<E, B, S>,
     orchestrator_mailbox: orchestrator::Mailbox<MinSig, PublicKey>,
     mempool: Mempool<Transaction>,
@@ -168,13 +175,12 @@ where
     E: BufferPooler
         + Spawner
         + Metrics
-        + CryptoRngCore
         + CryptoRng
         + Rng
         + Clock
         + GClock
         + Storage
-        + ThreadPooler
+        + Strategizer
         + Network
         + Send
         + 'static,
@@ -184,7 +190,18 @@ where
     Batch: BatchVerifier<PublicKey = PublicKey>,
 {
     /// Create a new [Engine].
-    pub async fn new(context: E, config: Config<B, P, S>) -> (Self, NodeHandle<E>) {
+    pub async fn new(
+        context: E,
+        config: Config<B, P, S>,
+        probe_network: (
+            impl Sender<PublicKey = PublicKey>,
+            impl Receiver<PublicKey = PublicKey>,
+        ),
+        state_sync_network: (
+            impl Sender<PublicKey = PublicKey>,
+            impl Receiver<PublicKey = PublicKey>,
+        ),
+    ) -> (Self, NodeHandle<E>) {
         let (mempool, submitter) = Mempool::<Transaction>::new(config.pool_config.clone());
         let (clob, clob_mailbox) = ClobActor::new(ClobConfig::default());
         if let Some(clob_genesis) = config.genesis.as_ref().and_then(|genesis| genesis.clob.as_ref())
@@ -330,11 +347,22 @@ where
             &consensus_namespace,
             &config.output,
         );
+        let floor_verifier = certificate_verifier
+            .clone()
+            .expect("threshold scheme must support epoch-independent certificates");
         let provider = Provider::new(
             consensus_namespace.clone(),
             config.signer.clone(),
             certificate_verifier,
         );
+        let floor_sizing_scheme =
+            provider.scheme_for_epoch(&orchestrator::EpochTransition {
+                epoch: Epoch::zero(),
+                poly: Some(config.output.public().clone()),
+                share: config.share.clone(),
+                dealers: config.peer_config.dealers(0),
+            });
+        let floor_provider = FloorProvider::new(floor_verifier, floor_sizing_scheme);
         let state_partition = format!("{}-coins", config.partition_prefix);
         let db_config =
             QmdbState::<E>::config_with_page_cache(&state_partition, page_cache.clone());
@@ -351,7 +379,7 @@ where
             )
             .await
             .expect("failed to initialize empty state database for genesis commitment");
-            state_commitment(empty.sync_target().await)
+            state_commitment(empty.sync_target())
         };
         let genesis_state = if let Some(genesis) = &config.genesis {
             let fingerprint = commonware_formatting::hex(
@@ -379,7 +407,7 @@ where
                 .apply_to_state(&mut state, &empty_state)
                 .await
                 .expect("failed to seed state database with genesis");
-            let actual = state_commitment(state.sync_target().await);
+            let actual = state_commitment(state.sync_target());
             assert_eq!(
                 expected, actual,
                 "state database genesis commitment must match the genesis block commitment"
@@ -395,7 +423,7 @@ where
             )
             .await
             .expect("failed to initialize state database for startup probe");
-            state.sync_target().await
+            state.sync_target()
         };
         clear_disabled_state_sync_metadata(&context, &config.partition_prefix).await;
         if repair_marshal_progress_if_state_is_behind(
@@ -420,11 +448,47 @@ where
         );
         let genesis = app.genesis_block();
         let genesis_digest = genesis.digest();
-        // Fresh nodes recover through marshal backfill. Existing nodes reuse the finalized floor
-        // recovered above so marshal, stateful execution, and Simplex restart from one anchor.
-        let plan =
+        // The sync plan drives both marshal and stateful startup. Fresh joining nodes can discover
+        // a floor and sync QMDB directly; bootstrap nodes leave `state_sync` disabled and start
+        // from genesis. Interrupted state sync resumes from its persisted floor.
+        let mut plan =
             SyncPlan::<_, Scheme, Standard<Block>>::init(&context, config.partition_prefix.clone())
                 .await;
+        let (state_sync, state_sync_mailbox) = StateSyncActor::new(
+            context.child("state_sync_resolver"),
+            StateSyncConfig {
+                peer_provider: config.manager.clone(),
+                blocker: config.blocker.clone(),
+                database: None,
+                operation_codec_config: nunchi_common::qmdb_operation_codec_config(),
+                mailbox_size: MAILBOX_SIZE,
+                me: Some(config.signer.public_key()),
+                initial: STATE_SYNC_RESOLVER_INITIAL,
+                timeout: STATE_SYNC_RESOLVER_TIMEOUT,
+                fetch_retry_timeout: STATE_SYNC_RESOLVER_RETRY,
+                max_serve_ops: STATE_SYNC_FETCH_BATCH_SIZE,
+                priority_requests: false,
+                priority_responses: false,
+            },
+        );
+        let state_sync_handle = state_sync.start(state_sync_network);
+        let (probe, probe_mailbox) = Probe::new(ProbeConfig {
+            context: context.child("probe"),
+            provider: floor_provider,
+            strategy: config.strategy.clone(),
+            capacity: MAILBOX_SIZE,
+            blocker: config.blocker.clone(),
+            minimum_epoch: Epoch::zero(),
+            retry_timeout: NZDuration!(Duration::from_secs(1)),
+        });
+        let probe_handle = probe.start(probe_network);
+        if plan.should_state_sync(config.state_sync) && plan.floor().is_none() {
+            let floor = probe_mailbox
+                .subscribe()
+                .await
+                .expect("state-sync floor probe stopped");
+            plan = plan.with_floor(floor);
+        }
         let marshal_start = recovered_floor
             .clone()
             .map_or_else(|| plan.marshal_start(genesis), marshal::Start::Floor);
@@ -455,6 +519,8 @@ where
             },
         )
         .await;
+        // Once startup floor selection is complete, serve our latest finalization to peers.
+        probe_mailbox.attach(marshal_mailbox.clone());
 
         let (stateful, stateful_mailbox) = StatefulActor::init(
             context.child("stateful"),
@@ -463,11 +529,11 @@ where
                 db_config,
                 input_provider: submitter.clone(),
                 marshal: marshal_mailbox.clone(),
-                max_pending_acks: MAX_PENDING_ACKS,
                 mailbox_size: MAILBOX_SIZE,
                 plan,
-                resolvers: NoStateSyncResolver,
+                resolvers: state_sync_mailbox,
                 sync_config: state_sync_config(),
+                prune_config: Some(state_prune_config()),
             },
         );
         let node_handle = NodeHandle::new(
@@ -555,6 +621,8 @@ where
             buffer,
             buffered_mailbox,
             marshal,
+            probe_handle,
+            state_sync_handle,
             orchestrator,
             orchestrator_mailbox,
             mempool,
@@ -672,6 +740,8 @@ where
         let marshal_handle = self
             .marshal
             .start(reporters, self.buffered_mailbox, marshal);
+        let probe_handle = self.probe_handle;
+        let state_sync_handle = self.state_sync_handle;
         let stateful_handle = self.stateful.start();
         let orchestrator_handle = self.orchestrator.start(votes, certificates, resolver);
         let mempool_handle = self
@@ -694,6 +764,8 @@ where
                 result = dkg_handle => unexpected_exit("dkg", result),
                 result = buffer_handle => unexpected_exit("buffer", result),
                 result = marshal_handle => unexpected_exit("marshal", result),
+                result = probe_handle => unexpected_exit("probe", result),
+                result = state_sync_handle => unexpected_exit("state sync resolver", result),
                 result = stateful_handle => unexpected_exit("stateful", result),
                 result = orchestrator_handle => unexpected_exit("orchestrator", result),
                 result = mempool_handle => unexpected_exit("mempool", result),
@@ -713,6 +785,8 @@ where
                 result = dkg_handle => unexpected_exit("dkg", result),
                 result = buffer_handle => unexpected_exit("buffer", result),
                 result = marshal_handle => unexpected_exit("marshal", result),
+                result = probe_handle => unexpected_exit("probe", result),
+                result = state_sync_handle => unexpected_exit("state sync resolver", result),
                 result = stateful_handle => unexpected_exit("stateful", result),
                 result = orchestrator_handle => unexpected_exit("orchestrator", result),
                 result = mempool_handle => unexpected_exit("mempool", result),
@@ -749,7 +823,7 @@ where
         + Rng
         + Spawner
         + Storage
-        + ThreadPooler
+        + Strategizer
         + Send
         + Sync
         + 'static,

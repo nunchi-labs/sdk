@@ -18,7 +18,7 @@ use nunchi_coins::{
     Transaction,
 };
 use nunchi_oracle::{IntervalKey, NamespaceId, OracleOperation, Transaction as OracleTransaction};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{rngs::StdRng, RngExt, SeedableRng};
 use std::time::Duration;
 use tracing::info;
 
@@ -105,9 +105,9 @@ fn reaches_height_100() {
 }
 
 #[test_traced]
-fn backfills_late_validator() {
+fn state_syncs_late_validator() {
     with_large_stack(|| {
-        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        let executor = deterministic::Runner::timed(Duration::from_secs(60));
         executor.start(|mut context| async move {
             let mut network = TestNetworkBuilder::new(5)
                 .without_initial_links()
@@ -129,7 +129,7 @@ fn backfills_late_validator() {
                     [from, to].contains(&0usize) && ![from, to].contains(&1usize)
                 })
                 .await;
-            network.start_validator(0).await;
+            network.start_validator_with_state_sync(0).await;
             network.run_until_height(20).await;
         });
     });
@@ -157,7 +157,7 @@ fn recovers_unclean_shutdown() {
                 };
 
                 let wait =
-                    context.gen_range(Duration::from_millis(250)..Duration::from_millis(1_000));
+                    context.random_range(Duration::from_millis(250)..Duration::from_millis(1_000));
                 let mut network = TestNetworkBuilder::new(n)
                     .with_fixture(fixture)
                     .with_initial_link(reliable_link())
@@ -618,14 +618,21 @@ fn mempool_replaces_same_nonce_resubmission() {
     with_large_stack(|| {
         let executor = deterministic::Runner::timed(Duration::from_secs(120));
         executor.start(|mut context| async move {
-            let mut network = TestNetworkBuilder::new(VALIDATORS)
-                .build(&mut context)
-                .await;
+            // Single validator: this asserts mempool replacement, not multi-peer
+            // gossip races where another proposer can still include the original.
+            let mut network = TestNetworkBuilder::new(1).build(&mut context).await;
             network.start_all().await;
 
             let alice = key(ALICE);
             let alice_id = Address::from(alice.public_key());
             let node0 = network.submitter(0);
+            let silver_spec = CoinSpec::new(
+                TokenSymbol::new("SILV").expect("valid token symbol"),
+                TokenName::new("Silver").expect("valid token name"),
+                9,
+                500_000,
+                None,
+            );
 
             let original = node0
                 .submit(
@@ -640,13 +647,7 @@ fn mempool_replaces_same_nonce_resubmission() {
                         &alice,
                         0,
                         CoinOperation::CreateToken {
-                            spec: CoinSpec::new(
-                                TokenSymbol::new("SILV").expect("valid token symbol"),
-                                TokenName::new("Silver").expect("valid token name"),
-                                9,
-                                500_000,
-                                None,
-                            ),
+                            spec: silver_spec.clone(),
                         },
                     )
                     .into(),
@@ -674,17 +675,7 @@ fn mempool_replaces_same_nonce_resubmission() {
 
             // The chain holds Silver, not Gold: the replacement is what executed.
             let ledger = network.ledgers().await.into_iter().next().expect("ledger");
-            let silver = TokenFactory::derive_coin_id(
-                &alice_id,
-                0,
-                &CoinSpec::new(
-                    TokenSymbol::new("SILV").expect("valid token symbol"),
-                    TokenName::new("Silver").expect("valid token name"),
-                    9,
-                    500_000,
-                    None,
-                ),
-            );
+            let silver = TokenFactory::derive_coin_id(&alice_id, 0, &silver_spec);
             assert!(ledger.token(&silver).await.unwrap().is_some());
             assert!(ledger.token(&gold_coin()).await.unwrap().is_none());
         });

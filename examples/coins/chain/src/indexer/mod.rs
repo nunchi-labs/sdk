@@ -6,7 +6,7 @@ use commonware_consensus::types::Epoch;
 use commonware_cryptography::bls12381::{
     dkg::feldman_desmedt::Output as DkgOutput, primitives::variant::MinSig,
 };
-use commonware_runtime::{Clock, Metrics, Spawner, Storage};
+use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner, Storage};
 use commonware_storage::queue;
 use commonware_utils::sync::Mutex;
 use std::{future::Future, num::NonZeroUsize, sync::Arc, time::Duration};
@@ -187,13 +187,13 @@ pub(crate) struct Config {
     pub(crate) metrics: IndexerMetrics,
 }
 
-pub(crate) struct Indexer<E: Spawner + Clock + Storage + Metrics, C: Client> {
+pub(crate) struct Indexer<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> {
     producer: Producer,
     pusher: Pusher<E, C>,
     consumer: Consumer<E, C>,
 }
 
-impl<E: Spawner + Clock + Storage + Metrics, C: Client> Indexer<E, C> {
+impl<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> Indexer<E, C> {
     pub(crate) async fn new(
         context: E,
         client: C,

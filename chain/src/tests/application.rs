@@ -10,7 +10,8 @@ use commonware_glue::stateful::{
 };
 use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
 use commonware_storage::mmr::Location;
-use commonware_utils::{non_empty_range, sync::AsyncRwLock};
+use commonware_utils::non_empty_range;
+use nunchi_common::shared_database;
 use futures::{lock::Mutex as AsyncMutex, FutureExt};
 use nunchi_common::{
     Event, EventSink, NoopEventSink, QmdbBackend, QmdbBatch, QmdbDatabaseSet, QmdbMerkleized,
@@ -260,7 +261,7 @@ where
     let db = QmdbBackend::init(context, config)
         .await
         .expect("init state db");
-    let databases: QmdbDatabaseSet<deterministic::Context> = Arc::new(AsyncRwLock::new(db));
+    let databases: QmdbDatabaseSet<deterministic::Context> = shared_database(db);
     let genesis_target = databases.committed_targets().await;
     let genesis_state = StateCommitment {
         root: genesis_target.root,
@@ -295,7 +296,7 @@ fn verification_uses_noop_event_sink() {
             <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::verify(
                 &mut app,
                 (context.child("verify"), block.context.clone()),
-                futures::stream::iter([block, parent]),
+                futures::stream::iter([Arc::new(block), Arc::new(parent)]),
                 databases.new_batches().await,
             )
             .await;

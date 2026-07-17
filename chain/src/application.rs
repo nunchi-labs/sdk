@@ -10,7 +10,7 @@ use commonware_glue::stateful::{
 use commonware_parallel::{Rayon, Strategy as _};
 use commonware_runtime::{
     telemetry::metrics::{histogram::Buckets, Histogram, HistogramExt as _, MetricsExt as _},
-    Clock, Metrics, Spawner, Storage,
+    BufferPooler, Clock, Metrics, Spawner, Storage,
 };
 use commonware_storage::{mmr::Location, qmdb::sync::Target};
 use commonware_utils::{non_empty_range, range::NonEmptyRange, SystemTimeExt};
@@ -211,7 +211,7 @@ where
 
     /// Execute txpool candidates in order, including the first `max_block_transactions` that
     /// apply cleanly against the parent state.
-    pub async fn build_valid_transactions<E: Storage + Clock + Metrics>(
+    pub async fn build_valid_transactions<E: BufferPooler + Storage + Clock + Metrics>(
         &self,
         batches: <QmdbDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
         context: RuntimeContext,
@@ -221,7 +221,7 @@ where
             .await
     }
 
-    async fn build_valid_transactions_inner<E: Storage + Clock + Metrics>(
+    async fn build_valid_transactions_inner<E: BufferPooler + Storage + Clock + Metrics>(
         &self,
         timing: Option<(&E, &ApplicationMetrics)>,
         batches: <QmdbDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
@@ -273,7 +273,7 @@ where
         Some((included, merkleized))
     }
 
-    async fn build_proposal_state<E: Storage + Clock + Metrics>(
+    async fn build_proposal_state<E: BufferPooler + Storage + Clock + Metrics>(
         &mut self,
         timing: Option<(&E, &ApplicationMetrics)>,
         batches: <QmdbDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
@@ -347,7 +347,7 @@ where
         commit_extension: bool,
     ) -> Option<QmdbMerkleized<E>>
     where
-        E: Storage + Clock + Metrics,
+        E: BufferPooler + Storage + Clock + Metrics,
         EventHandler: EventConsumer,
     {
         events.begin_block(context).await;
@@ -424,7 +424,7 @@ where
         }
     }
 
-    fn state_range<E: Storage + Clock + Metrics>(
+    fn state_range<E: BufferPooler + Storage + Clock + Metrics>(
         merkleized: &QmdbMerkleized<E>,
     ) -> NonEmptyRange<Location> {
         let bounds = merkleized.bounds();
@@ -590,7 +590,7 @@ where
 
 impl<E, R, Ext, Events> StatefulApplication<E> for Application<R, Ext, Events>
 where
-    E: Rng + Spawner + Metrics + Clock + Storage,
+    E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler,
     R: Runtime + Clone + Send + Sync + 'static,
     R::Transaction: PoolTransaction + Sync,
     Ext: ConsensusExtension + Sync,
@@ -613,7 +613,7 @@ where
     async fn propose(
         &mut self,
         (runtime_context, context): (E, Self::Context),
-        ancestry: impl futures::Stream<Item = Self::Block> + Send,
+        ancestry: impl futures::Stream<Item = std::sync::Arc<Self::Block>> + Send,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: &mut Self::InputProvider,
     ) -> Option<Proposed<Self, E>> {
@@ -663,7 +663,7 @@ where
     async fn verify(
         &mut self,
         (runtime_context, _): (E, Self::Context),
-        ancestry: impl futures::Stream<Item = Self::Block> + Send,
+        ancestry: impl futures::Stream<Item = std::sync::Arc<Self::Block>> + Send,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         let metrics = self.metrics(&runtime_context);
