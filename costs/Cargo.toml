@@ -1,0 +1,31 @@
+[package]
+name = "nunchi-costs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Custodial account and usage-credit accounting primitives for Nunchi chains."
+
+[lints]
+workspace = true
+
+[features]
+default = []
+rpc = ["dep:jsonrpsee", "dep:nunchi-rpc"]
+
+[dependencies]
+async-trait = { workspace = true }
+bytes = { workspace = true }
+commonware-codec = { workspace = true }
+commonware-cryptography = { workspace = true }
+commonware-formatting = { workspace = true }
+commonware-macros = { workspace = true }
+jsonrpsee = { workspace = true, optional = true }
+nunchi-common = { workspace = true }
+nunchi-crypto = { workspace = true }
+nunchi-rpc = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+futures = { workspace = true }

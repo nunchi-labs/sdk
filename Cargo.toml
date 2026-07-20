@@ -3,6 +3,7 @@ members = [
     "authority",
     "bridge",
     "common",
+    "costs",
     "chain",
     "clob",
     "coins",
@@ -43,6 +44,7 @@ nunchi-bridge = { version = "2026.6.0", path = "bridge" }
 nunchi-chain = { version = "2026.6.0", path = "chain" }
 nunchi-clob = { version = "2026.6.0", path = "clob" }
 nunchi-common = { version = "2026.6.0", path = "common" }
+nunchi-costs = { version = "2026.6.0", path = "costs" }
 nunchi-crypto = { version = "2026.6.0", path = "crypto" }
 nunchi-dkg = { version = "2026.6.0", path = "dkg" }
 nunchi-mempool = { version = "2026.6.0", path = "mempool" }
