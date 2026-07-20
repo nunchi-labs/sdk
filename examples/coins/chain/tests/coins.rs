@@ -195,14 +195,25 @@ async fn submit_scenario(
     // Alice: create GOLD, send some to Bob, mint a bit more, burn a bit.
     node0
         .submit(
-            Transaction::sign(&alice, nunchi_common::DEFAULT_CHAIN_ID, 0, CoinOperation::CreateToken { spec: gold_spec() }).into(),
+            Transaction::sign(
+                &alice,
+                nunchi_common::DEFAULT_CHAIN_ID,
+                0,
+                CoinOperation::CreateToken { spec: gold_spec() },
+            )
+            .into(),
         )
         .await
         .expect("admit create token");
     node0
         .submit(
-            Transaction::sign(&alice, nunchi_common::DEFAULT_CHAIN_ID, 1, CoinOperation::Transfer {
-                    coin, from: alice_id.clone(),
+            Transaction::sign(
+                &alice,
+                nunchi_common::DEFAULT_CHAIN_ID,
+                1,
+                CoinOperation::Transfer {
+                    coin,
+                    from: alice_id.clone(),
                     to: bob_id.clone(),
                     amount: 300_000,
                 },
@@ -213,8 +224,13 @@ async fn submit_scenario(
         .expect("admit transfer");
     node0
         .submit(
-            Transaction::sign(&alice, nunchi_common::DEFAULT_CHAIN_ID, 2, CoinOperation::Mint {
-                    coin, to: alice_id.clone(),
+            Transaction::sign(
+                &alice,
+                nunchi_common::DEFAULT_CHAIN_ID,
+                2,
+                CoinOperation::Mint {
+                    coin,
+                    to: alice_id.clone(),
                     amount: 50_000,
                 },
             )
@@ -224,8 +240,13 @@ async fn submit_scenario(
         .expect("admit mint");
     node0
         .submit(
-            Transaction::sign(&alice, nunchi_common::DEFAULT_CHAIN_ID, 3, CoinOperation::Burn {
-                    coin, from: alice_id.clone(),
+            Transaction::sign(
+                &alice,
+                nunchi_common::DEFAULT_CHAIN_ID,
+                3,
+                CoinOperation::Burn {
+                    coin,
+                    from: alice_id.clone(),
                     amount: 100_000,
                 },
             )
@@ -237,8 +258,13 @@ async fn submit_scenario(
     // Bob: forward some of what he received to Carol.
     node1
         .submit(
-            Transaction::sign(&bob, nunchi_common::DEFAULT_CHAIN_ID, 0, CoinOperation::Transfer {
-                    coin, from: bob_id.clone(),
+            Transaction::sign(
+                &bob,
+                nunchi_common::DEFAULT_CHAIN_ID,
+                0,
+                CoinOperation::Transfer {
+                    coin,
+                    from: bob_id.clone(),
                     to: carol_id.clone(),
                     amount: 120_000,
                 },
@@ -355,9 +381,16 @@ fn authority_registry_updates_onchain() {
 
         submitter
             .submit(
-                AuthorityTransaction::sign(&owners[0], nunchi_common::DEFAULT_CHAIN_ID, 0, AuthorityOperation::Configure {
+                AuthorityTransaction::sign(
+                    &owners[0],
+                    nunchi_common::DEFAULT_CHAIN_ID,
+                    0,
+                    AuthorityOperation::Configure {
                         policy: MultisigPolicy {
-                            owners: owner_ids, threshold: 2, }, initial_validators: initial.clone(),
+                            owners: owner_ids,
+                            threshold: 2,
+                        },
+                        initial_validators: initial.clone(),
                         epoch: 0,
                     },
                 )
@@ -367,23 +400,40 @@ fn authority_registry_updates_onchain() {
             .expect("admit configure");
         submitter
             .submit(
-                AuthorityTransaction::sign(&owners[0], nunchi_common::DEFAULT_CHAIN_ID, 1, AuthorityOperation::Propose {
-                        change, effective_epoch: 3, })
+                AuthorityTransaction::sign(
+                    &owners[0],
+                    nunchi_common::DEFAULT_CHAIN_ID,
+                    1,
+                    AuthorityOperation::Propose {
+                        change,
+                        effective_epoch: 3,
+                    },
+                )
                 .into(),
             )
             .await
             .expect("admit propose");
         submitter
             .submit(
-                AuthorityTransaction::sign(&owners[1], nunchi_common::DEFAULT_CHAIN_ID, 0, AuthorityOperation::Approve { proposal })
-                    .into(),
+                AuthorityTransaction::sign(
+                    &owners[1],
+                    nunchi_common::DEFAULT_CHAIN_ID,
+                    0,
+                    AuthorityOperation::Approve { proposal },
+                )
+                .into(),
             )
             .await
             .expect("admit approve");
         submitter
             .submit(
-                AuthorityTransaction::sign(&owners[2], nunchi_common::DEFAULT_CHAIN_ID, 0, AuthorityOperation::Execute { proposal })
-                    .into(),
+                AuthorityTransaction::sign(
+                    &owners[2],
+                    nunchi_common::DEFAULT_CHAIN_ID,
+                    0,
+                    AuthorityOperation::Execute { proposal },
+                )
+                .into(),
             )
             .await
             .expect("admit execute");
@@ -417,7 +467,11 @@ fn oracle_updates_finalize_across_validators() {
         let submitter = network.submitter(0);
         submitter
             .submit(
-                OracleTransaction::sign(&updater, nunchi_common::DEFAULT_CHAIN_ID, 0, OracleOperation::AppendRecord {
+                OracleTransaction::sign(
+                    &updater,
+                    nunchi_common::DEFAULT_CHAIN_ID,
+                    0,
+                    OracleOperation::AppendRecord {
                         namespace: oracle_namespace(),
                         interval: IntervalKey::new(3),
                         payload: b"opaque-oracle-payload".to_vec(),
@@ -476,8 +530,13 @@ fn mempool_tracks_status_through_finalization() {
         digests.push(
             node0
                 .submit(
-                    Transaction::sign(&alice, nunchi_common::DEFAULT_CHAIN_ID, 0, CoinOperation::CreateToken { spec: gold_spec() })
-                        .into(),
+                    Transaction::sign(
+                        &alice,
+                        nunchi_common::DEFAULT_CHAIN_ID,
+                        0,
+                        CoinOperation::CreateToken { spec: gold_spec() },
+                    )
+                    .into(),
                 )
                 .await
                 .expect("admit create token"),
@@ -488,7 +547,8 @@ fn mempool_tracks_status_through_finalization() {
                     .submit(
                         Transaction::sign(
                             &alice,
-                            nunchi_common::DEFAULT_CHAIN_ID, nonce,
+                            nunchi_common::DEFAULT_CHAIN_ID,
+                            nonce,
                             CoinOperation::Mint {
                                 coin,
                                 to: alice_id.clone(),
@@ -504,8 +564,13 @@ fn mempool_tracks_status_through_finalization() {
         // Nonce 5 leaves a gap at 3 and 4: admitted, but never proposable.
         let gapped = node0
             .submit(
-                Transaction::sign(&alice, nunchi_common::DEFAULT_CHAIN_ID, 5, CoinOperation::Mint {
-                        coin, to: alice_id.clone(),
+                Transaction::sign(
+                    &alice,
+                    nunchi_common::DEFAULT_CHAIN_ID,
+                    5,
+                    CoinOperation::Mint {
+                        coin,
+                        to: alice_id.clone(),
                         amount: 1_000,
                     },
                 )
@@ -552,14 +617,23 @@ fn mempool_replaces_same_nonce_resubmission() {
 
         let original = node0
             .submit(
-                Transaction::sign(&alice, nunchi_common::DEFAULT_CHAIN_ID, 0, CoinOperation::CreateToken { spec: gold_spec() })
-                    .into(),
+                Transaction::sign(
+                    &alice,
+                    nunchi_common::DEFAULT_CHAIN_ID,
+                    0,
+                    CoinOperation::CreateToken { spec: gold_spec() },
+                )
+                .into(),
             )
             .await
             .expect("admit original");
         let replacement = node0
             .submit(
-                Transaction::sign(&alice, nunchi_common::DEFAULT_CHAIN_ID, 0, CoinOperation::CreateToken {
+                Transaction::sign(
+                    &alice,
+                    nunchi_common::DEFAULT_CHAIN_ID,
+                    0,
+                    CoinOperation::CreateToken {
                         spec: CoinSpec::new(
                             TokenSymbol::new("SILV").expect("valid token symbol"),
                             TokenName::new("Silver").expect("valid token name"),

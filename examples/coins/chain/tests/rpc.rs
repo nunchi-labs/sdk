@@ -67,7 +67,11 @@ fn rpc_serves_status_and_filters_submissions_over_http() {
 
         // A well-signed transaction is accepted and lands in the pool.
         let alice = PrivateKey::from_seed(100);
-        let transaction = CoinTransaction::sign(&alice, nunchi_common::DEFAULT_CHAIN_ID, 0, CoinOperation::CreateToken {
+        let transaction = CoinTransaction::sign(
+            &alice,
+            nunchi_common::DEFAULT_CHAIN_ID,
+            0,
+            CoinOperation::CreateToken {
                 spec: CoinSpec::new(
                     TokenSymbol::new("GOLD").expect("valid token symbol"),
                     TokenName::new("Gold").expect("valid token name"),

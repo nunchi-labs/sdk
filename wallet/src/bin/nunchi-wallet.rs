@@ -67,7 +67,8 @@ async fn main() -> Result<()> {
             insecure_store,
         } => {
             let created = nunchi_wallet::create_wallet(
-                &CreateWalletOptions::new(cli.wallet_root, name, chain_id).insecure_store(insecure_store),
+                &CreateWalletOptions::new(cli.wallet_root, name, chain_id)
+                    .insecure_store(insecure_store),
             )?;
             println!("{}", serde_json::to_string_pretty(&created.summary)?);
         }
@@ -76,11 +77,13 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&wallets)?);
         }
         Command::Show { name } => {
-            let wallet = nunchi_wallet::show_wallet(&WalletLookupOptions::new(cli.wallet_root, name))?;
+            let wallet =
+                nunchi_wallet::show_wallet(&WalletLookupOptions::new(cli.wallet_root, name))?;
             println!("{}", serde_json::to_string_pretty(&wallet)?);
         }
         Command::Address { name } => {
-            let wallet = nunchi_wallet::show_wallet(&WalletLookupOptions::new(cli.wallet_root, name))?;
+            let wallet =
+                nunchi_wallet::show_wallet(&WalletLookupOptions::new(cli.wallet_root, name))?;
             println!("{}", wallet.address);
         }
         Command::SubmitTransfer {
@@ -113,7 +116,8 @@ async fn main() -> Result<()> {
             let amount = amount
                 .parse::<u128>()
                 .context("amount must be a valid u128")?;
-            let tx = WalletRpcClient::build_transfer(&signer, chain_id, nonce, coin, from, to, amount);
+            let tx =
+                WalletRpcClient::build_transfer(&signer, chain_id, nonce, coin, from, to, amount);
             let client = WalletRpcClient::new(rpc)?;
             let response = client.submit_coins_transaction(&tx).await?;
             println!(

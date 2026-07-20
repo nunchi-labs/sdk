@@ -86,6 +86,41 @@ fn runtime_validate_has_no_event_sink_surface() {
     });
 }
 
+#[test]
+fn runtime_rejects_a_transaction_signed_for_another_chain() {
+    deterministic::Runner::default().start(|context| async move {
+        let mut state = QmdbState::init(context, "coins-runtime-chain-id")
+            .await
+            .unwrap();
+        let key = PrivateKey::ed25519_from_seed(1);
+        let tx = Transaction::from(nunchi_coins::Transaction::sign(
+            &key,
+            8,
+            0,
+            CoinOperation::CreateToken {
+                spec: CoinSpec::new(
+                    TokenSymbol::new("NCH").unwrap(),
+                    TokenName::new("Nunchi").unwrap(),
+                    9,
+                    1_000,
+                    None,
+                ),
+            },
+        ));
+
+        let error = ConfiguredCoinsRuntime::<9>::validate(&mut state, RuntimeContext::default(), &tx)
+            .await
+            .expect_err("wrong chain id must be rejected");
+        assert!(matches!(
+            error,
+            RuntimeError::ChainIdMismatch {
+                expected: 9,
+                actual: 8
+            }
+        ));
+    });
+}
+
 async fn fee_state(
     context: deterministic::Context,
     partition: &str,

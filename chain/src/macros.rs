@@ -68,6 +68,15 @@ macro_rules! transaction_wrapper {
                     )+
                 }
             }
+
+            /// Return the chain identifier bound into the wrapped transaction signature.
+            pub fn chain_id(&self) -> ::nunchi_common::ChainId {
+                match self {
+                    $(
+                        Self::$variant(tx) => tx.payload.chain_id,
+                    )+
+                }
+            }
         }
 
         impl ::nunchi_mempool::PoolTransaction for $name {

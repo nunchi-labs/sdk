@@ -32,7 +32,7 @@ pub use nunchi_dkg::{
     Activity, Context, EdScheme, EpochProvider, Finalization, Identity, Notarization, Provider,
     PublicKey, Scheme, Seed, Seedable, Signature, ThresholdScheme,
 };
-pub use runtime::{CoinsRuntime, RuntimeError};
+pub use runtime::{CoinsRuntime, ConfiguredCoinsRuntime, RuntimeError};
 pub use transaction::Transaction;
 
 pub type Block<Tx = Transaction> = nunchi_chain::Block<Tx>;

@@ -10,6 +10,6 @@ pub use keystore::{KeystoreError, WalletKeystore};
 pub use passkey::{PasskeyAssertion, PasskeyPublicKey, SECP256R1_SCHEME};
 pub use record::{
     address_from_public_key, address_hrp, create_wallet, list_wallets, load_private_key,
-    parse_address, show_wallet, sign_message, CreatedWallet, CreateWalletOptions,
+    parse_address, show_wallet, sign_message, CreateWalletOptions, CreatedWallet,
     ListWalletsOptions, WalletError, WalletLookupOptions, WalletRecord, WalletSummary,
 };

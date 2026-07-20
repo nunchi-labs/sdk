@@ -8,7 +8,7 @@ use std::future::Future;
 use commonware_codec::{EncodeSize, Read, Write};
 use commonware_cryptography::sha256;
 
-use crate::{EventSink, StateStore};
+use crate::{ChainId, EventSink, StateStore, DEFAULT_CHAIN_ID};
 
 /// Deterministic execution context supplied by the chain application.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -32,6 +32,12 @@ pub trait Runtime {
 
     /// Runtime-level deterministic execution error.
     type Error: std::error::Error + Send + Sync + 'static;
+
+    /// Chain identifier accepted by this runtime.
+    ///
+    /// The default preserves the local-devnet behavior. Production chains must set a distinct
+    /// value so their runtime can reject transactions signed for another chain.
+    const CHAIN_ID: ChainId = DEFAULT_CHAIN_ID;
 
     /// Validate a transaction against scratch state.
     fn validate<S>(

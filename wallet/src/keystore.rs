@@ -113,37 +113,41 @@ pub(crate) fn read_wallet(
         }
     }
 
-    let envelope: EncryptedEnvelope = serde_json::from_str(&raw).map_err(|source| {
-        crate::record::WalletError::Json {
+    let envelope: EncryptedEnvelope =
+        serde_json::from_str(&raw).map_err(|source| crate::record::WalletError::Json {
             path: path.to_path_buf(),
             source,
-        }
-    })?;
+        })?;
     let password = password.ok_or(KeystoreError::PasswordRequired)?;
     let record = decrypt_record(&envelope, password)?;
     validate_wallet_record(&record)?;
     Ok(record)
 }
 
-fn encrypt_record(record: &WalletRecord, password: &str) -> Result<EncryptedEnvelope, KeystoreError> {
+fn encrypt_record(
+    record: &WalletRecord,
+    password: &str,
+) -> Result<EncryptedEnvelope, KeystoreError> {
     let mut salt = [0u8; SALT_LEN];
     let mut nonce_bytes = [0u8; NONCE_LEN];
     OsRng.fill_bytes(&mut salt);
     OsRng.fill_bytes(&mut nonce_bytes);
 
     let key = derive_key(password, &salt)?;
-    let cipher = ChaCha20Poly1305::new_from_slice(&key).map_err(|_| KeystoreError::InvalidEnvelope {
-        reason: "invalid derived key length".to_string(),
-    })?;
+    let cipher =
+        ChaCha20Poly1305::new_from_slice(&key).map_err(|_| KeystoreError::InvalidEnvelope {
+            reason: "invalid derived key length".to_string(),
+        })?;
     let plaintext = serde_json::to_vec(record).map_err(|_| KeystoreError::InvalidEnvelope {
         reason: "failed to serialize wallet record".to_string(),
     })?;
     let nonce = Nonce::from_slice(&nonce_bytes);
-    let ciphertext = cipher
-        .encrypt(nonce, plaintext.as_ref())
-        .map_err(|_| KeystoreError::InvalidEnvelope {
-            reason: "encryption failed".to_string(),
-        })?;
+    let ciphertext =
+        cipher
+            .encrypt(nonce, plaintext.as_ref())
+            .map_err(|_| KeystoreError::InvalidEnvelope {
+                reason: "encryption failed".to_string(),
+            })?;
 
     Ok(EncryptedEnvelope {
         version: ENVELOPE_VERSION,
@@ -154,7 +158,10 @@ fn encrypt_record(record: &WalletRecord, password: &str) -> Result<EncryptedEnve
     })
 }
 
-fn decrypt_record(envelope: &EncryptedEnvelope, password: &str) -> Result<WalletRecord, KeystoreError> {
+fn decrypt_record(
+    envelope: &EncryptedEnvelope,
+    password: &str,
+) -> Result<WalletRecord, KeystoreError> {
     if envelope.version != ENVELOPE_VERSION || envelope.kdf != "argon2id" {
         return Err(KeystoreError::InvalidEnvelope {
             reason: "unsupported keystore version".to_string(),
@@ -166,9 +173,10 @@ fn decrypt_record(envelope: &EncryptedEnvelope, password: &str) -> Result<Wallet
     let nonce_bytes = hex_decode(&envelope.nonce).map_err(|_| KeystoreError::InvalidEnvelope {
         reason: "invalid nonce".to_string(),
     })?;
-    let ciphertext = hex_decode(&envelope.ciphertext).map_err(|_| KeystoreError::InvalidEnvelope {
-        reason: "invalid ciphertext".to_string(),
-    })?;
+    let ciphertext =
+        hex_decode(&envelope.ciphertext).map_err(|_| KeystoreError::InvalidEnvelope {
+            reason: "invalid ciphertext".to_string(),
+        })?;
     if salt.len() != SALT_LEN || nonce_bytes.len() != NONCE_LEN {
         return Err(KeystoreError::InvalidEnvelope {
             reason: "invalid salt or nonce length".to_string(),
@@ -176,9 +184,10 @@ fn decrypt_record(envelope: &EncryptedEnvelope, password: &str) -> Result<Wallet
     }
 
     let key = derive_key(password, &salt)?;
-    let cipher = ChaCha20Poly1305::new_from_slice(&key).map_err(|_| KeystoreError::InvalidEnvelope {
-        reason: "invalid derived key length".to_string(),
-    })?;
+    let cipher =
+        ChaCha20Poly1305::new_from_slice(&key).map_err(|_| KeystoreError::InvalidEnvelope {
+            reason: "invalid derived key length".to_string(),
+        })?;
     let nonce = Nonce::from_slice(&nonce_bytes);
     let plaintext = cipher
         .decrypt(nonce, ciphertext.as_ref())
@@ -189,9 +198,10 @@ fn decrypt_record(envelope: &EncryptedEnvelope, password: &str) -> Result<Wallet
 }
 
 fn derive_key(password: &str, salt: &[u8]) -> Result<[u8; 32], KeystoreError> {
-    let params = Params::new(19 * 1024, 2, 1, Some(32)).map_err(|_| KeystoreError::InvalidEnvelope {
-        reason: "invalid argon2 params".to_string(),
-    })?;
+    let params =
+        Params::new(19 * 1024, 2, 1, Some(32)).map_err(|_| KeystoreError::InvalidEnvelope {
+            reason: "invalid argon2 params".to_string(),
+        })?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut key = [0u8; 32];
     argon2

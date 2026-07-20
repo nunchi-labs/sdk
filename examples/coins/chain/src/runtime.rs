@@ -4,16 +4,26 @@ use commonware_codec::EncodeSize;
 use nunchi_authority::{AuthorityError, AuthorityLedger};
 use nunchi_bridge::{escrow_address, BridgeError, BridgeLedger, BridgeOperation};
 use nunchi_coins::{CoinId, Ledger, LedgerError};
-use nunchi_common::{EventSink, NoopEventSink, Overlay, Runtime, RuntimeContext, StateStore};
+use nunchi_common::{ChainId, EventSink, NoopEventSink, Overlay, Runtime, RuntimeContext, StateStore};
 use nunchi_oracle::{OracleError, OracleLedger};
 
 use crate::Transaction;
 
+/// Default coins-chain runtime for the local-development chain.
+pub type CoinsRuntime = ConfiguredCoinsRuntime<{ nunchi_common::DEFAULT_CHAIN_ID }>;
+
+/// Coins-chain runtime parameterized by its consensus chain identifier.
+///
+/// The default is the local-development chain (`0`). Production chains should use a distinct
+/// value, for example `ConfiguredCoinsRuntime<1>`, so a transaction signed for another chain is
+/// rejected before any fees or state changes are staged.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct CoinsRuntime;
+pub struct ConfiguredCoinsRuntime<const ID: ChainId>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
+    #[error("transaction chain id mismatch: expected {expected}, got {actual}")]
+    ChainIdMismatch { expected: ChainId, actual: ChainId },
     #[error("coins module error: {0}")]
     Coins(#[from] LedgerError),
     #[error("authority module error: {0}")]
@@ -36,9 +46,11 @@ impl RuntimeError {
     }
 }
 
-impl Runtime for CoinsRuntime {
+impl<const ID: ChainId> Runtime for ConfiguredCoinsRuntime<ID> {
     type Transaction = Transaction;
     type Error = RuntimeError;
+
+    const CHAIN_ID: ChainId = ID;
 
     async fn validate<S>(
         state: &mut S,
@@ -48,7 +60,7 @@ impl Runtime for CoinsRuntime {
     where
         S: StateStore + Send + Sync,
     {
-        apply_transaction(state, context, transaction, NoopEventSink).await
+        apply_transaction::<ID, _, _>(state, context, transaction, NoopEventSink).await
     }
 
     async fn apply<S, Events>(
@@ -61,7 +73,7 @@ impl Runtime for CoinsRuntime {
         S: StateStore + Send + Sync,
         Events: EventSink + Send,
     {
-        apply_transaction(state, context, transaction, events).await
+        apply_transaction::<ID, _, _>(state, context, transaction, events).await
     }
 
     fn is_storage_error(error: &Self::Error) -> bool {
@@ -69,7 +81,7 @@ impl Runtime for CoinsRuntime {
     }
 }
 
-async fn apply_transaction<S, Events>(
+async fn apply_transaction<const ID: ChainId, S, Events>(
     state: &mut S,
     context: RuntimeContext,
     transaction: &Transaction,
@@ -79,6 +91,13 @@ where
     S: StateStore + Send + Sync,
     Events: EventSink + Send,
 {
+    if transaction.chain_id() != ConfiguredCoinsRuntime::<ID>::CHAIN_ID {
+        return Err(RuntimeError::ChainIdMismatch {
+            expected: ConfiguredCoinsRuntime::<ID>::CHAIN_ID,
+            actual: transaction.chain_id(),
+        });
+    }
+
     // Fee ante: charge the authorizing account before module dispatch. The fee is staged in the
     // same overlay as the operation, so a failed transaction reverts its fee.
     let mut fees = Ledger::new(&mut *state);

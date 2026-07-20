@@ -132,6 +132,7 @@ fn nonce_overflow_emits_no_event_and_leaves_value_unchanged() {
         let account = address(&signer);
         let tx = Transaction::sign(
             &signer,
+            nunchi_common::DEFAULT_CHAIN_ID,
             u64::MAX,
             CustomOperation::SetValue { value: 99 },
         );

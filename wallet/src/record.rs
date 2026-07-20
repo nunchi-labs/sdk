@@ -166,7 +166,12 @@ pub fn create_wallet(options: &CreateWalletOptions) -> Result<CreatedWallet, Wal
         created_at_ms: unix_now_ms(),
     };
     validate_wallet_record(&record)?;
-    crate::keystore::write_wallet(&record_path, &record, options.password.as_deref(), options.insecure_store)?;
+    crate::keystore::write_wallet(
+        &record_path,
+        &record,
+        options.password.as_deref(),
+        options.insecure_store,
+    )?;
     Ok(CreatedWallet {
         summary: wallet_summary_from_record(&record, record_path),
     })
