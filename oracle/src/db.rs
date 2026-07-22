@@ -89,11 +89,7 @@ fn append_into_pages(
         .page_count
         .checked_add(1)
         .ok_or(OracleError::IndexFull)?;
-    Ok((
-        IntervalIndexMeta { page_count },
-        page_count - 1,
-        vec![id],
-    ))
+    Ok((IntervalIndexMeta { page_count }, page_count - 1, vec![id]))
 }
 
 #[async_trait]
@@ -283,9 +279,12 @@ impl<S: StateStore + Send + Sync> OracleDB for S {
         let last_page = if meta.page_count == 0 {
             Vec::new()
         } else {
-            match StateStore::get(self, &writer_page_key(writer, interval, meta.page_count - 1))
-                .await
-                .map_err(|err| OracleError::Storage(err.to_string()))?
+            match StateStore::get(
+                self,
+                &writer_page_key(writer, interval, meta.page_count - 1),
+            )
+            .await
+            .map_err(|err| OracleError::Storage(err.to_string()))?
             {
                 Some(bytes) => decode_page(&bytes)?,
                 None => return Err(OracleError::MissingRecord),
