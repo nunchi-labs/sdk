@@ -1,6 +1,6 @@
 use crate::{
     IntervalKey, NamespaceId, OracleDB, OracleOperation, OracleRecord, RecordId, Transaction,
-    MAX_PAYLOAD_SIZE, MAX_PROOF_SIZE, MAX_QUERY_INTERVALS, MAX_RECORDS_PER_BUCKET,
+    MAX_PAYLOAD_SIZE, MAX_PROOF_SIZE, MAX_QUERY_INTERVALS,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{Hasher, Sha256};
@@ -176,14 +176,6 @@ impl<D: OracleDB> OracleLedger<D> {
             return Err(OracleError::ProofTooLarge);
         }
 
-        let mut namespace_records = self.db.namespace_index(namespace, interval).await?;
-        let mut writer_records = self.db.writer_index(signer, interval).await?;
-        if namespace_records.len() == MAX_RECORDS_PER_BUCKET
-            || writer_records.len() == MAX_RECORDS_PER_BUCKET
-        {
-            return Err(OracleError::IndexFull);
-        }
-
         let id = record_id(signer, nonce, namespace, interval);
         let record = OracleRecord {
             id,
@@ -196,13 +188,10 @@ impl<D: OracleDB> OracleLedger<D> {
             written_at_ms: context.timestamp_ms,
         };
         self.db.set_record(&record);
-
-        namespace_records.push(id);
         self.db
-            .set_namespace_index(namespace, interval, &namespace_records);
-
-        writer_records.push(id);
-        self.db.set_writer_index(signer, interval, &writer_records);
+            .append_namespace_index(namespace, interval, id)
+            .await?;
+        self.db.append_writer_index(signer, interval, id).await?;
         Ok(())
     }
 

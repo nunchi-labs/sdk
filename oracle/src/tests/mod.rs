@@ -8,7 +8,7 @@ use nunchi_crypto::PrivateKey;
 
 use crate::{
     IntervalKey, NamespaceId, OracleError, OracleGenesis, OracleLedger, OracleOperation,
-    Transaction, MAX_PAYLOAD_SIZE, MAX_PROOF_SIZE,
+    Transaction, INDEX_PAGE_SIZE, MAX_PAYLOAD_SIZE, MAX_PROOF_SIZE, MAX_QUERY_INTERVALS,
 };
 
 #[derive(Default)]
@@ -272,5 +272,93 @@ fn genesis_is_noop_for_permissionless_oracle() {
             .await
             .unwrap();
         assert_eq!(records[0].payload, b"from-genesis");
+    });
+}
+
+#[test]
+fn interval_index_spans_multiple_pages() {
+    run_test(|| async {
+        let writer = PrivateKey::from_seed(2);
+        let mut ledger = OracleLedger::new(MemoryStore::default());
+        let total = INDEX_PAGE_SIZE + 3;
+
+        for nonce in 0..total {
+            let payload = format!("record-{nonce}").into_bytes();
+            ledger
+                .apply_transaction(
+                    &append_tx(&writer, nonce as u64, namespace(), 9, payload),
+                    context(1_000 + nonce as u64),
+                )
+                .await
+                .unwrap();
+        }
+
+        let records = ledger
+            .records_by_namespace(&namespace(), IntervalKey::new(9), IntervalKey::new(9))
+            .await
+            .unwrap();
+        assert_eq!(records.len(), total);
+        assert_eq!(records[0].payload, b"record-0");
+        assert_eq!(
+            records[INDEX_PAGE_SIZE].payload,
+            format!("record-{INDEX_PAGE_SIZE}").into_bytes()
+        );
+        assert_eq!(
+            records[total - 1].payload,
+            format!("record-{}", total - 1).into_bytes()
+        );
+
+        let by_writer = ledger
+            .records_by_writer(
+                &Address::external(&writer.public_key()),
+                IntervalKey::new(9),
+                IntervalKey::new(9),
+            )
+            .await
+            .unwrap();
+        assert_eq!(by_writer.len(), total);
+    });
+}
+
+#[test]
+fn query_allows_large_interval_ranges() {
+    run_test(|| async {
+        let writer = PrivateKey::from_seed(2);
+        let mut ledger = OracleLedger::new(MemoryStore::default());
+        ledger
+            .apply_transaction(
+                &append_tx(&writer, 0, namespace(), 0, b"start".to_vec()),
+                context(1_000),
+            )
+            .await
+            .unwrap();
+        ledger
+            .apply_transaction(
+                &append_tx(&writer, 1, namespace(), 2_000, b"end".to_vec()),
+                context(2_000),
+            )
+            .await
+            .unwrap();
+
+        let records = ledger
+            .records_by_namespace(&namespace(), IntervalKey::new(0), IntervalKey::new(2_000))
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].payload, b"start");
+        assert_eq!(records[1].payload, b"end");
+
+        let err = ledger
+            .records_by_namespace(
+                &namespace(),
+                IntervalKey::new(0),
+                IntervalKey::new(MAX_QUERY_INTERVALS),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            OracleError::InvalidQuery("interval range is too large")
+        );
     });
 }

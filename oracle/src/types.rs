@@ -6,10 +6,22 @@ use nunchi_common::Address;
 pub const MAX_PAYLOAD_SIZE: usize = 64 * 1024;
 /// Maximum proof bytes accepted in one oracle record.
 pub const MAX_PROOF_SIZE: usize = 16 * 1024;
-/// Maximum records stored in one explicit query index bucket.
-pub const MAX_RECORDS_PER_BUCKET: usize = 1024;
+/// Maximum record ids stored in one interval-index page.
+///
+/// Interval indexes are paged: a single `(namespace|writer, interval)` bucket may
+/// contain an unbounded number of records across multiple pages of this size.
+pub const INDEX_PAGE_SIZE: usize = 1024;
+/// Backward-compatible alias for [`INDEX_PAGE_SIZE`].
+///
+/// Historically this capped total records per interval bucket. Indexes are now
+/// paged, so this value is only the per-page capacity.
+#[doc(alias = "INDEX_PAGE_SIZE")]
+pub const MAX_RECORDS_PER_BUCKET: usize = INDEX_PAGE_SIZE;
 /// Maximum interval buckets a helper query will read in one call.
-pub const MAX_QUERY_INTERVALS: u64 = 1024;
+///
+/// Sized to allow month-scale day buckets and day-scale minute buckets without
+/// forcing consumers to shard interval keys.
+pub const MAX_QUERY_INTERVALS: u64 = 100_000;
 
 /// Opaque namespace chosen by writers and consuming modules.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -32,6 +44,33 @@ impl IntervalKey {
 /// Stable identifier for an appended oracle record.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct RecordId(pub Digest);
+
+/// Metadata for a paged interval index.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct IntervalIndexMeta {
+    /// Number of pages currently allocated for this index.
+    pub page_count: u32,
+}
+
+impl Write for IntervalIndexMeta {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.page_count.write(buf);
+    }
+}
+
+impl Read for IntervalIndexMeta {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+        Ok(Self {
+            page_count: u32::read(buf)?,
+        })
+    }
+}
+
+impl FixedSize for IntervalIndexMeta {
+    const SIZE: usize = u32::SIZE;
+}
 
 macro_rules! digest_id_codec {
     ($ty:ty) => {
