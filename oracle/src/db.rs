@@ -92,6 +92,20 @@ fn append_into_pages(
     Ok((IntervalIndexMeta { page_count }, page_count - 1, vec![id]))
 }
 
+fn extend_within_limit(
+    records: &mut Vec<RecordId>,
+    page: Vec<RecordId>,
+    max_records: usize,
+) -> Result<(), OracleError> {
+    if records.len().saturating_add(page.len()) > max_records {
+        return Err(OracleError::InvalidQuery(
+            "query result exceeds MAX_QUERY_RECORDS",
+        ));
+    }
+    records.extend(page);
+    Ok(())
+}
+
 #[async_trait]
 pub trait OracleDB {
     async fn nonce(&self, account: &Address) -> Result<u64, OracleError>;
@@ -102,16 +116,20 @@ pub trait OracleDB {
 
     fn set_record(&mut self, record: &OracleRecord);
 
-    /// Load every record id indexed under `(namespace, interval)`, across pages.
+    /// Load record ids indexed under `(namespace, interval)`, across pages.
+    ///
+    /// Fails if more than `max_records` ids would be returned.
     async fn namespace_index(
         &self,
         namespace: &NamespaceId,
         interval: &IntervalKey,
+        max_records: usize,
     ) -> Result<Vec<RecordId>, OracleError>;
 
     /// Append one record id to the paged `(namespace, interval)` index.
     ///
-    /// Only the last page (and meta when a new page is allocated) is rewritten.
+    /// Always rewrites the last page. Rewrites index meta only when a new page
+    /// is allocated (including the first page).
     async fn append_namespace_index(
         &mut self,
         namespace: &NamespaceId,
@@ -119,14 +137,20 @@ pub trait OracleDB {
         id: RecordId,
     ) -> Result<(), OracleError>;
 
-    /// Load every record id indexed under `(writer, interval)`, across pages.
+    /// Load record ids indexed under `(writer, interval)`, across pages.
+    ///
+    /// Fails if more than `max_records` ids would be returned.
     async fn writer_index(
         &self,
         writer: &Address,
         interval: &IntervalKey,
+        max_records: usize,
     ) -> Result<Vec<RecordId>, OracleError>;
 
     /// Append one record id to the paged `(writer, interval)` index.
+    ///
+    /// Always rewrites the last page. Rewrites index meta only when a new page
+    /// is allocated (including the first page).
     async fn append_writer_index(
         &mut self,
         writer: &Address,
@@ -173,6 +197,7 @@ impl<S: StateStore + Send + Sync> OracleDB for S {
         &self,
         namespace: &NamespaceId,
         interval: &IntervalKey,
+        max_records: usize,
     ) -> Result<Vec<RecordId>, OracleError> {
         let meta = match StateStore::get(self, &namespace_meta_key(namespace, interval))
             .await
@@ -188,7 +213,9 @@ impl<S: StateStore + Send + Sync> OracleDB for S {
                 .await
                 .map_err(|err| OracleError::Storage(err.to_string()))?
             {
-                Some(bytes) => records.extend(decode_page(&bytes)?),
+                Some(bytes) => {
+                    extend_within_limit(&mut records, decode_page(&bytes)?, max_records)?
+                }
                 None => return Err(OracleError::MissingRecord),
             }
         }
@@ -229,11 +256,13 @@ impl<S: StateStore + Send + Sync> OracleDB for S {
             namespace_page_key(namespace, interval, page_index),
             encoded(&page),
         );
-        StateStore::set(
-            self,
-            namespace_meta_key(namespace, interval),
-            encoded(&next_meta),
-        );
+        if next_meta != meta {
+            StateStore::set(
+                self,
+                namespace_meta_key(namespace, interval),
+                encoded(&next_meta),
+            );
+        }
         Ok(())
     }
 
@@ -241,6 +270,7 @@ impl<S: StateStore + Send + Sync> OracleDB for S {
         &self,
         writer: &Address,
         interval: &IntervalKey,
+        max_records: usize,
     ) -> Result<Vec<RecordId>, OracleError> {
         let meta = match StateStore::get(self, &writer_meta_key(writer, interval))
             .await
@@ -256,7 +286,9 @@ impl<S: StateStore + Send + Sync> OracleDB for S {
                 .await
                 .map_err(|err| OracleError::Storage(err.to_string()))?
             {
-                Some(bytes) => records.extend(decode_page(&bytes)?),
+                Some(bytes) => {
+                    extend_within_limit(&mut records, decode_page(&bytes)?, max_records)?
+                }
                 None => return Err(OracleError::MissingRecord),
             }
         }
@@ -297,7 +329,9 @@ impl<S: StateStore + Send + Sync> OracleDB for S {
             writer_page_key(writer, interval, page_index),
             encoded(&page),
         );
-        StateStore::set(self, writer_meta_key(writer, interval), encoded(&next_meta));
+        if next_meta != meta {
+            StateStore::set(self, writer_meta_key(writer, interval), encoded(&next_meta));
+        }
         Ok(())
     }
 }

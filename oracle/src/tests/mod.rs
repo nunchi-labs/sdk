@@ -7,7 +7,7 @@ use nunchi_common::{Address, RuntimeContext, StateError, StateStore};
 use nunchi_crypto::PrivateKey;
 
 use crate::{
-    IntervalKey, NamespaceId, OracleError, OracleGenesis, OracleLedger, OracleOperation,
+    IntervalKey, NamespaceId, OracleDB, OracleError, OracleGenesis, OracleLedger, OracleOperation,
     Transaction, INDEX_PAGE_SIZE, MAX_PAYLOAD_SIZE, MAX_PROOF_SIZE, MAX_QUERY_INTERVALS,
 };
 
@@ -360,5 +360,85 @@ fn query_allows_large_interval_ranges() {
             err,
             OracleError::InvalidQuery("interval range is too large")
         );
+    });
+}
+
+#[test]
+fn index_load_rejects_results_over_max_records() {
+    run_test(|| async {
+        let writer = PrivateKey::from_seed(2);
+        let mut ledger = OracleLedger::new(MemoryStore::default());
+        for nonce in 0..3 {
+            ledger
+                .apply_transaction(
+                    &append_tx(
+                        &writer,
+                        nonce,
+                        namespace(),
+                        1,
+                        format!("r{nonce}").into_bytes(),
+                    ),
+                    context(1_000 + nonce),
+                )
+                .await
+                .unwrap();
+        }
+
+        let err = ledger
+            .db()
+            .namespace_index(&namespace(), &IntervalKey::new(1), 2)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            OracleError::InvalidQuery("query result exceeds MAX_QUERY_RECORDS")
+        );
+    });
+}
+
+#[test]
+fn append_rewrites_meta_only_when_page_allocated() {
+    run_test(|| async {
+        let writer = PrivateKey::from_seed(2);
+        let mut ledger = OracleLedger::new(MemoryStore::default());
+
+        ledger
+            .apply_transaction(
+                &append_tx(&writer, 0, namespace(), 4, b"first".to_vec()),
+                context(1_000),
+            )
+            .await
+            .unwrap();
+        let after_first = ledger.into_inner();
+        let meta_keys_after_first = after_first
+            .values
+            .iter()
+            .filter(|(_, value)| value.is_some())
+            .count();
+
+        let mut ledger = OracleLedger::new(after_first);
+        ledger
+            .apply_transaction(
+                &append_tx(&writer, 1, namespace(), 4, b"second".to_vec()),
+                context(1_100),
+            )
+            .await
+            .unwrap();
+        let after_second = ledger.into_inner();
+        let meta_keys_after_second = after_second
+            .values
+            .iter()
+            .filter(|(_, value)| value.is_some())
+            .count();
+
+        // Second append fits on the existing page: one new record value, no new
+        // index meta key, and the page key is overwritten in place.
+        assert_eq!(meta_keys_after_second, meta_keys_after_first + 1);
+
+        let records = OracleLedger::new(after_second)
+            .records_by_namespace(&namespace(), IntervalKey::new(4), IntervalKey::new(4))
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 2);
     });
 }

@@ -9,7 +9,8 @@ pub const MAX_PROOF_SIZE: usize = 16 * 1024;
 /// Maximum record ids stored in one interval-index page.
 ///
 /// Interval indexes are paged: a single `(namespace|writer, interval)` bucket may
-/// contain an unbounded number of records across multiple pages of this size.
+/// contain many records across multiple pages of this size. Helper range queries
+/// still refuse to materialize more than [`MAX_QUERY_RECORDS`] records at once.
 pub const INDEX_PAGE_SIZE: usize = 1024;
 /// Backward-compatible alias for [`INDEX_PAGE_SIZE`].
 ///
@@ -22,6 +23,11 @@ pub const MAX_RECORDS_PER_BUCKET: usize = INDEX_PAGE_SIZE;
 /// Sized to allow month-scale day buckets and day-scale minute buckets without
 /// forcing consumers to shard interval keys.
 pub const MAX_QUERY_INTERVALS: u64 = 100_000;
+/// Maximum records a helper query will materialize in one call.
+///
+/// Interval indexes may grow beyond this via paging, but range queries fail
+/// instead of buffering an unbounded result set in memory.
+pub const MAX_QUERY_RECORDS: usize = 1_048_576;
 
 /// Opaque namespace chosen by writers and consuming modules.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
