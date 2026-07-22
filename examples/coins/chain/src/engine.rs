@@ -3,10 +3,7 @@ use crate::execution::NodeHandle;
 use crate::genesis::{genesis_target, state_commitment, ChainGenesis};
 use crate::history::{self, BlocksArchive, FinalizationsArchive};
 use crate::indexer;
-use crate::{
-    Block, EpochProvider, Provider, PublicKey, Scheme, Transaction, BLOCKS_PER_EPOCH,
-    NAMESPACE,
-};
+use crate::{Block, EpochProvider, Provider, PublicKey, Scheme, Transaction, NAMESPACE};
 use commonware_broadcast::buffered;
 use commonware_consensus::{
     marshal::{
@@ -57,6 +54,7 @@ use nunchi_mempool::{Mempool, PoolConfig};
 use rand::{CryptoRng, Rng};
 use std::{
     marker::PhantomData,
+    num::NonZeroU64,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -85,6 +83,7 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
     pub output: Output<MinSig, PublicKey>,
     pub share: Option<group::Share>,
     pub peer_config: PeerConfig<PublicKey>,
+    pub epoch_length: NonZeroU64,
     pub leader_timeout: Duration,
     pub certification_timeout: Duration,
     pub strategy: S,
@@ -228,7 +227,7 @@ where
                 max_supported_mode: MAX_SUPPORTED_MODE,
                 namespace: NAMESPACE.to_vec(),
                 storage_protector: dkg::StorageProtector::new(config.dkg_storage_key),
-                epoch_length: BLOCKS_PER_EPOCH,
+                epoch_length: config.epoch_length,
             },
         );
 
@@ -459,7 +458,7 @@ where
             finalized_blocks,
             marshal::Config {
                 provider: provider.clone(),
-                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                epocher: FixedEpocher::new(config.epoch_length),
                 start: marshal_start,
                 partition_prefix: format!("{}_marshal", config.partition_prefix),
                 mailbox_size: MAILBOX_SIZE,
@@ -513,7 +512,7 @@ where
                 APPLICATION_VERIFY_CONCURRENCY,
             ),
             marshal_mailbox.clone(),
-            FixedEpocher::new(BLOCKS_PER_EPOCH),
+            FixedEpocher::new(config.epoch_length),
         ));
 
         let (indexer_producer, indexer_producer_handle, indexer_pusher, indexer_consumer) =
@@ -576,7 +575,7 @@ where
                 muxer_size: MAILBOX_SIZE.get(),
                 mailbox_size: MAILBOX_SIZE,
                 partition_prefix: format!("{}_consensus", config.partition_prefix),
-                epoch_length: BLOCKS_PER_EPOCH,
+                epoch_length: config.epoch_length,
                 genesis_digest,
                 recovered_floor,
                 _phantom: PhantomData,

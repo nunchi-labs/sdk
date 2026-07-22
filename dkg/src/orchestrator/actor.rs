@@ -452,8 +452,11 @@ where
                         continue;
                     };
                     handle.abort();
+                    // Spawned task handles close their completion channel when aborted.
                     match handle.await {
-                        Ok(()) | Err(commonware_runtime::Error::Aborted) => {}
+                        Ok(())
+                        | Err(commonware_runtime::Error::Aborted)
+                        | Err(commonware_runtime::Error::Closed) => {}
                         Err(error) => {
                             panic!("consensus engine for epoch {epoch} failed while stopping: {error}")
                         }

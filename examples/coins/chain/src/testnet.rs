@@ -10,7 +10,7 @@ use crate::{
     channels,
     engine::{Config as EngineConfig, Engine},
     genesis::{ChainGenesis, GenesisError},
-    indexer, rpc, PublicKey, NAMESPACE,
+    indexer, rpc, PublicKey, BLOCKS_PER_EPOCH, NAMESPACE,
 };
 use commonware_codec::{Decode, DecodeExt, Encode, EncodeSize};
 use commonware_consensus::marshal;
@@ -640,6 +640,7 @@ async fn start_node(
         output,
         share: Some(share),
         peer_config: config.peer_config.clone(),
+        epoch_length: BLOCKS_PER_EPOCH,
         leader_timeout: Duration::from_millis(config.consensus.leader_timeout_ms),
         certification_timeout: Duration::from_millis(config.consensus.certification_timeout_ms),
         strategy: context
