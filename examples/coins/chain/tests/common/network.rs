@@ -38,7 +38,6 @@ use std::{
     time::Duration,
 };
 
-const FREEZER_TABLE_INITIAL_SIZE: u32 = 2u32.pow(14); // 1MB
 const TEST_QUOTA: Quota = Quota::per_second(NZU32!(u32::MAX));
 const MAX_BLOCK_TRANSACTIONS: usize = 256;
 
@@ -512,8 +511,6 @@ async fn start_validator(
         blocker: oracle.control(public_key.clone()),
         manager: oracle.manager(),
         partition_prefix: uid.clone(),
-        blocks_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
-        finalized_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
         signer: signer.clone(),
         dkg_storage_key: [9u8; 32],
         output,
@@ -527,6 +524,7 @@ async fn start_validator(
         pool_config: PoolConfig::default(),
         genesis: None,
         indexer: None,
+        indexer_spool_limits: Default::default(),
     };
 
     let validator_context = context.child("validator").with_attribute("id", &uid);

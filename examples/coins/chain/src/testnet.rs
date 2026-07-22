@@ -48,7 +48,6 @@ use std::{
 };
 use tracing::{info, warn, Level};
 
-const FREEZER_TABLE_INITIAL_SIZE: u32 = 2u32.pow(14);
 const DEFAULT_MAX_BLOCK_TRANSACTIONS: usize = 4_096;
 const DEFAULT_MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 const DEFAULT_CHANNEL_BACKLOG: usize = 1024;
@@ -137,6 +136,18 @@ pub struct NodeConfig {
     pub genesis_path: Option<PathBuf>,
     #[serde(default)]
     pub indexer_url: Option<String>,
+    /// Maximum self-contained finalized payloads retained while the indexer is unavailable.
+    #[serde(default = "default_indexer_spool_max_entries")]
+    pub indexer_spool_max_entries: u64,
+    /// Maximum logical encoded payload bytes retained by the indexer spool.
+    #[serde(default = "default_indexer_spool_max_bytes")]
+    pub indexer_spool_max_bytes: u64,
+    /// Maximum encoded size accepted for one finalized payload.
+    #[serde(default = "default_indexer_spool_max_payload_bytes")]
+    pub indexer_spool_max_payload_bytes: u64,
+    /// Maximum payload age before visible terminal expiry.
+    #[serde(default = "default_indexer_spool_max_age_seconds")]
+    pub indexer_spool_max_age_seconds: u64,
     pub consensus: ConsensusConfig,
     pub networking: NetworkConfig,
     /// Enable one-time peer QMDB state sync for a fresh joining node.
@@ -155,6 +166,22 @@ impl NodeConfig {
         let raw = toml::to_string_pretty(self).map_err(Error::TomlSerialize)?;
         fs::write(path, raw).map_err(Error::Io)
     }
+}
+
+fn default_indexer_spool_max_entries() -> u64 {
+    indexer::SpoolLimits::default().max_entries
+}
+
+fn default_indexer_spool_max_bytes() -> u64 {
+    indexer::SpoolLimits::default().max_bytes
+}
+
+fn default_indexer_spool_max_payload_bytes() -> u64 {
+    indexer::SpoolLimits::default().max_payload_bytes
+}
+
+fn default_indexer_spool_max_age_seconds() -> u64 {
+    indexer::SpoolLimits::default().max_age.as_secs()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -390,6 +417,10 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
             storage_dir: storage_dir.clone(),
             genesis_path: config.genesis_path.clone(),
             indexer_url: config.indexer_url.clone(),
+            indexer_spool_max_entries: default_indexer_spool_max_entries(),
+            indexer_spool_max_bytes: default_indexer_spool_max_bytes(),
+            indexer_spool_max_payload_bytes: default_indexer_spool_max_payload_bytes(),
+            indexer_spool_max_age_seconds: default_indexer_spool_max_age_seconds(),
             consensus: ConsensusConfig::default(),
             networking: NetworkConfig::default(),
             state_sync: false,
@@ -604,8 +635,6 @@ async fn start_node(
         blocker: oracle.clone(),
         manager: oracle.clone(),
         partition_prefix: config.name.clone(),
-        blocks_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
-        finalized_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
         signer: private_key,
         dkg_storage_key,
         output,
@@ -620,6 +649,12 @@ async fn start_node(
         pool_config: PoolConfig::default(),
         genesis: read_genesis(config.genesis_path.as_ref())?,
         indexer: indexer_client.map(|(client, _metrics)| client),
+        indexer_spool_limits: indexer::SpoolLimits {
+            max_entries: config.indexer_spool_max_entries,
+            max_bytes: config.indexer_spool_max_bytes,
+            max_payload_bytes: config.indexer_spool_max_payload_bytes,
+            max_age: Duration::from_secs(config.indexer_spool_max_age_seconds),
+        },
     };
     let dkg_callback: Box<dyn UpdateCallBack<MinSig, PublicKey>> = ContinueOnUpdate::boxed();
 
