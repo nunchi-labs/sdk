@@ -159,7 +159,7 @@ where
     let mut archive_existed = [false; 4];
     for (exists, partition) in archive_existed
         .iter_mut()
-        .zip(partitions.archives().into_iter())
+        .zip(partitions.archives())
     {
         *exists = partition_exists(context, partition).await?;
     }
