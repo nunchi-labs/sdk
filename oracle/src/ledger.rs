@@ -31,6 +31,8 @@ pub enum OracleError {
     InvalidQuery(&'static str),
     #[error("oracle record index references a missing record")]
     MissingRecord,
+    #[error("oracle interval index page is missing")]
+    MissingIndex,
     #[error("state storage error: {0}")]
     Storage(String),
 }

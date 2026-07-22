@@ -34,13 +34,25 @@ fn encoded<T: Encode>(value: &T) -> Vec<u8> {
 
 fn decoded<T: Read<Cfg = ()>>(bytes: &[u8]) -> Result<T, OracleError> {
     let mut buf = bytes;
-    T::read(&mut buf).map_err(|err| OracleError::Storage(err.to_string()))
+    let value = T::read(&mut buf).map_err(|err| OracleError::Storage(err.to_string()))?;
+    if !buf.is_empty() {
+        return Err(OracleError::Storage(
+            "trailing bytes in stored value".to_string(),
+        ));
+    }
+    Ok(value)
 }
 
 fn decode_page(bytes: &[u8]) -> Result<Vec<RecordId>, OracleError> {
     let mut buf = bytes;
-    Vec::read_cfg(&mut buf, &(RangeCfg::new(0..=INDEX_PAGE_SIZE), ()))
-        .map_err(|err| OracleError::Storage(err.to_string()))
+    let page = Vec::read_cfg(&mut buf, &(RangeCfg::new(0..=INDEX_PAGE_SIZE), ()))
+        .map_err(|err| OracleError::Storage(err.to_string()))?;
+    if !buf.is_empty() {
+        return Err(OracleError::Storage(
+            "trailing bytes in stored index page".to_string(),
+        ));
+    }
+    Ok(page)
 }
 
 fn namespace_meta_key(namespace: &NamespaceId, interval: &IntervalKey) -> Digest {
@@ -207,7 +219,11 @@ impl<S: StateStore + Send + Sync> OracleDB for S {
             None => return Ok(Vec::new()),
         };
 
-        let mut records = Vec::new();
+        let mut records = Vec::with_capacity(
+            (meta.page_count as usize)
+                .saturating_mul(INDEX_PAGE_SIZE)
+                .min(max_records),
+        );
         for page in 0..meta.page_count {
             match StateStore::get(self, &namespace_page_key(namespace, interval, page))
                 .await
@@ -216,7 +232,7 @@ impl<S: StateStore + Send + Sync> OracleDB for S {
                 Some(bytes) => {
                     extend_within_limit(&mut records, decode_page(&bytes)?, max_records)?
                 }
-                None => return Err(OracleError::MissingRecord),
+                None => return Err(OracleError::MissingIndex),
             }
         }
         Ok(records)
@@ -246,7 +262,7 @@ impl<S: StateStore + Send + Sync> OracleDB for S {
             .map_err(|err| OracleError::Storage(err.to_string()))?
             {
                 Some(bytes) => decode_page(&bytes)?,
-                None => return Err(OracleError::MissingRecord),
+                None => return Err(OracleError::MissingIndex),
             }
         };
 
@@ -280,7 +296,11 @@ impl<S: StateStore + Send + Sync> OracleDB for S {
             None => return Ok(Vec::new()),
         };
 
-        let mut records = Vec::new();
+        let mut records = Vec::with_capacity(
+            (meta.page_count as usize)
+                .saturating_mul(INDEX_PAGE_SIZE)
+                .min(max_records),
+        );
         for page in 0..meta.page_count {
             match StateStore::get(self, &writer_page_key(writer, interval, page))
                 .await
@@ -289,7 +309,7 @@ impl<S: StateStore + Send + Sync> OracleDB for S {
                 Some(bytes) => {
                     extend_within_limit(&mut records, decode_page(&bytes)?, max_records)?
                 }
-                None => return Err(OracleError::MissingRecord),
+                None => return Err(OracleError::MissingIndex),
             }
         }
         Ok(records)
@@ -319,7 +339,7 @@ impl<S: StateStore + Send + Sync> OracleDB for S {
             .map_err(|err| OracleError::Storage(err.to_string()))?
             {
                 Some(bytes) => decode_page(&bytes)?,
-                None => return Err(OracleError::MissingRecord),
+                None => return Err(OracleError::MissingIndex),
             }
         };
 
@@ -333,5 +353,30 @@ impl<S: StateStore + Send + Sync> OracleDB for S {
             StateStore::set(self, writer_meta_key(writer, interval), encoded(&next_meta));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_page, decoded};
+    use crate::{IntervalIndexMeta, OracleError};
+    use commonware_codec::Encode;
+
+    #[test]
+    fn decoded_rejects_trailing_bytes() {
+        let meta = IntervalIndexMeta { page_count: 1 };
+        let mut bytes = meta.encode().as_ref().to_vec();
+        bytes.push(0xff);
+        let err = decoded::<IntervalIndexMeta>(&bytes).unwrap_err();
+        assert!(matches!(err, OracleError::Storage(_)));
+    }
+
+    #[test]
+    fn decode_page_rejects_trailing_bytes() {
+        let page = Vec::<crate::RecordId>::new();
+        let mut bytes = page.encode().as_ref().to_vec();
+        bytes.push(0xff);
+        let err = decode_page(&bytes).unwrap_err();
+        assert!(matches!(err, OracleError::Storage(_)));
     }
 }
