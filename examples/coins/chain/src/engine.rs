@@ -14,8 +14,9 @@ use commonware_consensus::{
         store::Certificates,
     },
     simplex::elector::Random,
+    simplex::types::Finalization,
     types::{Epoch, FixedEpocher, Height, ViewDelta},
-    Reporters,
+    Epochable, Reporters,
 };
 use commonware_cryptography::{
     bls12381::{
@@ -151,6 +152,7 @@ where
     dkg_state: nunchi_chain::DkgState,
     startup_coordinator: Arc<Mutex<nunchi_chain::startup::StartupCoordinator>>,
     startup_reporter: StartupReporter,
+    startup_finalization: Option<Finalization<Scheme, Digest>>,
     buffer: buffered::Engine<E, PublicKey, Block, P>,
     buffered_mailbox: buffered::Mailbox<PublicKey, Block>,
     marshal: Marshal<E, S>,
@@ -497,6 +499,10 @@ where
                 .expect("state-sync floor probe stopped");
             plan = plan.with_floor(floor);
         }
+        // Preserve the certificate-verified anchor while the plan is consumed
+        // by the stateful actor. It is needed to resume Simplex from a QMDB
+        // snapshot taken within, rather than at the start of, an epoch.
+        let startup_finalization = plan.floor().cloned();
         let startup_coordinator = Arc::new(Mutex::new(
             nunchi_chain::startup::StartupCoordinator::new(MAX_PENDING_ACKS),
         ));
@@ -660,6 +666,7 @@ where
                 epoch_length: config.epoch_length,
                 genesis_digest,
                 recovered_floor,
+                startup_finalization: None,
                 startup_floor: None,
                 _phantom: PhantomData,
             },
@@ -673,6 +680,7 @@ where
             dkg_state,
             startup_coordinator,
             startup_reporter,
+            startup_finalization,
             buffer,
             buffered_mailbox,
             marshal,
@@ -822,6 +830,17 @@ where
             artifact.anchor_height,
         )
         .expect("authenticated DKG checkpoint does not match startup anchor height");
+        if let Some(finalization) = self.startup_finalization.take() {
+            assert_eq!(
+                finalization.proposal.payload, artifact.anchor_digest,
+                "state-sync finalization does not certify the attached QMDB anchor"
+            );
+            assert_eq!(
+                finalization.epoch(), checkpoint.epoch,
+                "state-sync finalization epoch does not match authenticated DKG checkpoint"
+            );
+            self.orchestrator.set_startup_finalization(finalization);
+        }
         self.orchestrator
             .set_startup_floor(orchestrator::StartupFloor {
                 height: artifact.anchor_height,

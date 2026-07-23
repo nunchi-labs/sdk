@@ -483,6 +483,7 @@ where
                 epoch_length: BLOCKS_PER_EPOCH,
                 genesis_digest,
                 recovered_floor,
+                startup_finalization: None,
                 startup_floor: None,
                 _phantom: PhantomData,
             },

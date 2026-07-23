@@ -22,7 +22,7 @@ use std::{
     time::Duration,
 };
 
-use crate::{testnet::*, NAMESPACE};
+use crate::{testnet::*, NAMESPACE, BLOCKS_PER_EPOCH};
 
 #[test]
 fn generated_testnet_has_unique_ports_dirs_and_complete_peer_sets() {
@@ -83,6 +83,7 @@ fn generated_testnet_has_unique_ports_dirs_and_complete_peer_sets() {
             .any(|bootstrapper| bootstrapper.address.port() == node.port));
         assert_eq!(config.rpc_address.port(), node.rpc_port);
         assert_eq!(config.metrics_address.port(), node.metrics_port);
+        assert_eq!(config.epoch_length, BLOCKS_PER_EPOCH);
 
         // The threshold material must round-trip from the written config.
         let max_participants =
@@ -97,6 +98,52 @@ fn generated_testnet_has_unique_ports_dirs_and_complete_peer_sets() {
         assert!(dkg_storage_keys.insert(dkg_storage_key));
     }
     assert_eq!(dkg_storage_keys.len(), 4);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn node_config_uses_default_epoch_length_when_omitted_and_reads_overrides() {
+    let dir = std::env::temp_dir().join(format!(
+        "coins-chain-epoch-config-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    let manifest = generate_local_testnet(LocalTestnetConfig {
+        validators: 1,
+        base_port: 43_000,
+        base_rpc_port: 44_000,
+        base_metrics_port: 45_000,
+        base_data_dir: dir.clone(),
+        bind_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        public_ips: None,
+        storage_dir: None,
+        genesis_path: None,
+        indexer_url: None,
+        seed: 11,
+    })
+    .expect("generate testnet");
+    let path = &manifest.nodes[0].config_path;
+    let raw = fs::read_to_string(path).expect("read generated config");
+
+    let legacy = raw.replace("epoch_length = 200000\n", "");
+    fs::write(path, legacy).expect("write legacy config");
+    assert_eq!(
+        NodeConfig::read(path)
+            .expect("read legacy config")
+            .epoch_length,
+        BLOCKS_PER_EPOCH
+    );
+
+    let configured = raw.replace("epoch_length = 200000", "epoch_length = 100");
+    fs::write(path, configured).expect("write configured config");
+    assert_eq!(
+        NodeConfig::read(path)
+            .expect("read configured config")
+            .epoch_length
+            .get(),
+        100
+    );
 
     let _ = fs::remove_dir_all(dir);
 }

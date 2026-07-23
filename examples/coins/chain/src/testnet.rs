@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     net::{IpAddr, SocketAddr},
-    num::{NonZeroU32, TryFromIntError},
+    num::{NonZeroU32, NonZeroU64, TryFromIntError},
     path::{Path, PathBuf},
     str::FromStr,
     time::{Duration, Instant},
@@ -136,6 +136,9 @@ pub struct NodeConfig {
     pub genesis_path: Option<PathBuf>,
     #[serde(default)]
     pub indexer_url: Option<String>,
+    /// Number of finalized blocks in each consensus epoch.
+    #[serde(default = "default_epoch_length")]
+    pub epoch_length: NonZeroU64,
     /// Maximum self-contained finalized payloads retained while the indexer is unavailable.
     #[serde(default = "default_indexer_spool_max_entries")]
     pub indexer_spool_max_entries: u64,
@@ -166,6 +169,10 @@ impl NodeConfig {
         let raw = toml::to_string_pretty(self).map_err(Error::TomlSerialize)?;
         fs::write(path, raw).map_err(Error::Io)
     }
+}
+
+fn default_epoch_length() -> NonZeroU64 {
+    BLOCKS_PER_EPOCH
 }
 
 fn default_indexer_spool_max_entries() -> u64 {
@@ -417,6 +424,7 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
             storage_dir: storage_dir.clone(),
             genesis_path: config.genesis_path.clone(),
             indexer_url: config.indexer_url.clone(),
+            epoch_length: default_epoch_length(),
             indexer_spool_max_entries: default_indexer_spool_max_entries(),
             indexer_spool_max_bytes: default_indexer_spool_max_bytes(),
             indexer_spool_max_payload_bytes: default_indexer_spool_max_payload_bytes(),
@@ -640,7 +648,7 @@ async fn start_node(
         output,
         share: Some(share),
         peer_config: config.peer_config.clone(),
-        epoch_length: BLOCKS_PER_EPOCH,
+        epoch_length: config.epoch_length,
         leader_timeout: Duration::from_millis(config.consensus.leader_timeout_ms),
         certification_timeout: Duration::from_millis(config.consensus.certification_timeout_ms),
         strategy: context

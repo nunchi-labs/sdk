@@ -113,6 +113,8 @@ where
     pub epoch_length: NonZeroU64,
     pub genesis_digest: Digest,
     pub recovered_floor: Option<Finalization<S, Digest>>,
+    /// A certificate-verified state-sync anchor for an in-progress epoch.
+    pub startup_finalization: Option<Finalization<S, Digest>>,
     pub startup_floor: Option<StartupFloor>,
 
     pub _phantom: PhantomData<L>,
@@ -183,6 +185,7 @@ where
     epoch_length: NonZeroU64,
     genesis_digest: Digest,
     recovered_floor: Option<Finalization<S, Digest>>,
+    startup_finalization: Option<Finalization<S, Digest>>,
     startup_floor: Option<StartupFloor>,
     page_cache_ref: CacheRef,
 
@@ -260,6 +263,7 @@ where
                 epoch_length: config.epoch_length,
                 genesis_digest: config.genesis_digest,
                 recovered_floor: config.recovered_floor,
+                startup_finalization: config.startup_finalization,
                 startup_floor: config.startup_floor,
                 page_cache_ref,
                 latest_epoch,
@@ -275,6 +279,12 @@ where
 
     pub fn set_startup_floor(&mut self, startup_floor: StartupFloor) {
         self.startup_floor = Some(startup_floor);
+    }
+
+    /// Installs the certificate-verified state-sync anchor used to resume an
+    /// in-progress epoch when the local marshal archive is empty.
+    pub fn set_startup_finalization(&mut self, startup_finalization: Finalization<S, Digest>) {
+        self.startup_finalization = Some(startup_finalization);
     }
 
     pub fn start(
@@ -562,6 +572,18 @@ where
             ));
         }
 
+        if self
+            .startup_finalization
+            .as_ref()
+            .is_some_and(|finalization| finalization.epoch() == epoch)
+        {
+            return Some(Floor::Finalized(
+                self.startup_finalization
+                    .take()
+                    .expect("matching startup finalization must exist"),
+            ));
+        }
+
         let Some(boundary_height) = StartupFloor::floor_boundary(epocher, epoch) else {
             return Some(Floor::Genesis(self.genesis_digest));
         };
@@ -678,4 +700,5 @@ mod tests {
 
         assert_eq!(floor.digest_for_epoch(&epocher, Epoch::new(2)), None);
     }
+
 }
