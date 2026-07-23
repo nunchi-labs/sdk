@@ -27,6 +27,15 @@ use crate::{application, Application, Block, TxPool};
 const FOREIGN_NAMESPACE: &[u8] = b"_NUNCHI_BRIDGE_CHAIN_FOREIGN";
 const WRONG_NAMESPACE: &[u8] = b"_NUNCHI_BRIDGE_CHAIN_WRONG";
 
+#[test]
+fn peer_state_sync_is_rejected_until_bridge_authenticates_dkg_state() {
+    assert!(matches!(
+        crate::engine::validate_state_sync(true),
+        Err(crate::engine::StartupError::UnsupportedDkgStateSync)
+    ));
+    assert!(crate::engine::validate_state_sync(false).is_ok());
+}
+
 fn schemes(namespace: &[u8], seed: u64) -> Vec<Scheme> {
     let mut rng = TestRng::new(seed);
     vrf::fixture::<MinSig, _>(&mut rng, namespace, 4).schemes

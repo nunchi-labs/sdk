@@ -81,6 +81,19 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
     pub bridge_handle: Handle<()>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum StartupError {
+    #[error("bridge-chain does not authenticate DKG progress in QMDB; state_sync = true is unsupported")]
+    UnsupportedDkgStateSync,
+}
+
+pub fn validate_state_sync(enabled: bool) -> Result<(), StartupError> {
+    if enabled {
+        return Err(StartupError::UnsupportedDkgStateSync);
+    }
+    Ok(())
+}
+
 type DkgActor<E, P> = nunchi_chain::DkgActor<E, P, NoopTransaction, BridgeExtension>;
 type DkgMailbox = nunchi_chain::DkgMailbox<NoopTransaction, BridgeExtension>;
 type StatefulApp<E> =
@@ -168,7 +181,8 @@ where
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
-    ) -> (Self, NodeHandle<E>) {
+    ) -> Result<(Self, NodeHandle<E>), StartupError> {
+        validate_state_sync(config.state_sync)?;
         let (mempool, submitter) = Mempool::<NoopTransaction>::new(config.pool_config.clone());
         let mempool = mempool.start(context.child("mempool"));
 
@@ -469,6 +483,8 @@ where
                 epoch_length: BLOCKS_PER_EPOCH,
                 genesis_digest,
                 recovered_floor,
+                startup_finalization: None,
+                startup_floor: None,
                 _phantom: PhantomData,
             },
         );
@@ -489,7 +505,7 @@ where
             stateful,
             stateful_mailbox,
         };
-        (engine, node_handle)
+        Ok((engine, node_handle))
     }
 
     #[allow(clippy::too_many_arguments)]

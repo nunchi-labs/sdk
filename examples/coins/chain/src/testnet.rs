@@ -10,7 +10,7 @@ use crate::{
     channels,
     engine::{Config as EngineConfig, Engine},
     genesis::{ChainGenesis, GenesisError},
-    indexer, rpc, PublicKey, NAMESPACE,
+    indexer, rpc, PublicKey, BLOCKS_PER_EPOCH, NAMESPACE,
 };
 use commonware_codec::{Decode, DecodeExt, Encode, EncodeSize};
 use commonware_consensus::marshal;
@@ -29,7 +29,7 @@ use commonware_p2p::{
 use commonware_runtime::{
     tokio, Clock as _, Handle, Runner as _, Spawner as _, Strategizer as _, Supervisor as _,
 };
-use commonware_utils::{ordered::Set, N3f1, NZUsize, NZU32};
+use commonware_utils::{ordered::Set, Hostname, N3f1, NZUsize, NZU32};
 use governor::Quota;
 use nunchi_dkg::{
     ContinueOnUpdate, PeerConfig, Storage as DkgStorage, StorageKey, StorageProtector,
@@ -41,14 +41,13 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     net::{IpAddr, SocketAddr},
-    num::{NonZeroU32, TryFromIntError},
+    num::{NonZeroU32, NonZeroU64, TryFromIntError},
     path::{Path, PathBuf},
     str::FromStr,
     time::{Duration, Instant},
 };
 use tracing::{info, warn, Level};
 
-const FREEZER_TABLE_INITIAL_SIZE: u32 = 2u32.pow(14);
 const DEFAULT_MAX_BLOCK_TRANSACTIONS: usize = 4_096;
 const DEFAULT_MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 const DEFAULT_CHANNEL_BACKLOG: usize = 1024;
@@ -124,7 +123,12 @@ pub struct NodeConfig {
     pub share: String,
     pub peer_config: PeerConfig<PublicKey>,
     pub listen_address: SocketAddr,
-    pub dialable_address: SocketAddr,
+    /// Address advertised to peers. IP literals use socket syntax (with brackets around IPv6),
+    /// while DNS names use `hostname:port` without a URL scheme or path. DNS is resolved again
+    /// whenever a disconnected peer retries this node, so operators should use a stable hostname
+    /// and an appropriate TTL.
+    #[serde(with = "ingress_serde")]
+    pub dialable_address: Ingress,
     pub rpc_address: SocketAddr,
     pub metrics_address: SocketAddr,
     pub bootstrappers: Vec<BootstrapperConfig>,
@@ -132,6 +136,21 @@ pub struct NodeConfig {
     pub genesis_path: Option<PathBuf>,
     #[serde(default)]
     pub indexer_url: Option<String>,
+    /// Number of finalized blocks in each consensus epoch.
+    #[serde(default = "default_epoch_length")]
+    pub epoch_length: NonZeroU64,
+    /// Maximum self-contained finalized payloads retained while the indexer is unavailable.
+    #[serde(default = "default_indexer_spool_max_entries")]
+    pub indexer_spool_max_entries: u64,
+    /// Maximum logical encoded payload bytes retained by the indexer spool.
+    #[serde(default = "default_indexer_spool_max_bytes")]
+    pub indexer_spool_max_bytes: u64,
+    /// Maximum encoded size accepted for one finalized payload.
+    #[serde(default = "default_indexer_spool_max_payload_bytes")]
+    pub indexer_spool_max_payload_bytes: u64,
+    /// Maximum payload age before visible terminal expiry.
+    #[serde(default = "default_indexer_spool_max_age_seconds")]
+    pub indexer_spool_max_age_seconds: u64,
     pub consensus: ConsensusConfig,
     pub networking: NetworkConfig,
     /// Enable one-time peer QMDB state sync for a fresh joining node.
@@ -152,10 +171,87 @@ impl NodeConfig {
     }
 }
 
+fn default_epoch_length() -> NonZeroU64 {
+    BLOCKS_PER_EPOCH
+}
+
+fn default_indexer_spool_max_entries() -> u64 {
+    indexer::SpoolLimits::default().max_entries
+}
+
+fn default_indexer_spool_max_bytes() -> u64 {
+    indexer::SpoolLimits::default().max_bytes
+}
+
+fn default_indexer_spool_max_payload_bytes() -> u64 {
+    indexer::SpoolLimits::default().max_payload_bytes
+}
+
+fn default_indexer_spool_max_age_seconds() -> u64 {
+    indexer::SpoolLimits::default().max_age.as_secs()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BootstrapperConfig {
     pub public_key: String,
-    pub address: SocketAddr,
+    /// Address used to dial the bootstrapper. IP literals use socket syntax (with brackets around
+    /// IPv6), while DNS names use `hostname:port` without a URL scheme or path. DNS is resolved on
+    /// each reconnect attempt rather than continuously while a connection is healthy.
+    #[serde(with = "ingress_serde")]
+    pub address: Ingress,
+}
+
+mod ingress_serde {
+    use super::*;
+    use serde::{de::Error as _, Deserializer, Serializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Ingress, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if let Ok(address) = SocketAddr::from_str(&value) {
+            return Ok(Ingress::Socket(address));
+        }
+        if value.contains("://") {
+            return Err(D::Error::custom(
+                "peer address must not contain a URL scheme or path",
+            ));
+        }
+
+        let (host, port) = value
+            .rsplit_once(':')
+            .ok_or_else(|| D::Error::custom("peer address is missing a port"))?;
+        if host.is_empty() {
+            return Err(D::Error::custom("peer address is missing a host"));
+        }
+        if port.is_empty() {
+            return Err(D::Error::custom("peer address is missing a port"));
+        }
+        if host.contains(':') {
+            return Err(D::Error::custom(
+                "IPv6 peer addresses must use bracketed socket syntax",
+            ));
+        }
+        let port = port
+            .parse::<u16>()
+            .map_err(|error| D::Error::custom(format!("invalid peer address port: {error}")))?;
+        let host = Hostname::new(host)
+            .map_err(|error| D::Error::custom(format!("invalid peer address hostname: {error}")))?;
+        Ok(Ingress::Dns { host, port })
+    }
+
+    pub fn serialize<S>(ingress: &Ingress, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match ingress {
+            Ingress::Socket(address) => serializer.serialize_str(&address.to_string()),
+            Ingress::Dns { host, port } => {
+                serializer.serialize_str(&format!("{host}:{port}"))
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -284,14 +380,14 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
         }
         let config_path = config.base_data_dir.join(format!("{name}.toml"));
         let listen_address = SocketAddr::new(config.bind_ip, port);
-        let dialable_address = SocketAddr::new(
+        let dialable_address = Ingress::Socket(SocketAddr::new(
             config
                 .public_ips
                 .as_ref()
                 .map(|hosts| hosts[index])
                 .unwrap_or(config.bind_ip),
             port,
-        );
+        ));
         let bootstrappers = participants
             .iter()
             .enumerate()
@@ -299,14 +395,14 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
             .map(|(candidate, public_key)| {
                 Ok(BootstrapperConfig {
                     public_key: encode(public_key),
-                    address: SocketAddr::new(
+                    address: Ingress::Socket(SocketAddr::new(
                         config
                             .public_ips
                             .as_ref()
                             .map(|hosts| hosts[candidate])
                             .unwrap_or(config.bind_ip),
                         config.base_port + u16::try_from(candidate)?,
-                    ),
+                    )),
                 })
             })
             .collect::<Result<Vec<_>, Error>>()?;
@@ -328,6 +424,11 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
             storage_dir: storage_dir.clone(),
             genesis_path: config.genesis_path.clone(),
             indexer_url: config.indexer_url.clone(),
+            epoch_length: default_epoch_length(),
+            indexer_spool_max_entries: default_indexer_spool_max_entries(),
+            indexer_spool_max_bytes: default_indexer_spool_max_bytes(),
+            indexer_spool_max_payload_bytes: default_indexer_spool_max_payload_bytes(),
+            indexer_spool_max_age_seconds: default_indexer_spool_max_age_seconds(),
             consensus: ConsensusConfig::default(),
             networking: NetworkConfig::default(),
             state_sync: false,
@@ -477,7 +578,7 @@ async fn start_node(
         .map(|bootstrapper| {
             Ok((
                 decode_unit::<PublicKey>(&bootstrapper.public_key, "bootstrapper.public_key")?,
-                Ingress::from(bootstrapper.address),
+                bootstrapper.address.clone(),
             ))
         })
         .collect::<Result<Vec<_>, Error>>()?;
@@ -486,6 +587,7 @@ async fn start_node(
         node = %config.name,
         public_key = %public_key,
         listen = %config.listen_address,
+        dialable = ?config.dialable_address,
         rpc = %config.rpc_address,
         metrics = %config.metrics_address,
         "starting coins-chain validator"
@@ -495,7 +597,7 @@ async fn start_node(
         private_key.clone(),
         NAMESPACE,
         config.listen_address,
-        config.dialable_address,
+        config.dialable_address.clone(),
         bootstrappers,
         config.networking.max_message_size,
     );
@@ -541,13 +643,12 @@ async fn start_node(
         blocker: oracle.clone(),
         manager: oracle.clone(),
         partition_prefix: config.name.clone(),
-        blocks_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
-        finalized_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
         signer: private_key,
         dkg_storage_key,
         output,
         share: Some(share),
         peer_config: config.peer_config.clone(),
+        epoch_length: config.epoch_length,
         leader_timeout: Duration::from_millis(config.consensus.leader_timeout_ms),
         certification_timeout: Duration::from_millis(config.consensus.certification_timeout_ms),
         strategy: context
@@ -557,6 +658,12 @@ async fn start_node(
         pool_config: PoolConfig::default(),
         genesis: read_genesis(config.genesis_path.as_ref())?,
         indexer: indexer_client.map(|(client, _metrics)| client),
+        indexer_spool_limits: indexer::SpoolLimits {
+            max_entries: config.indexer_spool_max_entries,
+            max_bytes: config.indexer_spool_max_bytes,
+            max_payload_bytes: config.indexer_spool_max_payload_bytes,
+            max_age: Duration::from_secs(config.indexer_spool_max_age_seconds),
+        },
     };
     let dkg_callback: Box<dyn UpdateCallBack<MinSig, PublicKey>> = ContinueOnUpdate::boxed();
 

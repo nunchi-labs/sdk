@@ -209,6 +209,8 @@ pub enum Error {
     TomlDeserialize(#[from] toml::de::Error),
     #[error("engine stopped unexpectedly: {0}")]
     Engine(commonware_runtime::Error),
+    #[error("engine startup failed: {0}")]
+    EngineStartup(#[from] crate::engine::StartupError),
 }
 
 struct Material {
@@ -585,7 +587,7 @@ async fn start_node(
         probe,
         state_sync,
     )
-    .await;
+    .await?;
     let engine_handle = engine.start(
         pending,
         recovered,

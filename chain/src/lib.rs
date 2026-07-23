@@ -8,6 +8,7 @@ pub mod engine;
 pub mod events;
 pub mod execution;
 pub mod state_sync;
+pub mod startup;
 mod macros;
 #[cfg(test)]
 mod tests;
@@ -18,6 +19,7 @@ pub use consensus::{
     dkg_reporters, BlockExtension, Composite, ConsensusExtension, DkgActor, DkgMailbox,
     DkgReporters, NoConsensusExtension,
 };
+pub use consensus::dkg_state::{DkgState, Error as DkgStateError};
 pub use events::{
     EventConsumer, FinalizedEvents, InMemoryEventConsumer, IndexedEvent, NoopEventConsumer,
     TransactionEventContext, TransactionEvents,

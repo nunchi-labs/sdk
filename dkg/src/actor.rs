@@ -1,16 +1,20 @@
 use super::{
-    state::{Dealer, Epoch as EpochState, Player, Storage},
+    state::{
+        CreatePlayerError, Dealer, Epoch as EpochState, Player, Reconciliation,
+        ReconciliationPhase, Storage,
+    },
     Mailbox, Message as MailboxMessage, PostUpdate, Update, UpdateCallBack,
 };
 use crate::{
     orchestrator::{self, EpochTransition},
     protector::StorageProtector,
+    public::{transition_logs, DkgProtocolConfig, PublicCheckpoint, N3F1_FAULT_MODEL},
     setup::PeerConfig,
-    ReshareBlock,
+    validate_share, ReshareBlock, STATE_FORMAT_VERSION,
 };
 use commonware_actor::mailbox::{self, Receiver as ActorReceiver};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
-use commonware_consensus::types::{Epoch, EpochPhase, Epocher, FixedEpocher};
+use commonware_consensus::types::{Epoch, EpochPhase, Epocher, FixedEpocher, Height};
 use commonware_cryptography::{
     bls12381::{
         dkg::feldman_desmedt::{
@@ -23,8 +27,9 @@ use commonware_cryptography::{
         },
     },
     ed25519::{self, Batch},
+    sha256::Sha256,
     transcript::Summary,
-    BatchVerifier, PublicKey, Signer,
+    BatchVerifier, Hasher, PublicKey, Signer,
 };
 use commonware_macros::select_loop;
 use commonware_math::algebra::Random;
@@ -38,7 +43,10 @@ use commonware_runtime::{
 };
 use commonware_utils::{ordered::Set, Acknowledgement as _, N3f1, NZU32};
 use rand::CryptoRng;
-use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
+use std::{
+    collections::BTreeMap,
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
+};
 use tracing::{debug, error, info, warn};
 
 /// Per-peer label.
@@ -111,6 +119,23 @@ pub struct Config<P> {
     pub namespace: Vec<u8>,
     pub storage_protector: StorageProtector,
     pub epoch_length: NonZeroU64,
+}
+
+/// Authenticated public state used to reconcile protected DKG storage before
+/// the actor enters consensus.
+pub struct AuthenticatedBootstrap {
+    pub config: DkgProtocolConfig,
+    pub checkpoint: PublicCheckpoint,
+    pub logs: Vec<crate::DealerLog>,
+    pub initial_share: Option<Share>,
+}
+
+enum Bootstrap {
+    Legacy {
+        output: Option<Output<MinSig, ed25519::PublicKey>>,
+        share: Option<Share>,
+    },
+    Authenticated(Box<AuthenticatedBootstrap>),
 }
 
 /// Execution mode for the DKG actor.
@@ -202,9 +227,47 @@ where
 
     /// Start the DKG actor.
     pub fn start(
-        mut self,
+        self,
         output: Option<Output<MinSig, ed25519::PublicKey>>,
         share: Option<Share>,
+        orchestrator: orchestrator::Mailbox<MinSig, ed25519::PublicKey>,
+        dkg: (
+            impl Sender<PublicKey = ed25519::PublicKey>,
+            impl Receiver<PublicKey = ed25519::PublicKey>,
+        ),
+        callback: Box<dyn UpdateCallBack<MinSig, ed25519::PublicKey>>,
+    ) -> Handle<()> {
+        self.start_inner(
+            Bootstrap::Legacy { output, share },
+            orchestrator,
+            dkg,
+            callback,
+        )
+    }
+
+    /// Start after reconciling protected storage with authenticated QMDB
+    /// checkpoint and log state.
+    pub fn start_authenticated(
+        self,
+        bootstrap: AuthenticatedBootstrap,
+        orchestrator: orchestrator::Mailbox<MinSig, ed25519::PublicKey>,
+        dkg: (
+            impl Sender<PublicKey = ed25519::PublicKey>,
+            impl Receiver<PublicKey = ed25519::PublicKey>,
+        ),
+        callback: Box<dyn UpdateCallBack<MinSig, ed25519::PublicKey>>,
+    ) -> Handle<()> {
+        self.start_inner(
+            Bootstrap::Authenticated(Box::new(bootstrap)),
+            orchestrator,
+            dkg,
+            callback,
+        )
+    }
+
+    fn start_inner(
+        mut self,
+        bootstrap: Bootstrap,
         orchestrator: orchestrator::Mailbox<MinSig, ed25519::PublicKey>,
         dkg: (
             impl Sender<PublicKey = ed25519::PublicKey>,
@@ -215,13 +278,13 @@ where
         match self.execution {
             Execution::Shared => spawn_cell!(
                 self.context,
-                self.run(output, share, orchestrator, dkg, callback)
+                self.run(bootstrap, orchestrator, dkg, callback)
             ),
             Execution::Dedicated => {
                 let context = self.context.take();
                 context.dedicated().spawn(move |context| {
                     self.context.restore(context);
-                    self.run(output, share, orchestrator, dkg, callback)
+                    self.run(bootstrap, orchestrator, dkg, callback)
                 })
             }
         }
@@ -229,8 +292,7 @@ where
 
     async fn run(
         mut self,
-        output: Option<Output<MinSig, ed25519::PublicKey>>,
-        share: Option<Share>,
+        bootstrap: Bootstrap,
         mut orchestrator: orchestrator::Mailbox<MinSig, ed25519::PublicKey>,
         (sender, receiver): (
             impl Sender<PublicKey = ed25519::PublicKey>,
@@ -241,6 +303,7 @@ where
         let max_read_size = NZU32!(self.peer_config.max_participants_per_round());
         let epocher = FixedEpocher::new(self.epoch_length);
         let self_pk = self.signer.public_key();
+        let authenticated_bootstrap = matches!(bootstrap, Bootstrap::Authenticated(_));
 
         // Initialize persistent state
         let mut storage = match Storage::init(
@@ -260,16 +323,29 @@ where
                 return;
             }
         };
-        if storage.epoch().is_none() {
-            let initial_state = EpochState {
-                round: 0,
-                rng_seed: Summary::random(self.context.as_present_mut()),
-                output,
-                share,
-            };
-            if let Err(err) = storage.set_epoch(Epoch::zero(), initial_state).await {
-                error!(%err, "failed to persist initial DKG epoch");
-                return;
+        match bootstrap {
+            Bootstrap::Legacy { output, share } => {
+                if storage.epoch().is_none() {
+                    let initial_state = EpochState {
+                        round: 0,
+                        rng_seed: Summary::random(self.context.as_present_mut()),
+                        output,
+                        share,
+                    };
+                    if let Err(err) = storage.set_epoch(Epoch::zero(), initial_state).await {
+                        error!(%err, "failed to persist initial DKG epoch");
+                        return;
+                    }
+                }
+            }
+            Bootstrap::Authenticated(bootstrap) => {
+                if let Err(err) = self
+                    .reconcile_authenticated(&mut storage, *bootstrap, &self_pk)
+                    .await
+                {
+                    error!(%err, "failed to reconcile authenticated DKG state");
+                    return;
+                }
             }
         }
 
@@ -366,7 +442,8 @@ where
             .expect("round info configuration should be correct");
 
             // Initialize dealer state if we are a dealer (factory handles log submission check)
-            let mut dealer_state: Option<Dealer<MinSig, ed25519::PrivateKey>> = am_dealer
+            let mut dealer_state: Option<Dealer<MinSig, ed25519::PrivateKey>> = (am_dealer
+                && (is_dkg || epoch_state.share.is_some()))
                 .then(|| {
                     storage.create_dealer::<ed25519::PrivateKey, N3f1>(
                         epoch,
@@ -378,16 +455,41 @@ where
                 })
                 .flatten();
 
-            // Initialize player state if we are a player
-            let mut player_state: Option<Player<MinSig, ed25519::PrivateKey>> = am_player
-                .then(|| {
-                    storage.create_player::<ed25519::PrivateKey, N3f1>(
-                        epoch,
-                        self.signer.clone(),
-                        round.clone(),
-                    )
-                })
-                .flatten();
+            // Initialize player state if we are a player.
+            let mut player_state: Option<Player<MinSig, ed25519::PrivateKey>> = if am_player {
+                match storage.create_player::<ed25519::PrivateKey, N3f1>(
+                    epoch,
+                    self.signer.clone(),
+                    round.clone(),
+                ) {
+                    Ok(player) => Some(player),
+                    Err(CreatePlayerError::MissingPlayerDealing)
+                        if authenticated_bootstrap && epoch_state.share.is_none() =>
+                    {
+                        warn!(
+                            %epoch,
+                            validator = ?self_pk,
+                            authenticated_bootstrap,
+                            has_share = false,
+                            "continuing without DKG player state because authenticated public logs have no local private dealings"
+                        );
+                        None
+                    }
+                    Err(err) => {
+                        error!(
+                            %epoch,
+                            validator = ?self_pk,
+                            authenticated_bootstrap,
+                            has_share = epoch_state.share.is_some(),
+                            %err,
+                            "failed to resume DKG player from protected storage"
+                        );
+                        break 'actor;
+                    }
+                }
+            } else {
+                None
+            };
 
             select_loop! {
                 self.context,
@@ -546,43 +648,149 @@ where
                         // Finalize the round before acknowledging
                         //
                         // TODO(#3453): Minimize end-of-epoch processing via pre-verify
-                        let mut logs = Logs::<_, _, N3f1>::new(round.clone());
-                        for (dealer, log) in storage.logs(epoch) {
-                            logs.record(dealer, log);
-                        }
+                        let checked_logs = storage.logs(epoch);
                         let (success, next_round, next_output, next_share) =
-                            if let Some(ps) = player_state.take() {
-                                match ps.finalize::<N3f1, Batch>(
+                            if let Some(previous_output) = epoch_state.output.as_ref() {
+                                let protocol_config = DkgProtocolConfig {
+                                    state_format_version: STATE_FORMAT_VERSION,
+                                    namespace: self.namespace.clone(),
+                                    epoch_length: self.epoch_length,
+                                    participants: self.peer_config.participants.clone(),
+                                    num_participants_per_round: self
+                                        .peer_config
+                                        .num_participants_per_round
+                                        .clone(),
+                                    mode: Mode::NonZeroCounter,
+                                    mode_version: 0,
+                                    fault_model: N3F1_FAULT_MODEL,
+                                    trusted_initial_identity: *previous_output.public().public(),
+                                };
+                                let checkpoint = PublicCheckpoint {
+                                    format_version: STATE_FORMAT_VERSION,
+                                    protocol_config_digest: protocol_config
+                                        .digest()
+                                        .expect("actor DKG configuration should be valid"),
+                                    epoch,
+                                    successful_round: epoch_state.round,
+                                    activation_height: epoch
+                                        .previous()
+                                        .and_then(|previous| epocher.last(previous))
+                                        .unwrap_or(Height::zero()),
+                                    output: previous_output.clone(),
+                                };
+                                let public = match transition_logs::<_, _, Batch>(
+                                    &protocol_config,
+                                    &checkpoint,
+                                    checked_logs.clone(),
+                                    block.height(),
                                     self.context.as_present_mut(),
-                                    logs,
                                     &Sequential,
                                 ) {
-                                    Ok((new_output, new_share)) => (
-                                        true,
-                                        epoch_state.round + 1,
-                                        Some(new_output),
-                                        Some(new_share),
-                                    ),
-                                    Err(_) => (
+                                    Ok(public) => public,
+                                    Err(err) => {
+                                        error!(%epoch, %err, "failed public DKG transition");
+                                        break 'actor;
+                                    }
+                                };
+                                if !public.succeeded {
+                                    (
                                         false,
                                         epoch_state.round,
                                         epoch_state.output.clone(),
                                         epoch_state.share.clone(),
-                                    ),
+                                    )
+                                } else if let Some(ps) = player_state.take() {
+                                    let mut player_logs = Logs::<_, _, N3f1>::new(round.clone());
+                                    for (dealer, log) in checked_logs {
+                                        player_logs.record(dealer, log);
+                                    }
+                                    match ps.finalize::<N3f1, Batch>(
+                                        self.context.as_present_mut(),
+                                        player_logs,
+                                        &Sequential,
+                                    ) {
+                                        Ok((player_output, player_share))
+                                            if player_output == public.checkpoint.output =>
+                                        {
+                                            if let Err(err) = validate_share(
+                                                &player_output,
+                                                &self_pk,
+                                                &player_share,
+                                            ) {
+                                                error!(%epoch, %err, "derived DKG share is invalid");
+                                                break 'actor;
+                                            }
+                                            (
+                                                true,
+                                                public.checkpoint.successful_round,
+                                                Some(player_output),
+                                                Some(player_share),
+                                            )
+                                        }
+                                        Err(
+                                            commonware_cryptography::bls12381::dkg::feldman_desmedt::Error::MissingPlayerDealing,
+                                        ) => (
+                                            true,
+                                            public.checkpoint.successful_round,
+                                            Some(public.checkpoint.output),
+                                            None,
+                                        ),
+                                        Ok(_) | Err(_) => {
+                                            error!(%epoch, "player result conflicts with public DKG transition");
+                                            break 'actor;
+                                        }
+                                    }
+                                } else {
+                                    (
+                                        true,
+                                        public.checkpoint.successful_round,
+                                        Some(public.checkpoint.output),
+                                        None,
+                                    )
                                 }
                             } else {
-                                match observe::<_, _, N3f1, Batch>(
-                                    self.context.as_present_mut(),
-                                    logs,
-                                    &Sequential,
-                                ) {
-                                    Ok(output) => (true, epoch_state.round + 1, Some(output), None),
-                                    Err(_) => (
-                                        false,
-                                        epoch_state.round,
-                                        epoch_state.output.clone(),
-                                        epoch_state.share.clone(),
-                                    ),
+                                let mut logs = Logs::<_, _, N3f1>::new(round.clone());
+                                for (dealer, log) in checked_logs {
+                                    logs.record(dealer, log);
+                                }
+                                if let Some(ps) = player_state.take() {
+                                    match ps.finalize::<N3f1, Batch>(
+                                        self.context.as_present_mut(),
+                                        logs,
+                                        &Sequential,
+                                    ) {
+                                        Ok((new_output, new_share)) => (
+                                            true,
+                                            epoch_state.round + 1,
+                                            Some(new_output),
+                                            Some(new_share),
+                                        ),
+                                        Err(_) => (
+                                            false,
+                                            epoch_state.round,
+                                            epoch_state.output.clone(),
+                                            epoch_state.share.clone(),
+                                        ),
+                                    }
+                                } else {
+                                    match observe::<_, _, N3f1, Batch>(
+                                        self.context.as_present_mut(),
+                                        logs,
+                                        &Sequential,
+                                    ) {
+                                        Ok(output) => (
+                                            true,
+                                            epoch_state.round + 1,
+                                            Some(output),
+                                            None,
+                                        ),
+                                        Err(_) => (
+                                            false,
+                                            epoch_state.round,
+                                            epoch_state.output.clone(),
+                                            epoch_state.share.clone(),
+                                        ),
+                                    }
                                 }
                             };
                         if success {
@@ -651,6 +859,126 @@ where
         info!("exiting DKG actor");
     }
 
+    async fn reconcile_authenticated(
+        &mut self,
+        storage: &mut Storage<E, MinSig, ed25519::PublicKey>,
+        bootstrap: AuthenticatedBootstrap,
+        self_pk: &ed25519::PublicKey,
+    ) -> Result<(), ReconciliationError> {
+        bootstrap
+            .config
+            .validate_checkpoint(&bootstrap.checkpoint)?;
+        if bootstrap.config.namespace != self.namespace
+            || bootstrap.config.epoch_length != self.epoch_length
+            || bootstrap.config.participants != self.peer_config.participants
+            || bootstrap.config.num_participants_per_round
+                != self.peer_config.num_participants_per_round
+        {
+            return Err(ReconciliationError::LocalConfigurationMismatch);
+        }
+        let info = bootstrap.config.round_info(&bootstrap.checkpoint)?;
+        let checkpoint_digest = Sha256::hash(&bootstrap.checkpoint.encode());
+        if let Some(reconciliation) = storage.reconciliation() {
+            if reconciliation.phase == ReconciliationPhase::Importing
+                && (reconciliation.checkpoint_digest != checkpoint_digest
+                    || reconciliation.target_epoch != bootstrap.checkpoint.epoch)
+            {
+                return Err(ReconciliationError::ImportInProgressConflict);
+            }
+        }
+        let importing = Reconciliation {
+            format_version: STATE_FORMAT_VERSION,
+            checkpoint_digest,
+            target_epoch: bootstrap.checkpoint.epoch,
+            phase: ReconciliationPhase::Importing,
+        };
+        let complete = Reconciliation {
+            phase: ReconciliationPhase::Complete,
+            ..importing.clone()
+        };
+        let mut logs = BTreeMap::new();
+        for signed in bootstrap.logs {
+            let (dealer, log) = signed
+                .check(&info)
+                .ok_or(ReconciliationError::InvalidAuthenticatedLog)?;
+            if let Some(existing) = logs.insert(dealer, log.clone()) {
+                if existing != log {
+                    return Err(ReconciliationError::ConflictingAuthenticatedLog);
+                }
+            }
+        }
+
+        let target_epoch = bootstrap.checkpoint.epoch;
+        let mut rewrite_state = false;
+        let share = match storage.epoch() {
+            None if target_epoch == Epoch::zero() => {
+                if let Some(share) = bootstrap.initial_share {
+                    validate_share(&bootstrap.checkpoint.output, self_pk, &share)?;
+                    Some(share)
+                } else {
+                    None
+                }
+            }
+            None => None,
+            Some((local_epoch, _)) if local_epoch > target_epoch => {
+                return Err(ReconciliationError::LocalStateAhead)
+            }
+            Some((local_epoch, _)) if local_epoch < target_epoch => {
+                rewrite_state = true;
+                None
+            }
+            Some((_, local)) => {
+                if local.round != bootstrap.checkpoint.successful_round
+                    || local.output.as_ref() != Some(&bootstrap.checkpoint.output)
+                {
+                    return Err(ReconciliationError::MatchingEpochConflict);
+                }
+                if let Some(share) = local.share.as_ref() {
+                    validate_share(&bootstrap.checkpoint.output, self_pk, share)?;
+                }
+                for (dealer, log) in &logs {
+                    if let Some(existing) = storage.logs(target_epoch).get(dealer) {
+                        if existing != log {
+                            return Err(ReconciliationError::ConflictingAuthenticatedLog);
+                        }
+                    }
+                }
+                storage.set_reconciliation(importing).await?;
+                for (dealer, log) in logs {
+                    storage.append_log(target_epoch, dealer, log).await?;
+                }
+                storage.set_reconciliation(complete).await?;
+                return Ok(());
+            }
+        };
+
+        storage.set_reconciliation(importing).await?;
+        for (dealer, log) in logs {
+            if let Some(existing) = storage.logs(target_epoch).get(&dealer) {
+                if existing != &log {
+                    return Err(ReconciliationError::ConflictingAuthenticatedLog);
+                }
+                continue;
+            }
+            storage.append_log(target_epoch, dealer, log).await?;
+        }
+        if rewrite_state || storage.epoch().is_none() {
+            storage
+                .set_epoch(
+                    target_epoch,
+                    EpochState {
+                        round: bootstrap.checkpoint.successful_round,
+                        rng_seed: Summary::random(self.context.as_present_mut()),
+                        output: Some(bootstrap.checkpoint.output),
+                        share,
+                    },
+                )
+                .await?;
+        }
+        storage.set_reconciliation(complete).await?;
+        Ok(())
+    }
+
     async fn distribute_shares<S: Sender<PublicKey = ed25519::PublicKey>>(
         self_pk: &ed25519::PublicKey,
         storage: &mut Storage<E, MinSig, ed25519::PublicKey>,
@@ -690,4 +1018,24 @@ where
             }
         }
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ReconciliationError {
+    #[error("authenticated public DKG state error: {0}")]
+    Public(#[from] crate::public::Error),
+    #[error("protected DKG storage error: {0}")]
+    Storage(#[from] crate::state::Error),
+    #[error("local DKG protocol configuration differs from authenticated state")]
+    LocalConfigurationMismatch,
+    #[error("authenticated dealer log is invalid")]
+    InvalidAuthenticatedLog,
+    #[error("authenticated dealer logs conflict")]
+    ConflictingAuthenticatedLog,
+    #[error("protected DKG state is ahead of authenticated QMDB state")]
+    LocalStateAhead,
+    #[error("protected DKG state conflicts with authenticated QMDB at the same epoch")]
+    MatchingEpochConflict,
+    #[error("a different authenticated DKG checkpoint import is already in progress")]
+    ImportInProgressConflict,
 }

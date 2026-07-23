@@ -163,7 +163,6 @@ pub(crate) enum BlockMetricSource {
     ProducerRecord,
     LiveCertificate,
     ConsumerCached,
-    ConsumerMarshal,
 }
 
 impl BlockMetricSource {
@@ -172,7 +171,6 @@ impl BlockMetricSource {
             Self::ProducerRecord => "producer_record",
             Self::LiveCertificate => "live_certificate",
             Self::ConsumerCached => "consumer_cached",
-            Self::ConsumerMarshal => "consumer_marshal",
         }
     }
 }
@@ -192,7 +190,6 @@ impl EncodeLabelValueTrait for BlockMetricSource {
 pub(crate) enum SharedCacheSource {
     ProducerRecord,
     LiveCertificate,
-    ConsumerMarshal,
 }
 
 impl SharedCacheSource {
@@ -200,7 +197,6 @@ impl SharedCacheSource {
         match self {
             Self::ProducerRecord => "producer_record",
             Self::LiveCertificate => "live_certificate",
-            Self::ConsumerMarshal => "consumer_marshal",
         }
     }
 }
@@ -248,7 +244,6 @@ impl EncodeLabelValueTrait for SharedRetentionReason {
 pub(crate) enum BackfillStatus {
     Uploaded,
     Skipped,
-    Abandoned,
 }
 
 impl BackfillStatus {
@@ -256,7 +251,6 @@ impl BackfillStatus {
         match self {
             Self::Uploaded => "uploaded",
             Self::Skipped => "skipped",
-            Self::Abandoned => "abandoned",
         }
     }
 }
@@ -303,7 +297,6 @@ impl EncodeLabelValueTrait for BackfillDecision {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum BackfillPhase {
     Start,
-    BeforeBlock,
     BeforeAttempt,
 }
 
@@ -311,7 +304,6 @@ impl BackfillPhase {
     const fn as_str(self) -> &'static str {
         match self {
             Self::Start => "start",
-            Self::BeforeBlock => "before_block",
             Self::BeforeAttempt => "before_attempt",
         }
     }
@@ -331,9 +323,6 @@ impl EncodeLabelValueTrait for BackfillPhase {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum BackfillWaitReason {
     CertificateUpload,
-    MissingBlock,
-    MissingFinalization,
-    MismatchedFinalization,
     HttpError,
 }
 
@@ -341,37 +330,8 @@ impl BackfillWaitReason {
     const fn as_str(self) -> &'static str {
         match self {
             Self::CertificateUpload => "certificate_upload",
-            Self::MissingBlock => "missing_block",
-            Self::MissingFinalization => "missing_finalization",
-            Self::MismatchedFinalization => "mismatched_finalization",
             Self::HttpError => "http_error",
         }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum BackfillResetReason {
-    MissingFinalization,
-    MismatchedFinalization,
-}
-
-impl BackfillResetReason {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::MissingFinalization => "missing_finalization",
-            Self::MismatchedFinalization => "mismatched_finalization",
-        }
-    }
-}
-
-impl EncodeLabelValueTrait for BackfillResetReason {
-    fn encode(
-        &self,
-        encoder: &mut commonware_runtime::telemetry::metrics::LabelValueEncoder,
-    ) -> Result<(), fmt::Error> {
-        use fmt::Write as _;
-
-        encoder.write_str(self.as_str())
     }
 }
 
@@ -475,6 +435,10 @@ pub(crate) enum ProducerStatus {
     Ignored,
     Recorded,
     AlreadyUploaded,
+    ExpiredOversized,
+    ExpiredEntries,
+    ExpiredBytes,
+    ExpiredAge,
 }
 
 impl ProducerStatus {
@@ -485,6 +449,10 @@ impl ProducerStatus {
             Self::Ignored => "ignored",
             Self::Recorded => "recorded",
             Self::AlreadyUploaded => "already_uploaded",
+            Self::ExpiredOversized => "expired_oversized",
+            Self::ExpiredEntries => "expired_entries",
+            Self::ExpiredBytes => "expired_bytes",
+            Self::ExpiredAge => "expired_age",
         }
     }
 }
@@ -538,6 +506,10 @@ pub(crate) struct SharedStateSnapshot {
     pub(crate) uploaded_digests: usize,
     pub(crate) latest_finalized_height: u64,
     pub(crate) acked_through_height: u64,
+    pub(crate) spool_entries: usize,
+    pub(crate) spool_logical_bytes: u64,
+    pub(crate) spool_oldest_height: u64,
+    pub(crate) spool_oldest_enqueued_at_millis: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, EncodeLabelSet)]
@@ -597,11 +569,6 @@ struct BackfillDecisionLabel {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, EncodeLabelSet)]
 struct BackfillWaitReasonLabel {
     reason: BackfillWaitReason,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, EncodeLabelSet)]
-struct BackfillResetReasonLabel {
-    reason: BackfillResetReason,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, EncodeLabelSet)]
@@ -666,6 +633,11 @@ pub(crate) struct Inner {
     shared_uploaded_digests: Gauge,
     shared_latest_finalized_height: Gauge,
     shared_acked_through_height: Gauge,
+    spool_entries: Gauge,
+    spool_logical_bytes: Gauge,
+    spool_oldest_height: Gauge,
+    spool_oldest_enqueued_at_millis: Gauge,
+    producer_certificate_requests: Gauge,
     shared_pruned: CounterFamily<SharedRetentionReasonLabel>,
     shared_cache_inserted: CounterFamily<SharedCacheSourceLabel>,
     shared_cache_removed: CounterFamily<SharedRetentionReasonLabel>,
@@ -677,9 +649,6 @@ pub(crate) struct Inner {
     backfill_decision: CounterFamily<BackfillDecisionLabel>,
     backfill_wait_duration: HistogramFamily<BackfillWaitReasonLabel>,
     backfill_retry: CounterFamily<BackfillWaitReasonLabel>,
-    backfill_queue_reset: CounterFamily<BackfillResetReasonLabel>,
-    backfill_queue_reset_abandoned_entries: HistogramFamily<BackfillResetReasonLabel>,
-    backfill_queue_reset_abandoned_height_span: HistogramFamily<BackfillResetReasonLabel>,
     backfill_active_block_estimated_bytes: Gauge,
     backfill_active_body_estimated_bytes: Gauge,
     queue_enqueue: CounterFamily<QueueStatusLabel>,
@@ -817,6 +786,26 @@ impl IndexerMetrics {
                 "shared_acked_through_height",
                 "Queue acknowledgement floor tracked by shared indexer state",
             ),
+            spool_entries: context.gauge(
+                "spool_entries",
+                "Current number of self-contained finalized payloads in the durable spool",
+            ),
+            spool_logical_bytes: context.gauge(
+                "spool_logical_bytes",
+                "Current encoded bytes in self-contained finalized spool payloads",
+            ),
+            spool_oldest_height: context.gauge(
+                "spool_oldest_height",
+                "Oldest finalized height retained in the durable spool",
+            ),
+            spool_oldest_enqueued_at_millis: context.gauge(
+                "spool_oldest_enqueued_at_millis",
+                "Wall-clock Unix millisecond timestamp of the oldest durable spool payload",
+            ),
+            producer_certificate_requests: context.gauge(
+                "spool_certificate_requests",
+                "Current finalized blocks awaiting a marshal certificate before spool admission",
+            ),
             shared_pruned: context.family(
                 "shared_prune",
                 "Total shared indexer state retention removals by reason",
@@ -866,24 +855,6 @@ impl IndexerMetrics {
             backfill_retry: context.family(
                 "backfill_retry",
                 "Total durable backfill retries by reason",
-            ),
-            backfill_queue_reset: context.family(
-                "backfill_queue_reset",
-                "Total durable backfill queue resets by reason",
-            ),
-            backfill_queue_reset_abandoned_entries: context.register(
-                "backfill_queue_reset_abandoned_entries",
-                "Durable backfill entries abandoned by queue reset",
-                raw::Family::<BackfillResetReasonLabel, raw::Histogram, fn() -> raw::Histogram>::new_with_constructor(
-                    local_histogram,
-                ),
-            ),
-            backfill_queue_reset_abandoned_height_span: context.register(
-                "backfill_queue_reset_abandoned_height_span",
-                "Durable backfill height span abandoned by queue reset",
-                raw::Family::<BackfillResetReasonLabel, raw::Histogram, fn() -> raw::Histogram>::new_with_constructor(
-                    local_histogram,
-                ),
             ),
             backfill_active_block_estimated_bytes: context.gauge(
                 "backfill_active_block_estimated_bytes",
@@ -1074,11 +1045,29 @@ impl IndexerMetrics {
         let _ = self
             .shared_acked_through_height
             .try_set(snapshot.acked_through_height);
+        let _ = self.spool_entries.try_set(snapshot.spool_entries);
+        let _ = self
+            .spool_logical_bytes
+            .try_set(snapshot.spool_logical_bytes);
+        let _ = self
+            .spool_oldest_height
+            .try_set(snapshot.spool_oldest_height);
+        let _ = self
+            .spool_oldest_enqueued_at_millis
+            .try_set(snapshot.spool_oldest_enqueued_at_millis);
         self.queue_ack_floor(snapshot.acked_through_height);
         let lag = snapshot
             .latest_finalized_height
             .saturating_sub(snapshot.acked_through_height);
         let _ = self.queue_lag_height.try_set(lag);
+    }
+
+    pub(crate) fn certificate_request_started(&self) {
+        self.producer_certificate_requests.inc();
+    }
+
+    pub(crate) fn certificate_request_finished(&self) {
+        self.producer_certificate_requests.dec();
     }
 
     pub(crate) fn shared_cache_inserted(&self, source: SharedCacheSource) {
@@ -1130,22 +1119,6 @@ impl IndexerMetrics {
         self.backfill_wait_duration
             .get_or_create(&BackfillWaitReasonLabel { reason })
             .observe(duration.as_secs_f64());
-    }
-
-    pub(crate) fn backfill_queue_reset(
-        &self,
-        reason: BackfillResetReason,
-        abandoned_entries: u64,
-        abandoned_height_span: u64,
-    ) {
-        let label = BackfillResetReasonLabel { reason };
-        self.backfill_queue_reset.get_or_create(&label).inc();
-        self.backfill_queue_reset_abandoned_entries
-            .get_or_create(&label)
-            .observe(abandoned_entries as f64);
-        self.backfill_queue_reset_abandoned_height_span
-            .get_or_create(&label)
-            .observe(abandoned_height_span as f64);
     }
 
     pub(crate) fn start_backfill_body(&self, bytes: u64) -> BackfillBodyGuard {
@@ -1403,9 +1376,6 @@ impl BackfillUploadGuard {
         self.status = Some(BackfillStatus::Skipped);
     }
 
-    pub(crate) const fn abandoned(&mut self) {
-        self.status = Some(BackfillStatus::Abandoned);
-    }
 }
 
 impl Drop for BackfillUploadGuard {
