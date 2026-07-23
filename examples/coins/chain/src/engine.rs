@@ -660,6 +660,7 @@ where
                 epoch_length: config.epoch_length,
                 genesis_digest,
                 recovered_floor,
+                startup_floor: None,
                 _phantom: PhantomData,
             },
         );
@@ -745,7 +746,7 @@ where
 
     #[allow(clippy::too_many_arguments)]
     async fn run(
-        self,
+        mut self,
         votes: (
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
@@ -797,7 +798,6 @@ where
         let probe_handle = self.probe_handle;
         let state_sync_handle = self.state_sync_handle;
         let stateful_handle = self.stateful.start();
-        let orchestrator_handle = self.orchestrator.start(votes, certificates, resolver);
         // Marshal may queue one finalized block for the not-yet-started DKG
         // mailbox while stateful attaches or reconstructs QMDB. Once the
         // database subscription resolves, reconcile protected DKG storage
@@ -822,11 +822,17 @@ where
             artifact.anchor_height,
         )
         .expect("authenticated DKG checkpoint does not match startup anchor height");
+        self.orchestrator
+            .set_startup_floor(orchestrator::StartupFloor {
+                height: artifact.anchor_height,
+                digest: artifact.anchor_digest,
+            });
         let logs = self
             .dkg_state
             .load_logs(&reader)
             .await
             .expect("attached QMDB has invalid authenticated DKG logs");
+        let orchestrator_handle = self.orchestrator.start(votes, certificates, resolver);
         let dkg_handle = self.dkg.start_authenticated(
             dkg::AuthenticatedBootstrap {
                 config: self.dkg_state.config().clone(),

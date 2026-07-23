@@ -42,7 +42,7 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
     time::Duration,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 const CLEANUP_WATERMARK_KEY: U64 = U64::new(0);
 
@@ -113,8 +113,36 @@ where
     pub epoch_length: NonZeroU64,
     pub genesis_digest: Digest,
     pub recovered_floor: Option<Finalization<S, Digest>>,
+    pub startup_floor: Option<StartupFloor>,
 
     pub _phantom: PhantomData<L>,
+}
+
+/// A certified startup boundary that can anchor the first entered epoch when
+/// local finalized block history is absent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StartupFloor {
+    pub height: Height,
+    pub digest: Digest,
+}
+
+impl StartupFloor {
+    fn digest_for_epoch(&self, epocher: &FixedEpocher, epoch: Epoch) -> Option<Digest> {
+        Self::floor_boundary(epocher, epoch)
+            .filter(|boundary| *boundary == self.height)
+            .map(|_| self.digest)
+    }
+
+    // Epoch zero uses genesis as its floor; every later epoch is anchored by the
+    // last finalized block from the previous epoch.
+    fn floor_boundary(epocher: &FixedEpocher, epoch: Epoch) -> Option<Height> {
+        let previous_epoch = epoch.previous()?;
+        Some(
+            epocher
+                .last(previous_epoch)
+                .expect("previous epoch should be covered by epoch strategy"),
+        )
+    }
 }
 
 pub struct Actor<E, B, A, S, L, T, Blk, R = NoopReporter<Activity<S, Digest>>>
@@ -155,6 +183,7 @@ where
     epoch_length: NonZeroU64,
     genesis_digest: Digest,
     recovered_floor: Option<Finalization<S, Digest>>,
+    startup_floor: Option<StartupFloor>,
     page_cache_ref: CacheRef,
 
     latest_epoch: Gauge,
@@ -231,6 +260,7 @@ where
                 epoch_length: config.epoch_length,
                 genesis_digest: config.genesis_digest,
                 recovered_floor: config.recovered_floor,
+                startup_floor: config.startup_floor,
                 page_cache_ref,
                 latest_epoch,
                 partition_cleanup_total,
@@ -241,6 +271,10 @@ where
             },
             Mailbox::new(sender),
         )
+    }
+
+    pub fn set_startup_floor(&mut self, startup_floor: StartupFloor) {
+        self.startup_floor = Some(startup_floor);
     }
 
     pub fn start(
@@ -394,34 +428,8 @@ where
                         startup_cleanup_done = true;
                     }
 
-                    let floor = if self
-                        .recovered_floor
-                        .as_ref()
-                        .is_some_and(|floor| floor.epoch() == transition.epoch)
-                    {
-                        Floor::Finalized(
-                            self.recovered_floor
-                                .take()
-                                .expect("matching recovered floor must exist"),
-                        )
-                    } else {
-                        // DKG state does not persist the consensus floor; derive the epoch's
-                        // genesis from marshal's finalized boundary block.
-                        let digest = match Self::floor_boundary(&epocher, transition.epoch) {
-                            Some(boundary_height) => self
-                                .marshal
-                                .get_block(boundary_height)
-                                .await
-                                .unwrap_or_else(|| {
-                                    panic!(
-                                        "missing finalized boundary block at height {} for epoch {}",
-                                        boundary_height, transition.epoch
-                                    )
-                                })
-                                .digest(),
-                            None => self.genesis_digest,
-                        };
-                        Floor::Genesis(digest)
+                    let Some(floor) = self.resolve_floor(&epocher, transition.epoch).await else {
+                        break;
                     };
 
                     // Register the new signing scheme with the scheme provider.
@@ -537,15 +545,45 @@ where
         }
     }
 
-    // Epoch zero uses genesis as its floor; every later epoch is anchored by the
-    // last finalized block from the previous epoch.
-    fn floor_boundary(epocher: &FixedEpocher, epoch: Epoch) -> Option<Height> {
-        let previous_epoch = epoch.previous()?;
-        Some(
-            epocher
-                .last(previous_epoch)
-                .expect("previous epoch should be covered by epoch strategy"),
-        )
+    async fn resolve_floor(
+        &mut self,
+        epocher: &FixedEpocher,
+        epoch: Epoch,
+    ) -> Option<Floor<S, Digest>> {
+        if self
+            .recovered_floor
+            .as_ref()
+            .is_some_and(|floor| floor.epoch() == epoch)
+        {
+            return Some(Floor::Finalized(
+                self.recovered_floor
+                    .take()
+                    .expect("matching recovered floor must exist"),
+            ));
+        }
+
+        let Some(boundary_height) = StartupFloor::floor_boundary(epocher, epoch) else {
+            return Some(Floor::Genesis(self.genesis_digest));
+        };
+
+        if let Some(block) = self.marshal.get_block(boundary_height).await {
+            return Some(Floor::Genesis(block.digest()));
+        }
+
+        if let Some(digest) = self
+            .startup_floor
+            .as_ref()
+            .and_then(|startup_floor| startup_floor.digest_for_epoch(epocher, epoch))
+        {
+            return Some(Floor::Genesis(digest));
+        }
+
+        error!(
+            %boundary_height,
+            %epoch,
+            "refusing to enter epoch without recovered floor, certified startup boundary, or local finalized boundary block"
+        );
+        None
     }
 
     async fn enter_epoch(
@@ -605,5 +643,39 @@ where
         let certificate = certificate_mux.register(epoch.get()).await.unwrap();
         let resolver = resolver_mux.register(epoch.get()).await.unwrap();
         engine.start(vote, certificate, resolver)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_utils::NZU64;
+
+    #[test]
+    fn startup_floor_only_matches_previous_epoch_boundary() {
+        let epocher = FixedEpocher::new(NZU64!(10));
+        let digest = Digest([9; 32]);
+        let floor = StartupFloor {
+            height: Height::new(19),
+            digest,
+        };
+
+        assert_eq!(
+            floor.digest_for_epoch(&epocher, Epoch::new(2)),
+            Some(digest)
+        );
+        assert_eq!(floor.digest_for_epoch(&epocher, Epoch::new(1)), None);
+        assert_eq!(floor.digest_for_epoch(&epocher, Epoch::zero()), None);
+    }
+
+    #[test]
+    fn non_boundary_startup_floor_is_not_inferred() {
+        let epocher = FixedEpocher::new(NZU64!(10));
+        let floor = StartupFloor {
+            height: Height::new(12),
+            digest: Digest([7; 32]),
+        };
+
+        assert_eq!(floor.digest_for_epoch(&epocher, Epoch::new(2)), None);
     }
 }
