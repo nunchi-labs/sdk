@@ -15,6 +15,7 @@ use commonware_cryptography::{
         },
         primitives::{group::Share, sharing::ModeVersion, variant::Variant},
     },
+    sha256::Digest,
     transcript::{Summary, Transcript},
     BatchVerifier, PublicKey, Signer,
 };
@@ -45,6 +46,81 @@ const READ_BUFFER: NonZeroUsize = NZUsize!(1 << 20);
 const RECORD_AD_DOMAIN: &[u8] = b"nunchi-dkg-storage";
 const RECORD_KIND_EPOCH: u8 = 0;
 const RECORD_KIND_EVENT: u8 = 1;
+const RECONCILIATION_KEY: u8 = 0;
+
+/// Durable authenticated-state import phase.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReconciliationPhase {
+    Importing,
+    Complete,
+}
+
+impl EncodeSize for ReconciliationPhase {
+    fn encode_size(&self) -> usize {
+        1
+    }
+}
+
+impl Write for ReconciliationPhase {
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            Self::Importing => 0u8.write(buf),
+            Self::Complete => 1u8.write(buf),
+        }
+    }
+}
+
+impl Read for ReconciliationPhase {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        match u8::read(buf)? {
+            0 => Ok(Self::Importing),
+            1 => Ok(Self::Complete),
+            other => Err(CodecError::InvalidEnum(other)),
+        }
+    }
+}
+
+/// Crash-recovery marker for an authenticated checkpoint import.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Reconciliation {
+    pub format_version: u16,
+    pub checkpoint_digest: Digest,
+    pub target_epoch: EpochNum,
+    pub phase: ReconciliationPhase,
+}
+
+impl EncodeSize for Reconciliation {
+    fn encode_size(&self) -> usize {
+        self.format_version.encode_size()
+            + self.checkpoint_digest.encode_size()
+            + self.target_epoch.encode_size()
+            + self.phase.encode_size()
+    }
+}
+
+impl Write for Reconciliation {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.format_version.write(buf);
+        self.checkpoint_digest.write(buf);
+        self.target_epoch.write(buf);
+        self.phase.write(buf);
+    }
+}
+
+impl Read for Reconciliation {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        Ok(Self {
+            format_version: ReadExt::read(buf)?,
+            checkpoint_digest: ReadExt::read(buf)?,
+            target_epoch: ReadExt::read(buf)?,
+            phase: ReadExt::read(buf)?,
+        })
+    }
+}
 
 /// Errors returned by DKG persistent storage.
 #[derive(Debug, thiserror::Error)]
@@ -204,6 +280,7 @@ where
     public_key: P,
 
     states: Metadata<E, u64, SealedRecord>,
+    reconciliation: Metadata<E, u8, Reconciliation>,
     msgs: SVJournal<E, SealedRecord>,
 
     // In-memory state
@@ -235,6 +312,14 @@ where
             MetadataConfig {
                 partition: format!("{partition_prefix}_states"),
                 codec_config: RangeCfg::from(..),
+            },
+        )
+        .await?;
+        let reconciliation = Metadata::init(
+            context.child("reconciliation"),
+            MetadataConfig {
+                partition: format!("{partition_prefix}_reconciliation"),
+                codec_config: (),
             },
         )
         .await?;
@@ -311,6 +396,7 @@ where
             namespace,
             public_key,
             states,
+            reconciliation,
             msgs,
             current,
             epochs,
@@ -457,6 +543,22 @@ where
     /// Returns the current epoch state, if initialized.
     pub fn epoch(&self) -> Option<(EpochNum, Epoch<V, P>)> {
         self.current.as_ref().map(|(e, s)| (*e, s.clone()))
+    }
+
+    /// Return the durable authenticated-state reconciliation marker.
+    pub fn reconciliation(&self) -> Option<Reconciliation> {
+        self.reconciliation.get(&RECONCILIATION_KEY).cloned()
+    }
+
+    /// Persist and sync an authenticated-state reconciliation phase.
+    pub async fn set_reconciliation(
+        &mut self,
+        reconciliation: Reconciliation,
+    ) -> Result<(), Error> {
+        self.reconciliation
+            .put(RECONCILIATION_KEY, reconciliation);
+        self.reconciliation.sync().await?;
+        Ok(())
     }
 
     fn get_or_create_epoch(&mut self, epoch: EpochNum) -> &mut EpochCache<V, P> {

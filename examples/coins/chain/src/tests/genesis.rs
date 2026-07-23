@@ -3,12 +3,19 @@ use nunchi_authority::{AuthorityGenesis, AuthorityLedger};
 use nunchi_coins::{CoinsGenesis, Ledger};
 use nunchi_common::{CommitState, QmdbState};
 
-use commonware_cryptography::{ed25519, Signer as _};
+use commonware_cryptography::{
+    bls12381::{
+        dkg::feldman_desmedt::deal,
+        primitives::{sharing::Mode, variant::MinSig},
+    },
+    ed25519, Signer as _,
+};
 use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
 use nunchi_authority::{AuthorityDB, AuthorityOperation, Transaction as AuthorityTransaction};
 use nunchi_coins::{Address, CoinDB, CoinSpec, TokenFactory, TokenName, TokenSymbol};
 use nunchi_crypto::PrivateKey;
 use nunchi_oracle::{IntervalKey, OracleGenesis, OracleLedger};
+use commonware_utils::{ordered::Set, test_rng, N3f1, NZU64};
 
 use crate::genesis::*;
 
@@ -79,12 +86,103 @@ async fn empty_commitment(context: deterministic::Context, partition: &str) -> S
     state_commitment(state.sync_target())
 }
 
+fn authenticated_dkg() -> (
+    nunchi_chain::DkgState,
+    commonware_cryptography::bls12381::dkg::feldman_desmedt::Output<
+        MinSig,
+        ed25519::PublicKey,
+    >,
+) {
+    let participants = Set::from_iter_dedup(
+        (0..4)
+            .map(ed25519::PrivateKey::from_seed)
+            .map(|signer| signer.public_key()),
+    );
+    let (output, _) =
+        deal::<MinSig, _, N3f1>(test_rng(), Mode::NonZeroCounter, participants.clone())
+            .unwrap();
+    let config = nunchi_dkg::DkgProtocolConfig {
+        state_format_version: nunchi_dkg::STATE_FORMAT_VERSION,
+        namespace: crate::NAMESPACE.to_vec(),
+        epoch_length: NZU64!(10),
+        participants,
+        num_participants_per_round: vec![4],
+        mode: Mode::NonZeroCounter,
+        mode_version: 0,
+        fault_model: nunchi_dkg::public::N3F1_FAULT_MODEL,
+        trusted_initial_identity: *output.public().public(),
+    };
+    (nunchi_chain::DkgState::new(config).unwrap(), output)
+}
+
 #[test]
 fn genesis_json_roundtrips() {
     let genesis = sample_genesis();
     let raw = serde_json::to_vec_pretty(&genesis).unwrap();
     let decoded = ChainGenesis::from_slice(&raw).unwrap();
     assert_eq!(decoded, genesis);
+}
+
+#[test]
+fn authenticated_checkpoint_is_seeded_with_and_without_application_genesis() {
+    deterministic::Runner::default().start(|context| async move {
+        let (dkg, output) = authenticated_dkg();
+        for (suffix, empty_label, config_label, state_label, reopen_label, genesis) in [
+            (
+                "none",
+                "empty_none",
+                "config_none",
+                "state_none",
+                "reopen_none",
+                None,
+            ),
+            (
+                "some",
+                "empty_some",
+                "config_some",
+                "state_some",
+                "reopen_some",
+                Some(sample_genesis()),
+            ),
+        ] {
+            let partition = format!("authenticated-genesis-{suffix}");
+            let empty = empty_commitment(
+                context.child(empty_label),
+                &format!("{partition}-empty"),
+            )
+            .await;
+            let config_context = context.child(config_label);
+            let config = QmdbState::<deterministic::Context>::config(
+                &config_context,
+                &partition,
+            );
+            let commitment = authenticated_genesis_target(
+                context.child(state_label),
+                config.clone(),
+                &dkg,
+                output.clone(),
+                genesis.as_ref(),
+                &empty,
+            )
+            .await
+            .unwrap();
+            assert_ne!(commitment.root, empty.root);
+
+            let state = QmdbState::init_with_config(
+                context.child(reopen_label),
+                config,
+            )
+                .await
+                .unwrap();
+            let checkpoint = dkg.load_checkpoint(&state).await.unwrap();
+            assert_eq!(checkpoint.epoch, commonware_consensus::types::Epoch::zero());
+            assert_eq!(checkpoint.activation_height.get(), 0);
+            assert_eq!(
+                checkpoint.protocol_config_digest,
+                dkg.config().digest().unwrap()
+            );
+        }
+    });
 }
 
 #[test]

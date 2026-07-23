@@ -1,6 +1,6 @@
 use crate::application::{self, Application};
 use crate::execution::NodeHandle;
-use crate::genesis::{genesis_target, state_commitment, ChainGenesis};
+use crate::genesis::{authenticated_genesis_target, state_commitment, ChainGenesis};
 use crate::history::{self, BlocksArchive, FinalizationsArchive};
 use crate::indexer;
 use crate::{Block, EpochProvider, Provider, PublicKey, Scheme, Transaction, NAMESPACE};
@@ -20,7 +20,7 @@ use commonware_consensus::{
 use commonware_cryptography::{
     bls12381::{
         dkg::feldman_desmedt::Output,
-        primitives::{group, variant::MinSig},
+        primitives::{group, sharing::Mode, variant::MinSig},
     },
     ed25519::{self, Batch},
     sha256::Digest,
@@ -28,7 +28,7 @@ use commonware_cryptography::{
 };
 use commonware_glue::stateful::{
     Application as StatefulApplication,
-    db::ManagedDb as _,
+    db::{DatabaseSet as _, ManagedDb as _},
     probe::{Config as ProbeConfig, Probe},
     Config as StatefulConfig, Mailbox as StatefulMailbox, Stateful as StatefulActor, SyncPlan,
 };
@@ -48,14 +48,14 @@ use nunchi_chain::state_sync::{
     Mailbox as StateSyncMailbox,
 };
 use nunchi_clob::{ClobActor, ClobConfig, ClobExtension};
-use nunchi_common::{QmdbBackend, QmdbState};
+use nunchi_common::{QmdbBackend, QmdbReader, QmdbState};
 use nunchi_dkg::{self as dkg, orchestrator, PeerConfig, UpdateCallBack, MAX_SUPPORTED_MODE};
 use nunchi_mempool::{Mempool, PoolConfig};
 use rand::{CryptoRng, Rng};
 use std::{
     marker::PhantomData,
     num::NonZeroU64,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tracing::{info, warn};
@@ -124,6 +124,7 @@ type Orchestrator<E, B, S> = orchestrator::Actor<
     Option<indexer::Pusher<E, indexer::HttpClient>>,
 >;
 type IndexerConsumer<E> = indexer::Consumer<E, indexer::HttpClient>;
+type StartupReporter = nunchi_chain::startup::StartupReporter<Block>;
 
 /// The engine that drives the coins-chain [Application].
 #[allow(clippy::type_complexity)]
@@ -147,6 +148,9 @@ where
     config: Config<B, P, S>,
     dkg: DkgActor<E, P>,
     dkg_mailbox: DkgMailbox,
+    dkg_state: nunchi_chain::DkgState,
+    startup_coordinator: Arc<Mutex<nunchi_chain::startup::StartupCoordinator>>,
+    startup_reporter: StartupReporter,
     buffer: buffered::Engine<E, PublicKey, Block, P>,
     buffered_mailbox: buffered::Mailbox<PublicKey, Block>,
     marshal: Marshal<E, S>,
@@ -214,6 +218,19 @@ where
         let num_participants =
             commonware_utils::NZU32!(config.peer_config.max_participants_per_round());
         let block_codec_config = (num_participants, ());
+        let protocol_config = dkg::DkgProtocolConfig {
+            state_format_version: dkg::STATE_FORMAT_VERSION,
+            namespace: NAMESPACE.to_vec(),
+            epoch_length: config.epoch_length,
+            participants: config.peer_config.participants.clone(),
+            num_participants_per_round: config.peer_config.num_participants_per_round.clone(),
+            mode: Mode::NonZeroCounter,
+            mode_version: 0,
+            fault_model: dkg::public::N3F1_FAULT_MODEL,
+            trusted_initial_identity: *config.output.public().public(),
+        };
+        let dkg_state = nunchi_chain::DkgState::new(protocol_config)
+            .expect("invalid authenticated DKG protocol configuration");
 
         let (dkg, dkg_mailbox) = dkg::Actor::new(
             context.child("dkg"),
@@ -322,41 +339,65 @@ where
             .expect("failed to initialize empty state database for genesis commitment");
             state_commitment(empty.sync_target())
         };
-        let genesis_state = if let Some(genesis) = &config.genesis {
-            let fingerprint = commonware_formatting::hex(
-                &genesis
-                    .fingerprint()
-                    .expect("failed to fingerprint statically configured genesis"),
-            );
-            let compute_partition = format!("{}-genesis-{}", config.partition_prefix, fingerprint);
-            let compute_config =
-                QmdbState::<E>::config_with_page_cache(&compute_partition, page_cache.clone());
-            let expected = genesis_target(
-                context.child("genesis_commitment"),
-                compute_config,
-                genesis,
-                &empty_state,
+        let dkg_fingerprint = commonware_formatting::hex(
+            &dkg_state
+                .config()
+                .digest()
+                .expect("failed to fingerprint authenticated DKG configuration"),
+        );
+        let app_fingerprint = config
+            .genesis
+            .as_ref()
+            .map(|genesis| {
+                commonware_formatting::hex(
+                    &genesis
+                        .fingerprint()
+                        .expect("failed to fingerprint statically configured genesis"),
+                )
+            })
+            .unwrap_or_else(|| "none".to_owned());
+        let compute_partition = format!(
+            "{}-genesis-{}-{}",
+            config.partition_prefix, dkg_fingerprint, app_fingerprint
+        );
+        let compute_config =
+            QmdbState::<E>::config_with_page_cache(&compute_partition, page_cache.clone());
+        let expected = authenticated_genesis_target(
+            context.child("genesis_commitment"),
+            compute_config,
+            &dkg_state,
+            config.output.clone(),
+            config.genesis.as_ref(),
+            &empty_state,
+        )
+        .await
+        .expect("failed to materialize authenticated genesis commitment");
+        let state_was_empty = {
+            let state = QmdbState::init_with_config(
+                context.child("genesis_existing_state_probe"),
+                db_config.clone(),
             )
             .await
-            .expect("failed to materialize genesis commitment");
-
-            let mut state =
-                QmdbState::init_with_config(context.child("genesis_seed"), db_config.clone())
-                    .await
-                    .expect("failed to initialize state database for genesis seeding");
-            genesis
-                .apply_to_state(&mut state, &empty_state)
-                .await
-                .expect("failed to seed state database with genesis");
-            let actual = state_commitment(state.sync_target());
+            .expect("failed to inspect state database before genesis seeding");
+            state.sync_target().root == empty_state.root
+        };
+        let actual = authenticated_genesis_target(
+            context.child("genesis_seed"),
+            db_config.clone(),
+            &dkg_state,
+            config.output.clone(),
+            config.genesis.as_ref(),
+            &empty_state,
+        )
+        .await
+        .expect("failed to seed authenticated state database");
+        if state_was_empty {
             assert_eq!(
                 expected, actual,
-                "state database genesis commitment must match the genesis block commitment"
+                "fresh state database genesis commitment must match the genesis block commitment"
             );
-            expected
-        } else {
-            empty_state
-        };
+        }
+        let genesis_state = expected;
         let current_state_target = {
             let state = QmdbState::init_with_config(
                 context.child("startup_state_probe"),
@@ -366,13 +407,16 @@ where
             .expect("failed to initialize state database for startup probe");
             state.sync_target()
         };
-        if let Some(processed_height) = validate_marshal_progress_against_state(
+        let local_startup_candidate = if let Some((processed_height, candidate)) =
+            validate_marshal_progress_against_state(
             &context,
             &config.partition_prefix,
+            &finalizations_by_height,
             &finalized_blocks,
             &current_state_target,
         )
-        .await {
+        .await
+        {
             validate_history_through_processed(
                 &finalizations_by_height,
                 &finalized_blocks,
@@ -391,17 +435,21 @@ where
                     .await
                     .expect("failed to startup-prune finalized blocks");
             }
+            Some(candidate)
         } else if ArchiveStore::last_index(&finalized_blocks).is_some()
             || ArchiveStore::last_index(&finalizations_by_height).is_some()
         {
             panic!("finalized history exists without persisted marshal processed height; rebuild or perform verified peer state sync");
-        }
+        } else {
+            None
+        };
         let applied_height = Arc::new(AsyncMutex::new(Height::zero()));
-        let app = Application::with_consensus(
+        let app = Application::with_authenticated_dkg(
             submitter.clone(),
             config.max_block_transactions,
             ClobExtension::new(clob_mailbox.clone()),
-            Some(dkg_mailbox.clone()),
+            dkg_mailbox.clone(),
+            dkg_state.clone(),
             applied_height.clone(),
             genesis_state,
             application::genesis_payload(),
@@ -449,6 +497,40 @@ where
                 .expect("state-sync floor probe stopped");
             plan = plan.with_floor(floor);
         }
+        let startup_coordinator = Arc::new(Mutex::new(
+            nunchi_chain::startup::StartupCoordinator::new(MAX_PENDING_ACKS),
+        ));
+        startup_coordinator
+            .lock()
+            .expect("startup coordinator lock poisoned")
+            .record(nunchi_chain::startup::StartupCandidate {
+                height: Height::zero(),
+                digest: genesis_digest,
+                state_target: <Application as StatefulApplication<E>>::sync_targets(&genesis),
+                certificate_payload: None,
+                genesis: true,
+            })
+            .expect("genesis startup candidate should fit");
+        if let Some(candidate) = local_startup_candidate {
+            startup_coordinator
+                .lock()
+                .expect("startup coordinator lock poisoned")
+                .record(candidate)
+                .expect("local startup candidate should fit");
+        }
+        let certified_payloads = recovered_floor
+            .iter()
+            .map(|certificate| certificate.proposal.payload)
+            .chain(
+                plan.floor()
+                    .into_iter()
+                    .map(|certificate| certificate.proposal.payload),
+            );
+        let startup_reporter = nunchi_chain::startup::StartupReporter::new(
+            startup_coordinator.clone(),
+            certified_payloads,
+            block_state_target,
+        );
         let marshal_start = recovered_floor
             .clone()
             .map_or_else(|| plan.marshal_start(genesis), marshal::Start::Floor);
@@ -587,6 +669,9 @@ where
             config,
             dkg,
             dkg_mailbox,
+            dkg_state,
+            startup_coordinator,
+            startup_reporter,
             buffer,
             buffered_mailbox,
             marshal,
@@ -695,16 +780,15 @@ where
         ),
         callback: Box<dyn UpdateCallBack<MinSig, PublicKey>>,
     ) -> Result<(), EngineError> {
-        let dkg_handle = self.dkg.start(
-            Some(self.config.output),
-            self.config.share,
-            self.orchestrator_mailbox,
-            dkg,
-            callback,
-        );
         let buffer_handle = self.buffer.start(broadcast);
         let reporters: Reporters<_, _, indexer::Producer> = Reporters::from((
-            nunchi_chain::dkg_reporters(self.stateful_mailbox, self.dkg_mailbox),
+            Reporters::from((
+                nunchi_chain::dkg_reporters(
+                    self.stateful_mailbox.clone(),
+                    self.dkg_mailbox,
+                ),
+                self.startup_reporter,
+            )),
             self.indexer_producer,
         ));
         let marshal_handle = self
@@ -714,6 +798,46 @@ where
         let state_sync_handle = self.state_sync_handle;
         let stateful_handle = self.stateful.start();
         let orchestrator_handle = self.orchestrator.start(votes, certificates, resolver);
+        // Marshal may queue one finalized block for the not-yet-started DKG
+        // mailbox while stateful attaches or reconstructs QMDB. Once the
+        // database subscription resolves, reconcile protected DKG storage
+        // against the authenticated checkpoint before acknowledging that block.
+        let databases = self.stateful_mailbox.subscribe_databases().await;
+        let attached_target = databases.committed_targets().await;
+        let artifact = self
+            .startup_coordinator
+            .lock()
+            .expect("startup coordinator lock poisoned")
+            .resolve(&attached_target)
+            .expect("attached QMDB does not exactly match one certified startup block");
+        let reader = QmdbReader::new(databases);
+        let checkpoint = self
+            .dkg_state
+            .load_checkpoint(&reader)
+            .await
+            .expect("attached QMDB has invalid authenticated DKG checkpoint");
+        dkg::validate_anchor(
+            self.dkg_state.config(),
+            &checkpoint,
+            artifact.anchor_height,
+        )
+        .expect("authenticated DKG checkpoint does not match startup anchor height");
+        let logs = self
+            .dkg_state
+            .load_logs(&reader)
+            .await
+            .expect("attached QMDB has invalid authenticated DKG logs");
+        let dkg_handle = self.dkg.start_authenticated(
+            dkg::AuthenticatedBootstrap {
+                config: self.dkg_state.config().clone(),
+                checkpoint,
+                logs,
+                initial_share: self.config.share,
+            },
+            self.orchestrator_mailbox,
+            dkg,
+            callback,
+        );
         let mempool_handle = self
             .mempool
             .start_p2p(self.context.child("mempool"), mempool);
@@ -780,20 +904,34 @@ fn unexpected_exit(
     }
 }
 
+fn block_state_target(
+    block: &Block,
+) -> commonware_storage::qmdb::sync::Target<
+    commonware_storage::mmr::Family,
+    Digest,
+> {
+    commonware_storage::qmdb::sync::Target::new(
+        block.state_root,
+        block.state_range.clone(),
+    )
+}
+
 const MARSHAL_PROCESSED_KEY: U64 = U64::new(0xFF);
 
 async fn validate_marshal_progress_against_state<E>(
     context: &E,
     partition_prefix: &str,
+    finalizations: &FinalizationsArchive<E>,
     finalized_blocks: &BlocksArchive<E>,
     current_target: &commonware_storage::qmdb::sync::Target<commonware_storage::mmr::Family, Digest>,
-) -> Option<Height>
+) -> Option<(Height, nunchi_chain::startup::StartupCandidate)>
 where
     E: BufferPooler
         + Clock
         + Metrics
         + Network
         + Rng
+        + CryptoRng
         + Spawner
         + Storage
         + Strategizer
@@ -834,7 +972,28 @@ where
         };
         let target = <Application as StatefulApplication<E>>::sync_targets(&block);
         if &target == current_target {
-            return Some(processed_height);
+            let certificate = Certificates::get(
+                finalizations,
+                ArchiveIdentifier::Index(height),
+            )
+            .await
+            .expect("failed to read startup candidate finalization")
+            .expect("startup candidate block has no finalization");
+            assert_eq!(
+                certificate.proposal.payload,
+                block.digest(),
+                "startup candidate certificate payload must equal block digest"
+            );
+            return Some((
+                processed_height,
+                nunchi_chain::startup::StartupCandidate {
+                    height: block.height,
+                    digest: block.digest(),
+                    state_target: target,
+                    certificate_payload: Some(certificate.proposal.payload),
+                    genesis: false,
+                },
+            ));
         }
     }
 

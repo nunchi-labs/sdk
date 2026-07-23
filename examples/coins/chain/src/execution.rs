@@ -17,7 +17,7 @@ pub use nunchi_chain::SharedAppliedHeight;
 #[derive(Clone)]
 pub struct NodeHandle<E>
 where
-    E: Context + Spawner + Metrics + Clock + rand::Rng,
+    E: Context + Spawner + Metrics + Clock + rand::Rng + rand::CryptoRng,
 {
     pub submitter: MempoolHandle<Transaction>,
     pub clob: ClobMailbox,
@@ -27,7 +27,7 @@ where
 
 impl<E> NodeHandle<E>
 where
-    E: Context + Spawner + Metrics + Clock + rand::Rng,
+    E: Context + Spawner + Metrics + Clock + rand::Rng + rand::CryptoRng,
 {
     pub fn new(
         submitter: MempoolHandle<Transaction>,
@@ -53,14 +53,14 @@ where
 /// Read-only coin queries answered from the stateful actor's committed databases.
 pub struct StatefulQuery<E>
 where
-    E: Context + Spawner + Metrics + Clock + rand::Rng,
+    E: Context + Spawner + Metrics + Clock + rand::Rng + rand::CryptoRng,
 {
     stateful: StatefulMailbox<E, Application>,
 }
 
 impl<E> Clone for StatefulQuery<E>
 where
-    E: Context + Spawner + Metrics + Clock + rand::Rng,
+    E: Context + Spawner + Metrics + Clock + rand::Rng + rand::CryptoRng,
 {
     fn clone(&self) -> Self {
         Self {
@@ -71,7 +71,7 @@ where
 
 impl<E> StatefulQuery<E>
 where
-    E: Context + Spawner + Metrics + Clock + rand::Rng,
+    E: Context + Spawner + Metrics + Clock + rand::Rng + rand::CryptoRng,
 {
     pub fn new(stateful: StatefulMailbox<E, Application>) -> Self {
         Self { stateful }
@@ -85,7 +85,15 @@ where
 #[async_trait]
 impl<E> CoinQuery for StatefulQuery<E>
 where
-    E: Context + Spawner + Metrics + Clock + rand::Rng + Send + Sync + 'static,
+    E: Context
+        + Spawner
+        + Metrics
+        + Clock
+        + rand::Rng
+        + rand::CryptoRng
+        + Send
+        + Sync
+        + 'static,
 {
     async fn nonce(&self, account: Address) -> Result<u64, LedgerError> {
         self.ledger().await.nonce(&account).await

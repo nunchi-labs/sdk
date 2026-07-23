@@ -1,6 +1,9 @@
 use crate::{
     protector::{ProtectionError, SealedRecord, StorageProtector},
-    state::{Dealer, Epoch as EpochState, Error as StorageError, Storage},
+    state::{
+        Dealer, Epoch as EpochState, Error as StorageError, Reconciliation,
+        ReconciliationPhase, Storage,
+    },
 };
 use bytes::Bytes;
 use commonware_codec::{Encode, RangeCfg, ReadExt};
@@ -15,6 +18,7 @@ use commonware_cryptography::{
         },
     },
     ed25519::{self},
+    sha256::Digest,
     transcript::Summary,
     Signer,
 };
@@ -455,6 +459,66 @@ fn storage_recovers_no_share_observer_epoch() {
         assert_eq!(recovered_state.round, 3);
         assert!(recovered_state.output.is_some());
         assert!(recovered_state.share.is_none());
+    });
+}
+
+#[test_traced]
+fn storage_recovers_reconciliation_phase_from_separate_partition() {
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        let signers = create_test_signers(4);
+        let public_key = signers[0].public_key();
+        let partition = "reconciliation_marker";
+        let marker = Reconciliation {
+            format_version: crate::STATE_FORMAT_VERSION,
+            checkpoint_digest: Digest([9; 32]),
+            target_epoch: Epoch::new(15),
+            phase: ReconciliationPhase::Importing,
+        };
+
+        let mut storage = init_storage(
+            context.child("storage"),
+            partition,
+            TEST_STORAGE_KEY,
+            TEST_NAMESPACE.to_vec(),
+            public_key.clone(),
+        )
+        .await;
+        storage
+            .set_reconciliation(marker.clone())
+            .await
+            .expect("reconciliation marker should persist");
+        drop(storage);
+
+        let mut recovered = init_storage(
+            context.child("recovered_storage"),
+            partition,
+            TEST_STORAGE_KEY,
+            TEST_NAMESPACE.to_vec(),
+            public_key,
+        )
+        .await;
+        assert_eq!(recovered.reconciliation(), Some(marker.clone()));
+
+        let complete = Reconciliation {
+            phase: ReconciliationPhase::Complete,
+            ..marker
+        };
+        recovered
+            .set_reconciliation(complete.clone())
+            .await
+            .expect("completed marker should persist");
+        drop(recovered);
+
+        let recovered = init_storage(
+            context.child("completed_storage"),
+            partition,
+            TEST_STORAGE_KEY,
+            TEST_NAMESPACE.to_vec(),
+            signers[0].public_key(),
+        )
+        .await;
+        assert_eq!(recovered.reconciliation(), Some(complete));
     });
 }
 
