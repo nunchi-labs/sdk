@@ -24,7 +24,10 @@ use commonware_runtime::{
     buffer::paged::CacheRef, Buf, BufMut, BufferPooler, Clock, Metrics, Storage as RuntimeStorage,
 };
 use commonware_storage::{
-    journal::{self, segmented::variable::{Config as SVConfig, Journal as SVJournal}},
+    journal::{
+        self,
+        segmented::variable::{Config as SVConfig, Journal as SVJournal},
+    },
     metadata::{self, Config as MetadataConfig, Metadata},
 };
 use commonware_utils::{Faults, NZUsize, NZU16};
@@ -47,6 +50,17 @@ const RECORD_AD_DOMAIN: &[u8] = b"nunchi-dkg-storage";
 const RECORD_KIND_EPOCH: u8 = 0;
 const RECORD_KIND_EVENT: u8 = 1;
 const RECONCILIATION_KEY: u8 = 0;
+
+/// Error returned when resuming a player from protected storage.
+#[derive(Debug, thiserror::Error)]
+pub enum CreatePlayerError {
+    /// Public dealer logs are present, but matching private dealer messages are not.
+    #[error("missing private player dealing")]
+    MissingPlayerDealing,
+    /// The crypto player could not be resumed from the persisted state.
+    #[error("failed to resume DKG player: {0}")]
+    Crypto(commonware_cryptography::bls12381::dkg::feldman_desmedt::Error),
+}
 
 /// Durable authenticated-state import phase.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -732,16 +746,25 @@ where
         epoch: EpochNum,
         signer: C,
         round_info: Info<V, P>,
-    ) -> Option<Player<V, C>> {
+    ) -> Result<Player<V, C>, CreatePlayerError> {
         let logs = self.logs(epoch);
         let dealings = self.dealings(epoch);
-        let (crypto_player, acks) = CryptoPlayer::resume::<M>(round_info, signer, &logs, dealings)
-            .expect("should be able to resume player");
+        let (crypto_player, acks) =
+            CryptoPlayer::resume::<M>(round_info, signer, &logs, dealings).map_err(|err| {
+                if matches!(
+                    err,
+                    commonware_cryptography::bls12381::dkg::feldman_desmedt::Error::MissingPlayerDealing
+                ) {
+                    CreatePlayerError::MissingPlayerDealing
+                } else {
+                    CreatePlayerError::Crypto(err)
+                }
+            })?;
         for dealer in acks.keys() {
             debug!(?epoch, ?dealer, "restored committed dealer message");
         }
 
-        Some(Player {
+        Ok(Player {
             player: crypto_player,
             acks,
         })

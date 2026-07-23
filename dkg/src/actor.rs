@@ -1,6 +1,6 @@
 use super::{
     state::{
-        Dealer, Epoch as EpochState, Player, Reconciliation,
+        CreatePlayerError, Dealer, Epoch as EpochState, Player, Reconciliation,
         ReconciliationPhase, Storage,
     },
     Mailbox, Message as MailboxMessage, PostUpdate, Update, UpdateCallBack,
@@ -303,6 +303,7 @@ where
         let max_read_size = NZU32!(self.peer_config.max_participants_per_round());
         let epocher = FixedEpocher::new(self.epoch_length);
         let self_pk = self.signer.public_key();
+        let authenticated_bootstrap = matches!(bootstrap, Bootstrap::Authenticated(_));
 
         // Initialize persistent state
         let mut storage = match Storage::init(
@@ -454,16 +455,41 @@ where
                 })
                 .flatten();
 
-            // Initialize player state if we are a player
-            let mut player_state: Option<Player<MinSig, ed25519::PrivateKey>> = am_player
-                .then(|| {
-                    storage.create_player::<ed25519::PrivateKey, N3f1>(
-                        epoch,
-                        self.signer.clone(),
-                        round.clone(),
-                    )
-                })
-                .flatten();
+            // Initialize player state if we are a player.
+            let mut player_state: Option<Player<MinSig, ed25519::PrivateKey>> = if am_player {
+                match storage.create_player::<ed25519::PrivateKey, N3f1>(
+                    epoch,
+                    self.signer.clone(),
+                    round.clone(),
+                ) {
+                    Ok(player) => Some(player),
+                    Err(CreatePlayerError::MissingPlayerDealing)
+                        if authenticated_bootstrap && epoch_state.share.is_none() =>
+                    {
+                        warn!(
+                            %epoch,
+                            validator = ?self_pk,
+                            authenticated_bootstrap,
+                            has_share = false,
+                            "continuing without DKG player state because authenticated public logs have no local private dealings"
+                        );
+                        None
+                    }
+                    Err(err) => {
+                        error!(
+                            %epoch,
+                            validator = ?self_pk,
+                            authenticated_bootstrap,
+                            has_share = epoch_state.share.is_some(),
+                            %err,
+                            "failed to resume DKG player from protected storage"
+                        );
+                        break 'actor;
+                    }
+                }
+            } else {
+                None
+            };
 
             select_loop! {
                 self.context,
