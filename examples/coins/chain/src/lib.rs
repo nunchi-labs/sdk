@@ -19,6 +19,7 @@ pub mod application;
 pub mod engine;
 pub mod execution;
 pub mod genesis;
+pub(crate) mod history;
 pub mod indexer;
 pub mod rpc;
 pub mod runtime;

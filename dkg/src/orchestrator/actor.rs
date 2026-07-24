@@ -26,9 +26,14 @@ use commonware_parallel::Strategy;
 use commonware_runtime::{
     buffer::paged::CacheRef,
     spawn_cell,
-    telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
+    telemetry::metrics::{
+        histogram::Buckets, CounterFamily, EncodeLabelSet, Gauge, GaugeExt, Histogram,
+        MetricsExt as _,
+    },
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
+use commonware_storage::metadata::{self, Metadata};
+use commonware_utils::sequence::U64;
 use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16};
 use rand::CryptoRng;
 use std::{
@@ -38,6 +43,13 @@ use std::{
     time::Duration,
 };
 use tracing::{debug, info, warn};
+
+const CLEANUP_WATERMARK_KEY: U64 = U64::new(0);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, EncodeLabelSet)]
+struct CleanupStatusLabel {
+    status: &'static str,
+}
 
 /// Reporter that discards consensus activity.
 pub struct NoopReporter<A> {
@@ -146,6 +158,10 @@ where
     page_cache_ref: CacheRef,
 
     latest_epoch: Gauge,
+    partition_cleanup_total: CounterFamily<CleanupStatusLabel>,
+    partition_cleanup_watermark: Gauge,
+    partitions_active: Gauge,
+    partition_cleanup_duration: Histogram,
 
     _phantom: PhantomData<L>,
 }
@@ -180,6 +196,23 @@ where
 
         // Register latest_epoch gauge for Grafana integration
         let latest_epoch = context.gauge("latest_epoch", "current epoch");
+        let partition_cleanup_total = context.family(
+            "consensus_partition_cleanup",
+            "Total number of consensus partition cleanup outcomes",
+        );
+        let partition_cleanup_watermark = context.gauge(
+            "consensus_partition_cleanup_watermark",
+            "Next consensus epoch partition requiring cleanup",
+        );
+        let partitions_active = context.gauge(
+            "consensus_partitions_active",
+            "Number of consensus epoch partitions with active engines",
+        );
+        let partition_cleanup_duration = context.histogram(
+            "consensus_partition_cleanup_duration_seconds",
+            "Duration of consensus epoch partition cleanup operations",
+            Buckets::LOCAL,
+        );
 
         (
             Self {
@@ -200,6 +233,10 @@ where
                 recovered_floor: config.recovered_floor,
                 page_cache_ref,
                 latest_epoch,
+                partition_cleanup_total,
+                partition_cleanup_watermark,
+                partitions_active,
+                partition_cleanup_duration,
                 _phantom: PhantomData,
             },
             Mailbox::new(sender),
@@ -268,6 +305,24 @@ where
         // Wait for instructions to transition epochs.
         let epocher = FixedEpocher::new(self.epoch_length);
         let mut engines: BTreeMap<Epoch, Handle<()>> = BTreeMap::new();
+        let cleanup_partition = format!("{}_cleanup-v1", self.partition_prefix);
+        let mut cleanup_metadata = Metadata::<E, U64, U64>::init(
+            self.context.child("partition_cleanup_metadata"),
+            metadata::Config {
+                partition: cleanup_partition,
+                codec_config: (),
+            },
+        )
+        .await
+        .expect("failed to initialize consensus partition cleanup metadata");
+        let mut next_epoch_to_clean = cleanup_metadata
+            .get(&CLEANUP_WATERMARK_KEY)
+            .cloned()
+            .unwrap_or_else(|| U64::new(0));
+        let _ = self
+            .partition_cleanup_watermark
+            .try_set(u64::from(&next_epoch_to_clean));
+        let mut startup_cleanup_done = false;
 
         select_loop! {
             self.context,
@@ -317,6 +372,28 @@ where
                         continue;
                     }
 
+                    if !startup_cleanup_done {
+                        assert!(
+                            u64::from(&next_epoch_to_clean) <= transition.epoch.get(),
+                            "consensus partition cleanup watermark {} is ahead of first entering epoch {}",
+                            u64::from(&next_epoch_to_clean),
+                            transition.epoch,
+                        );
+                        if let Some(previous) = transition.epoch.previous() {
+                            assert!(
+                                !engines.keys().any(|epoch| *epoch <= previous),
+                                "refusing to clean a consensus partition with an active engine"
+                            );
+                            self.cleanup_through(
+                                &mut cleanup_metadata,
+                                &mut next_epoch_to_clean,
+                                previous,
+                            )
+                            .await;
+                        }
+                        startup_cleanup_done = true;
+                    }
+
                     let floor = if self
                         .recovered_floor
                         .as_ref()
@@ -364,6 +441,7 @@ where
                         .await;
                     engines.insert(transition.epoch, handle);
                     let _ = self.latest_epoch.try_set(transition.epoch.get());
+                    let _ = self.partitions_active.try_set(engines.len());
 
                     info!(epoch = %transition.epoch, "entered epoch");
                 }
@@ -374,13 +452,88 @@ where
                         continue;
                     };
                     handle.abort();
+                    // Spawned task handles close their completion channel when aborted.
+                    match handle.await {
+                        Ok(())
+                        | Err(commonware_runtime::Error::Aborted)
+                        | Err(commonware_runtime::Error::Closed) => {}
+                        Err(error) => {
+                            panic!("consensus engine for epoch {epoch} failed while stopping: {error}")
+                        }
+                    }
+                    let _ = self.partitions_active.try_set(engines.len());
 
                     // Unregister the signing scheme for the epoch.
                     assert!(self.provider.unregister(&epoch));
 
+                    if u64::from(&next_epoch_to_clean) <= epoch.get() {
+                        assert!(
+                            !engines.keys().any(|active| *active <= epoch),
+                            "refusing to clean a consensus partition with an active engine"
+                        );
+                        self.cleanup_through(
+                            &mut cleanup_metadata,
+                            &mut next_epoch_to_clean,
+                            epoch,
+                        )
+                        .await;
+                    }
+
                     info!(%epoch, "exited epoch");
                 }
             },
+        }
+    }
+
+    async fn cleanup_through(
+        &mut self,
+        metadata: &mut Metadata<E, U64, U64>,
+        next_epoch_to_clean: &mut U64,
+        through: Epoch,
+    ) {
+        while u64::from(&*next_epoch_to_clean) <= through.get() {
+            let epoch = Epoch::new(u64::from(&*next_epoch_to_clean));
+            let partition = format!("{}_consensus_{}", self.partition_prefix, epoch);
+            let started = std::time::Instant::now();
+            let status = match self.context.remove(&partition, None).await {
+                Ok(()) => {
+                    info!(%epoch, %partition, "removed retired consensus partition");
+                    "removed"
+                }
+                Err(commonware_runtime::Error::PartitionMissing(_)) => {
+                    info!(%epoch, %partition, "retired consensus partition already missing");
+                    "missing"
+                }
+                Err(error) => {
+                    self.partition_cleanup_total
+                        .get_or_create(&CleanupStatusLabel { status: "failed" })
+                        .inc();
+                    self.partition_cleanup_duration
+                        .observe(started.elapsed().as_secs_f64());
+                    warn!(%epoch, %partition, %error, "failed to remove retired consensus partition");
+                    panic!("failed to remove retired consensus partition {partition}: {error}");
+                }
+            };
+            self.partition_cleanup_total
+                .get_or_create(&CleanupStatusLabel { status })
+                .inc();
+            self.partition_cleanup_duration
+                .observe(started.elapsed().as_secs_f64());
+
+            let next = epoch
+                .get()
+                .checked_add(1)
+                .expect("consensus cleanup watermark overflow");
+            metadata
+                .put_sync(CLEANUP_WATERMARK_KEY, U64::new(next))
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "failed to persist consensus cleanup watermark after removing {partition}: {error}"
+                    )
+                });
+            *next_epoch_to_clean = U64::new(next);
+            let _ = self.partition_cleanup_watermark.try_set(next);
         }
     }
 

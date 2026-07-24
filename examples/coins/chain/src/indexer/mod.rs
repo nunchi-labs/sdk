@@ -6,9 +6,9 @@ use commonware_consensus::types::Epoch;
 use commonware_cryptography::bls12381::{
     dkg::feldman_desmedt::Output as DkgOutput, primitives::variant::MinSig,
 };
-use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner, Storage};
+use commonware_runtime::{BufferPooler, Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::queue;
-use commonware_utils::sync::Mutex;
+use commonware_utils::{sync::Mutex, NZU64};
 use std::{future::Future, num::NonZeroUsize, sync::Arc, time::Duration};
 use thiserror::Error;
 
@@ -21,7 +21,7 @@ use backfiller::{SharedState, State};
 pub(crate) use metrics::{DkgUploadStatus, IndexerMetrics};
 #[cfg(test)]
 pub(crate) use metrics::{
-    BackfillDecision, BackfillPhase, BackfillResetReason, BackfillWaitReason, BlockMetricSource,
+    BackfillDecision, BackfillPhase, BackfillWaitReason, BlockMetricSource,
     HttpArtifact, LiveUploadArtifact, ProducerActivity, ProducerStatus, QueueReadSource,
     QueueStatus, SharedCacheSource, SharedRetentionReason, SharedStateSnapshot,
 };
@@ -32,6 +32,64 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MISSING_FINALIZATION_GRACE: Duration = Duration::from_secs(120);
 const MISMATCHED_FINALIZATION_GRACE: Duration = Duration::from_secs(15);
+pub(crate) const SPOOL_ITEMS_PER_SECTION: std::num::NonZeroU64 = NZU64!(128);
+
+/// Availability window for durable finalized uploads while the external indexer is unavailable.
+#[derive(Clone, Copy, Debug)]
+pub struct SpoolLimits {
+    pub max_entries: u64,
+    pub max_bytes: u64,
+    pub max_payload_bytes: u64,
+    pub max_age: Duration,
+}
+
+impl Default for SpoolLimits {
+    fn default() -> Self {
+        Self {
+            max_entries: crate::BLOCKS_PER_EPOCH.get(),
+            max_bytes: 2 * 1024 * 1024 * 1024,
+            max_payload_bytes: 16 * 1024 * 1024,
+            max_age: Duration::from_secs(24 * 60 * 60),
+        }
+    }
+}
+
+impl SpoolLimits {
+    fn validate(self) {
+        assert!(self.max_entries > 0, "indexer spool max_entries must be non-zero");
+        assert!(self.max_bytes > 0, "indexer spool max_bytes must be non-zero");
+        assert!(
+            self.max_payload_bytes > 0 && self.max_payload_bytes <= self.max_bytes,
+            "indexer spool max_payload_bytes must be in 1..=max_bytes"
+        );
+        assert!(!self.max_age.is_zero(), "indexer spool max_age must be non-zero");
+        self.max_encoded_payload_bytes()
+            .expect("indexer spool encoded payload bound overflows u64");
+    }
+
+    pub fn max_encoded_payload_bytes(self) -> Option<u64> {
+        (SPOOL_ITEMS_PER_SECTION.get() - 1)
+            .checked_mul(self.max_payload_bytes)?
+            .checked_add(self.max_bytes)
+    }
+}
+
+#[cfg(test)]
+mod spool_tests {
+    use super::*;
+
+    #[test]
+    fn default_spool_bound_includes_section_slack() {
+        let limits = SpoolLimits::default();
+        assert_eq!(limits.max_entries, crate::BLOCKS_PER_EPOCH.get());
+        assert_eq!(limits.max_bytes, 2 * 1024 * 1024 * 1024);
+        assert_eq!(limits.max_age, Duration::from_secs(24 * 60 * 60));
+        assert_eq!(
+            limits.max_encoded_payload_bytes(),
+            Some(limits.max_bytes + 127 * limits.max_payload_bytes)
+        );
+    }
+}
 
 /// Errors returned by the HTTP indexer client.
 #[derive(Debug, Error)]
@@ -184,11 +242,13 @@ pub(crate) struct Config {
     pub(crate) mailbox_size: NonZeroUsize,
     pub(crate) backfiller_max_active: NonZeroUsize,
     pub(crate) backfiller_retry: Duration,
+    pub(crate) spool_limits: SpoolLimits,
     pub(crate) metrics: IndexerMetrics,
 }
 
 pub(crate) struct Indexer<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> {
     producer: Producer,
+    producer_handle: Handle<()>,
     pusher: Pusher<E, C>,
     consumer: Consumer<E, C>,
 }
@@ -205,8 +265,10 @@ impl<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> Indexer<E
             mailbox_size,
             backfiller_max_active,
             backfiller_retry,
+            spool_limits,
             metrics,
         } = config;
+        spool_limits.validate();
         let uploads: SharedState = Arc::new(Mutex::new(State::with_metrics(metrics.clone())));
         let pusher = Pusher::new(
             context.child("pusher"),
@@ -215,42 +277,65 @@ impl<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> Indexer<E
             uploads.clone(),
             metrics.clone(),
         );
-        let (writer, reader) = backfiller;
-        let producer = backfiller::producer::init(
+        let (writer, mut reader) = backfiller;
+        loop {
+            let Some((position, entry)) = reader
+                .try_recv()
+                .await
+                .expect("failed to reconstruct durable indexer spool")
+            else {
+                break;
+            };
+            uploads.lock().recover_queued(position, &entry);
+        }
+        reader.reset().await;
+        let (admission_sender, admission_receiver) = commonware_actor::mailbox::new(
+            context.child("admission_mailbox"),
+            mailbox_size,
+        );
+        let (producer, producer_handle) = backfiller::producer::init(
             context.child("producer"),
             uploads.clone(),
             metrics.clone(),
-            writer.clone(),
-            mailbox_size,
+            marshal.clone(),
+            admission_sender,
+            backfiller::producer::Config {
+                mailbox_size,
+                retry: backfiller_retry,
+                missing_finalization_grace: MISSING_FINALIZATION_GRACE,
+                mismatched_finalization_grace: MISMATCHED_FINALIZATION_GRACE,
+                spool_limits,
+            },
         );
         let consumer = Consumer::new(
             context.child("consumer"),
             client,
-            marshal,
             metrics,
             uploads,
             (writer, reader),
+            admission_receiver,
             backfiller::consumer::Config {
                 max_active: backfiller_max_active,
                 retry: backfiller_retry,
-                missing_finalization_grace: MISSING_FINALIZATION_GRACE,
-                mismatched_finalization_grace: MISMATCHED_FINALIZATION_GRACE,
+                spool_limits,
             },
         );
 
         Self {
             producer,
+            producer_handle,
             pusher,
             consumer,
         }
     }
 
-    pub(crate) fn split(self) -> (Producer, Pusher<E, C>, Consumer<E, C>) {
+    pub(crate) fn split(self) -> (Producer, Handle<()>, Pusher<E, C>, Consumer<E, C>) {
         let Self {
             producer,
+            producer_handle,
             pusher,
             consumer,
         } = self;
-        (producer, pusher, consumer)
+        (producer, producer_handle, pusher, consumer)
     }
 }

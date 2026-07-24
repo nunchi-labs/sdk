@@ -8,7 +8,8 @@ use commonware_cryptography::Signer as _;
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_macros::{select, test_traced};
 use commonware_p2p::simulated::Link;
-use commonware_runtime::{deterministic, Clock, Runner as _};
+use commonware_runtime::{deterministic, Clock, Runner as _, Spawner as _, Supervisor as _};
+use commonware_utils::NZU64;
 use nunchi_authority::{
     proposal_id, AuthorityOperation, MultisigPolicy, RegistryChange,
     Transaction as AuthorityTransaction,
@@ -105,6 +106,56 @@ fn reaches_height_100() {
 }
 
 #[test_traced]
+fn crosses_epoch_boundary_and_reclaims_retired_partition() {
+    with_large_stack(|| {
+        let executor = deterministic::Runner::timed(Duration::from_secs(60));
+        executor.start(|mut context| async move {
+            let cfg = ValidatorConfig {
+                epoch_length: NZU64!(20),
+                ..ValidatorConfig::default()
+            };
+            let mut network = TestNetworkBuilder::new(VALIDATORS)
+                .with_initial_link(reliable_link())
+                .with_validator_config(cfg)
+                .build(&mut context)
+                .await;
+            network.start_all().await;
+
+            let validator_task_prefix = "validator";
+            assert!(network.running_tasks(validator_task_prefix) > 0);
+
+            network.run_until_height(25).await;
+
+            network.assert_validator_metric("engine_orchestrator_latest_epoch", &[], 1);
+            network.assert_validator_metric(
+                "engine_orchestrator_consensus_partitions_active",
+                &[],
+                1,
+            );
+            network.assert_validator_metric(
+                "engine_orchestrator_consensus_partition_cleanup_watermark",
+                &[],
+                1,
+            );
+            network.assert_validator_metric(
+                "engine_orchestrator_consensus_partition_cleanup_total",
+                &[("status", "removed")],
+                1,
+            );
+            network.assert_consensus_partition_missing(0).await;
+            assert!(network.running_tasks(validator_task_prefix) > 0);
+
+            let shutdown = network.context().child("shutdown");
+            shutdown
+                .stop(0, Some(Duration::from_secs(10)))
+                .await
+                .expect("validator tasks should stop cleanly");
+            assert_eq!(network.running_tasks(validator_task_prefix), 0);
+        });
+    });
+}
+
+#[test_traced]
 fn state_syncs_late_validator() {
     with_large_stack(|| {
         let executor = deterministic::Runner::timed(Duration::from_secs(60));
@@ -154,6 +205,7 @@ fn recovers_unclean_shutdown() {
                 let cfg = ValidatorConfig {
                     leader_timeout: Duration::from_millis(250),
                     certification_timeout: Duration::from_millis(500),
+                    ..ValidatorConfig::default()
                 };
 
                 let wait =

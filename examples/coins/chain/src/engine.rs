@@ -1,11 +1,9 @@
 use crate::application::{self, Application};
 use crate::execution::NodeHandle;
 use crate::genesis::{genesis_target, state_commitment, ChainGenesis};
+use crate::history::{self, BlocksArchive, FinalizationsArchive};
 use crate::indexer;
-use crate::{
-    Block, EpochProvider, Finalization, Provider, PublicKey, Scheme, Transaction, BLOCKS_PER_EPOCH,
-    NAMESPACE,
-};
+use crate::{Block, EpochProvider, Provider, PublicKey, Scheme, Transaction, NAMESPACE};
 use commonware_broadcast::buffered;
 use commonware_consensus::{
     marshal::{
@@ -13,7 +11,7 @@ use commonware_consensus::{
         core::Actor as MarshalActor,
         resolver,
         standard::{Inline, Standard},
-        store::{Blocks as _, Certificates},
+        store::Certificates,
     },
     simplex::elector::Random,
     types::{Epoch, FixedEpocher, Height, ViewDelta},
@@ -24,7 +22,6 @@ use commonware_cryptography::{
         dkg::feldman_desmedt::Output,
         primitives::{group, variant::MinSig},
     },
-    certificate::Verifier as _,
     ed25519::{self, Batch},
     sha256::Digest,
     BatchVerifier, Digestible, Signer,
@@ -41,12 +38,8 @@ use commonware_runtime::{
     buffer::paged::CacheRef, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics,
     Network, Spawner, Storage, Strategizer,
 };
-use commonware_storage::{
-    archive::{immutable, Identifier as ArchiveIdentifier},
-    metadata::{self, Metadata},
-    queue,
-};
-use commonware_utils::{sequence::U64, union, NZDuration, NZU64};
+use commonware_storage::{archive::{Archive as ArchiveStore, Identifier as ArchiveIdentifier}, metadata::{self, Metadata}, queue};
+use commonware_utils::{sequence::U64, union, NZDuration};
 use futures::lock::Mutex as AsyncMutex;
 use governor::clock::Clock as GClock;
 use nunchi_chain::engine::*;
@@ -61,6 +54,7 @@ use nunchi_mempool::{Mempool, PoolConfig};
 use rand::{CryptoRng, Rng};
 use std::{
     marker::PhantomData,
+    num::NonZeroU64,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -84,13 +78,12 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
     pub blocker: B,
     pub manager: P,
     pub partition_prefix: String,
-    pub blocks_freezer_table_initial_size: u32,
-    pub finalized_freezer_table_initial_size: u32,
     pub signer: ed25519::PrivateKey,
     pub dkg_storage_key: dkg::StorageKey,
     pub output: Output<MinSig, PublicKey>,
     pub share: Option<group::Share>,
     pub peer_config: PeerConfig<PublicKey>,
+    pub epoch_length: NonZeroU64,
     pub leader_timeout: Duration,
     pub certification_timeout: Duration,
     pub strategy: S,
@@ -100,6 +93,7 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
     pub pool_config: PoolConfig,
     pub genesis: Option<ChainGenesis>,
     pub indexer: Option<indexer::HttpClient>,
+    pub indexer_spool_limits: indexer::SpoolLimits,
 }
 
 type DkgActor<E, P> = nunchi_chain::DkgActor<E, P, Transaction, ClobExtension>;
@@ -110,8 +104,6 @@ type LimitedStatefulAppMailbox<E> = VerifyLimiter<StatefulAppMailbox<E>>;
 type InlineApp<E> = Inline<E, Scheme, LimitedStatefulAppMailbox<E>, Block, FixedEpocher>;
 type Marshaled<E> = BoxedAutomaton<InlineApp<E>>;
 type SchemeProvider = Provider<Scheme, ed25519::PrivateKey>;
-type FinalizationsArchive<E> = immutable::Archive<E, Digest, Finalization>;
-type BlocksArchive<E> = immutable::Archive<E, Digest, Block>;
 type Marshal<E, S> = MarshalActor<
     E,
     Standard<Block>,
@@ -167,6 +159,7 @@ where
     stateful: StatefulApp<E>,
     stateful_mailbox: StatefulAppMailbox<E>,
     indexer_producer: Option<indexer::Producer>,
+    indexer_producer_handle: Option<Handle<()>>,
     indexer_consumer: Option<IndexerConsumer<E>>,
 }
 
@@ -234,7 +227,7 @@ where
                 max_supported_mode: MAX_SUPPORTED_MODE,
                 namespace: NAMESPACE.to_vec(),
                 storage_protector: dkg::StorageProtector::new(config.dkg_storage_key),
-                epoch_length: BLOCKS_PER_EPOCH,
+                epoch_length: config.epoch_length,
             },
         );
 
@@ -251,88 +244,36 @@ where
         );
 
         let start = Instant::now();
-        let finalizations_by_height = immutable::Archive::init(
-            context.child("finalizations_by_height"),
-            immutable::Config {
-                metadata_partition: format!(
-                    "{}-finalizations-by-height-metadata",
-                    config.partition_prefix
-                ),
-                freezer_table_partition: format!(
-                    "{}-finalizations-by-height-freezer-table",
-                    config.partition_prefix
-                ),
-                freezer_table_initial_size: config.finalized_freezer_table_initial_size,
-                freezer_table_resize_frequency: FREEZER_TABLE_RESIZE_FREQUENCY,
-                freezer_table_resize_chunk_size: FREEZER_TABLE_RESIZE_CHUNK_SIZE,
-                freezer_key_partition: format!(
-                    "{}-finalizations-by-height-freezer-key",
-                    config.partition_prefix
-                ),
-                freezer_key_page_cache: page_cache.clone(),
-                freezer_key_write_buffer: WRITE_BUFFER,
-                freezer_value_partition: format!(
-                    "{}-finalizations-by-height-freezer-value",
-                    config.partition_prefix
-                ),
-                freezer_value_write_buffer: WRITE_BUFFER,
-                freezer_value_target_size: FREEZER_VALUE_TARGET_SIZE,
-                freezer_value_compression: FREEZER_VALUE_COMPRESSION,
-                ordinal_partition: format!(
-                    "{}-finalizations-by-height-ordinal",
-                    config.partition_prefix
-                ),
-                ordinal_write_buffer: WRITE_BUFFER,
-                items_per_section: IMMUTABLE_ITEMS_PER_SECTION,
-                codec_config: Scheme::certificate_codec_config_unbounded(),
-                replay_buffer: REPLAY_BUFFER,
-            },
+        let opened_history = history::open(
+            &context,
+            &config.partition_prefix,
+            page_cache.clone(),
+            block_codec_config,
         )
         .await
-        .expect("failed to initialize finalizations by height archive");
-        info!(elapsed = ?start.elapsed(), "restored finalizations by height archive");
-
-        let start = Instant::now();
-        let finalized_blocks = immutable::Archive::init(
-            context.child("finalized_blocks"),
-            immutable::Config {
-                metadata_partition: format!(
-                    "{}-finalized_blocks-metadata",
-                    config.partition_prefix
-                ),
-                freezer_table_partition: format!(
-                    "{}-finalized_blocks-freezer-table",
-                    config.partition_prefix
-                ),
-                freezer_table_initial_size: config.blocks_freezer_table_initial_size,
-                freezer_table_resize_frequency: FREEZER_TABLE_RESIZE_FREQUENCY,
-                freezer_table_resize_chunk_size: FREEZER_TABLE_RESIZE_CHUNK_SIZE,
-                freezer_key_partition: format!(
-                    "{}-finalized_blocks-freezer-key",
-                    config.partition_prefix
-                ),
-                freezer_key_page_cache: page_cache.clone(),
-                freezer_key_write_buffer: WRITE_BUFFER,
-                freezer_value_partition: format!(
-                    "{}-finalized_blocks-freezer-value",
-                    config.partition_prefix
-                ),
-                freezer_value_write_buffer: WRITE_BUFFER,
-                freezer_value_target_size: FREEZER_VALUE_TARGET_SIZE,
-                freezer_value_compression: FREEZER_VALUE_COMPRESSION,
-                ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
-                ordinal_write_buffer: WRITE_BUFFER,
-                items_per_section: IMMUTABLE_ITEMS_PER_SECTION,
-                codec_config: block_codec_config,
-                replay_buffer: REPLAY_BUFFER,
-            },
-        )
-        .await
-        .expect("failed to initialize finalized blocks archive");
-        info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
+        .unwrap_or_else(|error| panic!("failed to initialize bounded finalized history: {error}"));
+        let history::Opened {
+            finalizations: mut finalizations_by_height,
+            blocks: mut finalized_blocks,
+            partitions: history_partitions,
+            marker_status,
+        } = opened_history;
+        info!(
+            elapsed = ?start.elapsed(),
+            format_version = history::FORMAT_VERSION,
+            finalizations_key = %history_partitions.finalizations_key,
+            finalizations_value = %history_partitions.finalizations_value,
+            blocks_key = %history_partitions.blocks_key,
+            blocks_value = %history_partitions.blocks_value,
+            logical_retention = history::LOGICAL_RETENTION,
+            items_per_section = history::PRUNABLE_ITEMS_PER_SECTION.get(),
+            maximum_section_and_cadence_slack = history::MAX_RETAINED_HEIGHTS - history::LOGICAL_RETENTION,
+            ?marker_status,
+            "restored prunable finalized history"
+        );
 
         let recovered_height = Certificates::last_index(&finalizations_by_height);
-        let mut recovered_floor = if let Some(height) = recovered_height {
+        let recovered_floor = if let Some(height) = recovered_height {
             Certificates::get(
                 &finalizations_by_height,
                 ArchiveIdentifier::Index(height.get()),
@@ -425,15 +366,35 @@ where
             .expect("failed to initialize state database for startup probe");
             state.sync_target()
         };
-        if repair_marshal_progress_if_state_is_behind(
+        if let Some(processed_height) = validate_marshal_progress_against_state(
             &context,
             &config.partition_prefix,
             &finalized_blocks,
             &current_state_target,
         )
-        .await
+        .await {
+            validate_history_through_processed(
+                &finalizations_by_height,
+                &finalized_blocks,
+                processed_height,
+            )
+            .await;
+            if let Some(tip) = ArchiveStore::last_index(&finalized_blocks) {
+                let policy_floor = history::policy_floor(tip, history::LOGICAL_RETENTION);
+                let safe_floor = policy_floor.min(processed_height.get());
+                finalizations_by_height
+                    .prune(safe_floor)
+                    .await
+                    .expect("failed to startup-prune finalized certificates");
+                finalized_blocks
+                    .prune(safe_floor)
+                    .await
+                    .expect("failed to startup-prune finalized blocks");
+            }
+        } else if ArchiveStore::last_index(&finalized_blocks).is_some()
+            || ArchiveStore::last_index(&finalizations_by_height).is_some()
         {
-            recovered_floor = None;
+            panic!("finalized history exists without persisted marshal processed height; rebuild or perform verified peer state sync");
         }
         let applied_height = Arc::new(AsyncMutex::new(Height::zero()));
         let app = Application::with_consensus(
@@ -497,7 +458,7 @@ where
             finalized_blocks,
             marshal::Config {
                 provider: provider.clone(),
-                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                epocher: FixedEpocher::new(config.epoch_length),
                 start: marshal_start,
                 partition_prefix: format!("{}_marshal", config.partition_prefix),
                 mailbox_size: MAILBOX_SIZE,
@@ -551,10 +512,10 @@ where
                 APPLICATION_VERIFY_CONCURRENCY,
             ),
             marshal_mailbox.clone(),
-            FixedEpocher::new(BLOCKS_PER_EPOCH),
+            FixedEpocher::new(config.epoch_length),
         ));
 
-        let (indexer_producer, indexer_pusher, indexer_consumer) =
+        let (indexer_producer, indexer_producer_handle, indexer_pusher, indexer_consumer) =
             if let Some(client) = config.indexer.clone() {
                 let indexer_context = context.child("indexer");
                 let indexer_metrics = indexer::IndexerMetrics::register(&indexer_context);
@@ -562,10 +523,13 @@ where
                 let queue = queue::shared::init(
                     context.child("indexer_queue"),
                     queue::Config {
-                        partition: format!("{}-indexer-finalized-queue", config.partition_prefix),
-                        items_per_section: NZU64!(128),
+                        partition: format!(
+                            "{}-indexer-finalized-payload-queue-v1",
+                            config.partition_prefix
+                        ),
+                        items_per_section: indexer::SPOOL_ITEMS_PER_SECTION,
                         compression: None,
-                        codec_config: (),
+                        codec_config: block_codec_config,
                         page_cache: page_cache.clone(),
                         write_buffer: WRITE_BUFFER,
                     },
@@ -581,14 +545,20 @@ where
                         mailbox_size: MAILBOX_SIZE,
                         backfiller_max_active: commonware_utils::NZUsize!(16),
                         backfiller_retry: Duration::from_millis(500),
+                        spool_limits: config.indexer_spool_limits,
                         metrics: indexer_metrics,
                     },
                 )
                 .await;
-                let (producer, pusher, consumer) = indexer.split();
-                (Some(producer), Some(pusher), Some(consumer))
+                let (producer, producer_handle, pusher, consumer) = indexer.split();
+                (
+                    Some(producer),
+                    Some(producer_handle),
+                    Some(pusher),
+                    Some(consumer),
+                )
             } else {
-                (None, None, None)
+                (None, None, None, None)
             };
 
         let (orchestrator, orchestrator_mailbox) = orchestrator::Actor::new(
@@ -605,7 +575,7 @@ where
                 muxer_size: MAILBOX_SIZE.get(),
                 mailbox_size: MAILBOX_SIZE,
                 partition_prefix: format!("{}_consensus", config.partition_prefix),
-                epoch_length: BLOCKS_PER_EPOCH,
+                epoch_length: config.epoch_length,
                 genesis_digest,
                 recovered_floor,
                 _phantom: PhantomData,
@@ -629,6 +599,7 @@ where
             stateful,
             stateful_mailbox,
             indexer_producer,
+            indexer_producer_handle,
             indexer_consumer,
         };
         (engine, node_handle)
@@ -747,10 +718,13 @@ where
             .mempool
             .start_p2p(self.context.child("mempool"), mempool);
         let indexer_consumer_handle = self.indexer_consumer.map(indexer::Consumer::start);
+        let indexer_producer_handle = self.indexer_producer_handle;
         let clob_handle = self.clob.start_p2p(self.context.child("clob"), clob);
 
         let mut shutdown = self.context.stopped();
-        if let Some(indexer_consumer_handle) = indexer_consumer_handle {
+        if let (Some(indexer_producer_handle), Some(indexer_consumer_handle)) =
+            (indexer_producer_handle, indexer_consumer_handle)
+        {
             commonware_macros::select! {
                 stopped = &mut shutdown => match stopped {
                     Ok(0) => {
@@ -769,6 +743,7 @@ where
                 result = orchestrator_handle => unexpected_exit("orchestrator", result),
                 result = mempool_handle => unexpected_exit("mempool", result),
                 result = clob_handle => unexpected_exit("clob", result),
+                result = indexer_producer_handle => unexpected_exit("indexer_producer", result),
                 result = indexer_consumer_handle => unexpected_exit("indexer_consumer", result),
             }
         } else {
@@ -806,14 +781,13 @@ fn unexpected_exit(
 }
 
 const MARSHAL_PROCESSED_KEY: U64 = U64::new(0xFF);
-const STATE_SYNC_METADATA_SUFFIX: &str = "state_sync_metadata";
 
-async fn repair_marshal_progress_if_state_is_behind<E>(
+async fn validate_marshal_progress_against_state<E>(
     context: &E,
     partition_prefix: &str,
     finalized_blocks: &BlocksArchive<E>,
     current_target: &commonware_storage::qmdb::sync::Target<commonware_storage::mmr::Family, Digest>,
-) -> bool
+) -> Option<Height>
 where
     E: BufferPooler
         + Clock
@@ -837,63 +811,87 @@ where
     )
     .await
     .expect("failed to initialize marshal progress metadata probe");
-    let Some(processed_height) = metadata.get(&MARSHAL_PROCESSED_KEY).copied() else {
-        return false;
-    };
+    let processed_height = metadata.get(&MARSHAL_PROCESSED_KEY).copied()?;
     drop(metadata);
 
-    let Some(processed_block) = finalized_blocks
-        .get(ArchiveIdentifier::Index(processed_height.get()))
-        .await
-        .expect("failed to read processed block for state repair")
-    else {
-        warn!(
-            %processed_height,
-            "marshal progress references a missing finalized block; clearing startup metadata to replay"
-        );
-        remove_partition_if_exists(context, &marshal_metadata_partition).await;
-        clear_disabled_state_sync_metadata(context, partition_prefix).await;
-        return true;
+    let Some(tip) = ArchiveStore::last_index(finalized_blocks) else {
+        panic!("marshal progress references height {processed_height}, but finalized block history is empty; rebuild or perform verified peer state sync");
     };
-    let processed_target = <Application as StatefulApplication<E>>::sync_targets(&processed_block);
-    let current_size = current_target.range.end().as_u64();
-    let processed_size = processed_target.range.end().as_u64();
-    if current_size >= processed_size {
-        return false;
+    let search_end = tip.min(
+        processed_height
+            .get()
+            .saturating_add(MAX_PENDING_ACKS.get() as u64),
+    );
+    for height in processed_height.get()..=search_end {
+        let Some(block) = ArchiveStore::get(
+            finalized_blocks,
+            ArchiveIdentifier::Index(height),
+        )
+            .await
+            .expect("failed to read finalized block while validating QMDB startup target")
+        else {
+            continue;
+        };
+        let target = <Application as StatefulApplication<E>>::sync_targets(&block);
+        if &target == current_target {
+            return Some(processed_height);
+        }
     }
 
-    warn!(
-        %processed_height,
-        current_size,
-        processed_size,
-        "state database is behind marshal progress; clearing startup metadata to replay finalized blocks"
+    panic!(
+        "QMDB committed target does not exactly match canonical finalized history from processed height {} through {}; rebuild or perform verified peer state sync",
+        processed_height,
+        search_end,
     );
-    remove_partition_if_exists(context, &marshal_metadata_partition).await;
-    remove_partition_if_exists(
-        context,
-        &format!("{partition_prefix}{STATE_SYNC_METADATA_SUFFIX}"),
-    )
-    .await;
-    true
 }
 
-async fn clear_disabled_state_sync_metadata<E>(context: &E, partition_prefix: &str)
+async fn validate_history_through_processed<E>(
+    finalizations: &FinalizationsArchive<E>,
+    blocks: &BlocksArchive<E>,
+    processed_height: Height,
+)
 where
-    E: Storage,
+    E: BufferPooler + Metrics + Storage,
 {
-    remove_partition_if_exists(
-        context,
-        &format!("{partition_prefix}{STATE_SYNC_METADATA_SUFFIX}"),
-    )
-    .await;
-}
+    let processed = processed_height.get();
+    let first = match (finalizations.first_index(), blocks.first_index()) {
+        (Some(finalization), Some(block)) => finalization.max(block),
+        _ => panic!(
+            "marshal processed height {processed_height} has incomplete finalized history; rebuild or perform verified peer state sync"
+        ),
+    };
+    if first > processed {
+        panic!(
+            "marshal processed height {processed_height} is below retained finalized history floor {first}; rebuild or perform verified peer state sync"
+        );
+    }
 
-async fn remove_partition_if_exists<E>(context: &E, partition: &str)
-where
-    E: Storage,
-{
-    match context.remove(partition, None).await {
-        Ok(()) | Err(commonware_runtime::Error::PartitionMissing(_)) => {}
-        Err(error) => panic!("failed to remove partition {partition}: {error}"),
+    for height in first..=processed {
+        let certificate = finalizations
+            .get(ArchiveIdentifier::Index(height))
+            .await
+            .expect("failed to validate finalized certificate archive");
+        let block = blocks
+            .get(ArchiveIdentifier::Index(height))
+            .await
+            .expect("failed to validate finalized block archive");
+        if height == processed {
+            assert!(
+                block.is_some(),
+                "marshal processed height {processed_height} references a missing finalized block; rebuild or perform verified peer state sync"
+            );
+        }
+        if let (Some(certificate), Some(block)) = (certificate, block) {
+            assert_eq!(
+                certificate.proposal.payload,
+                block.digest(),
+                "finalized block and certificate conflict at height {height}"
+            );
+            assert_eq!(
+                certificate.proposal.round.epoch(),
+                block.context.round.epoch(),
+                "finalized block and certificate epochs conflict at height {height}"
+            );
+        }
     }
 }
