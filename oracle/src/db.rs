@@ -1,8 +1,8 @@
 //! Persistence layer for the oracle module.
 
 use crate::{
-    IntervalKey, NamespaceId, OracleError, OracleRecord, RecordId, MAX_RECORDS_PER_BUCKET,
-    ORACLE_NAMESPACE,
+    IntervalIndexMeta, IntervalKey, NamespaceId, OracleError, OracleRecord, RecordId,
+    INDEX_PAGE_SIZE, ORACLE_NAMESPACE,
 };
 use async_trait::async_trait;
 use commonware_codec::{Encode, RangeCfg, Read, ReadExt};
@@ -16,8 +16,10 @@ const NS: Namespace = Namespace::new(ORACLE_NAMESPACE);
 enum Table {
     Nonce = 0,
     Record = 3,
-    NamespaceInterval = 4,
-    WriterInterval = 5,
+    NamespaceIntervalMeta = 4,
+    WriterIntervalMeta = 5,
+    NamespaceIntervalPage = 6,
+    WriterIntervalPage = 7,
 }
 
 impl From<Table> for u8 {
@@ -32,19 +34,88 @@ fn encoded<T: Encode>(value: &T) -> Vec<u8> {
 
 fn decoded<T: Read<Cfg = ()>>(bytes: &[u8]) -> Result<T, OracleError> {
     let mut buf = bytes;
-    T::read(&mut buf).map_err(|err| OracleError::Storage(err.to_string()))
+    let value = T::read(&mut buf).map_err(|err| OracleError::Storage(err.to_string()))?;
+    if !buf.is_empty() {
+        return Err(OracleError::Storage(
+            "trailing bytes in stored value".to_string(),
+        ));
+    }
+    Ok(value)
 }
 
-fn namespace_interval_key(namespace: &NamespaceId, interval: &IntervalKey) -> Digest {
+fn decode_page(bytes: &[u8]) -> Result<Vec<RecordId>, OracleError> {
+    let mut buf = bytes;
+    let page = Vec::read_cfg(&mut buf, &(RangeCfg::new(0..=INDEX_PAGE_SIZE), ()))
+        .map_err(|err| OracleError::Storage(err.to_string()))?;
+    if !buf.is_empty() {
+        return Err(OracleError::Storage(
+            "trailing bytes in stored index page".to_string(),
+        ));
+    }
+    Ok(page)
+}
+
+fn namespace_meta_key(namespace: &NamespaceId, interval: &IntervalKey) -> Digest {
     let mut logical = encoded(namespace);
     logical.extend_from_slice(interval.encode().as_ref());
-    NS.key(Table::NamespaceInterval, &logical)
+    NS.key(Table::NamespaceIntervalMeta, &logical)
 }
 
-fn writer_interval_key(writer: &Address, interval: &IntervalKey) -> Digest {
+fn writer_meta_key(writer: &Address, interval: &IntervalKey) -> Digest {
     let mut logical = writer.encode().as_ref().to_vec();
     logical.extend_from_slice(interval.encode().as_ref());
-    NS.key(Table::WriterInterval, &logical)
+    NS.key(Table::WriterIntervalMeta, &logical)
+}
+
+fn namespace_page_key(namespace: &NamespaceId, interval: &IntervalKey, page: u32) -> Digest {
+    let mut logical = encoded(namespace);
+    logical.extend_from_slice(interval.encode().as_ref());
+    logical.extend_from_slice(page.encode().as_ref());
+    NS.key(Table::NamespaceIntervalPage, &logical)
+}
+
+fn writer_page_key(writer: &Address, interval: &IntervalKey, page: u32) -> Digest {
+    let mut logical = writer.encode().as_ref().to_vec();
+    logical.extend_from_slice(interval.encode().as_ref());
+    logical.extend_from_slice(page.encode().as_ref());
+    NS.key(Table::WriterIntervalPage, &logical)
+}
+
+fn append_into_pages(
+    meta: IntervalIndexMeta,
+    last_page: Vec<RecordId>,
+    id: RecordId,
+) -> Result<(IntervalIndexMeta, u32, Vec<RecordId>), OracleError> {
+    if meta.page_count == 0 {
+        return Ok((IntervalIndexMeta { page_count: 1 }, 0, vec![id]));
+    }
+
+    let page_index = meta.page_count - 1;
+    if last_page.len() < INDEX_PAGE_SIZE {
+        let mut page = last_page;
+        page.push(id);
+        return Ok((meta, page_index, page));
+    }
+
+    let page_count = meta
+        .page_count
+        .checked_add(1)
+        .ok_or(OracleError::IndexFull)?;
+    Ok((IntervalIndexMeta { page_count }, page_count - 1, vec![id]))
+}
+
+fn extend_within_limit(
+    records: &mut Vec<RecordId>,
+    page: Vec<RecordId>,
+    max_records: usize,
+) -> Result<(), OracleError> {
+    if records.len().saturating_add(page.len()) > max_records {
+        return Err(OracleError::InvalidQuery(
+            "query result exceeds MAX_QUERY_RECORDS",
+        ));
+    }
+    records.extend(page);
+    Ok(())
 }
 
 #[async_trait]
@@ -57,26 +128,47 @@ pub trait OracleDB {
 
     fn set_record(&mut self, record: &OracleRecord);
 
+    /// Load record ids indexed under `(namespace, interval)`, across pages.
+    ///
+    /// Fails if more than `max_records` ids would be returned.
     async fn namespace_index(
         &self,
         namespace: &NamespaceId,
         interval: &IntervalKey,
+        max_records: usize,
     ) -> Result<Vec<RecordId>, OracleError>;
 
-    fn set_namespace_index(
+    /// Append one record id to the paged `(namespace, interval)` index.
+    ///
+    /// Always rewrites the last page. Rewrites index meta only when a new page
+    /// is allocated (including the first page).
+    async fn append_namespace_index(
         &mut self,
         namespace: &NamespaceId,
         interval: &IntervalKey,
-        records: &[RecordId],
-    );
+        id: RecordId,
+    ) -> Result<(), OracleError>;
 
+    /// Load record ids indexed under `(writer, interval)`, across pages.
+    ///
+    /// Fails if more than `max_records` ids would be returned.
     async fn writer_index(
         &self,
         writer: &Address,
         interval: &IntervalKey,
+        max_records: usize,
     ) -> Result<Vec<RecordId>, OracleError>;
 
-    fn set_writer_index(&mut self, writer: &Address, interval: &IntervalKey, records: &[RecordId]);
+    /// Append one record id to the paged `(writer, interval)` index.
+    ///
+    /// Always rewrites the last page. Rewrites index meta only when a new page
+    /// is allocated (including the first page).
+    async fn append_writer_index(
+        &mut self,
+        writer: &Address,
+        interval: &IntervalKey,
+        id: RecordId,
+    ) -> Result<(), OracleError>;
 }
 
 #[async_trait]
@@ -117,56 +209,174 @@ impl<S: StateStore + Send + Sync> OracleDB for S {
         &self,
         namespace: &NamespaceId,
         interval: &IntervalKey,
+        max_records: usize,
     ) -> Result<Vec<RecordId>, OracleError> {
-        match StateStore::get(self, &namespace_interval_key(namespace, interval))
+        let meta = match StateStore::get(self, &namespace_meta_key(namespace, interval))
             .await
             .map_err(|err| OracleError::Storage(err.to_string()))?
         {
-            Some(bytes) => {
-                let mut buf = bytes.as_ref();
-                Vec::read_cfg(&mut buf, &(RangeCfg::new(0..=MAX_RECORDS_PER_BUCKET), ()))
-                    .map_err(|err| OracleError::Storage(err.to_string()))
+            Some(bytes) => decoded::<IntervalIndexMeta>(&bytes)?,
+            None => return Ok(Vec::new()),
+        };
+
+        let mut records = Vec::with_capacity(
+            (meta.page_count as usize)
+                .saturating_mul(INDEX_PAGE_SIZE)
+                .min(max_records),
+        );
+        for page in 0..meta.page_count {
+            match StateStore::get(self, &namespace_page_key(namespace, interval, page))
+                .await
+                .map_err(|err| OracleError::Storage(err.to_string()))?
+            {
+                Some(bytes) => {
+                    extend_within_limit(&mut records, decode_page(&bytes)?, max_records)?
+                }
+                None => return Err(OracleError::MissingIndex),
             }
-            None => Ok(Vec::new()),
         }
+        Ok(records)
     }
 
-    fn set_namespace_index(
+    async fn append_namespace_index(
         &mut self,
         namespace: &NamespaceId,
         interval: &IntervalKey,
-        records: &[RecordId],
-    ) {
+        id: RecordId,
+    ) -> Result<(), OracleError> {
+        let meta = match StateStore::get(self, &namespace_meta_key(namespace, interval))
+            .await
+            .map_err(|err| OracleError::Storage(err.to_string()))?
+        {
+            Some(bytes) => decoded::<IntervalIndexMeta>(&bytes)?,
+            None => IntervalIndexMeta::default(),
+        };
+        let last_page = if meta.page_count == 0 {
+            Vec::new()
+        } else {
+            match StateStore::get(
+                self,
+                &namespace_page_key(namespace, interval, meta.page_count - 1),
+            )
+            .await
+            .map_err(|err| OracleError::Storage(err.to_string()))?
+            {
+                Some(bytes) => decode_page(&bytes)?,
+                None => return Err(OracleError::MissingIndex),
+            }
+        };
+
+        let (next_meta, page_index, page) = append_into_pages(meta, last_page, id)?;
         StateStore::set(
             self,
-            namespace_interval_key(namespace, interval),
-            encoded(&records.to_vec()),
+            namespace_page_key(namespace, interval, page_index),
+            encoded(&page),
         );
+        if next_meta != meta {
+            StateStore::set(
+                self,
+                namespace_meta_key(namespace, interval),
+                encoded(&next_meta),
+            );
+        }
+        Ok(())
     }
 
     async fn writer_index(
         &self,
         writer: &Address,
         interval: &IntervalKey,
+        max_records: usize,
     ) -> Result<Vec<RecordId>, OracleError> {
-        match StateStore::get(self, &writer_interval_key(writer, interval))
+        let meta = match StateStore::get(self, &writer_meta_key(writer, interval))
             .await
             .map_err(|err| OracleError::Storage(err.to_string()))?
         {
-            Some(bytes) => {
-                let mut buf = bytes.as_ref();
-                Vec::read_cfg(&mut buf, &(RangeCfg::new(0..=MAX_RECORDS_PER_BUCKET), ()))
-                    .map_err(|err| OracleError::Storage(err.to_string()))
+            Some(bytes) => decoded::<IntervalIndexMeta>(&bytes)?,
+            None => return Ok(Vec::new()),
+        };
+
+        let mut records = Vec::with_capacity(
+            (meta.page_count as usize)
+                .saturating_mul(INDEX_PAGE_SIZE)
+                .min(max_records),
+        );
+        for page in 0..meta.page_count {
+            match StateStore::get(self, &writer_page_key(writer, interval, page))
+                .await
+                .map_err(|err| OracleError::Storage(err.to_string()))?
+            {
+                Some(bytes) => {
+                    extend_within_limit(&mut records, decode_page(&bytes)?, max_records)?
+                }
+                None => return Err(OracleError::MissingIndex),
             }
-            None => Ok(Vec::new()),
         }
+        Ok(records)
     }
 
-    fn set_writer_index(&mut self, writer: &Address, interval: &IntervalKey, records: &[RecordId]) {
+    async fn append_writer_index(
+        &mut self,
+        writer: &Address,
+        interval: &IntervalKey,
+        id: RecordId,
+    ) -> Result<(), OracleError> {
+        let meta = match StateStore::get(self, &writer_meta_key(writer, interval))
+            .await
+            .map_err(|err| OracleError::Storage(err.to_string()))?
+        {
+            Some(bytes) => decoded::<IntervalIndexMeta>(&bytes)?,
+            None => IntervalIndexMeta::default(),
+        };
+        let last_page = if meta.page_count == 0 {
+            Vec::new()
+        } else {
+            match StateStore::get(
+                self,
+                &writer_page_key(writer, interval, meta.page_count - 1),
+            )
+            .await
+            .map_err(|err| OracleError::Storage(err.to_string()))?
+            {
+                Some(bytes) => decode_page(&bytes)?,
+                None => return Err(OracleError::MissingIndex),
+            }
+        };
+
+        let (next_meta, page_index, page) = append_into_pages(meta, last_page, id)?;
         StateStore::set(
             self,
-            writer_interval_key(writer, interval),
-            encoded(&records.to_vec()),
+            writer_page_key(writer, interval, page_index),
+            encoded(&page),
         );
+        if next_meta != meta {
+            StateStore::set(self, writer_meta_key(writer, interval), encoded(&next_meta));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_page, decoded};
+    use crate::{IntervalIndexMeta, OracleError};
+    use commonware_codec::Encode;
+
+    #[test]
+    fn decoded_rejects_trailing_bytes() {
+        let meta = IntervalIndexMeta { page_count: 1 };
+        let mut bytes = meta.encode().as_ref().to_vec();
+        bytes.push(0xff);
+        let err = decoded::<IntervalIndexMeta>(&bytes).unwrap_err();
+        assert!(matches!(err, OracleError::Storage(_)));
+    }
+
+    #[test]
+    fn decode_page_rejects_trailing_bytes() {
+        let page = Vec::<crate::RecordId>::new();
+        let mut bytes = page.encode().as_ref().to_vec();
+        bytes.push(0xff);
+        let err = decode_page(&bytes).unwrap_err();
+        assert!(matches!(err, OracleError::Storage(_)));
     }
 }

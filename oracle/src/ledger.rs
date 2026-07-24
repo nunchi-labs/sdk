@@ -1,6 +1,6 @@
 use crate::{
     IntervalKey, NamespaceId, OracleDB, OracleOperation, OracleRecord, RecordId, Transaction,
-    MAX_PAYLOAD_SIZE, MAX_PROOF_SIZE, MAX_QUERY_INTERVALS, MAX_RECORDS_PER_BUCKET,
+    MAX_PAYLOAD_SIZE, MAX_PROOF_SIZE, MAX_QUERY_INTERVALS, MAX_QUERY_RECORDS,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{Hasher, Sha256};
@@ -31,6 +31,8 @@ pub enum OracleError {
     InvalidQuery(&'static str),
     #[error("oracle record index references a missing record")]
     MissingRecord,
+    #[error("oracle interval index page is missing")]
+    MissingIndex,
     #[error("state storage error: {0}")]
     Storage(String),
 }
@@ -99,6 +101,9 @@ impl<D: OracleDB> OracleLedger<D> {
     }
 
     /// Query records by namespace over an inclusive interval range.
+    ///
+    /// Fails if the range spans more than [`MAX_QUERY_INTERVALS`] buckets or if
+    /// materializing the result would exceed [`MAX_QUERY_RECORDS`] records.
     pub async fn records_by_namespace(
         &self,
         namespace: &NamespaceId,
@@ -109,9 +114,10 @@ impl<D: OracleDB> OracleLedger<D> {
 
         let mut records = Vec::new();
         for bucket in start.bucket..=end.bucket {
+            let remaining = MAX_QUERY_RECORDS.saturating_sub(records.len());
             let index = self
                 .db
-                .namespace_index(namespace, &IntervalKey::new(bucket))
+                .namespace_index(namespace, &IntervalKey::new(bucket), remaining)
                 .await?;
             self.load_records(index, &mut records).await?;
         }
@@ -119,6 +125,9 @@ impl<D: OracleDB> OracleLedger<D> {
     }
 
     /// Query records by writer over an inclusive interval range.
+    ///
+    /// Fails if the range spans more than [`MAX_QUERY_INTERVALS`] buckets or if
+    /// materializing the result would exceed [`MAX_QUERY_RECORDS`] records.
     pub async fn records_by_writer(
         &self,
         writer: &Address,
@@ -129,9 +138,10 @@ impl<D: OracleDB> OracleLedger<D> {
 
         let mut records = Vec::new();
         for bucket in start.bucket..=end.bucket {
+            let remaining = MAX_QUERY_RECORDS.saturating_sub(records.len());
             let index = self
                 .db
-                .writer_index(writer, &IntervalKey::new(bucket))
+                .writer_index(writer, &IntervalKey::new(bucket), remaining)
                 .await?;
             self.load_records(index, &mut records).await?;
         }
@@ -176,14 +186,6 @@ impl<D: OracleDB> OracleLedger<D> {
             return Err(OracleError::ProofTooLarge);
         }
 
-        let mut namespace_records = self.db.namespace_index(namespace, interval).await?;
-        let mut writer_records = self.db.writer_index(signer, interval).await?;
-        if namespace_records.len() == MAX_RECORDS_PER_BUCKET
-            || writer_records.len() == MAX_RECORDS_PER_BUCKET
-        {
-            return Err(OracleError::IndexFull);
-        }
-
         let id = record_id(signer, nonce, namespace, interval);
         let record = OracleRecord {
             id,
@@ -196,13 +198,10 @@ impl<D: OracleDB> OracleLedger<D> {
             written_at_ms: context.timestamp_ms,
         };
         self.db.set_record(&record);
-
-        namespace_records.push(id);
         self.db
-            .set_namespace_index(namespace, interval, &namespace_records);
-
-        writer_records.push(id);
-        self.db.set_writer_index(signer, interval, &writer_records);
+            .append_namespace_index(namespace, interval, id)
+            .await?;
+        self.db.append_writer_index(signer, interval, id).await?;
         Ok(())
     }
 
@@ -211,6 +210,12 @@ impl<D: OracleDB> OracleLedger<D> {
         ids: Vec<RecordId>,
         records: &mut Vec<OracleRecord>,
     ) -> Result<(), OracleError> {
+        let remaining = MAX_QUERY_RECORDS.saturating_sub(records.len());
+        if ids.len() > remaining {
+            return Err(OracleError::InvalidQuery(
+                "query result exceeds MAX_QUERY_RECORDS",
+            ));
+        }
         for id in ids {
             let record = self
                 .db
