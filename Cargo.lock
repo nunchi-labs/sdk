@@ -2818,6 +2818,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "nunchi-costs"
+version = "2026.6.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-formatting",
+ "commonware-macros",
+ "futures",
+ "jsonrpsee",
+ "nunchi-common",
+ "nunchi-crypto",
+ "nunchi-rpc",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "nunchi-crypto"
 version = "2026.6.0"
 dependencies = [
