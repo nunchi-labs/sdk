@@ -30,7 +30,7 @@ pub(crate) use pusher::Pusher;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-const MISSING_FINALIZATION_GRACE: Duration = Duration::from_secs(120);
+const MISSING_FINALIZATION_GRACE: Duration = Duration::from_secs(5);
 const MISMATCHED_FINALIZATION_GRACE: Duration = Duration::from_secs(15);
 pub(crate) const SPOOL_ITEMS_PER_SECTION: std::num::NonZeroU64 = NZU64!(128);
 

@@ -71,6 +71,11 @@ impl Message {
     }
 }
 
+enum RecordOutcome {
+    Complete,
+    ResetMailbox,
+}
+
 #[derive(Default)]
 struct OverflowMessages {
     messages: VecDeque<Message>,
@@ -106,6 +111,19 @@ impl Policy for Message {
             .producer_mailbox_overflowed(message.block_estimated_bytes);
         overflow.messages.push_back(message);
     }
+}
+
+fn drain_to_latest(receiver: &mut mailbox::Receiver<Message>) -> Option<Message> {
+    let mut latest: Option<Message> = None;
+    while let Ok(message) = receiver.try_recv() {
+        if let Some(stale) = latest.replace(message) {
+            stale
+                .metrics
+                .producer_recorded(ProducerStatus::Ignored, Duration::ZERO);
+            stale.ack.acknowledge();
+        }
+    }
+    latest
 }
 
 struct Actor<E: BufferPooler + Clock + Storage + Metrics> {
@@ -199,13 +217,27 @@ impl<E: BufferPooler + Clock + Storage + Metrics + Spawner> Actor<E> {
     }
 
     async fn run(mut self) {
-        while let Some(Message { block, ack, .. }) = self.receiver.recv().await {
-            self.record(&block).await;
+        let mut pending = None;
+        loop {
+            let message = match pending.take() {
+                Some(message) => message,
+                None => {
+                    let Some(message) = self.receiver.recv().await else {
+                        break;
+                    };
+                    message
+                }
+            };
+            let Message { block, ack, .. } = message;
+            let outcome = self.record(&block).await;
             ack.acknowledge();
+            if matches!(outcome, RecordOutcome::ResetMailbox) {
+                pending = drain_to_latest(&mut self.receiver);
+            }
         }
     }
 
-    async fn record(&mut self, block: &Block) {
+    async fn record(&mut self, block: &Block) -> RecordOutcome {
         let started = Instant::now();
         self.metrics
             .observe_block(BlockMetricSource::ProducerRecord, block);
@@ -214,7 +246,7 @@ impl<E: BufferPooler + Clock + Storage + Metrics + Spawner> Actor<E> {
                 ProducerStatus::AlreadyUploaded,
                 started.elapsed(),
             );
-            return;
+            return RecordOutcome::Complete;
         };
         let first_seen = self.context.current();
         self.metrics.certificate_request_started();
@@ -229,12 +261,19 @@ impl<E: BufferPooler + Clock + Storage + Metrics + Spawner> Actor<E> {
                     .current()
                     .duration_since(first_seen)
                     .unwrap_or_default();
-                assert!(
-                    elapsed < self.missing_finalization_grace,
-                    "marshal has no finalization certificate for durable indexer payload at height {} after {:?}",
-                    candidate.height,
-                    elapsed,
-                );
+                if elapsed >= self.missing_finalization_grace {
+                    self.metrics.certificate_request_finished();
+                    self.metrics.producer_recorded(
+                        ProducerStatus::MissingFinalization,
+                        started.elapsed(),
+                    );
+                    warn!(
+                        height = candidate.height,
+                        ?elapsed,
+                        "skipping uncertified indexer payload and resetting producer backlog"
+                    );
+                    return RecordOutcome::ResetMailbox;
+                }
                 warn!(height = candidate.height, ?elapsed, "waiting for finalized certificate before spooling indexer payload");
                 self.context.sleep(self.retry).await;
                 continue;
@@ -285,7 +324,7 @@ impl<E: BufferPooler + Clock + Storage + Metrics + Spawner> Actor<E> {
                 ?status,
                 "terminally expiring finalized indexer payload to preserve spool availability bound"
             );
-            return;
+            return RecordOutcome::Complete;
         }
         let (response, completed) = oneshot::channel();
         let _ = self.admission.enqueue(Admission { entry, response });
@@ -294,6 +333,7 @@ impl<E: BufferPooler + Clock + Storage + Metrics + Spawner> Actor<E> {
             .expect("indexer spool admission coordinator stopped");
         self.metrics
             .producer_recorded(ProducerStatus::Recorded, started.elapsed());
+        RecordOutcome::Complete
     }
 }
 
@@ -331,6 +371,7 @@ mod tests {
     use commonware_utils::{
         acknowledgement::Exact, range::NonEmptyRange, NZUsize,
     };
+    use futures::FutureExt as _;
 
     fn state(height: u64) -> StateCommitment {
         StateCommitment {
@@ -393,6 +434,56 @@ mod tests {
             let encoded = context.encode();
             assert!(encoded.contains("indexer_producer_mailbox_overflow_entries 0"));
             assert!(encoded.contains("indexer_producer_mailbox_overflow_block_estimated_bytes 0"));
+        });
+    }
+
+    #[test]
+    fn reset_acknowledges_backlog_and_retains_latest_block() {
+        deterministic::Runner::default().start(|context| async move {
+            let metrics = IndexerMetrics::register(&context.child("indexer"));
+            let (sender, mut receiver) = mailbox::new(context.child("mailbox"), NZUsize!(1));
+            let (ack_1, mut waiter_1) = Exact::handle();
+            let (ack_2, mut waiter_2) = Exact::handle();
+            let (ack_3, mut waiter_3) = Exact::handle();
+
+            assert_eq!(
+                sender.enqueue(Message::new(
+                    block(1, 1, b"first").into(),
+                    ack_1,
+                    metrics.clone(),
+                )),
+                Feedback::Ok
+            );
+            assert_eq!(
+                sender.enqueue(Message::new(
+                    block(2, 2, b"second").into(),
+                    ack_2,
+                    metrics.clone(),
+                )),
+                Feedback::Backoff
+            );
+            assert_eq!(
+                sender.enqueue(Message::new(
+                    block(3, 3, b"third").into(),
+                    ack_3,
+                    metrics,
+                )),
+                Feedback::Backoff
+            );
+
+            let latest = drain_to_latest(&mut receiver).expect("latest block");
+            assert_eq!(latest.block.height, Height::new(3));
+            assert!(matches!((&mut waiter_1).now_or_never(), Some(Ok(()))));
+            assert!(matches!((&mut waiter_2).now_or_never(), Some(Ok(()))));
+            assert!((&mut waiter_3).now_or_never().is_none());
+
+            latest.ack.acknowledge();
+            assert!(waiter_3.await.is_ok());
+
+            let encoded = context.encode();
+            assert!(encoded.contains(
+                "indexer_producer_report_total{activity=\"block\",status=\"ignored\"} 2"
+            ));
         });
     }
 }
