@@ -671,6 +671,12 @@ where
         let block = ancestry.next().await?;
         let parent = ancestry.next().await?;
 
+        // Verify the cryptographic parent link: the proposed block must
+        // reference the actual parent's digest to maintain hash-chain integrity.
+        if block.parent != parent.digest() {
+            return None;
+        }
+
         if !Self::verify_timestamp(&runtime_context, &block, &parent).await {
             return None;
         }
