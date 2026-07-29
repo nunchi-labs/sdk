@@ -12,8 +12,9 @@ use nunchi_crypto::PrivateKey;
 
 use crate::{
     market_id, AssetId, ClobActor, ClobConfig, ClobDB, ClobError, ClobGenesis, ClobLedger,
-    ClobMailbox, ClobMarketGenesis, ClobOperation, FillId, Market, MatchBatch, MatchEngine,
-    OrderId, Side, TimeInForce, Transaction, MAX_FILLS_PER_MARKET,
+    ClobMailbox, ClobMarketGenesis, ClobOperation, FillId, Market, MatchBatch, MatchEngine, Order,
+    OrderId, OrderStatus, Side, TimeInForce, Transaction, MAX_ACCOUNT_ORDERS, MAX_BOOK_ORDERS,
+    MAX_FILLS_PER_MARKET,
 };
 
 #[derive(Default)]
@@ -1291,5 +1292,133 @@ fn clob_mailbox_reports_stopped_actor() {
             created_at_height: 0,
             created_at_ms: 0,
         });
+    });
+}
+
+fn fake_order_id(seed: u64) -> OrderId {
+    OrderId(Sha256::hash(seed.encode().as_ref()))
+}
+
+/// Seed `count` fake resting orders into the side book for the given side,
+/// each with a stored Order record so `load_resting_orders` does not fail.
+/// Uses a very high price for asks (won't cross with normal bids).
+fn seed_fake_book_orders(
+    ledger: &mut ClobLedger<MemoryStore>,
+    side: Side,
+    count: usize,
+    owner: &Address,
+) {
+    let mut ids = Vec::with_capacity(count);
+    // Use a price that won't cross with incoming orders at price 100.
+    // Ask at 10000 won't match any bid at 100.
+    let price = match side {
+        Side::Ask => 10000,
+        Side::Bid => 5,
+    };
+    for i in 0..count as u64 {
+        let id = fake_order_id(i);
+        ids.push(id);
+        let order = Order {
+            id,
+            owner: owner.clone(),
+            market: market(),
+            side,
+            price,
+            original_base: 2,
+            remaining_base: 2,
+            filled_base: 0,
+            status: OrderStatus::Open,
+            sequence: i,
+            created_at_height: 1,
+            created_at_ms: 1_000,
+        };
+        ledger.db.set_order(&order);
+    }
+    ledger.db.set_side_book(&market(), side, &ids);
+}
+
+#[test]
+fn book_full_rejects_new_order_beyond_limit() {
+    run_test(|| async {
+        let creator = PrivateKey::from_seed(1);
+        let maker = PrivateKey::from_seed(2);
+        let taker = PrivateKey::from_seed(3);
+        let filler = PrivateKey::from_seed(100);
+        let filler_addr = Address::external(&filler.public_key());
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        seed_market(&mut ledger, &creator).await;
+
+        // Seed the ask side book with exactly MAX_BOOK_ORDERS fake resting
+        // orders at a very high price (won't cross with the incoming bid).
+        seed_fake_book_orders(&mut ledger, Side::Ask, MAX_BOOK_ORDERS, &filler_addr);
+
+        // Submit a crossing pair: a new ask at price 100 (which must rest in
+        // the full ask book after partial fill) and a bid that partially fills.
+        let ask = place_tx(
+            &maker,
+            0,
+            Side::Ask,
+            100,
+            4,
+            TimeInForce::GoodTilCancelled,
+        );
+        let bid = place_tx(
+            &taker,
+            0,
+            Side::Bid,
+            100,
+            2,
+            TimeInForce::ImmediateOrCancel,
+        );
+        let batch = batch_from_orders(&ledger, vec![ask, bid], context(2)).await;
+        let err = ledger
+            .apply_match_batch(&batch, context(2))
+            .await
+            .unwrap_err();
+        assert_eq!(err, ClobError::BookFull);
+    });
+}
+
+#[test]
+fn account_index_full_rejects_new_order_beyond_limit() {
+    run_test(|| async {
+        let creator = PrivateKey::from_seed(1);
+        let maker = PrivateKey::from_seed(2);
+        let taker = PrivateKey::from_seed(3);
+        let maker_addr = Address::external(&maker.public_key());
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        seed_market(&mut ledger, &creator).await;
+
+        // Seed the maker's account order index with exactly MAX_ACCOUNT_ORDERS
+        // fake order IDs.
+        let fake_ids: Vec<OrderId> = (0..MAX_ACCOUNT_ORDERS as u64)
+            .map(fake_order_id)
+            .collect();
+        ledger.db.set_account_orders(&maker_addr, &fake_ids);
+
+        // Submit a crossing pair so the maker's ask gets accepted and tries to
+        // register in the full account index.
+        let ask = place_tx(
+            &maker,
+            0,
+            Side::Ask,
+            100,
+            4,
+            TimeInForce::GoodTilCancelled,
+        );
+        let bid = place_tx(
+            &taker,
+            0,
+            Side::Bid,
+            100,
+            2,
+            TimeInForce::ImmediateOrCancel,
+        );
+        let batch = batch_from_orders(&ledger, vec![ask, bid], context(2)).await;
+        let err = ledger
+            .apply_match_batch(&batch, context(2))
+            .await
+            .unwrap_err();
+        assert_eq!(err, ClobError::AccountIndexFull);
     });
 }
