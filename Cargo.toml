@@ -22,7 +22,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "2026.6.0"
+version = "2026.7.0-alpha.1"
 edition = "2021"
 license = "BSL"
 
@@ -37,20 +37,20 @@ unexpected_cfgs = { level = "warn", check-cfg = [
 ] }
 
 [workspace.dependencies]
-nunchi-coins = { version = "2026.6.0", path = "coins" }
-nunchi-authority = { version = "2026.6.0", path = "authority" }
-nunchi-bridge = { version = "2026.6.0", path = "bridge" }
-nunchi-chain = { version = "2026.6.0", path = "chain" }
-nunchi-clob = { version = "2026.6.0", path = "clob" }
-nunchi-common = { version = "2026.6.0", path = "common" }
-nunchi-crypto = { version = "2026.6.0", path = "crypto" }
-nunchi-dkg = { version = "2026.6.0", path = "dkg" }
-nunchi-mempool = { version = "2026.6.0", path = "mempool" }
-nunchi-oracle = { version = "2026.6.0", path = "oracle" }
-nunchi-rpc = { version = "2026.6.0", path = "rpc" }
-nunchi-coins-chain = { version = "2026.6.0", path = "examples/coins/chain" }
-nunchi-bridge-chain = { version = "2026.6.0", path = "examples/bridge-chain" }
-nunchi-xtask = { version = "2026.6.0", package = "xtask", path = "xtask" }
+nunchi-coins = { version = "2026.7.0-alpha.1", path = "coins" }
+nunchi-authority = { version = "2026.7.0-alpha.1", path = "authority" }
+nunchi-bridge = { version = "2026.7.0-alpha.1", path = "bridge" }
+nunchi-chain = { version = "2026.7.0-alpha.1", path = "chain" }
+nunchi-clob = { version = "2026.7.0-alpha.1", path = "clob" }
+nunchi-common = { version = "2026.7.0-alpha.1", path = "common" }
+nunchi-crypto = { version = "2026.7.0-alpha.1", path = "crypto" }
+nunchi-dkg = { version = "2026.7.0-alpha.1", path = "dkg" }
+nunchi-mempool = { version = "2026.7.0-alpha.1", path = "mempool" }
+nunchi-oracle = { version = "2026.7.0-alpha.1", path = "oracle" }
+nunchi-rpc = { version = "2026.7.0-alpha.1", path = "rpc" }
+nunchi-coins-chain = { version = "2026.7.0-alpha.1", path = "examples/coins/chain" }
+nunchi-bridge-chain = { version = "2026.7.0-alpha.1", path = "examples/bridge-chain" }
+nunchi-xtask = { version = "2026.7.0-alpha.1", package = "xtask", path = "xtask" }
 commonware-actor = "2026.7.0"
 commonware-broadcast = "2026.7.0"
 commonware-codec = "2026.7.0"
