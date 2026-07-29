@@ -424,6 +424,9 @@ impl<D: AuthorityDB> AuthorityLedger<D> {
             .latest_indexed_epoch()
             .await?
             .map_or(to, |latest| latest.max(to));
+        if to.saturating_sub(from) > MAX_EPOCH_LOOKAHEAD {
+            return Err(AuthorityError::InvalidEpoch);
+        }
         let mut schedules = Vec::new();
         for validator in self.db.validator_index().await? {
             if let Some(schedule) = self.db.validator(&validator).await? {
