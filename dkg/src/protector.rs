@@ -103,6 +103,15 @@ impl StorageProtector {
 
     /// Seals plaintext with the supplied associated data and nonce.
     ///
+    /// # Security
+    ///
+    /// ChaCha20-Poly1305 is catastrophically broken if the same `(key, nonce)`
+    /// pair encrypts two different plaintexts. Callers **must** ensure that
+    /// `nonce` is unique for every call with the same key. The current DKG
+    /// storage layer generates nonces via the runtime CSPRNG; see
+    /// [`Storage::seal_record`](crate::state::Storage) for details and
+    /// assumptions.
+    ///
     /// # Examples
     ///
     /// ```ignore

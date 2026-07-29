@@ -392,6 +392,17 @@ where
         Ok(event)
     }
 
+    /// Encrypt a DKG record for persistent storage.
+    ///
+    /// # Nonce strategy
+    ///
+    /// Nonces are generated via the runtime CSPRNG (`fill_bytes`). With a
+    /// 96-bit random nonce and ChaCha20-Poly1305, the birthday-bound
+    /// collision probability is `O(n^2 / 2^96)` which is negligible for the
+    /// expected number of records a single node seals over its lifetime
+    /// (typically in the low thousands). This relies on the runtime providing
+    /// a properly seeded CSPRNG -- deterministic test runtimes use a fixed
+    /// seed, so nonce uniqueness is *not* guaranteed in tests.
     fn seal_record(
         &mut self,
         kind: u8,
