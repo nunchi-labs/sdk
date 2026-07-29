@@ -193,9 +193,9 @@ impl EventConsumer for InMemoryEventConsumer {
     fn begin_block(&self, context: RuntimeContext) -> impl Future<Output = ()> + Send {
         let pending = self.pending.clone();
         async move {
-            let block_digest = context
-                .block_digest
-                .expect("event consumer received context without block digest");
+            let Some(block_digest) = context.block_digest else {
+                return;
+            };
             pending.lock().expect("event consumer poisoned").insert(
                 block_digest,
                 FinalizedEvents {
