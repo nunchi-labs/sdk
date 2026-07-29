@@ -169,6 +169,39 @@ struct RpcError {
     data: Option<serde_json::Value>,
 }
 
+#[derive(Debug, thiserror::Error)]
+enum ToolError {
+    #[error("HTTP request failed: {0}")]
+    Request(#[from] reqwest::Error),
+    #[error("HTTP error status {status}: {body}")]
+    HttpStatus {
+        status: reqwest::StatusCode,
+        body: String,
+    },
+    #[error("RPC error {code}: {message}{data}")]
+    Rpc {
+        code: i64,
+        message: String,
+        data: String,
+    },
+    #[error("RPC response had no result")]
+    NoResult,
+    #[error("{method} failed after retries")]
+    RetryExhausted { method: &'static str },
+}
+
+impl ToolError {
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::Request(error) => error.is_timeout() || error.is_connect(),
+            Self::HttpStatus { status, .. } => {
+                *status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+            }
+            Self::Rpc { .. } | Self::NoResult | Self::RetryExhausted { .. } => false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 struct NonceParams {
     account: String,
@@ -755,7 +788,7 @@ async fn query_nonces(
                         },
                     )
                     .await?;
-                    Ok::<_, String>((index, response.nonce))
+                    Ok::<_, ToolError>((index, response.nonce))
                 }
             }),
     )
@@ -881,7 +914,7 @@ async fn submit_batch_until(
             }
             Err(error) if Instant::now() < retry_deadline => {
                 retried.fetch_add(1, Ordering::Relaxed);
-                record_sample_error(&sample_error, error);
+                record_sample_error(&sample_error, error.to_string());
                 time::sleep(delay).await;
                 delay = delay.saturating_mul(2).min(Duration::from_secs(2));
             }
@@ -890,7 +923,7 @@ async fn submit_batch_until(
                     u64::try_from(pending.len()).unwrap_or(u64::MAX),
                     Ordering::Relaxed,
                 );
-                record_sample_error(&sample_error, error);
+                record_sample_error(&sample_error, error.to_string());
                 break;
             }
         }
@@ -903,7 +936,7 @@ async fn submit_transaction_async_retry(
     rpc_url: &str,
     rpc_id: &Arc<AtomicU64>,
     transaction: &Transaction,
-) -> Result<SubmitTransactionResponse, String> {
+) -> Result<SubmitTransactionResponse, ToolError> {
     rpc_async_retry(
         client,
         rpc_url,
@@ -1086,8 +1119,8 @@ fn next_async_rpc_id(id: &AtomicU64) -> u64 {
     id.fetch_add(1, Ordering::Relaxed) + 1
 }
 
-fn boxed_error(error: String) -> Box<dyn Error> {
-    std::io::Error::other(error).into()
+fn boxed_error(error: impl std::fmt::Display) -> Box<dyn Error> {
+    std::io::Error::other(error.to_string()).into()
 }
 
 fn rpc<T, P>(
@@ -1131,7 +1164,7 @@ async fn rpc_async_retry<T, P>(
     rpc_id: &Arc<AtomicU64>,
     method: &'static str,
     params: P,
-) -> Result<T, String>
+) -> Result<T, ToolError>
 where
     T: DeserializeOwned,
     P: Clone + Serialize,
@@ -1149,7 +1182,7 @@ where
         .await
         {
             Ok(response) => return Ok(response),
-            Err(error) if is_retryable_rpc_error(&error) && attempt < 8 => {
+            Err(error) if error.is_retryable() && attempt < 8 => {
                 last_error = Some(error);
                 time::sleep(delay).await;
                 delay = delay.saturating_mul(2).min(Duration::from_secs(2));
@@ -1157,7 +1190,7 @@ where
             Err(error) => return Err(error),
         }
     }
-    Err(last_error.unwrap_or_else(|| format!("{method} failed after retries")))
+    Err(last_error.unwrap_or(ToolError::RetryExhausted { method }))
 }
 
 async fn rpc_async<T, P>(
@@ -1166,7 +1199,7 @@ async fn rpc_async<T, P>(
     id: u64,
     method: &'static str,
     params: P,
-) -> Result<T, String>
+) -> Result<T, ToolError>
 where
     T: DeserializeOwned,
     P: Serialize,
@@ -1180,17 +1213,13 @@ where
             params,
         })
         .send()
-        .await
-        .map_err(|error| error.to_string())?;
+        .await?;
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        return Err(format!("http status {status}: {body}"));
+        return Err(ToolError::HttpStatus { status, body });
     }
-    let response = response
-        .json::<RpcResponse<T>>()
-        .await
-        .map_err(|error| error.to_string())?;
+    let response = response.json::<RpcResponse<T>>().await?;
     match (response.result, response.error) {
         (Some(result), None) => Ok(result),
         (_, Some(error)) => {
@@ -1198,20 +1227,12 @@ where
                 .data
                 .map(|data| format!(": {data}"))
                 .unwrap_or_default();
-            Err(format!(
-                "rpc error {} {}{}",
-                error.code, error.message, data
-            ))
+            Err(ToolError::Rpc {
+                code: error.code,
+                message: error.message,
+                data,
+            })
         }
-        (None, None) => Err("rpc response had no result".to_string()),
+        (None, None) => Err(ToolError::NoResult),
     }
-}
-
-fn is_retryable_rpc_error(error: &str) -> bool {
-    error.contains("429")
-        || error.contains("Too Many Requests")
-        || error.contains("connection")
-        || error.contains("timed out")
-        // reqwest transport failures (dropped tunnels, refused sockets)
-        || error.contains("error sending request")
 }
