@@ -91,6 +91,9 @@ impl<T: PoolTransaction> MempoolHandle<T> {
 
     /// Submit many transactions with one mailbox round trip. Statelessly invalid
     /// transactions are rejected before the actor is enqueued.
+    ///
+    /// The returned `Vec` has the same length as the input and is indexed identically:
+    /// `result[i]` is the outcome for `txs[i]`.
     pub async fn submit_many(&self, txs: Vec<T>) -> Vec<Result<Digest, AdmissionError>> {
         let started = Instant::now();
         if let Some(metrics) = self.metrics.get() {
@@ -172,8 +175,11 @@ impl<T: PoolTransaction> MempoolHandle<T> {
         results
     }
 
-    /// Fetch up to `limit` executable transactions, gap-free within each nonce
-    /// lane. Returns an empty list if the pool has shut down.
+    /// Fetch up to `limit` executable transactions across all nonce lanes.
+    ///
+    /// Each nonce lane is contiguous from the committed nonce forward (no gaps),
+    /// and at most `limit` total transactions are returned across all lanes.
+    /// Returns an empty `Vec` if the pool has shut down.
     pub async fn pending(&self, limit: usize) -> Vec<T> {
         let (responder, receiver) = oneshot::channel();
         let mut sender = self.sender.clone();
@@ -188,10 +194,16 @@ impl<T: PoolTransaction> MempoolHandle<T> {
     }
 
     /// Report a finalized block: the digests it included and each touched
-    /// lane's new committed nonce. Fire-and-forget so the consensus
-    /// finalize hook never blocks on the pool; a dropped report self-heals on
-    /// the next one (re-proposed finalized transactions fail the ledger nonce
-    /// gate and are pruned then).
+    /// lane's new committed nonce.
+    ///
+    /// This method is fire-and-forget: it uses `try_send` so that the consensus
+    /// finalize hook never blocks on the pool. If the message is dropped (e.g.,
+    /// the mailbox is full or shut down), the pool self-heals on the next call
+    /// because re-proposed finalized transactions will fail the ledger nonce gate
+    /// and be pruned then.
+    ///
+    /// `lane_nonces` must contain the new committed nonce for each account whose
+    /// transactions were included in the finalized block.
     pub fn finalized(
         &self,
         digests: Vec<Digest>,
@@ -214,9 +226,11 @@ impl<T: PoolTransaction> MempoolHandle<T> {
         }
     }
 
-    /// Status of a transaction the pool has seen. In-memory only: history is
-    /// lost on restart, and old entries are evicted once the status cache is
-    /// at capacity.
+    /// Status of a transaction the pool has seen.
+    ///
+    /// Status history is in-memory only and is lost on node restart. When the
+    /// status cache reaches `status_cache_capacity`, the oldest entries are
+    /// evicted in FIFO order.
     pub async fn status(&self, digest: Digest) -> Option<TxStatus> {
         let (responder, receiver) = oneshot::channel();
         let mut sender = self.sender.clone();
