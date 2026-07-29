@@ -40,6 +40,16 @@ pub enum OracleError {
 /// The ledger validates signed oracle transactions, mutates authenticated state through
 /// [`OracleDB`], and stores opaque interval-addressed data. It does not decode payloads,
 /// normalize values, derive market state, or decide whether data is fresh.
+///
+/// # Single-writer assumption
+///
+/// `OracleLedger` assumes externally-serialized transaction application: only one
+/// `apply_transaction` call may be in progress at a time. The read-check-write
+/// sequence in `append_record` is **not** atomic at the storage level, so concurrent
+/// callers could both pass the capacity check and push the bucket past
+/// `MAX_RECORDS_PER_BUCKET`. Callers that process transactions in parallel must
+/// serialize access to this ledger externally (e.g., via a mutex or single-threaded
+/// executor).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OracleLedger<D> {
     db: D,
@@ -178,8 +188,8 @@ impl<D: OracleDB> OracleLedger<D> {
 
         let mut namespace_records = self.db.namespace_index(namespace, interval).await?;
         let mut writer_records = self.db.writer_index(signer, interval).await?;
-        if namespace_records.len() == MAX_RECORDS_PER_BUCKET
-            || writer_records.len() == MAX_RECORDS_PER_BUCKET
+        if namespace_records.len() >= MAX_RECORDS_PER_BUCKET
+            || writer_records.len() >= MAX_RECORDS_PER_BUCKET
         {
             return Err(OracleError::IndexFull);
         }
