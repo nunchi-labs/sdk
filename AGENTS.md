@@ -27,7 +27,7 @@ just check
 
 ### Core Primitives
 
-* [`coins`](coins/) - defines what a coin and account are. Also contains other basic financial functions
+* [`coins`](coins/) - core coin module: account model, token definitions, ledger operations (mint/burn/transfer/fees), event emission, genesis initialization, and optional JSON-RPC surface
 * [`crypto`](crypto/) - defines key primitives and wrappers around commonware cryptographic primitives
 * [`rpc`](rpc/) - core abstractions for modular RPC
 * `bridge` - moves coins between chains

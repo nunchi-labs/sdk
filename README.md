@@ -34,7 +34,7 @@ This repository will contain modules for building public and private blockchains
 
 ### Blockchain Basics
 
-* [`nunchi-coins`](coins/) - defines what a coin and account are
+* [`nunchi-coins`](coins/) - core coin module: account model, token definitions, ledger operations (mint/burn/transfer/fees), event emission, genesis initialization, and optional JSON-RPC surface
 * [`nunchi-common`](common/) - core abstractions for addresses, state db, and runtime
 * [`nunchi-crypto`](crypto/) - core primitives/wrappers around commonware cryptographic primitives
 * [`nunchi-rpc`](rpc/) - core abstractions for modular RPC
