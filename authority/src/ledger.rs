@@ -65,14 +65,17 @@ pub struct AuthorityLedger<D> {
 }
 
 impl<D: AuthorityDB> AuthorityLedger<D> {
+    /// Wrap an `AuthorityDB` backend as an authority ledger.
     pub fn new(db: D) -> Self {
         Self { db }
     }
 
+    /// Borrow the underlying database.
     pub fn db(&self) -> &D {
         &self.db
     }
 
+    /// Consume the ledger, returning the underlying database.
     pub fn into_inner(self) -> D {
         self.db
     }
@@ -114,14 +117,22 @@ impl<D: AuthorityDB> AuthorityLedger<D> {
         Ok(())
     }
 
+    /// Return the current multisig governance policy, or `None` if the authority
+    /// module has not yet been configured.
     pub async fn policy(&self) -> Result<Option<MultisigPolicy>, AuthorityError> {
         self.db.policy().await
     }
 
+    /// Look up a pending or executed governance proposal by its deterministic id.
+    ///
+    /// Returns `None` if the proposal does not exist. The id is a SHA-256 hash of
+    /// the encoded `RegistryChange` and `effective_epoch`.
     pub async fn proposal(&self, id: &ProposalId) -> Result<Option<Proposal>, AuthorityError> {
         self.db.proposal(id).await
     }
 
+    /// Return the validator set (players and dealers) for the given epoch, or `None`
+    /// if that epoch has not yet been indexed.
     pub async fn epoch_registry(
         &self,
         epoch: EpochNumber,
@@ -129,6 +140,8 @@ impl<D: AuthorityDB> AuthorityLedger<D> {
         self.db.epoch_registry(epoch).await
     }
 
+    /// Return the schedule for a known validator, or `None` if the validator has never
+    /// been registered.
     pub async fn validator(
         &self,
         validator: &ValidatorId,
