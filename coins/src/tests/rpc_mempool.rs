@@ -8,7 +8,7 @@ use nunchi_rpc::{encode_hex, RpcRouter};
 
 use crate::{
     rpc::{
-        register_mempool, CoinsMempoolRpc, MempoolIngress, SubmitTransactionResponse,
+        register_submit, CoinsMempoolRpc, MempoolIngress, SubmitTransactionResponse,
         SubmitTransactionsResponse, TransactionStatusResponse,
     },
     CoinOperation, CoinSpec, PrivateKey, TokenName, TokenSymbol, Transaction,
@@ -73,7 +73,7 @@ fn sample_transaction() -> Transaction {
 
 fn module(ingress: MockIngress) -> jsonrpsee::RpcModule<()> {
     let mut router = RpcRouter::new(());
-    register_mempool(&mut router, CoinsMempoolRpc::new(ingress)).expect("register mempool RPC");
+    register_submit(&mut router, CoinsMempoolRpc::new(ingress)).expect("register submit RPC");
     router.into_module()
 }
 

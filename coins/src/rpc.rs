@@ -4,9 +4,9 @@
 mod mempool;
 #[cfg(feature = "mempool")]
 pub use mempool::{
-    register_mempool, CoinMempoolServer, CoinsMempoolRpc, MempoolIngress, SubmitTransactionParams,
-    SubmitTransactionResponse, SubmitTransactionResult, SubmitTransactionsParams,
-    SubmitTransactionsResponse, TransactionStatusResponse,
+    register_mempool, register_submit, CoinMempoolServer, CoinsMempoolRpc, MempoolIngress,
+    SubmitTransactionParams, SubmitTransactionResponse, SubmitTransactionResult,
+    SubmitTransactionsParams, SubmitTransactionsResponse, TransactionStatusResponse,
 };
 
 use std::sync::Arc;
@@ -202,7 +202,7 @@ pub struct RootResponse {
 
 /// Register the coin module's query RPC methods into a downstream router.
 ///
-/// Transaction submission lives in [`register_mempool`] (behind the `mempool`
+/// Transaction submission lives in [`register_submit`] (behind the `mempool`
 /// feature) so chains without a pool can still serve queries.
 pub fn register<Context, Q>(
     router: &mut RpcRouter<Context>,

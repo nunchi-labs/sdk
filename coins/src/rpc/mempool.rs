@@ -217,8 +217,11 @@ impl TransactionStatusResponse {
     }
 }
 
-/// Register the coin module's mempool RPC methods into a downstream router.
-pub fn register_mempool<Context, I>(
+/// Register the coin module's transaction submission RPC methods into a downstream router.
+///
+/// This registers the `coins.submit_transaction`, `coins.submit_transactions`,
+/// and `coins.transaction_status` endpoints.
+pub fn register_submit<Context, I>(
     router: &mut RpcRouter<Context>,
     rpc: CoinsMempoolRpc<I>,
 ) -> Result<(), RegisterMethodError>
@@ -226,6 +229,18 @@ where
     I: MempoolIngress,
 {
     router.merge(rpc.into_rpc())
+}
+
+/// Deprecated alias for [`register_submit`].
+#[deprecated(since = "2026.8.0", note = "renamed to `register_submit`")]
+pub fn register_mempool<Context, I>(
+    router: &mut RpcRouter<Context>,
+    rpc: CoinsMempoolRpc<I>,
+) -> Result<(), RegisterMethodError>
+where
+    I: MempoolIngress,
+{
+    register_submit(router, rpc)
 }
 
 fn admission_error(error: AdmissionError) -> ErrorObjectOwned {

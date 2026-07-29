@@ -82,7 +82,7 @@ impl MempoolIngress for ChainMempoolIngress {
 ///
 /// Downstream applications can follow this pattern: create one router over their node context,
 /// merge SDK modules via their `register` entry points (such as [`nunchi_coins::rpc::register`]
-/// and [`nunchi_coins::rpc::register_mempool`]), then merge any app-specific methods.
+/// and [`nunchi_coins::rpc::register_submit`]), then merge any app-specific methods.
 pub fn module<Q>(
     query: Q,
     mempool: MempoolHandle<Transaction>,
@@ -93,7 +93,7 @@ where
 {
     let mut router = RpcRouter::new(RpcContext::new(query.clone(), applied_height));
     nunchi_coins::rpc::register(&mut router, CoinsRpc::new(query))?;
-    nunchi_coins::rpc::register_mempool(
+    nunchi_coins::rpc::register_submit(
         &mut router,
         CoinsMempoolRpc::new(ChainMempoolIngress::new(mempool)),
     )?;
