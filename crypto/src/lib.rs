@@ -22,17 +22,27 @@ pub enum Curve {
     Secp256r1 = 2,
 }
 
-impl Curve {
-    fn tag(self) -> u8 {
-        self as u8
+impl Write for Curve {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        (*self as u8).write(buf);
     }
+}
 
-    fn read(buf: &mut impl bytes::Buf) -> Result<Self, Error> {
+impl Read for Curve {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         match u8::read(buf)? {
             1 => Ok(Self::Ed25519),
             2 => Ok(Self::Secp256r1),
             tag => Err(Error::InvalidEnum(tag)),
         }
+    }
+}
+
+impl EncodeSize for Curve {
+    fn encode_size(&self) -> usize {
+        1
     }
 }
 
@@ -73,7 +83,7 @@ impl PublicKey {
 
 impl Write for PublicKey {
     fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.curve().tag().write(buf);
+        self.curve().write(buf);
         match self {
             Self::Ed25519(key) => key.write(buf),
             Self::Secp256r1(key) => key.write(buf),
@@ -158,7 +168,7 @@ impl core::fmt::Debug for PrivateKey {
 
 impl Write for PrivateKey {
     fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.curve().tag().write(buf);
+        self.curve().write(buf);
         match self {
             Self::Ed25519(key) => key.write(buf),
             Self::Secp256r1(key) => key.write(buf),
@@ -204,7 +214,7 @@ impl Signature {
 
 impl Write for Signature {
     fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.curve().tag().write(buf);
+        self.curve().write(buf);
         match self {
             Self::Ed25519(signature) => signature.write(buf),
             Self::Secp256r1(signature) => signature.write(buf),
