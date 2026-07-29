@@ -61,14 +61,57 @@ pub struct IndexedEvent {
 ///
 /// Implementations decide whether events are dropped, buffered until finalization, or forwarded
 /// elsewhere. The chain application only supplies block and transaction context.
+///
+/// # Call ordering
+///
+/// The expected call sequence for a successfully executed block is:
+///
+/// ```text
+/// begin_block -> (transaction_sink -> transaction_applied)* -> finalized
+/// ```
+///
+/// If a transaction fails during execution, the block is discarded instead:
+///
+/// ```text
+/// begin_block -> (transaction_sink -> transaction_applied)* -> discard_block
+/// ```
+///
+/// `transaction_applied` is only called for transactions that succeed; failed transactions
+/// cause the entire block to be discarded via `discard_block`.
+///
+/// # State sync
+///
+/// During state sync, `finalized` may be called **without** a preceding `begin_block`,
+/// because the block was finalized without being applied locally. Implementations must
+/// handle a missing pending entry gracefully (e.g., produce an empty event set).
+///
+/// # Concurrency
+///
+/// The trait requires `Clone + Send + Sync`. Multiple concurrent `begin_block` calls for
+/// different blocks are expected (e.g., during `verify` and `apply` concurrently).
+/// Implementations should use interior mutability (e.g., `Arc<Mutex<..>>`) to handle this.
+///
+/// `discard_block` may be called multiple times for the same digest and should be idempotent.
 pub trait EventConsumer: Clone + Send + Sync + 'static {
     /// Sink used for a single transaction execution.
     type Sink: EventSink + Send;
 
-    /// Prepare to receive events for a block.
+    /// Prepare to receive events for a new block.
+    ///
+    /// Called once per block before any transactions are executed. After this call, the
+    /// consumer should expect zero or more `transaction_sink`/`transaction_applied` pairs,
+    /// followed by either `finalized` or `discard_block`.
+    ///
+    /// Note: `finalized` may also be called without a preceding `begin_block` during
+    /// state sync -- see the trait-level documentation.
     fn begin_block(&self, context: RuntimeContext) -> impl Future<Output = ()> + Send;
 
-    /// Return the sink for a transaction in the current block.
+    /// Return a fresh event sink for a transaction about to be executed.
+    ///
+    /// The returned sink collects events emitted by the runtime during transaction
+    /// execution. If the transaction succeeds, the sink is passed to
+    /// [`transaction_applied`](Self::transaction_applied). If the transaction fails,
+    /// the sink is dropped and `discard_block` is called.
     fn transaction_sink(
         &self,
         context: RuntimeContext,
@@ -76,12 +119,23 @@ pub trait EventConsumer: Clone + Send + Sync + 'static {
     ) -> Self::Sink;
 
     /// Accept events from a successfully applied transaction.
+    ///
+    /// Only called for transactions that succeed. Never called for failed transactions.
     fn transaction_applied(&self, sink: Self::Sink) -> impl Future<Output = ()> + Send;
 
-    /// Discard all events collected for `block_digest`.
+    /// Discard all events collected for the block identified by `block_digest`.
+    ///
+    /// Called when a block fails execution (e.g., a transaction error or extension
+    /// verification failure). May be called multiple times for the same digest;
+    /// implementations should handle this idempotently.
     fn discard_block(&self, block_digest: Digest) -> impl Future<Output = ()> + Send;
 
-    /// Observe that the block in `context` has been finalized.
+    /// Observe that the block described by `context` has been finalized.
+    ///
+    /// During normal operation, this follows a `begin_block` and zero or more
+    /// `transaction_sink`/`transaction_applied` pairs. During state sync, this may
+    /// be called without any preceding calls for the block; implementations should
+    /// handle a missing pending entry gracefully.
     fn finalized(&self, context: RuntimeContext) -> impl Future<Output = ()> + Send;
 }
 
