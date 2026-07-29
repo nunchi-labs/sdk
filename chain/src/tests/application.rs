@@ -174,10 +174,13 @@ fn state_range<E: commonware_storage::Context>(
 }
 
 fn test_context(view: u64, parent: &Block<TestTx>) -> Context {
+    // view == 0 is only valid for the genesis block, which is constructed
+    // separately. Subtracting 1 from view 0 would overflow.
+    debug_assert!(view > 0, "test_context should not be called with view=0; use the genesis block constructor instead");
     Context {
         round: Round::new(Epoch::zero(), View::new(view)),
         leader: ed25519::PrivateKey::from_seed(view).public_key(),
-        parent: (View::new(view - 1), parent.digest()),
+        parent: (View::new(view.saturating_sub(1)), parent.digest()),
     }
 }
 
