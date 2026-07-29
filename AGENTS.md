@@ -328,7 +328,7 @@ Put tests in a `tests/mod.rs` file under a crate's `src` directory.
 ### Module Structure
 
 - Keep `mod.rs` minimal with re-exports
-- Use `cfg_if!` for platform-specific code
+- Use `#[cfg(...)]` attributes for conditional compilation and platform-specific code
 - Always place imports at the top of a module (never inline within functions)
 
 ```rust
