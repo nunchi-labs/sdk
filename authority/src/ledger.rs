@@ -405,6 +405,14 @@ impl<D: AuthorityDB> AuthorityLedger<D> {
         }
         schedule.removed_from = Some(removed_from);
         self.db.set_validator(&schedule);
+
+        // Remove the validator from the persisted index so that `refresh_epochs`
+        // no longer iterates over it.  The `ValidatorSchedule` is kept under
+        // the validator's own key for re-add detection.
+        let mut validators = self.db.validator_index().await?;
+        validators.retain(|v| v != &validator);
+        self.db.set_validator_index(&validators);
+
         self.refresh_epochs(removed_from, removed_from).await
     }
 
