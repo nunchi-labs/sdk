@@ -795,11 +795,45 @@ fn read_repo_file(repo_root: &Path, rel_path: &str) -> anyhow::Result<String> {
     let meta = std::fs::metadata(&full)?;
     if meta.len() > MAX_FILE_BYTES {
         let mut content = std::fs::read_to_string(&full)?;
-        content.truncate(MAX_FILE_BYTES as usize);
+        let limit = MAX_FILE_BYTES as usize;
+        let truncate_at = (0..=limit.min(content.len()))
+            .rev()
+            .find(|index| content.is_char_boundary(*index))
+            .unwrap_or(0);
+        content.truncate(truncate_at);
         content.push_str("\n\n[… truncated: file exceeds 256 KiB]");
         return Ok(content);
     }
     Ok(std::fs::read_to_string(&full)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{read_repo_file, MAX_FILE_BYTES};
+    use std::{fs, time::SystemTime};
+
+    #[test]
+    fn read_repo_file_truncates_at_a_char_boundary() {
+        let directory = std::env::temp_dir().join(format!(
+            "nunchi-mcp-test-{}",
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .expect("system clock must be after the Unix epoch")
+                .as_nanos()
+        ));
+        fs::create_dir(&directory).expect("temporary directory must be created");
+        let path = directory.join("large.txt");
+        let mut content = "a".repeat(MAX_FILE_BYTES as usize - 1);
+        content.push('€');
+        fs::write(&path, content).expect("test file must be written");
+
+        let actual = read_repo_file(&directory, "large.txt")
+            .expect("large UTF-8 file must be read without panicking");
+
+        assert!(actual.starts_with(&"a".repeat(MAX_FILE_BYTES as usize - 1)));
+        assert!(actual.ends_with("[… truncated: file exceeds 256 KiB]"));
+        fs::remove_dir_all(directory).expect("temporary directory must be removed");
+    }
 }
 
 fn search_repo_code(
