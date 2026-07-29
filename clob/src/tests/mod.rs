@@ -347,6 +347,79 @@ fn best_price_wins_during_validator_replay() {
 }
 
 #[test]
+fn matcher_prioritizes_multi_maker_partial_fills() {
+    run_test(|| async {
+        let creator = PrivateKey::from_seed(1);
+        let first_asker = PrivateKey::from_seed(2);
+        let second_asker = PrivateKey::from_seed(3);
+        let third_asker = PrivateKey::from_seed(4);
+        let bidder = PrivateKey::from_seed(5);
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        seed_market(&mut ledger, &creator).await;
+
+        let first_ask = place_tx(
+            &first_asker,
+            0,
+            Side::Ask,
+            90,
+            2,
+            TimeInForce::GoodTilCancelled,
+        );
+        let second_ask = place_tx(
+            &second_asker,
+            0,
+            Side::Ask,
+            100,
+            4,
+            TimeInForce::GoodTilCancelled,
+        );
+        let third_ask = place_tx(
+            &third_asker,
+            0,
+            Side::Ask,
+            100,
+            4,
+            TimeInForce::GoodTilCancelled,
+        );
+        let bid = place_tx(
+            &bidder,
+            0,
+            Side::Bid,
+            100,
+            8,
+            TimeInForce::ImmediateOrCancel,
+        );
+        let first_ask_id = OrderId(first_ask.digest());
+        let second_ask_id = OrderId(second_ask.digest());
+        let third_ask_id = OrderId(third_ask.digest());
+        let batch = batch_from_orders(
+            &ledger,
+            vec![first_ask, second_ask, third_ask, bid],
+            context(2),
+        )
+        .await;
+
+        assert_eq!(batch.fills.len(), 3);
+        assert_eq!(batch.fills[0].maker_order, first_ask_id);
+        assert_eq!(batch.fills[0].price, 90);
+        assert_eq!(batch.fills[0].base_quantity, 2);
+        assert_eq!(batch.fills[1].maker_order, second_ask_id);
+        assert_eq!(batch.fills[1].price, 100);
+        assert_eq!(batch.fills[1].base_quantity, 4);
+        assert_eq!(batch.fills[2].maker_order, third_ask_id);
+        assert_eq!(batch.fills[2].price, 100);
+        assert_eq!(batch.fills[2].base_quantity, 2);
+
+        ledger.apply_match_batch(&batch, context(2)).await.unwrap();
+
+        let resting_asks = ledger.book(&market(), Side::Ask).await.unwrap();
+        assert_eq!(resting_asks.len(), 1);
+        assert_eq!(resting_asks[0].id, third_ask_id);
+        assert_eq!(resting_asks[0].remaining_base, 2);
+    });
+}
+
+#[test]
 fn matcher_returns_no_fills_for_non_crossing_orders() {
     run_test(|| async {
         let creator = PrivateKey::from_seed(1);
