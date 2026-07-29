@@ -71,7 +71,7 @@ impl App {
         for node in &self.nodes {
             let result = Node::start(node, self.workspace.clone(), self.should_quit.clone());
             if let Err(error) = result {
-                let mut node = node.lock().unwrap();
+                let mut node = node.lock().expect("node lock poisoned in start_all");
                 node.status = NodeStatus::Error;
                 node.add_log(format!("failed to start node: {error}"));
             }
@@ -80,7 +80,7 @@ impl App {
 
     fn refresh(&self) {
         for node in &self.nodes {
-            node.lock().unwrap().refresh();
+            node.lock().expect("node lock poisoned in refresh").refresh();
         }
     }
 
@@ -121,7 +121,7 @@ impl App {
         };
         let result = Node::start(node, self.workspace.clone(), self.should_quit.clone());
         if let Err(error) = result {
-            let mut node = node.lock().unwrap();
+            let mut node = node.lock().expect("node lock poisoned in restart_selected");
             node.status = NodeStatus::Error;
             node.add_log(format!("failed to restart node: {error}"));
         }
@@ -129,13 +129,13 @@ impl App {
 
     fn shutdown_selected(&mut self) {
         if let Some(node) = self.nodes.get(self.selected) {
-            node.lock().unwrap().stop();
+            node.lock().expect("node lock poisoned in shutdown_selected").stop();
         }
     }
 
     fn shutdown_all(&mut self) {
         for node in &self.nodes {
-            node.lock().unwrap().stop();
+            node.lock().expect("node lock poisoned in shutdown_all").stop();
         }
     }
 }
@@ -233,7 +233,7 @@ fn handle_key(app: &mut App, code: KeyCode) {
             KeyCode::Char('S') => app.shutdown_all(),
             KeyCode::Char('r') => app.restart_selected(),
             KeyCode::Char(c) if c.is_ascii_digit() => {
-                app.select_node(c.to_digit(10).unwrap() as usize);
+                app.select_node(c.to_digit(10).expect("guard ensures c is ascii digit") as usize);
             }
             _ => {}
         },
@@ -257,7 +257,7 @@ fn render_sidebar(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .iter()
         .enumerate()
         .map(|(index, node)| {
-            let node = node.lock().unwrap();
+            let node = node.lock().expect("node lock poisoned in render_sidebar");
             let selected = index == app.selected;
             let style = if selected {
                 Style::default()
@@ -298,7 +298,7 @@ fn render_logs(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let Some(node) = app.nodes.get(app.selected) else {
         return;
     };
-    let node = node.lock().unwrap();
+    let node = node.lock().expect("node lock poisoned in render_logs");
     let visible_height = log_area.height.saturating_sub(2) as usize;
     let filter = app.log_filter.as_ref().map(|filter| filter.to_lowercase());
     let logs = node

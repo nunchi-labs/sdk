@@ -71,7 +71,7 @@ impl Node {
         should_quit: Arc<AtomicBool>,
     ) -> Result<(), std::io::Error> {
         let (spec, command_line) = {
-            let mut node = node.lock().unwrap();
+            let mut node = node.lock().expect("node lock poisoned in Node::start (pre-spawn)");
             node.stop();
             node.status = NodeStatus::Starting;
             let command_line = node.command_line();
@@ -92,7 +92,7 @@ impl Node {
         let stderr = child.stderr.take();
 
         {
-            let mut node = node.lock().unwrap();
+            let mut node = node.lock().expect("node lock poisoned in Node::start (post-spawn)");
             node.status = NodeStatus::Running;
             node.child = Some(child);
         }
@@ -104,7 +104,7 @@ impl Node {
             spawn_reader(Arc::clone(node), should_quit, stderr);
         }
 
-        let mut node = node.lock().unwrap();
+        let mut node = node.lock().expect("node lock poisoned in Node::start (log)");
         node.add_log(format!("started: {command_line}"));
         Ok(())
     }
@@ -153,10 +153,10 @@ where
                 break;
             }
             match line {
-                Ok(line) => node.lock().unwrap().add_log(line),
+                Ok(line) => node.lock().expect("node lock poisoned in spawn_reader").add_log(line),
                 Err(error) => {
                     node.lock()
-                        .unwrap()
+                        .expect("node lock poisoned in spawn_reader (read error)")
                         .add_log(format!("failed to read process output: {error}"));
                     break;
                 }
