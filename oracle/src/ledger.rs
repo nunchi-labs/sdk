@@ -61,12 +61,12 @@ impl<D: OracleDB> OracleLedger<D> {
         self.db
     }
 
-    /// Validate and apply a signed oracle transaction.
+    /// Validate the nonce and apply the oracle operation.
     ///
-    /// Does not re-check the transaction signature: callers must only pass
-    /// transactions that already passed stateless verification
-    /// ([`Transaction::verify`]), which the chain guarantees at mempool
-    /// admission and block verification.
+    /// Signature verification is **not** performed here; it is expected to have
+    /// been done upstream at mempool admission and block verification via
+    /// [`Transaction::verify`]. Only nonce sequencing and payload/proof size
+    /// limits are enforced. On success the account's nonce is incremented.
     pub async fn apply_transaction(
         &mut self,
         tx: &Transaction,
@@ -98,7 +98,12 @@ impl<D: OracleDB> OracleLedger<D> {
         self.db.record(id).await
     }
 
-    /// Query records by namespace over an inclusive interval range.
+    /// Query records by namespace over an inclusive interval range `[start, end]`.
+    ///
+    /// The range must satisfy `start.bucket() <= end.bucket()` and span at most
+    /// [`MAX_QUERY_INTERVALS`] (1024) buckets; otherwise returns
+    /// [`OracleError::InvalidQuery`]. Each bucket may contain at most
+    /// [`MAX_RECORDS_PER_BUCKET`] (1024) records.
     pub async fn records_by_namespace(
         &self,
         namespace: &NamespaceId,
@@ -118,7 +123,12 @@ impl<D: OracleDB> OracleLedger<D> {
         Ok(records)
     }
 
-    /// Query records by writer over an inclusive interval range.
+    /// Query records by writer over an inclusive interval range `[start, end]`.
+    ///
+    /// The range must satisfy `start.bucket() <= end.bucket()` and span at most
+    /// [`MAX_QUERY_INTERVALS`] (1024) buckets; otherwise returns
+    /// [`OracleError::InvalidQuery`]. Each bucket may contain at most
+    /// [`MAX_RECORDS_PER_BUCKET`] (1024) records.
     pub async fn records_by_writer(
         &self,
         writer: &Address,
@@ -238,6 +248,11 @@ fn validate_interval_range(start: IntervalKey, end: IntervalKey) -> Result<(), O
     Ok(())
 }
 
+/// Derive a deterministic record ID from transaction metadata.
+///
+/// The ID is computed as `SHA-256(writer_bytes || nonce_bytes || namespace_bytes || interval_bytes)`
+/// where each component uses its canonical `Encode` representation. This allows external
+/// indexers to recompute record IDs from on-chain transaction data without querying the oracle.
 fn record_id(
     writer: &Address,
     nonce: u64,
