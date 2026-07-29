@@ -236,13 +236,13 @@ pub struct RepoSearchCodeParams {
 #[allow(dead_code)]
 pub struct NunchiServer {
     rpc: RpcClient,
-    repo_path: PathBuf,
+    repo_path: Option<PathBuf>,
     tool_router: ToolRouter<Self>,
 }
 
 #[tool_router]
 impl NunchiServer {
-    pub fn new(rpc: RpcClient, repo_path: PathBuf) -> Self {
+    pub fn new(rpc: RpcClient, repo_path: Option<PathBuf>) -> Self {
         Self {
             rpc,
             repo_path,
@@ -593,8 +593,11 @@ impl NunchiServer {
                         Hidden directories and build artifacts are excluded."
     )]
     async fn repo_list_files(&self, Parameters(p): Parameters<RepoListFilesParams>) -> String {
+        let Some(repo_path) = &self.repo_path else {
+            return "Error: repo tools are disabled. Start the server with --repo-path to enable them.".to_string();
+        };
         let sub = p.path.as_deref().unwrap_or(".");
-        match list_repo_files(&self.repo_path, sub) {
+        match list_repo_files(repo_path, sub) {
             Ok(files) => files.join("\n"),
             Err(e) => format!("Error: {e}"),
         }
@@ -611,7 +614,10 @@ impl NunchiServer {
                         Files larger than 256 KiB are truncated."
     )]
     async fn repo_read_file(&self, Parameters(p): Parameters<RepoReadFileParams>) -> String {
-        match read_repo_file(&self.repo_path, &p.path) {
+        let Some(repo_path) = &self.repo_path else {
+            return "Error: repo tools are disabled. Start the server with --repo-path to enable them.".to_string();
+        };
+        match read_repo_file(repo_path, &p.path) {
             Ok(content) => content,
             Err(e) => format!("Error: {e}"),
         }
@@ -629,9 +635,12 @@ impl NunchiServer {
                         Results are capped at 200 matches."
     )]
     async fn repo_search_code(&self, Parameters(p): Parameters<RepoSearchCodeParams>) -> String {
+        let Some(repo_path) = &self.repo_path else {
+            return "Error: repo tools are disabled. Start the server with --repo-path to enable them.".to_string();
+        };
         let sub = p.path.as_deref().unwrap_or(".");
         let case_insensitive = p.case_insensitive.unwrap_or(false);
-        match search_repo_code(&self.repo_path, sub, &p.pattern, case_insensitive) {
+        match search_repo_code(repo_path, sub, &p.pattern, case_insensitive) {
             Ok(matches) => {
                 if matches.is_empty() {
                     "No matches found.".to_string()

@@ -35,9 +35,9 @@ struct Cli {
     /// Path to the root of the Nunchi SDK repository.
     /// When set, the server exposes `repo_list_files`, `repo_read_file`, and
     /// `repo_search_code` tools that let AI clients browse source code.
-    /// Defaults to the current working directory.
-    #[arg(long, default_value = ".")]
-    repo_path: PathBuf,
+    /// Must be provided explicitly; repo tools are disabled if omitted.
+    #[arg(long)]
+    repo_path: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -51,17 +51,20 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let repo_path = match cli.repo_path.canonicalize() {
-        Ok(p) => p,
+    let repo_path = cli.repo_path.map(|p| match p.canonicalize() {
+        Ok(canonical) => canonical,
         Err(e) => {
             tracing::warn!(
-                path = %cli.repo_path.display(),
+                path = %p.display(),
                 error = %e,
                 "could not canonicalize --repo-path; using as-is"
             );
-            cli.repo_path
+            p
         }
-    };
+    });
+    if repo_path.is_none() {
+        tracing::info!("--repo-path not set; repo_list_files, repo_read_file, and repo_search_code tools are disabled");
+    }
     let rpc_client = client::RpcClient::new(cli.rpc_url);
     let mcp_server = server::NunchiServer::new(rpc_client, repo_path);
 
