@@ -52,6 +52,7 @@ use tracing::warn;
 pub const LATEST: &str = "latest";
 const DKG_OUTPUT_STATE_FILE: &str = "dkg-output.latest";
 const UPLOAD_PENDING: &str = "upload pending";
+const UNSUPPORTED_HEIGHT: &str = "unsupported block height";
 
 type BlockCfg = (NonZeroU32, ());
 type DkgOutputCfg = (NonZeroU32, ModeVersion);
@@ -270,7 +271,12 @@ impl Indexer {
     pub fn submit_notarization(&self, notarized: Notarized) -> Result<(), &'static str> {
         let view = notarized.proof.view();
         let Some(epoch) = block_epoch(&notarized.block) else {
-            return Err("unsupported block height");
+            warn!(
+                height = %notarized.block.height,
+                blocks_per_epoch = BLOCKS_PER_EPOCH.get(),
+                "rejecting notarization: block height is not within a supported epoch"
+            );
+            return Err(UNSUPPORTED_HEIGHT);
         };
         let key = ArtifactKey { epoch, view };
         let scheme = {
@@ -333,7 +339,12 @@ impl Indexer {
     pub fn submit_finalization(&self, finalized: Finalized) -> Result<(), &'static str> {
         let view = finalized.proof.view();
         let Some(epoch) = block_epoch(&finalized.block) else {
-            return Err("unsupported block height");
+            warn!(
+                height = %finalized.block.height,
+                blocks_per_epoch = BLOCKS_PER_EPOCH.get(),
+                "rejecting finalization: block height is not within a supported epoch"
+            );
+            return Err(UNSUPPORTED_HEIGHT);
         };
         let key = ArtifactKey { epoch, view };
         let scheme = {
@@ -623,6 +634,7 @@ fn upload_status(result: Result<(), &'static str>) -> StatusCode {
     match result {
         Ok(()) => StatusCode::OK,
         Err(UPLOAD_PENDING) => StatusCode::SERVICE_UNAVAILABLE,
+        Err(UNSUPPORTED_HEIGHT) => StatusCode::UNPROCESSABLE_ENTITY,
         Err(_) => StatusCode::UNAUTHORIZED,
     }
 }
