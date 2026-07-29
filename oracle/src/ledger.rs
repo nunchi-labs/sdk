@@ -63,15 +63,15 @@ impl<D: OracleDB> OracleLedger<D> {
 
     /// Validate and apply a signed oracle transaction.
     ///
-    /// Does not re-check the transaction signature: callers must only pass
-    /// transactions that already passed stateless verification
-    /// ([`Transaction::verify`]), which the chain guarantees at mempool
+    /// Verifies the transaction signature as a defense-in-depth measure,
+    /// even though the chain already verifies signatures at mempool
     /// admission and block verification.
     pub async fn apply_transaction(
         &mut self,
         tx: &Transaction,
         context: RuntimeContext,
     ) -> Result<(), OracleError> {
+        tx.verify()?;
         let expected = self.db.nonce(&tx.account_id).await?;
         if tx.payload.nonce != expected {
             return Err(OracleError::NonceMismatch {
