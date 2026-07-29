@@ -5,7 +5,21 @@ use commonware_p2p::simulated::{self, Link, Network};
 use commonware_runtime::{deterministic, Clock, Metrics, Runner as _, Supervisor};
 use commonware_utils::{NZUsize, NZU32};
 use governor::Quota;
-use std::time::Duration;
+use std::{io, time::Duration};
+
+#[derive(Debug)]
+struct ClosedReceiver;
+
+impl commonware_p2p::Receiver for ClosedReceiver {
+    type Error = io::Error;
+    type PublicKey = ed25519::PublicKey;
+
+    async fn recv(
+        &mut self,
+    ) -> Result<commonware_p2p::Message<Self::PublicKey>, Self::Error> {
+        Err(io::Error::other("closed"))
+    }
+}
 
 #[test]
 fn submit_pending_finalize_status_roundtrip() {
@@ -132,5 +146,38 @@ fn p2p_gossips_submitted_transactions() {
             context.sleep(Duration::from_millis(5)).await;
         }
         panic!("gossiped transaction did not reach peer");
+    });
+}
+
+#[test]
+fn p2p_receiver_close_is_recorded() {
+    deterministic::Runner::default().start(|context| async move {
+        let key = ed25519::PrivateKey::from_seed(1);
+        let peer = key.public_key();
+        let (network, oracle) = Network::<_, ed25519::PublicKey>::new_with_peers(
+            context.child("network"),
+            simulated::Config {
+                max_size: 1024 * 1024,
+                disconnect_on_block: true,
+                tracked_peer_sets: NZUsize!(1),
+            },
+            [peer.clone()],
+        )
+        .await;
+        network.start();
+        let (sender, _) = oracle
+            .control(peer)
+            .register(7, Quota::per_second(NZU32!(u32::MAX)))
+            .await
+            .unwrap();
+        let (mempool, handle) = Mempool::<TestTx>::new(PoolConfig::default());
+        mempool.start_p2p(context.child("mempool"), (sender, ClosedReceiver));
+        handle.submit(tx(1, 0, 10)).await.unwrap();
+
+        let encoded = context.encode();
+        assert!(
+            encoded.contains("mempool_p2p_disconnections_total 1"),
+            "{encoded}"
+        );
     });
 }

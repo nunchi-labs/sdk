@@ -59,6 +59,7 @@ pub(crate) struct MempoolMetrics {
     submitted_transactions: CounterFamily<SourceLabel>,
     dropped_transactions: CounterFamily<DropLabel>,
     finalized_transactions: Counter,
+    p2p_disconnections: Counter,
     pending_requests: Counter,
     pending_returned_transactions: Counter,
     pub submit_duration: Histogram,
@@ -86,6 +87,10 @@ impl MempoolMetrics {
             finalized_transactions: context.counter(
                 "finalized_transactions",
                 "pooled transactions removed after finalization",
+            ),
+            p2p_disconnections: context.counter(
+                "p2p_disconnections",
+                "p2p receiver closures that leave the mempool in node-local mode",
             ),
             pending_requests: context.counter("pending_requests", "proposal candidate pulls"),
             pending_returned_transactions: context.counter(
@@ -149,6 +154,10 @@ impl MempoolMetrics {
 
     pub fn finalized(&self, count: u64) {
         self.finalized_transactions.inc_by(count);
+    }
+
+    pub fn p2p_disconnected(&self) {
+        self.p2p_disconnections.inc();
     }
 
     pub fn pending(&self, returned: u64) {

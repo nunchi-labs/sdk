@@ -374,6 +374,9 @@ where
                     Ok((peer, bytes)) => self.handle_network(peer, bytes),
                     Err(error) => {
                         warn!(?error, "mempool p2p receiver closed; continuing node-local");
+                        if let Some(metrics) = self.mempool.metrics.get() {
+                            metrics.p2p_disconnected();
+                        }
                         self.run().await;
                         return;
                     }
