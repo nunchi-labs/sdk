@@ -8,6 +8,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, OnceLock},
 };
+use tracing::warn;
 
 struct Entry<T> {
     tx: T,
@@ -257,20 +258,29 @@ impl<T: PoolTransaction> Pool<T> {
 
         if height > self.last_height {
             self.last_height = height;
+        } else {
+            warn!(
+                received = height,
+                current = self.last_height,
+                "finalize: received non-monotonic or duplicate height; skipping TTL sweep"
+            );
+            self.record_stats();
+            return;
         }
         // Expiry only needs coarse timing, so amortize the full-pool walk
         // across blocks instead of paying it on every finalization.
         let ttl = self.config.ttl_blocks;
         let scan_interval = (ttl / 8).max(1);
-        if height >= self.last_ttl_scan.saturating_add(scan_interval) {
-            self.last_ttl_scan = height;
+        let current_height = self.last_height;
+        if current_height >= self.last_ttl_scan.saturating_add(scan_interval) {
+            self.last_ttl_scan = current_height;
             let expired: Vec<(T::NonceKey, u64)> = self
                 .queues
                 .iter()
                 .flat_map(|(account, queue)| {
                     queue
                         .iter()
-                        .filter(move |(_, entry)| entry.admitted_at.saturating_add(ttl) < height)
+                        .filter(move |(_, entry)| entry.admitted_at.saturating_add(ttl) < current_height)
                         .map(move |(&nonce, _)| (account.clone(), nonce))
                 })
                 .collect();
