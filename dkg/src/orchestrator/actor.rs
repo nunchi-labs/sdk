@@ -349,7 +349,10 @@ where
 
                     // Register the new signing scheme with the scheme provider.
                     let scheme = self.provider.scheme_for_epoch(&transition);
-                    assert!(self.provider.register(transition.epoch, scheme.clone()));
+                    if !self.provider.register(transition.epoch, scheme.clone()) {
+                        warn!(epoch = %transition.epoch, "scheme already registered for epoch; skipping");
+                        continue;
+                    }
 
                     // Enter the new epoch.
                     let handle = self
@@ -376,7 +379,9 @@ where
                     handle.abort();
 
                     // Unregister the signing scheme for the epoch.
-                    assert!(self.provider.unregister(&epoch));
+                    if !self.provider.unregister(&epoch) {
+                        warn!(%epoch, "no scheme registered for epoch being exited; already cleaned up?");
+                    }
 
                     info!(%epoch, "exited epoch");
                 }
