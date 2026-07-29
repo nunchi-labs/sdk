@@ -30,7 +30,7 @@ fn generated_testnet_has_unique_ports_dirs_and_complete_peer_sets() {
     let _ = fs::remove_dir_all(&dir);
 
     let manifest = generate_local_testnet(LocalTestnetConfig {
-        validators: 4,
+        validators: NZU32!(4),
         base_port: 40_000,
         base_rpc_port: 41_000,
         base_metrics_port: 42_000,
@@ -113,7 +113,7 @@ fn generated_testnet_can_advertise_remote_hosts() {
     ];
     let storage_dir = PathBuf::from("/var/lib/nunchi/coins-chain");
     let manifest = generate_local_testnet(LocalTestnetConfig {
-        validators: 2,
+        validators: NZU32!(2),
         base_port: 30_000,
         base_rpc_port: 8_545,
         base_metrics_port: 9_090,
@@ -162,7 +162,7 @@ fn peer_addresses_round_trip_dns_and_ipv6_as_strings() {
     ));
     let _ = fs::remove_dir_all(&dir);
     let manifest = generate_local_testnet(LocalTestnetConfig {
-        validators: 2,
+        validators: NZU32!(2),
         base_port: 32_000,
         base_rpc_port: 33_000,
         base_metrics_port: 34_000,
@@ -222,7 +222,7 @@ fn invalid_peer_addresses_are_rejected_through_node_config_read() {
     ));
     let _ = fs::remove_dir_all(&dir);
     let manifest = generate_local_testnet(LocalTestnetConfig {
-        validators: 1,
+        validators: NZU32!(1),
         base_port: 35_000,
         base_rpc_port: 36_000,
         base_metrics_port: 37_000,
@@ -275,7 +275,7 @@ fn parse_dns_address_through_node_config(address: &str, seed: u64) -> Ingress {
     ));
     let _ = fs::remove_dir_all(&dir);
     let manifest = generate_local_testnet(LocalTestnetConfig {
-        validators: 1,
+        validators: NZU32!(1),
         base_port: 38_000,
         base_rpc_port: 38_100,
         base_metrics_port: 38_200,

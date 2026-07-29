@@ -4,6 +4,7 @@ use nunchi_coins_chain::testnet::{
 };
 use std::{
     net::{IpAddr, Ipv4Addr},
+    num::NonZeroU32,
     path::{Path, PathBuf},
 };
 
@@ -62,8 +63,10 @@ impl Generate {
     pub fn run(self) -> Result<PathBuf, Box<dyn std::error::Error>> {
         let manifest_path = manifest_path(&self.out);
         let genesis_path = normalize_path(self.genesis_path)?;
+        let validators = NonZeroU32::new(self.validators)
+            .ok_or("validator count must be non-zero")?;
         let mut manifest = generate_local_testnet(LocalTestnetConfig {
-            validators: self.validators,
+            validators,
             base_port: self.base_port,
             base_rpc_port: self.base_rpc_port,
             base_metrics_port: self.base_metrics_port,

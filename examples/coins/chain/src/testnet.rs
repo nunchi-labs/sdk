@@ -55,7 +55,7 @@ const DEFAULT_CHANNEL_BACKLOG: usize = 1024;
 
 #[derive(Clone, Debug)]
 pub struct LocalTestnetConfig {
-    pub validators: u32,
+    pub validators: NonZeroU32,
     pub base_port: u16,
     pub base_rpc_port: u16,
     pub base_metrics_port: u16,
@@ -295,25 +295,22 @@ pub enum Error {
 /// Generate node keys, run the trusted initial deal, and write per-node configs plus the
 /// runner manifest into `config.base_data_dir`.
 pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnetManifest, Error> {
-    if config.validators == 0 {
-        return Err(Error::EmptyValidatorSet);
-    }
-
     fs::create_dir_all(&config.base_data_dir)?;
-    let node_count = usize::try_from(config.validators)?;
-    check_port_range(config.base_port, config.validators)?;
-    check_port_range(config.base_rpc_port, config.validators)?;
-    check_port_range(config.base_metrics_port, config.validators)?;
+    let validators = config.validators.get();
+    let node_count = usize::try_from(validators)?;
+    check_port_range(config.base_port, validators)?;
+    check_port_range(config.base_rpc_port, validators)?;
+    check_port_range(config.base_metrics_port, validators)?;
     if let Some(public_ips) = &config.public_ips {
         if public_ips.len() != node_count {
             return Err(Error::PublicHostCount {
-                validators: config.validators,
+                validators,
                 hosts: public_ips.len(),
             });
         }
     }
 
-    let private_keys = (0..config.validators)
+    let private_keys = (0..validators)
         .map(|index| ed25519::PrivateKey::from_seed(config.seed.wrapping_add(index as u64)))
         .collect::<Vec<_>>();
     let participants = private_keys
@@ -327,7 +324,7 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
         deal::<MinSig, _, N3f1>(&mut rng, Default::default(), participants_set.clone())
             .map_err(Error::Deal)?;
     let peer_config = PeerConfig {
-        num_participants_per_round: vec![config.validators],
+        num_participants_per_round: vec![validators],
         participants: participants_set,
     };
 
@@ -412,7 +409,7 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
         indexer: IndexerManifest {
             identity: encode(output.public().public()),
             output: encode(&output),
-            participants: config.validators,
+            participants: validators,
         },
         nodes,
     })
