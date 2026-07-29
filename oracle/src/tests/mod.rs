@@ -7,8 +7,9 @@ use nunchi_common::{Address, RuntimeContext, StateError, StateStore};
 use nunchi_crypto::PrivateKey;
 
 use crate::{
-    IntervalKey, NamespaceId, OracleError, OracleGenesis, OracleLedger, OracleOperation,
-    Transaction, MAX_PAYLOAD_SIZE, MAX_PROOF_SIZE,
+    IntervalKey, NamespaceId, OracleDB, OracleError, OracleGenesis, OracleLedger, OracleOperation,
+    RecordId, Transaction, MAX_PAYLOAD_SIZE, MAX_PROOF_SIZE, MAX_QUERY_INTERVALS,
+    MAX_RECORDS_PER_BUCKET,
 };
 
 #[derive(Default)]
@@ -240,6 +241,125 @@ fn payload_and_proof_limits_are_global() {
             .await
             .unwrap_err();
         assert_eq!(err, OracleError::ProofTooLarge);
+    });
+}
+
+#[test]
+fn nonce_overflow_is_rejected() {
+    run_test(|| async {
+        let writer = PrivateKey::from_seed(2);
+        let account = Address::external(&writer.public_key());
+        let mut store = MemoryStore::default();
+        store.set_nonce(&account, u64::MAX);
+        let mut ledger = OracleLedger::new(store);
+
+        let err = ledger
+            .apply_transaction(
+                &append_tx(&writer, u64::MAX, namespace(), 1, b"payload".to_vec()),
+                context(1_000),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err, OracleError::NonceOverflow);
+    });
+}
+
+#[test]
+fn nonce_mismatch_is_rejected() {
+    run_test(|| async {
+        let writer = PrivateKey::from_seed(2);
+        let mut ledger = OracleLedger::new(MemoryStore::default());
+
+        let err = ledger
+            .apply_transaction(
+                &append_tx(&writer, 1, namespace(), 1, b"payload".to_vec()),
+                context(1_000),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            OracleError::NonceMismatch {
+                expected: 0,
+                actual: 1,
+                ..
+            }
+        ));
+    });
+}
+
+#[test]
+fn full_record_index_is_rejected() {
+    run_test(|| async {
+        let writer = PrivateKey::from_seed(2);
+        let account = Address::external(&writer.public_key());
+        let interval = IntervalKey::new(1);
+        let records = vec![RecordId(id(b"record")); MAX_RECORDS_PER_BUCKET];
+        let mut store = MemoryStore::default();
+        store.set_namespace_index(&namespace(), &interval, &records);
+        let mut ledger = OracleLedger::new(store);
+
+        let err = ledger
+            .apply_transaction(
+                &append_tx(&writer, 0, namespace(), 1, b"payload".to_vec()),
+                context(1_000),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err, OracleError::IndexFull);
+        assert_eq!(ledger.db().nonce(&account).await.unwrap(), 0);
+    });
+}
+
+#[test]
+fn invalid_interval_ranges_are_rejected() {
+    run_test(|| async {
+        let ledger = OracleLedger::new(MemoryStore::default());
+
+        let err = ledger
+            .records_by_namespace(&namespace(), IntervalKey::new(1), IntervalKey::new(0))
+            .await
+            .unwrap_err();
+        assert_eq!(err, OracleError::InvalidQuery("inverted interval range"));
+
+        let err = ledger
+            .records_by_namespace(
+                &namespace(),
+                IntervalKey::new(0),
+                IntervalKey::new(MAX_QUERY_INTERVALS),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            OracleError::InvalidQuery("interval range is too large")
+        );
+
+        let err = ledger
+            .records_by_namespace(
+                &namespace(),
+                IntervalKey::new(0),
+                IntervalKey::new(u64::MAX),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err, OracleError::InvalidQuery("interval range overflow"));
+    });
+}
+
+#[test]
+fn missing_record_referenced_by_index_is_rejected() {
+    run_test(|| async {
+        let interval = IntervalKey::new(1);
+        let mut store = MemoryStore::default();
+        store.set_namespace_index(&namespace(), &interval, &[RecordId(id(b"missing"))]);
+        let ledger = OracleLedger::new(store);
+
+        let err = ledger
+            .records_by_namespace(&namespace(), interval, interval)
+            .await
+            .unwrap_err();
+        assert_eq!(err, OracleError::MissingRecord);
     });
 }
 
