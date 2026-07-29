@@ -440,9 +440,13 @@ where
             return false;
         }
 
-        let deadline = SystemTime::UNIX_EPOCH
-            .checked_add(Duration::from_millis(block.timestamp))
-            .expect("block timestamp exceeded maximum");
+        let Some(deadline) =
+            SystemTime::UNIX_EPOCH.checked_add(Duration::from_millis(block.timestamp))
+        else {
+            // Unreachable after the MAX_BLOCK_TIMESTAMP_MS guard above, but return false
+            // rather than panic to keep verify fault-tolerant on untrusted input.
+            return false;
+        };
         runtime_context.sleep_until(deadline).await;
         true
     }
