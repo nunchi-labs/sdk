@@ -253,6 +253,17 @@ fn transaction_codec_round_trips() {
 }
 
 #[test]
+fn tampered_transaction_is_rejected_by_verify() {
+    let writer = PrivateKey::from_seed(2);
+    let mut tx = append_tx(&writer, 0, namespace(), 1, b"data".to_vec());
+    // Tamper with the payload after signing
+    match &mut tx.payload.operation {
+        OracleOperation::AppendRecord { payload, .. } => payload.push(0xff),
+    }
+    assert!(tx.verify().is_err());
+}
+
+#[test]
 fn genesis_is_noop_for_permissionless_oracle() {
     run_test(|| async {
         let writer = PrivateKey::from_seed(2);

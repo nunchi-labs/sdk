@@ -72,6 +72,10 @@ impl<D: OracleDB> OracleLedger<D> {
         tx: &Transaction,
         context: RuntimeContext,
     ) -> Result<(), OracleError> {
+        #[cfg(debug_assertions)]
+        tx.verify()
+            .expect("apply_transaction called with unverified transaction");
+
         let expected = self.db.nonce(&tx.account_id).await?;
         if tx.payload.nonce != expected {
             return Err(OracleError::NonceMismatch {
