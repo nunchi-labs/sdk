@@ -15,6 +15,13 @@ use thiserror::Error;
 /// latest epoch ever materialized, so this bound keeps that span (and the refresh cost) small.
 pub const MAX_EPOCH_LOOKAHEAD: u64 = 100;
 
+/// How many epochs past the `proposed_epoch` a proposal remains executable.
+///
+/// Once `current_epoch > proposed_epoch + PROPOSAL_EXPIRY_EPOCHS`, the proposal is considered
+/// expired and must be re-proposed at a future epoch. This prevents approved proposals from
+/// being held indefinitely and executed far in the future.
+pub const PROPOSAL_EXPIRY_EPOCHS: u64 = 5;
+
 #[derive(Debug, Error, Clone, Eq, PartialEq)]
 pub enum AuthorityError {
     #[error("bad authority transaction signature: {0}")]
@@ -47,6 +54,8 @@ pub enum AuthorityError {
     ProposalNotFound(ProposalId),
     #[error("proposal already executed")]
     ProposalAlreadyExecuted,
+    #[error("proposal has expired and must be re-proposed")]
+    ProposalExpired,
     #[error("approval already recorded")]
     ApprovalAlreadyRecorded,
     #[error("proposal has {actual} approvals but requires {required}")]
@@ -318,6 +327,11 @@ impl<D: AuthorityDB> AuthorityLedger<D> {
         // consumed; a stale proposal must be re-proposed at a future epoch instead.
         if proposal.proposed_epoch < current_epoch {
             return Err(AuthorityError::InvalidEpoch);
+        }
+        // Proposals expire after a short window past their proposed_epoch to prevent
+        // approved changes from being held indefinitely and executed far in the future.
+        if current_epoch > proposal.proposed_epoch.saturating_add(PROPOSAL_EXPIRY_EPOCHS) {
+            return Err(AuthorityError::ProposalExpired);
         }
         if proposal.approvals.len() < policy.threshold as usize {
             return Err(AuthorityError::InsufficientApprovals {
