@@ -99,7 +99,7 @@ pub struct RelayerManifest {
     pub right_rpc: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct NodeConfig {
     pub name: String,
     pub chain: String,
@@ -121,6 +121,31 @@ pub struct NodeConfig {
     /// Enable one-time peer QMDB state sync for a fresh joining node.
     #[serde(default)]
     pub state_sync: bool,
+}
+
+impl std::fmt::Debug for NodeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeConfig")
+            .field("name", &self.name)
+            .field("chain", &self.chain)
+            .field("namespace", &self.namespace)
+            .field("foreign_namespace", &self.foreign_namespace)
+            .field("private_key", &"[redacted]")
+            .field("dkg_storage_key", &"[redacted]")
+            .field("output", &"[redacted]")
+            .field("foreign_output", &"[redacted]")
+            .field("share", &"[redacted]")
+            .field("peer_config", &self.peer_config)
+            .field("listen_address", &self.listen_address)
+            .field("dialable_address", &self.dialable_address)
+            .field("rpc_address", &self.rpc_address)
+            .field("bootstrappers", &self.bootstrappers)
+            .field("storage_dir", &self.storage_dir)
+            .field("consensus", &self.consensus)
+            .field("networking", &self.networking)
+            .field("state_sync", &self.state_sync)
+            .finish()
+    }
 }
 
 impl NodeConfig {
