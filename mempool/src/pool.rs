@@ -8,6 +8,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, OnceLock},
 };
+use tracing::error;
 
 struct Entry<T> {
     tx: T,
@@ -188,7 +189,10 @@ impl<T: PoolTransaction> Pool<T> {
                     .min(((limit - out.len()) / lanes).max(1))
                     .min(limit - out.len());
                 let from = self.committed_nonce(lane) + taken[index] as u64;
-                let queue = self.queues.get(lane).expect("ready lane has queue");
+                let Some(queue) = self.queues.get(lane) else {
+                    error!("BUG: ready_lanes contains lane with no queue entry; skipping");
+                    continue;
+                };
                 out.extend(
                     queue
                         .range(from..)
