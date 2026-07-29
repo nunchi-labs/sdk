@@ -440,6 +440,7 @@ fn order_priority_cmp(left: &Order, right: &Order) -> Ordering {
 }
 
 /// Return an asset pair in deterministic ascending order.
+#[must_use]
 pub fn canonical_asset_pair(a: AssetId, b: AssetId) -> (AssetId, AssetId) {
     if a <= b {
         (a, b)
@@ -453,6 +454,7 @@ pub fn canonical_asset_pair(a: AssetId, b: AssetId) -> (AssetId, AssetId) {
 /// Asset ids are sorted before hashing so `A/B` and `B/A` resolve to the same market.
 /// `tick_size` and `lot_size` are included so permissionless creation cannot be
 /// frontrun with incompatible market parameters.
+#[must_use]
 pub fn market_id(
     base_asset: &AssetId,
     quote_asset: &AssetId,
