@@ -8,7 +8,7 @@
 use std::{
     collections::HashMap,
     future::Future,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 use commonware_consensus::types::Height;
@@ -144,6 +144,10 @@ pub struct InMemoryEventConsumer {
     reports: Arc<Mutex<Vec<FinalizedEvents>>>,
 }
 
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|error| error.into_inner())
+}
+
 impl Clone for InMemoryEventConsumer {
     fn clone(&self) -> Self {
         Self {
@@ -164,15 +168,12 @@ impl InMemoryEventConsumer {
 
     /// Return a snapshot of all reports received so far.
     pub fn reports(&self) -> Vec<FinalizedEvents> {
-        self.reports
-            .lock()
-            .expect("event consumer poisoned")
-            .clone()
+        lock(&self.reports).clone()
     }
 
     /// Return the number of reports received so far.
     pub fn len(&self) -> usize {
-        self.reports.lock().expect("event consumer poisoned").len()
+        lock(&self.reports).len()
     }
 
     /// Return true when no reports have been received.
@@ -196,7 +197,7 @@ impl EventConsumer for InMemoryEventConsumer {
             let block_digest = context
                 .block_digest
                 .expect("event consumer received context without block digest");
-            pending.lock().expect("event consumer poisoned").insert(
+            lock(&pending).insert(
                 block_digest,
                 FinalizedEvents {
                     height: Height::new(context.height),
@@ -234,7 +235,7 @@ impl EventConsumer for InMemoryEventConsumer {
                 .context
                 .block_digest
                 .expect("event consumer received context without block digest");
-            let mut pending = pending.lock().expect("event consumer poisoned");
+            let mut pending = lock(&pending);
             let events_for_block = pending
                 .entry(block_digest)
                 .or_insert_with(|| FinalizedEvents {
@@ -254,10 +255,7 @@ impl EventConsumer for InMemoryEventConsumer {
     fn discard_block(&self, block_digest: Digest) -> impl Future<Output = ()> + Send {
         let pending = self.pending.clone();
         async move {
-            pending
-                .lock()
-                .expect("event consumer poisoned")
-                .remove(&block_digest);
+            lock(&pending).remove(&block_digest);
         }
     }
 
@@ -268,9 +266,7 @@ impl EventConsumer for InMemoryEventConsumer {
             let block_digest = context
                 .block_digest
                 .expect("event consumer received context without block digest");
-            let events = pending
-                .lock()
-                .expect("event consumer poisoned")
+            let events = lock(&pending)
                 .remove(&block_digest)
                 .unwrap_or_else(|| FinalizedEvents {
                     height: Height::new(context.height),
@@ -278,10 +274,20 @@ impl EventConsumer for InMemoryEventConsumer {
                     block_timestamp: context.timestamp_ms,
                     transactions: Vec::new(),
                 });
-            reports
-                .lock()
-                .expect("event consumer poisoned")
-                .push(events);
+            lock(&reports).push(events);
         }
+    }
+}
+
+#[cfg(test)]
+impl InMemoryEventConsumer {
+    pub(crate) fn poison_pending(&self) {
+        let _pending = self.pending.lock().unwrap();
+        panic!("poison pending event buffer");
+    }
+
+    pub(crate) fn poison_reports(&self) {
+        let _reports = self.reports.lock().unwrap();
+        panic!("poison event reports");
     }
 }
