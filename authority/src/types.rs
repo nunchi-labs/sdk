@@ -18,6 +18,7 @@ pub struct MultisigPolicy {
 }
 
 impl MultisigPolicy {
+    #[must_use]
     pub fn new(threshold: u16, owners: Vec<OwnerId>) -> Option<Self> {
         let owners = sorted_unique(owners)?;
         if threshold == 0 || threshold as usize > owners.len() {
