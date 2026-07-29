@@ -15,7 +15,7 @@ pub enum OracleError {
     BadSignature(#[from] SignatureError),
     #[error("nonce mismatch for {account:?}: expected {expected}, got {actual}")]
     NonceMismatch {
-        account: Box<Address>,
+        account: Address,
         expected: u64,
         actual: u64,
     },
@@ -75,7 +75,7 @@ impl<D: OracleDB> OracleLedger<D> {
         let expected = self.db.nonce(&tx.account_id).await?;
         if tx.payload.nonce != expected {
             return Err(OracleError::NonceMismatch {
-                account: Box::new(tx.account_id.clone()),
+                account: tx.account_id.clone(),
                 expected,
                 actual: tx.payload.nonce,
             });
