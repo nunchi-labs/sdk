@@ -20,19 +20,24 @@ pub enum AdmissionError {
 }
 
 /// Why a previously admitted transaction left the pool without finalizing.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum DropReason {
     /// Evicted to make room when the pool was full.
+    #[error("evicted from pool")]
     Evicted,
     /// Replaced by a later submission with the same account and nonce.
+    #[error("replaced by later submission")]
     Replaced,
     /// The account's committed nonce advanced past this transaction.
+    #[error("stale nonce")]
     StaleNonce,
     /// Sat unincluded for more than the pool's TTL in blocks.
+    #[error("expired (TTL exceeded)")]
     Expired,
 }
 
 impl DropReason {
+    /// Returns a short snake_case label suitable for metrics and API responses.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Evicted => "evicted",
