@@ -664,96 +664,110 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("bridge-chain-pair-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
 
-        let manifest = generate_bridge_pair(LocalBridgePairConfig {
-            validators: 4,
-            base_port_a: 40_000,
-            base_rpc_port_a: 41_000,
-            base_port_b: 42_000,
-            base_rpc_port_b: 43_000,
-            base_data_dir: dir.clone(),
-            seed_a: 7,
-            seed_b: 99,
-        })
-        .expect("generate bridge pair");
+        let test_dir = dir.clone();
+        let result = std::panic::catch_unwind(|| {
+            let dir = test_dir;
 
-        assert_eq!(manifest.nodes.len(), 8);
-        assert_eq!(
-            manifest.chains,
-            ["chain-a".to_string(), "chain-b".to_string()]
-        );
-        assert_eq!(
-            manifest.chain_a_executable_path,
-            PathBuf::from("bridge-chain-a-node")
-        );
-        assert_eq!(
-            manifest.chain_b_executable_path,
-            PathBuf::from("bridge-chain-b-node")
-        );
+            let manifest = generate_bridge_pair(LocalBridgePairConfig {
+                validators: 4,
+                base_port_a: 40_000,
+                base_rpc_port_a: 41_000,
+                base_port_b: 42_000,
+                base_rpc_port_b: 43_000,
+                base_data_dir: dir.clone(),
+                seed_a: 7,
+                seed_b: 99,
+            })
+            .expect("generate bridge pair");
 
-        let ports = manifest
-            .nodes
-            .iter()
-            .map(|node| node.port)
-            .collect::<HashSet<_>>();
-        assert_eq!(ports.len(), 8);
-        let rpc_ports = manifest
-            .nodes
-            .iter()
-            .map(|node| node.rpc_port)
-            .collect::<HashSet<_>>();
-        assert_eq!(rpc_ports.len(), 8);
+            assert_eq!(manifest.nodes.len(), 8);
+            assert_eq!(
+                manifest.chains,
+                ["chain-a".to_string(), "chain-b".to_string()]
+            );
+            assert_eq!(
+                manifest.chain_a_executable_path,
+                PathBuf::from("bridge-chain-a-node")
+            );
+            assert_eq!(
+                manifest.chain_b_executable_path,
+                PathBuf::from("bridge-chain-b-node")
+            );
 
-        let chain_a = NodeConfig::read(&manifest.nodes[0].config_path).expect("read chain a");
-        let chain_b = NodeConfig::read(&manifest.nodes[4].config_path).expect("read chain b");
-        assert_eq!(
-            manifest.nodes[0].executable_path,
-            PathBuf::from("bridge-chain-a-node")
-        );
-        assert_eq!(
-            manifest.nodes[4].executable_path,
-            PathBuf::from("bridge-chain-b-node")
-        );
-        assert_eq!(chain_a.chain, "chain-a");
-        assert_eq!(chain_b.chain, "chain-b");
-        assert_ne!(
-            chain_a.peer_config.participants,
-            chain_b.peer_config.participants
-        );
-        assert_eq!(chain_a.foreign_output, chain_b.output);
-        assert_eq!(chain_b.foreign_output, chain_a.output);
-        assert_ne!(chain_a.namespace, chain_b.namespace);
-        assert_eq!(chain_a.foreign_namespace, chain_b.namespace);
-        assert_eq!(chain_b.foreign_namespace, chain_a.namespace);
-
-        let mut dkg_storage_keys = HashSet::new();
-        for node in &manifest.nodes {
-            let config = NodeConfig::read(&node.config_path).expect("read node config");
-            assert_eq!(config.peer_config.participants.len(), 4);
-            assert_eq!(config.bootstrappers.len(), 3);
-            assert!(!config
-                .bootstrappers
+            let ports = manifest
+                .nodes
                 .iter()
-                .any(|bootstrapper| bootstrapper.address.port() == node.port));
+                .map(|node| node.port)
+                .collect::<HashSet<_>>();
+            assert_eq!(ports.len(), 8);
+            let rpc_ports = manifest
+                .nodes
+                .iter()
+                .map(|node| node.rpc_port)
+                .collect::<HashSet<_>>();
+            assert_eq!(rpc_ports.len(), 8);
 
-            let max_participants =
-                NonZeroU32::new(config.peer_config.max_participants_per_round()).unwrap();
-            decode_output(&config.output, max_participants).expect("decode output");
-            decode_output(&config.foreign_output, max_participants).expect("decode foreign output");
-            decode_unit::<group::Share>(&config.share, "share").expect("decode share");
-            decode_unit::<ed25519::PrivateKey>(&config.private_key, "private_key")
-                .expect("decode private key");
-            let dkg_storage_key =
-                decode_storage_key(&config.dkg_storage_key).expect("decode dkg storage key");
-            assert_ne!(config.dkg_storage_key, config.private_key);
-            assert!(dkg_storage_keys.insert(dkg_storage_key));
-        }
-        assert_eq!(dkg_storage_keys.len(), 8);
+            let chain_a =
+                NodeConfig::read(&manifest.nodes[0].config_path).expect("read chain a");
+            let chain_b =
+                NodeConfig::read(&manifest.nodes[4].config_path).expect("read chain b");
+            assert_eq!(
+                manifest.nodes[0].executable_path,
+                PathBuf::from("bridge-chain-a-node")
+            );
+            assert_eq!(
+                manifest.nodes[4].executable_path,
+                PathBuf::from("bridge-chain-b-node")
+            );
+            assert_eq!(chain_a.chain, "chain-a");
+            assert_eq!(chain_b.chain, "chain-b");
+            assert_ne!(
+                chain_a.peer_config.participants,
+                chain_b.peer_config.participants
+            );
+            assert_eq!(chain_a.foreign_output, chain_b.output);
+            assert_eq!(chain_b.foreign_output, chain_a.output);
+            assert_ne!(chain_a.namespace, chain_b.namespace);
+            assert_eq!(chain_a.foreign_namespace, chain_b.namespace);
+            assert_eq!(chain_b.foreign_namespace, chain_a.namespace);
 
-        let manifest_path = dir.join(LocalBridgePairManifest::FILE_NAME);
-        manifest.write(&manifest_path).expect("write manifest");
-        let read = LocalBridgePairManifest::read(&manifest_path).expect("read manifest");
-        assert_eq!(read.nodes.len(), manifest.nodes.len());
+            let mut dkg_storage_keys = HashSet::new();
+            for node in &manifest.nodes {
+                let config = NodeConfig::read(&node.config_path).expect("read node config");
+                assert_eq!(config.peer_config.participants.len(), 4);
+                assert_eq!(config.bootstrappers.len(), 3);
+                assert!(!config
+                    .bootstrappers
+                    .iter()
+                    .any(|bootstrapper| bootstrapper.address.port() == node.port));
 
+                let max_participants =
+                    NonZeroU32::new(config.peer_config.max_participants_per_round()).unwrap();
+                decode_output(&config.output, max_participants).expect("decode output");
+                decode_output(&config.foreign_output, max_participants)
+                    .expect("decode foreign output");
+                decode_unit::<group::Share>(&config.share, "share").expect("decode share");
+                decode_unit::<ed25519::PrivateKey>(&config.private_key, "private_key")
+                    .expect("decode private key");
+                let dkg_storage_key =
+                    decode_storage_key(&config.dkg_storage_key).expect("decode dkg storage key");
+                assert_ne!(config.dkg_storage_key, config.private_key);
+                assert!(dkg_storage_keys.insert(dkg_storage_key));
+            }
+            assert_eq!(dkg_storage_keys.len(), 8);
+
+            let manifest_path = dir.join(LocalBridgePairManifest::FILE_NAME);
+            manifest.write(&manifest_path).expect("write manifest");
+            let read =
+                LocalBridgePairManifest::read(&manifest_path).expect("read manifest");
+            assert_eq!(read.nodes.len(), manifest.nodes.len());
+        });
+
+        // Always clean up the temp directory, even if the test panicked
         let _ = fs::remove_dir_all(dir);
+
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
     }
 }
