@@ -44,6 +44,7 @@ pub enum PublicKey {
 }
 
 impl PublicKey {
+    /// Return the curve tag for this public key.
     pub fn curve(&self) -> Curve {
         match self {
             Self::Ed25519(_) => Curve::Ed25519,
@@ -51,6 +52,15 @@ impl PublicKey {
         }
     }
 
+    /// Verify `sig` over `msg` in the given `namespace`.
+    ///
+    /// The `namespace` is a domain separator that prevents cross-protocol signature
+    /// replay. The same namespace must be used in the corresponding
+    /// [`PrivateKey::sign`] call.
+    ///
+    /// Returns `Err(SignatureError::IncompatibleKey)` if the signature curve does not
+    /// match this key's curve. Returns `Err(SignatureError::InvalidSignature)` if the
+    /// signature is mathematically invalid.
     pub fn verify(
         &self,
         namespace: &[u8],
@@ -112,10 +122,16 @@ pub enum PrivateKey {
 }
 
 impl PrivateKey {
+    /// Create a deterministic Ed25519 key from a `u64` seed.
+    ///
+    /// For tests and key derivation only. Do not use for production key generation.
     pub fn ed25519_from_seed(seed: u64) -> Self {
         Self::Ed25519(ed25519::PrivateKey::from_seed(seed))
     }
 
+    /// Create a deterministic secp256r1 key from a `u64` seed.
+    ///
+    /// For tests and key derivation only. Do not use for production key generation.
     pub fn secp256r1_from_seed(seed: u64) -> Self {
         Self::Secp256r1(secp256r1::standard::PrivateKey::from_seed(seed))
     }
@@ -125,6 +141,7 @@ impl PrivateKey {
         Self::ed25519_from_seed(seed)
     }
 
+    /// Return the curve tag for this private key.
     pub fn curve(&self) -> Curve {
         match self {
             Self::Ed25519(_) => Curve::Ed25519,
@@ -132,6 +149,7 @@ impl PrivateKey {
         }
     }
 
+    /// Return the public key corresponding to this private key.
     pub fn public_key(&self) -> PublicKey {
         match self {
             Self::Ed25519(key) => PublicKey::Ed25519(key.public_key()),
@@ -139,6 +157,9 @@ impl PrivateKey {
         }
     }
 
+    /// Sign `msg` in the given `namespace`.
+    ///
+    /// The `namespace` must match the one used in [`PublicKey::verify`].
     pub fn sign(&self, namespace: &[u8], msg: &[u8]) -> Signature {
         match self {
             Self::Ed25519(key) => Signature::Ed25519(key.sign(namespace, msg)),
@@ -194,6 +215,7 @@ pub enum Signature {
 }
 
 impl Signature {
+    /// Return the curve tag for this signature.
     pub fn curve(&self) -> Curve {
         match self {
             Self::Ed25519(_) => Curve::Ed25519,
