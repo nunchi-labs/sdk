@@ -259,7 +259,7 @@ impl<D: AuthorityDB> AuthorityLedger<D> {
         effective_epoch: EpochNumber,
         current_epoch: EpochNumber,
     ) -> Result<ProposalId, AuthorityError> {
-        self.require_owner(signer).await?;
+        self.verify_owner(signer).await?;
         check_epoch_window(effective_epoch, current_epoch)?;
         let id = proposal_id(&change, effective_epoch);
         if self.db.proposal(&id).await?.is_some() {
@@ -281,7 +281,7 @@ impl<D: AuthorityDB> AuthorityLedger<D> {
         signer: &OwnerId,
         proposal: &ProposalId,
     ) -> Result<(), AuthorityError> {
-        self.require_owner(signer).await?;
+        self.verify_owner(signer).await?;
         let mut proposal = self
             .db
             .proposal(proposal)
@@ -341,6 +341,8 @@ impl<D: AuthorityDB> AuthorityLedger<D> {
         Ok(())
     }
 
+    /// Verify that `signer` is a registered owner. Returns the full policy
+    /// so callers that need it (e.g. [`execute`]) can use it directly.
     async fn require_owner(&self, signer: &OwnerId) -> Result<MultisigPolicy, AuthorityError> {
         let policy = self
             .db
@@ -352,6 +354,14 @@ impl<D: AuthorityDB> AuthorityLedger<D> {
         } else {
             Err(AuthorityError::Unauthorized)
         }
+    }
+
+    /// Verify that `signer` is a registered owner without returning the
+    /// policy. Use this when only authorization is needed and the policy
+    /// itself is not required, avoiding an unused return value.
+    async fn verify_owner(&self, signer: &OwnerId) -> Result<(), AuthorityError> {
+        self.require_owner(signer).await?;
+        Ok(())
     }
 
     async fn add_validator(
