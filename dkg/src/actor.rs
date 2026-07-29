@@ -303,18 +303,26 @@ where
                 let dealers = self.peer_config.dealers(epoch_state.round);
                 let previous_players = epoch_state.output.as_ref().unwrap().players();
                 if epoch_state.round == 0 {
-                    assert_eq!(
-                        &dealers, previous_players,
-                        "dealers for round 0 must equal previous output players"
+                    if &dealers != previous_players {
+                        error!(
+                            %epoch,
+                            round = epoch_state.round,
+                            "dealers for round 0 do not match previous output players; \
+                             skipping ceremony"
+                        );
+                        break 'actor;
+                    }
+                } else if !dealers
+                    .iter()
+                    .all(|d| previous_players.position(d).is_some())
+                {
+                    error!(
+                        %epoch,
+                        round = epoch_state.round,
+                        "dealers include keys not present in previous output players; \
+                         skipping ceremony",
                     );
-                } else {
-                    assert!(
-                        dealers
-                            .iter()
-                            .all(|d| previous_players.position(d).is_some()),
-                        "dealers for round {} must be drawn from previous output players",
-                        epoch_state.round
-                    );
+                    break 'actor;
                 }
 
                 (
