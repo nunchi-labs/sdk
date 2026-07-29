@@ -16,7 +16,7 @@ use std::{
     collections::VecDeque,
     future::Future,
     num::{NonZero, NonZeroU16, NonZeroUsize},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
     time::Duration,
 };
 
@@ -206,10 +206,19 @@ impl<A> VerifyLimiter<A> {
 }
 
 impl Limiter {
+    fn lock_state(&self) -> MutexGuard<'_, LimiterState> {
+        // LimiterState only contains bookkeeping counters. A panic while updating them does not
+        // compromise memory safety, and refusing all later verification work is worse than
+        // continuing with the recovered state.
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     async fn acquire(self: &Arc<Self>, metrics: &VerifyLimiterMetrics) -> Permit {
         loop {
             let receiver = {
-                let mut state = self.state.lock().expect("verify limiter mutex poisoned");
+                let mut state = self.lock_state();
                 if state.available > 0 {
                     state.available -= 1;
                     state.in_flight += 1;
@@ -239,7 +248,7 @@ impl Limiter {
     }
 
     fn release(&self, metrics: &VerifyLimiterMetrics) {
-        let mut state = self.state.lock().expect("verify limiter mutex poisoned");
+        let mut state = self.lock_state();
         state.in_flight = state.in_flight.saturating_sub(1);
         metrics.in_flight.try_set(state.in_flight).ok();
         metrics.complete_total.inc();
@@ -322,7 +331,10 @@ mod tests {
     use super::*;
     use commonware_runtime::telemetry::metrics::{raw, Registered, Registration};
     use futures::{pin_mut, task::noop_waker};
-    use std::task::{Context, Poll};
+    use std::{
+        panic::{catch_unwind, AssertUnwindSafe},
+        task::{Context, Poll},
+    };
 
     fn metrics() -> VerifyLimiterMetrics {
         VerifyLimiterMetrics {
@@ -361,5 +373,31 @@ mod tests {
 
         drop(first);
         assert!(matches!(second.as_mut().poll(&mut context), Poll::Ready(_)));
+    }
+
+    #[test]
+    fn verify_limiter_recovers_from_poisoned_state() {
+        let limiter = Arc::new(Limiter {
+            state: Mutex::new(LimiterState {
+                available: 1,
+                in_flight: 0,
+                waiting: 0,
+                waiters: VecDeque::new(),
+            }),
+        });
+        let metrics = metrics();
+
+        assert!(catch_unwind(AssertUnwindSafe(|| {
+            let _state = limiter.state.lock().unwrap();
+            panic!("poison limiter state");
+        }))
+        .is_err());
+
+        let permit = futures::executor::block_on(limiter.acquire(&metrics));
+        drop(permit);
+
+        let state = limiter.lock_state();
+        assert_eq!(state.available, 1);
+        assert_eq!(state.in_flight, 0);
     }
 }
