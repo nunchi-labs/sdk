@@ -90,7 +90,8 @@ pub struct TransactionStatusParams {
 pub struct DeriveAddressParams {
     /// Hex-encoded curve-tagged public key bytes (curve tag byte + key bytes,
     /// as produced by `PrivateKey::public_key().encode()`).
-    pub public_key_hex: String,
+    #[serde(alias = "public_key_hex")]
+    pub public_key: String,
 }
 
 /// Parameters for `sdk_derive_multisig_address`.
@@ -99,7 +100,8 @@ pub struct DeriveMultisigAddressParams {
     /// Minimum number of signers required to authorize a transaction.
     pub threshold: u16,
     /// Hex-encoded curve-tagged public keys for all policy members.
-    pub public_keys_hex: Vec<String>,
+    #[serde(alias = "public_keys_hex")]
+    pub public_keys: Vec<String>,
 }
 
 /// Parameters for `sdk_derive_coin_id`.
@@ -125,7 +127,8 @@ pub struct DeriveCoinIdParams {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BuildTransferParams {
     /// Hex-encoded curve-tagged private key bytes.
-    pub private_key_hex: String,
+    #[serde(alias = "private_key_hex")]
+    pub private_key: String,
     /// Sender's current nonce (from `coins_nonce`).
     pub nonce: u64,
     /// Hex-encoded coin ID.
@@ -142,7 +145,8 @@ pub struct BuildTransferParams {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BuildMintParams {
     /// Hex-encoded curve-tagged private key bytes (must be the token issuer's key).
-    pub private_key_hex: String,
+    #[serde(alias = "private_key_hex")]
+    pub private_key: String,
     /// Issuer's current nonce (from `coins_nonce`).
     pub nonce: u64,
     /// Hex-encoded coin ID to mint.
@@ -157,7 +161,8 @@ pub struct BuildMintParams {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BuildBurnParams {
     /// Hex-encoded curve-tagged private key bytes.
-    pub private_key_hex: String,
+    #[serde(alias = "private_key_hex")]
+    pub private_key: String,
     /// Account's current nonce (from `coins_nonce`).
     pub nonce: u64,
     /// Hex-encoded coin ID to burn.
@@ -172,7 +177,8 @@ pub struct BuildBurnParams {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BuildCreateTokenParams {
     /// Hex-encoded curve-tagged private key bytes (will become the token issuer).
-    pub private_key_hex: String,
+    #[serde(alias = "private_key_hex")]
+    pub private_key: String,
     /// Issuer's current nonce (from `coins_nonce`).
     pub nonce: u64,
     /// Token ticker symbol (≤ 32 bytes, UTF-8).
@@ -191,7 +197,8 @@ pub struct BuildCreateTokenParams {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BuildRegisterAccountPolicyParams {
     /// Hex-encoded curve-tagged private key bytes of the transaction signer.
-    pub private_key_hex: String,
+    #[serde(alias = "private_key_hex")]
+    pub private_key: String,
     /// Signer's current nonce (from `coins_nonce`).
     pub nonce: u64,
     /// Hex-encoded address of the account whose policy is being registered.
@@ -199,7 +206,8 @@ pub struct BuildRegisterAccountPolicyParams {
     /// Minimum threshold of signers required.
     pub threshold: u16,
     /// Hex-encoded curve-tagged public keys of all policy members.
-    pub signer_public_keys_hex: Vec<String>,
+    #[serde(alias = "signer_public_keys_hex")]
+    pub signer_public_keys: Vec<String>,
 }
 
 // ── parameter structs — repo tools ────────────────────────────────────────────
@@ -371,7 +379,7 @@ impl NunchiServer {
                         Returns the 32-byte (64 hex char) account address."
     )]
     async fn sdk_derive_address(&self, Parameters(p): Parameters<DeriveAddressParams>) -> String {
-        match decode_value::<PublicKey>(&p.public_key_hex, "public key") {
+        match decode_value::<PublicKey>(&p.public_key, "public key") {
             Ok(pk) => encode_value(&external_account_id(&pk)),
             Err(e) => format!("Error: {e}"),
         }
@@ -393,7 +401,7 @@ impl NunchiServer {
         &self,
         Parameters(p): Parameters<DeriveMultisigAddressParams>,
     ) -> String {
-        match build_multisig_policy(p.threshold, &p.public_keys_hex) {
+        match build_multisig_policy(p.threshold, &p.public_keys) {
             Ok(policy) => encode_value(&multisig_account_id(&policy)),
             Err(e) => format!("Error: {e}"),
         }
@@ -436,7 +444,7 @@ impl NunchiServer {
     )]
     async fn sdk_build_transfer(&self, Parameters(p): Parameters<BuildTransferParams>) -> String {
         match (|| -> anyhow::Result<String> {
-            let signer = decode_value::<PrivateKey>(&p.private_key_hex, "private key")?;
+            let signer = decode_value::<PrivateKey>(&p.private_key, "private key")?;
             let coin = decode_value::<CoinId>(&p.coin, "coin id")?;
             let from = decode_value::<nunchi_coins::Address>(&p.from, "from address")?;
             let to = decode_value::<nunchi_coins::Address>(&p.to, "to address")?;
@@ -472,7 +480,7 @@ impl NunchiServer {
     )]
     async fn sdk_build_mint(&self, Parameters(p): Parameters<BuildMintParams>) -> String {
         match (|| -> anyhow::Result<String> {
-            let signer = decode_value::<PrivateKey>(&p.private_key_hex, "private key")?;
+            let signer = decode_value::<PrivateKey>(&p.private_key, "private key")?;
             let coin = decode_value::<CoinId>(&p.coin, "coin id")?;
             let to = decode_value::<nunchi_coins::Address>(&p.to, "to address")?;
             let amount = p
@@ -498,7 +506,7 @@ impl NunchiServer {
     )]
     async fn sdk_build_burn(&self, Parameters(p): Parameters<BuildBurnParams>) -> String {
         match (|| -> anyhow::Result<String> {
-            let signer = decode_value::<PrivateKey>(&p.private_key_hex, "private key")?;
+            let signer = decode_value::<PrivateKey>(&p.private_key, "private key")?;
             let coin = decode_value::<CoinId>(&p.coin, "coin id")?;
             let from = decode_value::<nunchi_coins::Address>(&p.from, "from address")?;
             let amount = p
@@ -531,7 +539,7 @@ impl NunchiServer {
         Parameters(p): Parameters<BuildCreateTokenParams>,
     ) -> String {
         match (|| -> anyhow::Result<String> {
-            let signer = decode_value::<PrivateKey>(&p.private_key_hex, "private key")?;
+            let signer = decode_value::<PrivateKey>(&p.private_key, "private key")?;
             let spec = build_coin_spec_from_params(
                 &p.symbol,
                 &p.name,
@@ -563,9 +571,9 @@ impl NunchiServer {
         Parameters(p): Parameters<BuildRegisterAccountPolicyParams>,
     ) -> String {
         match (|| -> anyhow::Result<String> {
-            let signer = decode_value::<PrivateKey>(&p.private_key_hex, "private key")?;
+            let signer = decode_value::<PrivateKey>(&p.private_key, "private key")?;
             let account_id = decode_value::<nunchi_coins::Address>(&p.account_id, "account_id")?;
-            let policy = build_multisig_policy(p.threshold, &p.signer_public_keys_hex)?;
+            let policy = build_multisig_policy(p.threshold, &p.signer_public_keys)?;
             let tx = Transaction::sign(
                 &signer,
                 p.nonce,
@@ -655,11 +663,8 @@ impl NunchiServer {
 
 // ── free helpers ──────────────────────────────────────────────────────────────
 
-fn build_multisig_policy(
-    threshold: u16,
-    public_keys_hex: &[String],
-) -> anyhow::Result<MultisigPolicy> {
-    let keys: Vec<PublicKey> = public_keys_hex
+fn build_multisig_policy(threshold: u16, public_keys: &[String]) -> anyhow::Result<MultisigPolicy> {
+    let keys: Vec<PublicKey> = public_keys
         .iter()
         .enumerate()
         .map(|(i, hex_str)| decode_value::<PublicKey>(hex_str, &format!("public_key[{i}]")))
@@ -861,4 +866,103 @@ fn search_repo_code(
         }
     }
     Ok(hits)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{
+        BuildRegisterAccountPolicyParams, BuildTransferParams, DeriveAddressParams,
+        DeriveMultisigAddressParams,
+    };
+
+    #[test]
+    fn hex_parameters_use_unsuffixed_names() {
+        let address = DeriveAddressParams {
+            public_key: "key".to_string(),
+        };
+        let multisig = DeriveMultisigAddressParams {
+            threshold: 1,
+            public_keys: vec!["key".to_string()],
+        };
+        let transfer = BuildTransferParams {
+            private_key: "key".to_string(),
+            nonce: 1,
+            coin: "coin".to_string(),
+            from: "from".to_string(),
+            to: "to".to_string(),
+            amount: "1".to_string(),
+        };
+        let policy = BuildRegisterAccountPolicyParams {
+            private_key: "key".to_string(),
+            nonce: 1,
+            account_id: "account".to_string(),
+            threshold: 1,
+            signer_public_keys: vec!["key".to_string()],
+        };
+
+        assert_eq!(
+            serde_json::to_value(address).unwrap(),
+            json!({ "public_key": "key" })
+        );
+        assert_eq!(
+            serde_json::to_value(multisig).unwrap(),
+            json!({ "threshold": 1, "public_keys": ["key"] })
+        );
+        assert_eq!(
+            serde_json::to_value(transfer).unwrap(),
+            json!({
+                "private_key": "key",
+                "nonce": 1,
+                "coin": "coin",
+                "from": "from",
+                "to": "to",
+                "amount": "1",
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(policy).unwrap(),
+            json!({
+                "private_key": "key",
+                "nonce": 1,
+                "account_id": "account",
+                "threshold": 1,
+                "signer_public_keys": ["key"],
+            })
+        );
+    }
+
+    #[test]
+    fn hex_parameter_legacy_names_are_accepted() {
+        let address: DeriveAddressParams =
+            serde_json::from_value(json!({ "public_key_hex": "key" })).unwrap();
+        let multisig: DeriveMultisigAddressParams = serde_json::from_value(json!({
+            "threshold": 1,
+            "public_keys_hex": ["key"],
+        }))
+        .unwrap();
+        let transfer: BuildTransferParams = serde_json::from_value(json!({
+            "private_key_hex": "key",
+            "nonce": 1,
+            "coin": "coin",
+            "from": "from",
+            "to": "to",
+            "amount": "1",
+        }))
+        .unwrap();
+        let policy: BuildRegisterAccountPolicyParams = serde_json::from_value(json!({
+            "private_key_hex": "key",
+            "nonce": 1,
+            "account_id": "account",
+            "threshold": 1,
+            "signer_public_keys_hex": ["key"],
+        }))
+        .unwrap();
+
+        assert_eq!(address.public_key, "key");
+        assert_eq!(multisig.public_keys, ["key"]);
+        assert_eq!(transfer.private_key, "key");
+        assert_eq!(policy.signer_public_keys, ["key"]);
+    }
 }
