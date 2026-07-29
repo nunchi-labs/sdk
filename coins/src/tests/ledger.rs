@@ -1173,3 +1173,39 @@ fn charge_fee_of_zero_stages_no_writes() {
         assert_eq!(ledger.balance(&alice, &coin).await.unwrap(), 100);
     });
 }
+
+// ----- FeeConfig::quote direct tests -----
+
+fn dummy_fee_config(base: u128, per_byte: u128) -> FeeConfig {
+    let alice = address(&PrivateKey::ed25519_from_seed(1));
+    let coin = crate::TokenFactory::derive_coin_id(&alice, 0, &spec(1, None).expect("valid coin spec"));
+    let collector = address(&PrivateKey::ed25519_from_seed(99));
+    fee_config(coin, collector, base, per_byte)
+}
+
+#[test]
+fn fee_quote_rejects_per_byte_mul_overflow() {
+    // per_byte = u128::MAX, size = 2 -> checked_mul overflows
+    let config = dummy_fee_config(0, u128::MAX);
+    assert_eq!(config.quote(2), Err(LedgerError::FeeOverflow));
+}
+
+#[test]
+fn fee_quote_rejects_base_add_overflow() {
+    // per_byte = 1, size = 1, base = u128::MAX -> checked_add overflows
+    let config = dummy_fee_config(u128::MAX, 1);
+    assert_eq!(config.quote(1), Err(LedgerError::FeeOverflow));
+}
+
+#[test]
+fn fee_quote_zero_fee_for_zero_config() {
+    let config = dummy_fee_config(0, 0);
+    assert_eq!(config.quote(100), Ok(0));
+}
+
+#[test]
+fn fee_quote_correct_for_typical_transaction() {
+    // base = 10, per_byte = 2, size = 5 -> fee = 2*5 + 10 = 20
+    let config = dummy_fee_config(10, 2);
+    assert_eq!(config.quote(5), Ok(20));
+}
