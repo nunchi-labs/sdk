@@ -192,12 +192,30 @@ impl<T: PoolTransaction> MempoolHandle<T> {
     /// finalize hook never blocks on the pool; a dropped report self-heals on
     /// the next one (re-proposed finalized transactions fail the ledger nonce
     /// gate and are pruned then).
+    ///
+    /// # Trust assumption
+    ///
+    /// The caller is expected to be the internal consensus module.  The
+    /// lengths of `digests` and `lane_nonces` are bounded by the maximum
+    /// block size; no additional runtime clamping is applied.
+    /// `Pool::finalize` iterates both vectors linearly, so excessively
+    /// large inputs would block the actor for a proportional duration.
     pub fn finalized(
         &self,
         digests: Vec<Digest>,
         lane_nonces: Vec<(T::NonceKey, u64)>,
         height: u64,
     ) {
+        debug_assert!(
+            digests.len() <= 1_000_000,
+            "finalized: unexpectedly large digest list ({})",
+            digests.len()
+        );
+        debug_assert!(
+            lane_nonces.len() <= 100_000,
+            "finalized: unexpectedly large lane_nonces list ({})",
+            lane_nonces.len()
+        );
         let mut sender = self.sender.clone();
         if sender
             .try_send(Message::Finalized {
