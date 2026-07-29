@@ -230,15 +230,16 @@ impl Indexer {
             return Err("invalid seed signature");
         }
 
-        let mut store = self.store.write().unwrap();
-        store.seed_uploads.remove(&round);
-        if store.seeds.insert(round, seed.clone()).is_some() {
-            return Ok(());
-        }
-
         let mut data = vec![0u8; u8::SIZE + seed.encode_size()];
         data[0] = Kind::Seed as u8;
         seed.write(&mut data[1..].as_mut());
+
+        let mut store = self.store.write().unwrap();
+        store.seed_uploads.remove(&round);
+        if store.seeds.insert(round, seed).is_some() {
+            return Ok(());
+        }
+
         let _ = self.consensus_tx.send(data);
         let _ = self.summary_tx.send(SummaryEvent {
             kind: "seed",
@@ -292,23 +293,23 @@ impl Indexer {
             return Err("invalid notarization signature");
         }
 
+        let mut data = vec![0u8; u8::SIZE + notarized.encode_size()];
+        data[0] = Kind::Notarization as u8;
+        notarized.write(&mut data[1..].as_mut());
+        let summary = SummaryEvent::from_notarized("notarization", &notarized);
+
         let mut store = self.store.write().unwrap();
         store.notarization_uploads.remove(&key);
         store
             .blocks_by_digest
             .insert(notarized.block.digest(), notarized.block.clone());
 
-        if store.notarizations.insert(key, notarized.clone()).is_some() {
+        if store.notarizations.insert(key, notarized).is_some() {
             return Ok(());
         }
 
-        let mut data = vec![0u8; u8::SIZE + notarized.encode_size()];
-        data[0] = Kind::Notarization as u8;
-        notarized.write(&mut data[1..].as_mut());
         let _ = self.consensus_tx.send(data);
-        let _ = self
-            .summary_tx
-            .send(SummaryEvent::from_notarized("notarization", &notarized));
+        let _ = self.summary_tx.send(summary);
         Ok(())
     }
 
@@ -355,25 +356,24 @@ impl Indexer {
             return Err("invalid finalization signature");
         }
 
+        let mut data = vec![0u8; u8::SIZE + finalized.encode_size()];
+        data[0] = Kind::Finalization as u8;
+        finalized.write(&mut data[1..].as_mut());
+        let summary = SummaryEvent::from_finalized("finalization", &finalized);
+        let height = finalized.block.height.get();
+
         let mut store = self.store.write().unwrap();
         store.finalization_uploads.remove(&key);
         store
             .blocks_by_digest
             .insert(finalized.block.digest(), finalized.block.clone());
 
-        if store.finalizations.insert(key, finalized.clone()).is_some() {
+        if store.finalizations.insert(key, finalized).is_some() {
             return Ok(());
         }
-        store
-            .finalized_height_to_key
-            .insert(finalized.block.height.get(), key);
-        let mut data = vec![0u8; u8::SIZE + finalized.encode_size()];
-        data[0] = Kind::Finalization as u8;
-        finalized.write(&mut data[1..].as_mut());
+        store.finalized_height_to_key.insert(height, key);
         let _ = self.consensus_tx.send(data);
-        let _ = self
-            .summary_tx
-            .send(SummaryEvent::from_finalized("finalization", &finalized));
+        let _ = self.summary_tx.send(summary);
         Ok(())
     }
 
