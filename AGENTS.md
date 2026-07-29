@@ -30,8 +30,8 @@ just check
 * [`coins`](coins/) - defines what a coin and account are. Also contains other basic financial functions
 * [`crypto`](crypto/) - defines key primitives and wrappers around commonware cryptographic primitives
 * [`rpc`](rpc/) - core abstractions for modular RPC
-* `bridge` - moves coins between chains
-* `oracle` - takes in price feeds and provides them to other modules
+* [`bridge`](bridge/) - consensus extension that embeds foreign finalization certificates into proposed blocks
+* [`oracle`](oracle/) - generic interval-aware on-chain data store for arbitrary namespaced records
 * `chat` - allows humans or agents to publish to permanent on-chain public conversations
 * `factory` - wrapper of coins for mass issuance 
 
@@ -47,7 +47,7 @@ just check
 * `margin` - user has BTC + nunchi and doesn't want to sell, and deposits BTC+nunchi and gets a stablecoin.  Could be backed by other coins, not just btc and nunchi. 
 * `securities` - Non-synthetic perps contracts (delivery of tokenized stock)
 * `vaults` - a module for running vaults composed of many types of capital, traded by an authorised offchain party
-* `clob` - used on the global chain, provides liquidity between local chain tokens
+* [`clob`](clob/) - deterministic central limit order book for spot and derivatives execution
 * `derivatives` - ingests a price feed and creates derivatives products
 * `stablecoin` - a wrapper of coins special for the needs of stablecoins
 
