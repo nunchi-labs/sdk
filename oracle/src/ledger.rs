@@ -21,6 +21,8 @@ pub enum OracleError {
     },
     #[error("nonce overflow")]
     NonceOverflow,
+    #[error("oracle payload is empty")]
+    PayloadEmpty,
     #[error("oracle payload is too large")]
     PayloadTooLarge,
     #[error("oracle proof is too large")]
@@ -166,6 +168,9 @@ impl<D: OracleDB> OracleLedger<D> {
             proof,
         } = operation;
 
+        if payload.is_empty() {
+            return Err(OracleError::PayloadEmpty);
+        }
         if payload.len() > MAX_PAYLOAD_SIZE {
             return Err(OracleError::PayloadTooLarge);
         }

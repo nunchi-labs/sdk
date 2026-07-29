@@ -216,6 +216,23 @@ fn query_by_writer_spans_intervals() {
 }
 
 #[test]
+fn empty_payload_is_rejected() {
+    run_test(|| async {
+        let writer = PrivateKey::from_seed(2);
+        let mut ledger = OracleLedger::new(MemoryStore::default());
+
+        let err = ledger
+            .apply_transaction(
+                &append_tx(&writer, 0, namespace(), 1, Vec::new()),
+                context(1_000),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err, OracleError::PayloadEmpty);
+    });
+}
+
+#[test]
 fn payload_and_proof_limits_are_global() {
     run_test(|| async {
         let writer = PrivateKey::from_seed(2);
@@ -234,7 +251,7 @@ fn payload_and_proof_limits_are_global() {
         let proof = Some(vec![0; MAX_PROOF_SIZE + 1]);
         let err = ledger
             .apply_transaction(
-                &append_tx_with_proof(&writer, 0, namespace(), 1, Vec::new(), proof),
+                &append_tx_with_proof(&writer, 0, namespace(), 1, b"valid".to_vec(), proof),
                 context(1_000),
             )
             .await
