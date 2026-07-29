@@ -20,9 +20,13 @@ struct Cli {
     base_port_b: u16,
     #[arg(long, default_value_t = 9_545)]
     base_rpc_port_b: u16,
-    #[arg(long, default_value_t = 0)]
+    /// Seed for chain A key derivation. Must be unique per deployment to avoid
+    /// generating identical validator keys.
+    #[arg(long)]
     seed_a: u64,
-    #[arg(long, default_value_t = 10_000)]
+    /// Seed for chain B key derivation. Must be unique per deployment to avoid
+    /// generating identical validator keys.
+    #[arg(long)]
     seed_b: u64,
 }
 
