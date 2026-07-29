@@ -364,7 +364,17 @@ where
                     events.transaction_applied(sink).await;
                 }
                 Err(error) if R::is_storage_error(&error) => {
-                    panic!("storage failure while executing block: {error}");
+                    if commit_extension {
+                        // Apply path: storage corruption on a certified block is unrecoverable.
+                        panic!("storage failure while executing certified block: {error}");
+                    }
+                    // Verify path: treat storage errors as verification failure rather than
+                    // crashing the validator on an untrusted block.
+                    error!(%error, "storage error while verifying untrusted block; rejecting");
+                    if let Some(digest) = context.block_digest {
+                        events.discard_block(digest).await;
+                    }
+                    return None;
                 }
                 Err(_) => {
                     if let Some(digest) = context.block_digest {
