@@ -21,6 +21,10 @@ impl BridgeGenesis {
     }
 
     /// Pin this chain's [`ChainId`] into bridge state.
+    ///
+    /// Prefer [`BridgeLedger::apply_genesis`](crate::BridgeLedger::apply_genesis) instead,
+    /// which follows the same pattern as all other module ledgers.
+    #[deprecated(note = "use BridgeLedger::apply_genesis instead")]
     pub fn apply<S: StateStore>(&self, store: &mut S) {
         set_local_chain_id(store, &self.local_chain_id);
     }

@@ -6,9 +6,10 @@
 //! the same overlay.
 
 use crate::events::{transfer_locked_event, TransferLocked};
+use crate::genesis::BridgeGenesis;
 use crate::record::{
-    bridge_nonce, local_chain_id, put_transfer_record, set_bridge_nonce, AssetId,
-    BridgeTransferRecord, TransferRecordId,
+    bridge_nonce, local_chain_id, put_transfer_record, set_bridge_nonce, set_local_chain_id,
+    AssetId, BridgeTransferRecord, TransferRecordId,
 };
 use crate::transaction::{BridgeOperation, Transaction};
 use nunchi_common::{state_db::StateError, Authorization, EventSink, StateStore};
@@ -61,6 +62,17 @@ impl<S: StateStore> BridgeLedger<S> {
     /// Consume the ledger, returning the underlying state backend.
     pub fn into_inner(self) -> S {
         self.store
+    }
+
+    /// Seed the bridge module from genesis, following the same pattern as
+    /// other module ledgers (`AuthorityLedger::apply_genesis`, etc.).
+    ///
+    /// Pins this chain's [`ChainId`](crate::record::ChainId) into bridge
+    /// state so that every subsequent lock records the correct
+    /// `source_chain_id`.
+    pub async fn apply_genesis(&mut self, genesis: &BridgeGenesis) -> Result<(), BridgeError> {
+        set_local_chain_id(&mut self.store, &genesis.local_chain_id);
+        Ok(())
     }
 
     /// Verify, authorize, and apply a signed bridge transaction, returning the id of the recorded
