@@ -152,6 +152,7 @@ pub struct ClobActor {
     markets: BTreeMap<MarketId, Market>,
     sequences: BTreeMap<MarketId, u64>,
     nonces: BTreeMap<Address, u64>,
+    pending_nonces: BTreeMap<Address, u64>,
 }
 
 impl ClobActor {
@@ -165,6 +166,7 @@ impl ClobActor {
                 markets: BTreeMap::new(),
                 sequences: BTreeMap::new(),
                 nonces: BTreeMap::new(),
+                pending_nonces: BTreeMap::new(),
             },
             ClobMailbox { sender },
         )
@@ -392,6 +394,7 @@ impl ClobActor {
             .collect::<BTreeSet<_>>();
         self.pending_orders
             .retain(|tx| !closed.contains(&OrderId(tx.digest())));
+        self.refresh_pending_nonces();
     }
 
     fn accept_order(&mut self, tx: Transaction) -> Result<(), ClobError> {
@@ -426,7 +429,10 @@ impl ClobActor {
         {
             return Err(ClobError::InvalidOrder("duplicate pending order id"));
         }
+        let account = tx.account_id.clone();
         self.pending_orders.push(tx);
+        self.pending_nonces
+            .insert(account, expected.checked_add(1).unwrap_or(expected));
         Ok(())
     }
 
@@ -452,20 +458,16 @@ impl ClobActor {
         }
         self.pending_orders
             .retain(|tx| !stale.contains(&OrderId(tx.digest())));
+        self.refresh_pending_nonces();
         orders
     }
 
     fn expected_nonce_for_account(&self, account: &Address) -> u64 {
-        let mut expected = *self.nonces.get(account).unwrap_or(&0);
-        for tx in &self.pending_orders {
-            if &tx.account_id == account && tx.payload.nonce == expected {
-                let Some(next) = expected.checked_add(1) else {
-                    break;
-                };
-                expected = next;
-            }
-        }
-        expected
+        self.pending_nonces
+            .get(account)
+            .copied()
+            .or_else(|| self.nonces.get(account).copied())
+            .unwrap_or_default()
     }
 
     fn can_locally_replay(&self, tx: &Transaction) -> bool {
@@ -486,5 +488,24 @@ impl ClobActor {
                 .get(&tx.account_id)
                 .is_none_or(|expected| tx.payload.nonce >= *expected)
         });
+        self.refresh_pending_nonces();
+    }
+
+    fn refresh_pending_nonces(&mut self) {
+        self.pending_nonces.clear();
+        for tx in &self.pending_orders {
+            let expected = self
+                .pending_nonces
+                .get(&tx.account_id)
+                .copied()
+                .or_else(|| self.nonces.get(&tx.account_id).copied())
+                .unwrap_or_default();
+            if tx.payload.nonce == expected {
+                self.pending_nonces.insert(
+                    tx.account_id.clone(),
+                    expected.checked_add(1).unwrap_or(expected),
+                );
+            }
+        }
     }
 }

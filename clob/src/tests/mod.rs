@@ -1261,6 +1261,43 @@ fn clob_actor_rejects_gap_nonce_for_unknown_account() {
 }
 
 #[test]
+fn clob_actor_caches_expected_nonce_and_refreshes_after_sync() {
+    deterministic::Runner::default().start(|context| async move {
+        let (actor, mailbox) = ClobActor::new(ClobConfig::default());
+        let _actor_handle = actor.start(context);
+        let trader = PrivateKey::from_seed(9);
+        let account = Address::external(&trader.public_key());
+
+        for nonce in 0..=1 {
+            mailbox
+                .submit_order(place_tx(
+                    &trader,
+                    nonce,
+                    Side::Bid,
+                    100,
+                    2,
+                    TimeInForce::ImmediateOrCancel,
+                ))
+                .await
+                .unwrap();
+        }
+
+        mailbox.sync_nonce(account, 1).await.unwrap();
+        mailbox
+            .submit_order(place_tx(
+                &trader,
+                2,
+                Side::Bid,
+                100,
+                2,
+                TimeInForce::ImmediateOrCancel,
+            ))
+            .await
+            .unwrap();
+    });
+}
+
+#[test]
 fn clob_mailbox_reports_stopped_actor() {
     deterministic::Runner::default().start(|_| async move {
         let (actor, mailbox) = ClobActor::new(ClobConfig::default());
