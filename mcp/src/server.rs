@@ -444,6 +444,9 @@ impl NunchiServer {
                 .amount
                 .parse::<u128>()
                 .map_err(|_| anyhow::anyhow!("amount is not a valid u128"))?;
+            if amount == 0 {
+                anyhow::bail!("amount must be greater than zero");
+            }
             let tx = Transaction::sign(
                 &signer,
                 p.nonce,
@@ -479,6 +482,9 @@ impl NunchiServer {
                 .amount
                 .parse::<u128>()
                 .map_err(|_| anyhow::anyhow!("amount is not a valid u128"))?;
+            if amount == 0 {
+                anyhow::bail!("amount must be greater than zero");
+            }
             let tx = Transaction::sign(&signer, p.nonce, CoinOperation::Mint { coin, to, amount });
             Ok(encode_value(&tx))
         })() {
@@ -505,6 +511,9 @@ impl NunchiServer {
                 .amount
                 .parse::<u128>()
                 .map_err(|_| anyhow::anyhow!("amount is not a valid u128"))?;
+            if amount == 0 {
+                anyhow::bail!("amount must be greater than zero");
+            }
             let tx =
                 Transaction::sign(&signer, p.nonce, CoinOperation::Burn { coin, from, amount });
             Ok(encode_value(&tx))
