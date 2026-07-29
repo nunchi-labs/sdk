@@ -3,6 +3,7 @@ use commonware_codec::DecodeExt;
 use commonware_formatting::from_hex;
 use nunchi_common::Address;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 /// JSON-facing custom module genesis state.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -21,9 +22,19 @@ pub struct CustomAccountGenesis {
 
 impl<D: CustomDB> CustomLedger<D> {
     /// Seed custom state from genesis.
+    ///
+    /// Returns an error if the same account address appears more than once in the
+    /// genesis configuration.
     pub async fn apply_genesis(&mut self, genesis: &CustomGenesis) -> Result<(), CustomError> {
+        let mut seen = BTreeSet::new();
         for account in &genesis.accounts {
             let id = decode_hex::<Address>(&account.account, "account")?;
+            if !seen.insert(id.clone()) {
+                return Err(CustomError::Storage(format!(
+                    "duplicate genesis account: {}",
+                    account.account
+                )));
+            }
             self.db.set_value(&id, account.value);
         }
         Ok(())
