@@ -182,3 +182,53 @@ fn state_commit_rejects_oversized_values() {
         ));
     });
 }
+
+#[test]
+fn namespace_key_is_deterministic() {
+    let ns = Namespace::new(b"mod");
+    assert_eq!(ns.key(0u8, b"key1"), ns.key(0u8, b"key1"));
+}
+
+#[test]
+fn namespace_key_separates_tags() {
+    let ns1 = Namespace::new(b"module-a");
+    let ns2 = Namespace::new(b"module-b");
+    assert_ne!(
+        ns1.key(0u8, b"k"),
+        ns2.key(0u8, b"k"),
+        "different namespace tags must produce different keys"
+    );
+}
+
+#[test]
+fn namespace_key_separates_tables() {
+    let ns = Namespace::new(b"mod");
+    assert_ne!(
+        ns.key(0u8, b"k"),
+        ns.key(1u8, b"k"),
+        "different table discriminants must produce different keys"
+    );
+}
+
+#[test]
+fn namespace_key_separates_logical_keys() {
+    let ns = Namespace::new(b"mod");
+    assert_ne!(
+        ns.key(0u8, b"key1"),
+        ns.key(0u8, b"key2"),
+        "different logical keys must produce different storage keys"
+    );
+}
+
+#[test]
+fn namespace_key_tag_length_prefix_prevents_ambiguity() {
+    // "AB" namespace + "" logical must differ from "A" namespace + "B" logical
+    // (would be the same without the length prefix on the tag)
+    let ns_ab = Namespace::new(b"AB");
+    let ns_a = Namespace::new(b"A");
+    assert_ne!(
+        ns_ab.key(0u8, b""),
+        ns_a.key(0u8, b"B"),
+        "tag length-prefix must prevent tag/logical concatenation ambiguity"
+    );
+}
