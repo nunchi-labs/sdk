@@ -8,6 +8,7 @@ use commonware_cryptography::{
     sha256::Digest,
     Signer,
 };
+use commonware_glue::stateful::PruneConfig;
 use commonware_p2p::{
     simulated::{self, Link, Network, Oracle, Receiver, Sender},
     Manager,
@@ -23,6 +24,7 @@ use commonware_utils::{
 };
 use governor::Quota;
 use nunchi_authority::AuthorityLedger;
+use nunchi_chain::engine::default_state_prune_config;
 use nunchi_coins::{Address, Ledger};
 use nunchi_coins_chain::{
     engine::{Config, Engine},
@@ -112,6 +114,7 @@ pub(crate) struct ValidatorConfig {
     pub(crate) epoch_length: NonZeroU64,
     pub(crate) leader_timeout: Duration,
     pub(crate) certification_timeout: Duration,
+    pub(crate) prune_config: PruneConfig,
 }
 
 impl Default for ValidatorConfig {
@@ -120,6 +123,7 @@ impl Default for ValidatorConfig {
             epoch_length: BLOCKS_PER_EPOCH,
             leader_timeout: Duration::from_secs(1),
             certification_timeout: Duration::from_secs(2),
+            prune_config: default_state_prune_config(),
         }
     }
 }
@@ -601,6 +605,7 @@ async fn start_validator(
         certification_timeout: cfg.certification_timeout,
         strategy: Sequential,
         state_sync,
+        prune_config: cfg.prune_config,
         max_block_transactions: MAX_BLOCK_TRANSACTIONS,
         pool_config: PoolConfig::default(),
         genesis: None,
@@ -632,7 +637,8 @@ async fn start_validator(
         channels.probe,
         channels.state_sync,
     )
-    .await;
+    .await
+    .expect("valid prune config");
     engine.start(
         channels.pending,
         channels.recovered,

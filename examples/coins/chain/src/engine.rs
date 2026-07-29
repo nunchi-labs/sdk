@@ -54,8 +54,9 @@ use nunchi_dkg::{self as dkg, orchestrator, PeerConfig, UpdateCallBack, MAX_SUPP
 use nunchi_mempool::{Mempool, PoolConfig};
 use rand::{CryptoRng, Rng};
 use std::{
+    collections::BTreeSet,
     marker::PhantomData,
-    num::NonZeroU64,
+    num::{NonZeroU64, NonZeroUsize},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -71,6 +72,14 @@ pub enum EngineError {
     ShutdownSignalClosed,
     #[error("{0} stopped unexpectedly")]
     UnexpectedExit(&'static str),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum StartupError {
+    #[error("invalid prune configuration: {0}")]
+    PruneConfig(#[from] PruneConfigError),
+    #[error("invalid finalized-history retention policy: {0}")]
+    RetentionPolicy(#[from] history::RetentionPolicyError),
 }
 
 /// Configuration for the [Engine].
@@ -90,6 +99,7 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
     pub strategy: S,
     /// Discover a finalized floor and perform peer QMDB state sync on a fresh database.
     pub state_sync: bool,
+    pub prune_config: commonware_glue::stateful::PruneConfig,
     pub max_block_transactions: usize,
     pub pool_config: PoolConfig,
     pub genesis: Option<ChainGenesis>,
@@ -200,7 +210,9 @@ where
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
-    ) -> (Self, NodeHandle<E>) {
+    ) -> Result<(Self, NodeHandle<E>), StartupError> {
+        let prune_config = validate_state_prune_config(config.prune_config)?;
+        let retention_policy = history::RetentionPolicy::new(prune_config)?;
         let (mempool, submitter) = Mempool::<Transaction>::new(config.pool_config.clone());
         let (clob, clob_mailbox) = ClobActor::new(ClobConfig::default());
         if let Some(clob_genesis) = config.genesis.as_ref().and_then(|genesis| genesis.clob.as_ref())
@@ -268,6 +280,7 @@ where
             &config.partition_prefix,
             page_cache.clone(),
             block_codec_config,
+            retention_policy,
         )
         .await
         .unwrap_or_else(|error| panic!("failed to initialize bounded finalized history: {error}"));
@@ -284,9 +297,13 @@ where
             finalizations_value = %history_partitions.finalizations_value,
             blocks_key = %history_partitions.blocks_key,
             blocks_value = %history_partitions.blocks_value,
-            logical_retention = history::LOGICAL_RETENTION,
+            max_pending_acks = prune_config.max_pending_acks.get(),
+            maintenance_interval = prune_config.maintenance_interval.get(),
+            retained_marshal_blocks = prune_config.retained_marshal_blocks,
+            retained_qmdb_blocks = prune_config.retained_qmdb_blocks,
+            logical_retention = retention_policy.logical_retention,
             items_per_section = history::PRUNABLE_ITEMS_PER_SECTION.get(),
-            maximum_section_and_cadence_slack = history::MAX_RETAINED_HEIGHTS - history::LOGICAL_RETENTION,
+            maximum_retained_heights = retention_policy.max_retained_heights,
             ?marker_status,
             "restored prunable finalized history"
         );
@@ -416,6 +433,7 @@ where
             &finalizations_by_height,
             &finalized_blocks,
             &current_state_target,
+            prune_config.max_pending_acks,
         )
         .await
         {
@@ -426,7 +444,8 @@ where
             )
             .await;
             if let Some(tip) = ArchiveStore::last_index(&finalized_blocks) {
-                let policy_floor = history::policy_floor(tip, history::LOGICAL_RETENTION);
+                let policy_floor =
+                    history::policy_floor(tip, retention_policy.logical_retention);
                 let safe_floor = policy_floor.min(processed_height.get());
                 finalizations_by_height
                     .prune(safe_floor)
@@ -503,8 +522,21 @@ where
         // by the stateful actor. It is needed to resume Simplex from a QMDB
         // snapshot taken within, rather than at the start of, an epoch.
         let startup_finalization = plan.floor().cloned();
+        let certified_payloads = recovered_floor
+            .iter()
+            .map(|certificate| certificate.proposal.payload)
+            .chain(
+                plan.floor()
+                    .into_iter()
+                    .map(|certificate| certificate.proposal.payload),
+            )
+            .collect::<BTreeSet<_>>();
+        let coordinator_capacity = startup_coordinator_capacity(
+            local_startup_candidate.is_some(),
+            certified_payloads.len(),
+        );
         let startup_coordinator = Arc::new(Mutex::new(
-            nunchi_chain::startup::StartupCoordinator::new(MAX_PENDING_ACKS),
+            nunchi_chain::startup::StartupCoordinator::new(coordinator_capacity),
         ));
         startup_coordinator
             .lock()
@@ -524,17 +556,9 @@ where
                 .record(candidate)
                 .expect("local startup candidate should fit");
         }
-        let certified_payloads = recovered_floor
-            .iter()
-            .map(|certificate| certificate.proposal.payload)
-            .chain(
-                plan.floor()
-                    .into_iter()
-                    .map(|certificate| certificate.proposal.payload),
-            );
         let startup_reporter = nunchi_chain::startup::StartupReporter::new(
             startup_coordinator.clone(),
-            certified_payloads,
+            certified_payloads.into_iter(),
             block_state_target,
         );
         let marshal_start = recovered_floor
@@ -562,7 +586,7 @@ where
                 value_write_buffer: WRITE_BUFFER,
                 block_codec_config,
                 max_repair: MAX_REPAIR,
-                max_pending_acks: MAX_PENDING_ACKS,
+                max_pending_acks: prune_config.max_pending_acks,
                 strategy: config.strategy.clone(),
             },
         )
@@ -581,7 +605,7 @@ where
                 plan,
                 resolvers: state_sync_mailbox,
                 sync_config: state_sync_config(),
-                prune_config: Some(state_prune_config()),
+                prune_config: Some(prune_config),
             },
         );
         let node_handle = NodeHandle::new(
@@ -696,7 +720,7 @@ where
             indexer_producer_handle,
             indexer_consumer,
         };
-        (engine, node_handle)
+        Ok((engine, node_handle))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -943,12 +967,34 @@ fn block_state_target(
 
 const MARSHAL_PROCESSED_KEY: U64 = U64::new(0xFF);
 
+fn startup_coordinator_capacity(
+    has_local_startup_candidate: bool,
+    certified_payloads: usize,
+) -> NonZeroUsize {
+    1usize
+        .checked_add(usize::from(has_local_startup_candidate))
+        .and_then(|capacity| capacity.checked_add(certified_payloads))
+        .and_then(NonZeroUsize::new)
+        .expect("startup candidate capacity must fit in usize")
+}
+
+fn reconciliation_search_end(
+    processed_height: u64,
+    tip: u64,
+    max_pending_acks: NonZeroUsize,
+) -> u64 {
+    let ack_window =
+        u64::try_from(max_pending_acks.get()).expect("acknowledgement window does not fit in u64");
+    tip.min(processed_height.saturating_add(ack_window))
+}
+
 async fn validate_marshal_progress_against_state<E>(
     context: &E,
     partition_prefix: &str,
     finalizations: &FinalizationsArchive<E>,
     finalized_blocks: &BlocksArchive<E>,
     current_target: &commonware_storage::qmdb::sync::Target<commonware_storage::mmr::Family, Digest>,
+    max_pending_acks: NonZeroUsize,
 ) -> Option<(Height, nunchi_chain::startup::StartupCandidate)>
 where
     E: BufferPooler
@@ -980,11 +1026,8 @@ where
     let Some(tip) = ArchiveStore::last_index(finalized_blocks) else {
         panic!("marshal progress references height {processed_height}, but finalized block history is empty; rebuild or perform verified peer state sync");
     };
-    let search_end = tip.min(
-        processed_height
-            .get()
-            .saturating_add(MAX_PENDING_ACKS.get() as u64),
-    );
+    let search_end =
+        reconciliation_search_end(processed_height.get(), tip, max_pending_acks);
     for height in processed_height.get()..=search_end {
         let Some(block) = ArchiveStore::get(
             finalized_blocks,
@@ -1077,5 +1120,27 @@ where
                 "finalized block and certificate epochs conflict at height {height}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_utils::NZUsize;
+
+    #[test]
+    fn configured_ack_window_bounds_startup_reconciliation() {
+        assert_eq!(reconciliation_search_end(10, 20, NZUsize!(1)), 11);
+        assert_eq!(reconciliation_search_end(10, 10, NZUsize!(1)), 10);
+        assert_eq!(
+            reconciliation_search_end(u64::MAX, u64::MAX, NZUsize!(1)),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn startup_capacity_covers_every_candidate_source() {
+        assert_eq!(startup_coordinator_capacity(true, 2).get(), 4);
+        assert_eq!(startup_coordinator_capacity(false, 0).get(), 1);
     }
 }

@@ -3,6 +3,7 @@
 use crate::{Block, Finalization};
 use commonware_codec::Read;
 use commonware_cryptography::sha256::Digest;
+use commonware_glue::stateful::PruneConfig;
 use commonware_runtime::{buffer::paged::CacheRef, BufferPooler, Clock, Metrics, Spawner, Storage};
 use commonware_storage::{
     archive::{prunable, Archive as _},
@@ -10,23 +11,50 @@ use commonware_storage::{
     translator::EightCap,
 };
 use commonware_utils::{sequence::U64, NZU64};
-use nunchi_chain::engine::{
-    MAX_PENDING_ACKS, PRUNE_MAINTENANCE_INTERVAL, PRUNE_RETAINED_MARSHAL_BLOCKS, REPLAY_BUFFER,
-    WRITE_BUFFER,
-};
+use nunchi_chain::engine::{REPLAY_BUFFER, WRITE_BUFFER};
 use std::num::NonZeroU64;
 
 pub(crate) const FORMAT_VERSION: u64 = 1;
 pub(crate) const PRUNABLE_ITEMS_PER_SECTION: NonZeroU64 = NZU64!(4_096);
-pub(crate) const LOGICAL_RETENTION: u64 =
-    PRUNE_RETAINED_MARSHAL_BLOCKS as u64 + MAX_PENDING_ACKS.get() as u64 + 1;
-pub(crate) const MAX_RETAINED_HEIGHTS: u64 = LOGICAL_RETENTION
-    + PRUNABLE_ITEMS_PER_SECTION.get()
-    - 1
-    + PRUNE_MAINTENANCE_INTERVAL.get() as u64
-    - 1;
-
 const MARKER_KEY: U64 = U64::new(0);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RetentionPolicy {
+    pub(crate) logical_retention: u64,
+    pub(crate) max_retained_heights: u64,
+}
+
+#[derive(Debug, thiserror::Error, Eq, PartialEq)]
+pub enum RetentionPolicyError {
+    #[error("logical retention does not fit in u64")]
+    LogicalRetentionConversion,
+    #[error("maintenance interval does not fit in u64")]
+    MaintenanceIntervalConversion,
+    #[error("maximum retained height bound overflows u64")]
+    MaximumRetainedHeightsOverflow,
+}
+
+impl RetentionPolicy {
+    pub(crate) fn new(config: PruneConfig) -> Result<Self, RetentionPolicyError> {
+        let logical_retention = config
+            .max_pending_acks
+            .get()
+            .checked_add(1)
+            .and_then(|base| base.checked_add(config.retained_marshal_blocks))
+            .and_then(|retained| u64::try_from(retained).ok())
+            .ok_or(RetentionPolicyError::LogicalRetentionConversion)?;
+        let maintenance_interval = u64::try_from(config.maintenance_interval.get())
+            .map_err(|_| RetentionPolicyError::MaintenanceIntervalConversion)?;
+        let max_retained_heights = logical_retention
+            .checked_add(PRUNABLE_ITEMS_PER_SECTION.get() - 1)
+            .and_then(|retained| retained.checked_add(maintenance_interval - 1))
+            .ok_or(RetentionPolicyError::MaximumRetainedHeightsOverflow)?;
+        Ok(Self {
+            logical_retention,
+            max_retained_heights,
+        })
+    }
+}
 
 pub(crate) type FinalizationsArchive<E> =
     prunable::Archive<EightCap, E, Digest, Finalization>;
@@ -71,8 +99,6 @@ pub(crate) enum HistoryError {
         #[source]
         source: commonware_storage::metadata::Error,
     },
-    #[error("invalid history retention configuration: {0}")]
-    Retention(&'static str),
 }
 
 #[derive(Clone, Debug)]
@@ -123,35 +149,16 @@ pub(crate) const fn policy_floor(tip: u64, retained: u64) -> u64 {
     tip.saturating_add(1).saturating_sub(retained)
 }
 
-pub(crate) fn validate_production_retention() -> Result<(), HistoryError> {
-    if MAX_PENDING_ACKS.get() != 16 {
-        return Err(HistoryError::Retention(
-            "MAX_PENDING_ACKS changed; update the mandatory rewind assertion",
-        ));
-    }
-    if LOGICAL_RETENTION != 217 {
-        return Err(HistoryError::Retention(
-            "logical finalized-history retention must be 217",
-        ));
-    }
-    if MAX_RETAINED_HEIGHTS != 4_343 {
-        return Err(HistoryError::Retention(
-            "section-granular finalized-history bound must be 4,343",
-        ));
-    }
-    Ok(())
-}
-
 pub(crate) async fn open<E>(
     context: &E,
     prefix: &str,
     page_cache: CacheRef,
     block_codec_config: <Block as Read>::Cfg,
+    _policy: RetentionPolicy,
 ) -> Result<Opened<E>, HistoryError>
 where
     E: BufferPooler + Clock + Spawner + Storage + Metrics,
 {
-    validate_production_retention()?;
     reject_legacy(context, prefix).await?;
 
     let partitions = Partitions::new(prefix);
@@ -388,14 +395,25 @@ mod tests {
     use super::*;
     use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner as _};
     use commonware_utils::{NZU16, NZU32, NZUsize};
+    use nunchi_chain::engine::default_state_prune_config;
 
     #[test]
-    fn production_retention_arithmetic() {
-        validate_production_retention().unwrap();
-        assert_eq!(policy_floor(216, LOGICAL_RETENTION), 0);
-        assert_eq!(policy_floor(217, LOGICAL_RETENTION), 1);
-        assert_eq!(LOGICAL_RETENTION, 217);
-        assert_eq!(MAX_RETAINED_HEIGHTS, 4_343);
+    fn retention_policy_arithmetic() {
+        let standard = RetentionPolicy::new(default_state_prune_config()).unwrap();
+        assert_eq!(policy_floor(216, standard.logical_retention), 0);
+        assert_eq!(policy_floor(217, standard.logical_retention), 1);
+        assert_eq!(standard.logical_retention, 217);
+        assert_eq!(standard.max_retained_heights, 4_343);
+
+        let asymmetric = RetentionPolicy::new(PruneConfig {
+            max_pending_acks: NZUsize!(1),
+            maintenance_interval: NZUsize!(3),
+            retained_marshal_blocks: 5,
+            retained_qmdb_blocks: 1,
+        })
+        .unwrap();
+        assert_eq!(asymmetric.logical_retention, 7);
+        assert_eq!(asymmetric.max_retained_heights, 4_104);
     }
 
     #[test]
@@ -407,6 +425,7 @@ mod tests {
                 "validator",
                 page_cache.clone(),
                 (NZU32!(1), ()),
+                RetentionPolicy::new(default_state_prune_config()).unwrap(),
             )
             .await
             .expect("initialize fresh history");
@@ -420,6 +439,7 @@ mod tests {
                 "validator",
                 page_cache,
                 (NZU32!(1), ()),
+                RetentionPolicy::new(default_state_prune_config()).unwrap(),
             )
             .await
             .expect("reopen marked history");
@@ -458,6 +478,7 @@ mod tests {
                 "validator",
                 page_cache,
                 (NZU32!(1), ()),
+                RetentionPolicy::new(default_state_prune_config()).unwrap(),
             )
             .await;
             assert!(matches!(result, Err(HistoryError::LegacyPartition { .. })));

@@ -22,6 +22,7 @@ use commonware_cryptography::{
     ed25519, Signer,
 };
 use commonware_formatting::{from_hex, hex};
+use commonware_glue::stateful::PruneConfig;
 use commonware_p2p::{
     authenticated::discovery::{self, Network},
     Ingress, Manager,
@@ -36,12 +37,15 @@ use nunchi_dkg::{
     UpdateCallBack, MAX_SUPPORTED_MODE,
 };
 use nunchi_mempool::PoolConfig;
+use nunchi_chain::engine::{
+    default_state_prune_config, validate_state_prune_config, PruneConfigError,
+};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
     net::{IpAddr, SocketAddr},
-    num::{NonZeroU32, NonZeroU64, TryFromIntError},
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize, TryFromIntError},
     path::{Path, PathBuf},
     str::FromStr,
     time::{Duration, Instant},
@@ -156,18 +160,38 @@ pub struct NodeConfig {
     /// Enable one-time peer QMDB state sync for a fresh joining node.
     #[serde(default)]
     pub state_sync: bool,
+    /// Maximum number of marshal acknowledgements that may remain pending.
+    pub max_pending_acks: NonZeroUsize,
+    /// Finalized-height cadence for marshal and QMDB pruning maintenance.
+    pub maintenance_interval: NonZeroUsize,
+    /// Blocks retained by marshal beyond the mandatory acknowledgement window.
+    pub retained_marshal_blocks: usize,
+    /// Operation-history blocks retained by QMDB beyond the mandatory acknowledgement window.
+    pub retained_qmdb_blocks: usize,
     pub max_block_transactions: usize,
 }
 
 impl NodeConfig {
     pub fn read(path: impl AsRef<Path>) -> Result<Self, Error> {
         let raw = fs::read_to_string(path).map_err(Error::Io)?;
-        toml::from_str(&raw).map_err(Error::TomlDeserialize)
+        let config: Self = toml::from_str(&raw).map_err(Error::TomlDeserialize)?;
+        let prune_config = config.prune_config()?;
+        crate::history::RetentionPolicy::new(prune_config)?;
+        Ok(config)
     }
 
     pub fn write(&self, path: impl AsRef<Path>) -> Result<(), Error> {
         let raw = toml::to_string_pretty(self).map_err(Error::TomlSerialize)?;
         fs::write(path, raw).map_err(Error::Io)
+    }
+
+    pub fn prune_config(&self) -> Result<PruneConfig, PruneConfigError> {
+        validate_state_prune_config(PruneConfig {
+            max_pending_acks: self.max_pending_acks,
+            maintenance_interval: self.maintenance_interval,
+            retained_marshal_blocks: self.retained_marshal_blocks,
+            retained_qmdb_blocks: self.retained_qmdb_blocks,
+        })
     }
 }
 
@@ -318,6 +342,12 @@ pub enum Error {
     TomlSerialize(#[from] toml::ser::Error),
     #[error("failed to parse toml: {0}")]
     TomlDeserialize(#[from] toml::de::Error),
+    #[error("invalid prune configuration: {0}")]
+    PruneConfig(#[from] PruneConfigError),
+    #[error("invalid finalized-history retention policy: {0}")]
+    RetentionPolicy(#[from] crate::history::RetentionPolicyError),
+    #[error("engine startup failed: {0}")]
+    EngineStartup(#[from] crate::engine::StartupError),
     #[error("engine stopped unexpectedly: {0}")]
     Engine(#[from] crate::engine::EngineError),
     #[error("engine task failed: {0}")]
@@ -432,6 +462,10 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
             consensus: ConsensusConfig::default(),
             networking: NetworkConfig::default(),
             state_sync: false,
+            max_pending_acks: default_state_prune_config().max_pending_acks,
+            maintenance_interval: default_state_prune_config().maintenance_interval,
+            retained_marshal_blocks: default_state_prune_config().retained_marshal_blocks,
+            retained_qmdb_blocks: default_state_prune_config().retained_qmdb_blocks,
             max_block_transactions: DEFAULT_MAX_BLOCK_TRANSACTIONS,
         };
         node_config.write(&config_path)?;
@@ -565,6 +599,8 @@ async fn start_node(
     ),
     Error,
 > {
+    let prune_config = config.prune_config()?;
+    crate::history::RetentionPolicy::new(prune_config)?;
     let private_key = decode_unit::<ed25519::PrivateKey>(&config.private_key, "private_key")?;
     let dkg_storage_key = decode_storage_key(&config.dkg_storage_key)?;
     let public_key = private_key.public_key();
@@ -654,6 +690,7 @@ async fn start_node(
         strategy: context
             .strategy(std::thread::available_parallelism().unwrap_or(std::num::NonZeroUsize::MIN)),
         state_sync: config.state_sync,
+        prune_config,
         max_block_transactions: config.max_block_transactions,
         pool_config: PoolConfig::default(),
         genesis: read_genesis(config.genesis_path.as_ref())?,
@@ -687,7 +724,7 @@ async fn start_node(
         probe,
         state_sync,
     )
-    .await;
+    .await?;
     let engine_handle = engine.start(
         pending,
         recovered,

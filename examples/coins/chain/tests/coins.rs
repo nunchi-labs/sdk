@@ -6,10 +6,11 @@ use common::network::{
 };
 use commonware_cryptography::Signer as _;
 use commonware_cryptography::{Hasher, Sha256};
+use commonware_glue::stateful::PruneConfig;
 use commonware_macros::{select, test_traced};
 use commonware_p2p::simulated::Link;
 use commonware_runtime::{deterministic, Clock, Runner as _, Spawner as _, Supervisor as _};
-use commonware_utils::NZU64;
+use commonware_utils::{NZUsize, NZU64};
 use nunchi_authority::{
     proposal_id, AuthorityOperation, MultisigPolicy, RegistryChange,
     Transaction as AuthorityTransaction,
@@ -102,6 +103,31 @@ fn reaches_height_100() {
             success_rate: 0.98,
         };
         deterministic_state(10, 0, link, 100);
+    });
+}
+
+#[test_traced]
+fn configurable_pruning_policy_remains_live() {
+    with_large_stack(|| {
+        let executor = deterministic::Runner::timed(Duration::from_secs(60));
+        executor.start(|mut context| async move {
+            let cfg = ValidatorConfig {
+                prune_config: PruneConfig {
+                    max_pending_acks: NZUsize!(1),
+                    maintenance_interval: NZUsize!(3),
+                    retained_marshal_blocks: 5,
+                    retained_qmdb_blocks: 1,
+                },
+                ..ValidatorConfig::default()
+            };
+            let mut network = TestNetworkBuilder::new(VALIDATORS)
+                .with_initial_link(reliable_link())
+                .with_validator_config(cfg)
+                .build(&mut context)
+                .await;
+            network.start_all().await;
+            network.run_until_height(15).await;
+        });
     });
 }
 

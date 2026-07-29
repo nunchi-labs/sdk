@@ -12,7 +12,7 @@ use commonware_p2p::{
     Ingress, Manager, Receiver as _, Recipients, Sender as _,
 };
 use commonware_runtime::{deterministic, Clock as _, Quota, Runner as _, Supervisor as _};
-use commonware_utils::{ordered::Set, Hostname, NZU32};
+use commonware_utils::{ordered::Set, Hostname, NZUsize, NZU32};
 use std::collections::HashSet;
 use std::{
     fs,
@@ -84,6 +84,10 @@ fn generated_testnet_has_unique_ports_dirs_and_complete_peer_sets() {
         assert_eq!(config.rpc_address.port(), node.rpc_port);
         assert_eq!(config.metrics_address.port(), node.metrics_port);
         assert_eq!(config.epoch_length, BLOCKS_PER_EPOCH);
+        assert_eq!(config.max_pending_acks, NZUsize!(16));
+        assert_eq!(config.maintenance_interval, NZUsize!(32));
+        assert_eq!(config.retained_marshal_blocks, 200);
+        assert_eq!(config.retained_qmdb_blocks, 200);
 
         // The threshold material must round-trip from the written config.
         let max_participants =
@@ -98,6 +102,99 @@ fn generated_testnet_has_unique_ports_dirs_and_complete_peer_sets() {
         assert!(dkg_storage_keys.insert(dkg_storage_key));
     }
     assert_eq!(dkg_storage_keys.len(), 4);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn prune_config_is_required_and_validated() {
+    let dir = std::env::temp_dir().join(format!(
+        "coins-chain-prune-config-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    let manifest = generate_local_testnet(LocalTestnetConfig {
+        validators: 1,
+        base_port: 46_000,
+        base_rpc_port: 46_100,
+        base_metrics_port: 46_200,
+        base_data_dir: dir.clone(),
+        bind_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        public_ips: None,
+        storage_dir: None,
+        genesis_path: None,
+        indexer_url: None,
+        seed: 12,
+    })
+    .expect("generate testnet");
+    let generated_path = &manifest.nodes[0].config_path;
+    let raw = fs::read_to_string(generated_path).expect("read generated config");
+
+    for field in [
+        "max_pending_acks",
+        "maintenance_interval",
+        "retained_marshal_blocks",
+        "retained_qmdb_blocks",
+    ] {
+        let path = dir.join(format!("missing-{field}.toml"));
+        let filtered = raw
+            .lines()
+            .filter(|line| !line.starts_with(&format!("{field} = ")))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&path, filtered).expect("write incomplete config");
+        assert!(matches!(
+            NodeConfig::read(path),
+            Err(Error::TomlDeserialize(_))
+        ));
+    }
+
+    let mut asymmetric = NodeConfig::read(generated_path).expect("read generated config");
+    asymmetric.max_pending_acks = NZUsize!(1);
+    asymmetric.maintenance_interval = NZUsize!(3);
+    asymmetric.retained_marshal_blocks = 5;
+    asymmetric.retained_qmdb_blocks = 1;
+    let asymmetric_path = dir.join("asymmetric.toml");
+    asymmetric.write(&asymmetric_path).expect("write asymmetric config");
+    assert_eq!(
+        NodeConfig::read(&asymmetric_path)
+            .expect("read asymmetric config")
+            .prune_config()
+            .unwrap(),
+        asymmetric.prune_config().unwrap()
+    );
+
+    asymmetric.retained_qmdb_blocks = 6;
+    asymmetric.write(&asymmetric_path).expect("write unordered config");
+    assert!(matches!(
+        NodeConfig::read(&asymmetric_path),
+        Err(Error::PruneConfig(_))
+    ));
+
+    asymmetric.max_pending_acks = NZUsize!(1);
+    asymmetric.retained_marshal_blocks = usize::MAX - 1;
+    asymmetric.retained_qmdb_blocks = 0;
+    asymmetric.write(&asymmetric_path).expect("write overflowing window");
+    assert!(matches!(
+        NodeConfig::read(&asymmetric_path),
+        Err(Error::PruneConfig(_))
+    ));
+
+    asymmetric.retained_marshal_blocks = 0;
+    asymmetric.retained_qmdb_blocks = 0;
+    asymmetric.maintenance_interval = std::num::NonZeroUsize::new(usize::MAX).unwrap();
+    asymmetric.write(&asymmetric_path).expect("write overflowing config");
+    assert!(matches!(
+        NodeConfig::read(&asymmetric_path),
+        Err(Error::RetentionPolicy(_))
+    ));
+
+    let zero = raw.replace("max_pending_acks = 16", "max_pending_acks = 0");
+    fs::write(&asymmetric_path, zero).expect("write zero config");
+    assert!(matches!(
+        NodeConfig::read(&asymmetric_path),
+        Err(Error::TomlDeserialize(_))
+    ));
 
     let _ = fs::remove_dir_all(dir);
 }
