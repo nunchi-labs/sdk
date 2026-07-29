@@ -396,6 +396,44 @@ fn configure_rejects_empty_validator_set() {
     });
 }
 
+#[test]
+fn configure_rejects_epoch_outside_window() {
+    commonware_runtime::deterministic::Runner::default().start(|_| async move {
+        let owners = vec![owner(1), owner(2), owner(3)];
+        let validators = vec![validator(10), validator(11)];
+
+        // epoch below current_epoch: epoch=0, current_epoch=1
+        let mut ledger = AuthorityLedger::new(MemoryState::default());
+        let result = submit(
+            &mut ledger,
+            &owners[0],
+            AuthorityOperation::Configure {
+                policy: policy(&owners, 2),
+                initial_validators: validators.clone(),
+                epoch: 0,
+            },
+            1,
+        )
+        .await;
+        assert_eq!(result, Err(AuthorityError::InvalidEpoch));
+
+        // epoch above current_epoch + MAX_EPOCH_LOOKAHEAD: epoch=102, current_epoch=1
+        let mut ledger = AuthorityLedger::new(MemoryState::default());
+        let result = submit(
+            &mut ledger,
+            &owners[0],
+            AuthorityOperation::Configure {
+                policy: policy(&owners, 2),
+                initial_validators: validators.clone(),
+                epoch: 1 + MAX_EPOCH_LOOKAHEAD + 1,
+            },
+            1,
+        )
+        .await;
+        assert_eq!(result, Err(AuthorityError::InvalidEpoch));
+    });
+}
+
 // ----- configuration -----
 
 #[test]
