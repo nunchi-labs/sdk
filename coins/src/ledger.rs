@@ -393,6 +393,12 @@ impl<D: CoinDB> Ledger<D> {
         }
     }
 
+    /// Verify that `signer` is the permanent issuer of the token identified by
+    /// `coin`.
+    ///
+    /// Issuer rights are determined solely by address equality against the
+    /// [`TokenDefinition::issuer`](crate::asset::TokenDefinition::issuer) field,
+    /// which is set at token creation and cannot be transferred or revoked.
     async fn ensure_issuer(&self, signer: &Address, coin: &CoinId) -> Result<(), LedgerError> {
         let token = self
             .db

@@ -292,9 +292,23 @@ impl EncodeSize for CoinSpec {
 }
 
 /// A token registered in the Nunchi coin ledger.
+///
+/// # Issuer permanence
+///
+/// The [`issuer`](Self::issuer) address is set at token creation time and is
+/// **immutable** -- there is currently no operation to transfer or revoke
+/// issuer rights.  All mint operations are gated on this address via
+/// [`ensure_issuer`](crate::Ledger::ensure_issuer).
+///
+/// Losing access to the issuer key permanently disables minting for the
+/// token, with no recovery path.  If the issuer is a multisig account, the
+/// signing policy behind that address should be managed accordingly.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TokenDefinition {
+    /// Unique identifier for this token (coin ID).
     pub id: CoinId,
+    /// The address that created the token and holds permanent mint authority.
+    /// This field is set once at creation and cannot be changed.
     pub issuer: Address,
     pub symbol: TokenSymbol,
     pub name: TokenName,
