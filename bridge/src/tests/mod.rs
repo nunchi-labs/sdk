@@ -1,6 +1,8 @@
 mod genesis;
 mod ledger;
 mod record;
+#[cfg(feature = "rpc")]
+mod rpc;
 
 use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{
