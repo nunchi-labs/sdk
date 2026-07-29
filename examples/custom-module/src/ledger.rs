@@ -73,26 +73,39 @@ impl<D: CustomDB> CustomLedger<D> {
         }
 
         let next_nonce = expected.checked_add(1).ok_or(CustomError::NonceOverflow)?;
-        let event = self.apply_operation(&tx.account_id, &tx.payload.operation);
+        let event = self
+            .apply_operation(&tx.account_id, &tx.payload.operation)
+            .await?;
         self.db.set_nonce(&tx.account_id, next_nonce);
-        events.emit(event);
+        if let Some(event) = event {
+            events.emit(event);
+        }
         Ok(())
     }
 
-    fn apply_operation(&mut self, account_id: &Address, operation: &CustomOperation) -> Event {
+    async fn apply_operation(
+        &mut self,
+        account_id: &Address,
+        operation: &CustomOperation,
+    ) -> Result<Option<Event>, CustomError> {
         match operation {
             CustomOperation::SetValue { value } => {
                 self.db.set_value(account_id, *value);
-                value_set_event(ValueSet {
+                Ok(Some(value_set_event(ValueSet {
                     account_id: account_id.clone(),
                     value: *value,
-                })
+                })))
             }
             CustomOperation::ClearValue => {
+                let had_value = self.db.value(account_id).await?.is_some();
                 self.db.remove_value(account_id);
-                value_cleared_event(ValueCleared {
-                    account_id: account_id.clone(),
-                })
+                if had_value {
+                    Ok(Some(value_cleared_event(ValueCleared {
+                        account_id: account_id.clone(),
+                    })))
+                } else {
+                    Ok(None)
+                }
             }
         }
     }
