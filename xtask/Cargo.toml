@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Workspace automation and deployment setup tasks."
+repository = "https://github.com/nunchi-labs/sdk"
+keywords = ["blockchain", "testnet", "automation", "devops"]
+categories = ["development-tools"]
+readme = "README.md"
 
 [lints]
 workspace = true
