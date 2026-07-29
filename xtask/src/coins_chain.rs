@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const DEFAULT_BASE_METRICS_PORT: u16 = 9_090;
+pub const DEFAULT_BASE_METRICS_PORT: u16 = 9_090;
 
 #[derive(Debug, Args)]
 pub struct Generate {
