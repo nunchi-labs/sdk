@@ -3,7 +3,7 @@ use crate::{
         multisig_account_id, AccountPolicy, AccountType, Address, MultisigPolicy, PrivateKey,
     },
     asset::{TokenError, TokenName, TokenSymbol},
-    CoinSpec, FeeCharged, FeeConfig, Ledger, LedgerError, Transaction,
+    db::CoinDB, CoinOperation, CoinSpec, FeeCharged, FeeConfig, Ledger, LedgerError, Transaction,
 };
 use commonware_codec::DecodeExt;
 use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
@@ -183,6 +183,42 @@ fn rejects_transaction_with_wrong_nonce() {
                 ..
             }
         ));
+    });
+}
+
+#[test]
+fn rejects_transaction_when_account_nonce_overflows() {
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let mut ledger = ledger(context).await;
+        let alice_key = PrivateKey::ed25519_from_seed(1);
+        let alice = address(&alice_key);
+        let bob = address(&PrivateKey::ed25519_from_seed(2));
+        let coin = ledger
+            .create_token(alice.clone(), spec(1_000, None).expect("valid coin spec"))
+            .await
+            .expect("create token");
+
+        let mut db = ledger.into_inner();
+        db.set_nonce(&alice, u64::MAX);
+        let mut ledger = Ledger::new(db);
+        let tx = Transaction::sign(
+            &alice_key,
+            u64::MAX,
+            CoinOperation::Transfer {
+                coin,
+                from: alice.clone(),
+                to: bob,
+                amount: 1,
+            },
+        );
+
+        assert_eq!(
+            ledger.apply_transaction(&tx, NoopEventSink).await,
+            Err(LedgerError::NonceOverflow)
+        );
+        assert_eq!(ledger.nonce(&alice).await.unwrap(), u64::MAX);
+        assert_eq!(ledger.balance(&alice, &coin).await.unwrap(), 1_000);
     });
 }
 
