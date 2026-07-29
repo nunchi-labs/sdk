@@ -108,7 +108,7 @@ impl<D: OracleDB> OracleLedger<D> {
         validate_interval_range(start, end)?;
 
         let mut records = Vec::new();
-        for bucket in start.bucket..=end.bucket {
+        for bucket in start.bucket()..=end.bucket() {
             let index = self
                 .db
                 .namespace_index(namespace, &IntervalKey::new(bucket))
@@ -128,7 +128,7 @@ impl<D: OracleDB> OracleLedger<D> {
         validate_interval_range(start, end)?;
 
         let mut records = Vec::new();
-        for bucket in start.bucket..=end.bucket {
+        for bucket in start.bucket()..=end.bucket() {
             let index = self
                 .db
                 .writer_index(writer, &IntervalKey::new(bucket))
@@ -224,12 +224,12 @@ impl<D: OracleDB> OracleLedger<D> {
 }
 
 fn validate_interval_range(start: IntervalKey, end: IntervalKey) -> Result<(), OracleError> {
-    if end.bucket < start.bucket {
+    if end.bucket() < start.bucket() {
         return Err(OracleError::InvalidQuery("inverted interval range"));
     }
     let interval_count = end
-        .bucket
-        .checked_sub(start.bucket)
+        .bucket()
+        .checked_sub(start.bucket())
         .and_then(|count| count.checked_add(1))
         .ok_or(OracleError::InvalidQuery("interval range overflow"))?;
     if interval_count > MAX_QUERY_INTERVALS {

@@ -17,15 +17,17 @@ pub struct NamespaceId(pub Digest);
 
 /// Opaque interval key chosen by writers and consuming modules.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct IntervalKey {
-    /// Consumer-defined interval bucket.
-    pub bucket: u64,
-}
+pub struct IntervalKey(u64);
 
 impl IntervalKey {
     /// Construct an interval key.
     pub const fn new(bucket: u64) -> Self {
-        Self { bucket }
+        Self(bucket)
+    }
+
+    /// Return the underlying bucket value.
+    pub const fn bucket(&self) -> u64 {
+        self.0
     }
 }
 
@@ -60,7 +62,7 @@ digest_id_codec!(RecordId);
 
 impl Write for IntervalKey {
     fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.bucket.write(buf);
+        self.0.write(buf);
     }
 }
 
@@ -68,9 +70,7 @@ impl Read for IntervalKey {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
-        Ok(Self {
-            bucket: u64::read(buf)?,
-        })
+        Ok(Self(u64::read(buf)?))
     }
 }
 
