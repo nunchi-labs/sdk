@@ -40,7 +40,10 @@ enum Table {
     ConsumedRecord = 1,
     /// Per-sender lock nonce, giving each of a sender's transfers a distinct record id.
     Nonce = 2,
-    /// Singleton module configuration (currently just this chain's [`ChainId`]).
+    /// Module-level singleton configuration entries, keyed within this table by a
+    /// short string sub-key (e.g., `b"local_chain_id"`). Adding new configuration
+    /// fields does not require a new table discriminant -- use a distinct sub-key
+    /// within this same table instead.
     Config = 3,
 }
 
@@ -50,10 +53,16 @@ impl From<Table> for u8 {
     }
 }
 
-/// Non-empty marker value stored for a consumed record (presence = consumed).
+/// Non-empty sentinel value stored at a consumed-record key.
+///
+/// The presence of *any* value at the key signals consumption; the specific
+/// content (`&[1]`) is arbitrary and must not be relied upon by callers.
 const CONSUMED_MARKER: &[u8] = &[1];
 
-/// Domain label for the bridge-owned escrow address.
+/// Versioned domain label used to derive the bridge-owned escrow address.
+///
+/// This label must never change after deployment; changing it would produce a
+/// different escrow address and orphan any funds already held at the old address.
 const ESCROW_LABEL: &[u8] = b"nunchi/bridge/escrow/v1";
 
 /// The deterministic bridge-owned account that holds locked source-chain assets.
