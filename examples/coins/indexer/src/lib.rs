@@ -70,7 +70,7 @@ pub enum Kind {
     Finalization = 2,
 }
 
-pub struct Store {
+pub(crate) struct Store {
     seeds: BTreeMap<Round, Seed>,
     notarizations: BTreeMap<ArtifactKey, Notarized>,
     finalizations: BTreeMap<ArtifactKey, Finalized>,
