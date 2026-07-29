@@ -78,47 +78,81 @@ fn market_sequence_key(market: &MarketId) -> Digest {
     NS.key(Table::MarketSequence, market.encode().as_ref())
 }
 
-/// Typed state access required by [`crate::ClobLedger`].
+/// Typed state access for [`ClobLedger`](crate::ClobLedger).
+///
+/// **Read methods** are `async` because the underlying state store may require I/O to
+/// retrieve data. They return `Result` so the caller can propagate storage errors.
+///
+/// **Write methods** are synchronous and infallible at the call site because the underlying
+/// [`StateStore`] buffers writes in memory until [`StateStore::commit`] is called by the
+/// runtime. Write errors (e.g., disk full, serialization failure) surface only at commit
+/// time, not at the individual `set_*` / `remove_*` call site.
+///
+/// # Invariants for implementors
+///
+/// - Writes must be visible to subsequent reads within the same `ClobLedger` session
+///   (the overlay pattern guarantees this for the `StateStore` blanket impl).
+/// - [`StateStore::commit`] must be called to flush staged writes to durable storage.
 #[async_trait]
 pub trait ClobDB {
+    /// Read the current nonce for `account`, returning `0` if never set.
     async fn nonce(&self, account: &Address) -> Result<u64, ClobError>;
 
+    /// Stage a nonce update. Deferred to commit.
     fn set_nonce(&mut self, account: &Address, nonce: u64);
 
+    /// Read a market definition by id, returning `None` if it does not exist.
     async fn market(&self, id: &MarketId) -> Result<Option<Market>, ClobError>;
 
+    /// Stage a market write. Deferred to commit.
     fn set_market(&mut self, market: &Market);
 
+    /// Read the global market index (list of all market ids).
     async fn market_index(&self) -> Result<Vec<MarketId>, ClobError>;
 
+    /// Stage a market index update. Deferred to commit.
     fn set_market_index(&mut self, markets: &[MarketId]);
 
+    /// Read an order by id, returning `None` if it does not exist.
     async fn order(&self, id: &OrderId) -> Result<Option<Order>, ClobError>;
 
+    /// Stage an order write. Deferred to commit.
     fn set_order(&mut self, order: &Order);
 
+    /// Stage an order removal. Deferred to commit.
     fn remove_order(&mut self, order: &OrderId);
 
+    /// Read the order-id list for one side of a market's book.
     async fn side_book(&self, market: &MarketId, side: Side) -> Result<Vec<OrderId>, ClobError>;
 
+    /// Stage a side-book update. Deferred to commit.
     fn set_side_book(&mut self, market: &MarketId, side: Side, orders: &[OrderId]);
 
+    /// Read the list of open order ids for `account`.
     async fn account_orders(&self, account: &Address) -> Result<Vec<OrderId>, ClobError>;
 
+    /// Stage an account-orders update. Deferred to commit.
     fn set_account_orders(&mut self, account: &Address, orders: &[OrderId]);
 
+    /// Read a fill by id, returning `None` if it does not exist.
     async fn fill(&self, id: &FillId) -> Result<Option<Fill>, ClobError>;
 
+    /// Stage a fill write. Deferred to commit.
     fn set_fill(&mut self, fill: &Fill);
 
+    /// Stage a fill removal. Deferred to commit.
     fn remove_fill(&mut self, fill: &FillId);
 
+    /// Read the list of fill ids for a market.
     async fn market_fills(&self, market: &MarketId) -> Result<Vec<FillId>, ClobError>;
 
+    /// Stage a market-fills update. Deferred to commit.
     fn set_market_fills(&mut self, market: &MarketId, fills: &[FillId]);
 
+    /// Read the monotonic sequence counter for a market, returning `0` if never set.
     async fn market_sequence(&self, market: &MarketId) -> Result<u64, ClobError>;
 
+    /// Stage a market-sequence update. Deferred to commit.
     fn set_market_sequence(&mut self, market: &MarketId, sequence: u64);
 }
 
