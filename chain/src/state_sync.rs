@@ -53,10 +53,20 @@ type PendingSubscriber = oneshot::Sender<ResolverResult>;
 
 /// Probe-only certificate provider for nodes that have not started their DKG actor yet.
 ///
+/// This provider intentionally ignores the `epoch` parameter in both [`scoped`](commonware_cryptography::certificate::Provider::scoped)
+/// and [`scheme`](commonware_cryptography::certificate::Provider::scheme), accepting certificates
+/// from **any** epoch using the same epoch-independent verifier and sizing scheme.
+///
 /// The epoch-independent scheme authenticates recovered certificates from any resharing epoch.
 /// The sizing scheme supplies the configured participant count used only to derive the `f + 1`
 /// response threshold. Keeping this separate from the consensus provider avoids treating an old
 /// epoch's signing scheme as valid for a future epoch.
+///
+/// # Important
+///
+/// The `verifier` passed to [`FloorProvider::new`] **must** be valid for all epochs.
+/// Using an epoch-specific verifier with this provider will silently bypass epoch
+/// isolation, since every epoch resolves to the same verifier instance.
 #[derive(Clone)]
 pub struct FloorProvider<S> {
     verifier: std::sync::Arc<S>,
@@ -65,6 +75,9 @@ pub struct FloorProvider<S> {
 
 impl<S> FloorProvider<S> {
     /// Create a provider from an all-epoch verifier and a committee-sizing scheme.
+    ///
+    /// Both `verifier` and `sizing_scheme` must be epoch-independent. The resulting
+    /// provider will return them for every epoch without discrimination.
     pub fn new(verifier: S, sizing_scheme: S) -> Self {
         Self {
             verifier: std::sync::Arc::new(verifier),
@@ -80,6 +93,11 @@ where
     type Scope = commonware_consensus::types::Epoch;
     type Scheme = S;
 
+    /// Returns the epoch-independent verifier for any epoch.
+    ///
+    /// The `_epoch` parameter is intentionally ignored: this provider uses a single
+    /// verifier that is valid across all epochs. See the [struct-level docs](FloorProvider)
+    /// for details.
     fn scoped(
         &self,
         _epoch: Self::Scope,
@@ -89,6 +107,11 @@ where
         ))
     }
 
+    /// Returns the epoch-independent sizing scheme for any epoch.
+    ///
+    /// The `_epoch` parameter is intentionally ignored: this provider uses a single
+    /// sizing scheme that is valid across all epochs. See the [struct-level docs](FloorProvider)
+    /// for details.
     fn scheme(&self, _epoch: Self::Scope) -> Option<std::sync::Arc<Self::Scheme>> {
         Some(self.sizing_scheme.clone())
     }
