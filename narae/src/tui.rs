@@ -25,8 +25,11 @@ use std::{
     },
     time::Duration,
 };
+use unicode_width::UnicodeWidthChar;
 
 type SharedNode = Arc<Mutex<Node>>;
+
+const MAX_FILTER_LEN: usize = 256;
 
 #[derive(PartialEq, Eq)]
 enum InputMode {
@@ -138,6 +141,12 @@ impl App {
             node.lock().unwrap().stop();
         }
     }
+
+    fn push_filter_char(&mut self, character: char) {
+        if self.filter_input.chars().count() < MAX_FILTER_LEN {
+            self.filter_input.push(character);
+        }
+    }
 }
 
 pub fn run(config: Config, workspace: PathBuf) -> io::Result<()> {
@@ -207,7 +216,7 @@ fn handle_key(app: &mut App, code: KeyCode) {
             KeyCode::Backspace => {
                 app.filter_input.pop();
             }
-            KeyCode::Char(c) => app.filter_input.push(c),
+            KeyCode::Char(c) => app.push_filter_char(c),
             _ => {}
         },
         InputMode::Normal => match code {
@@ -345,7 +354,7 @@ fn render_filter(frame: &mut Frame<'_>, app: &App) {
         height: 1,
     };
     let text = if app.input_mode == InputMode::Filter {
-        format!(" /{}", app.filter_input)
+        format!(" /{}", truncate_filter(&app.filter_input, area.width.saturating_sub(2) as usize))
     } else {
         format!(
             " filter: {} (esc clears)",
@@ -356,6 +365,67 @@ fn render_filter(frame: &mut Frame<'_>, app: &App) {
         Paragraph::new(text).style(Style::default().fg(Color::White).bg(Color::Rgb(35, 35, 35))),
         area,
     );
+}
+
+fn truncate_filter(filter: &str, width: usize) -> String {
+    if filter
+        .chars()
+        .map(|character| character.width().unwrap_or(0))
+        .sum::<usize>()
+        <= width
+    {
+        return filter.to_string();
+    }
+
+    let prefix = "...";
+    if width <= prefix.len() {
+        return String::new();
+    }
+    let remaining = width.saturating_sub(prefix.len());
+    let mut result = String::from(prefix);
+    let mut used = 0;
+    for character in filter.chars().rev() {
+        let character_width = character.width().unwrap_or(0);
+        if used + character_width > remaining {
+            break;
+        }
+        result.insert(prefix.len(), character);
+        used += character_width;
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app() -> App {
+        App::new(
+            Config {
+                title: String::new(),
+                nodes: Vec::new(),
+            },
+            PathBuf::new(),
+        )
+    }
+
+    #[test]
+    fn filter_input_is_limited_to_maximum_characters() {
+        let mut app = app();
+        app.input_mode = InputMode::Filter;
+        for _ in 0..=MAX_FILTER_LEN {
+            handle_key(&mut app, KeyCode::Char('a'));
+        }
+
+        assert_eq!(app.filter_input.chars().count(), MAX_FILTER_LEN);
+    }
+
+    #[test]
+    fn filter_display_shows_the_most_recent_text_that_fits() {
+        assert_eq!(truncate_filter("abcdefgh", 5), "...gh");
+        assert_eq!(truncate_filter("ab", 5), "ab");
+        assert_eq!(truncate_filter("abcdefgh", 3), "");
+    }
 }
 
 fn render_help(frame: &mut Frame<'_>, app: &App) {
