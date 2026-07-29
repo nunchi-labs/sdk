@@ -9,9 +9,14 @@ use std::{
         Arc, Mutex,
     },
     thread,
+    time::{Duration, Instant},
 };
 
 const MAX_LOG_LINES: usize = 2_000;
+
+/// Duration to wait for a child process to exit after SIGTERM before
+/// escalating to SIGKILL.
+const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeStatus {
@@ -110,12 +115,49 @@ impl Node {
     }
 
     pub fn stop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-            self.status = NodeStatus::Stopped;
-            self.add_log("stopped");
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+
+        // On Unix, try SIGTERM first so the process can shut down gracefully
+        // (flush writes, release locks, etc.). On non-Unix platforms, fall
+        // through to the SIGKILL path below.
+        #[cfg(unix)]
+        {
+            // SAFETY: `child.id()` returns the OS-assigned PID of a process we
+            // own. Sending SIGTERM to our own child is a normal POSIX operation.
+            unsafe {
+                libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+            }
+            self.add_log("sent SIGTERM, waiting for graceful shutdown...");
+
+            let deadline = Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT;
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_status)) => {
+                        // Process exited on its own after SIGTERM.
+                        self.status = NodeStatus::Stopped;
+                        self.add_log("stopped (graceful)");
+                        return;
+                    }
+                    Ok(None) => {
+                        // Still running -- keep polling until the deadline.
+                        if Instant::now() >= deadline {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(50));
+                    }
+                    Err(_) => break,
+                }
+            }
+            self.add_log("graceful shutdown timed out, sending SIGKILL");
         }
+
+        // Fallback: forcibly kill the process.
+        let _ = child.kill();
+        let _ = child.wait();
+        self.status = NodeStatus::Stopped;
+        self.add_log("stopped");
     }
 
     pub fn refresh(&mut self) {

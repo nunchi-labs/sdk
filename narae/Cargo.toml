@@ -23,3 +23,6 @@ ratatui = "0.29"
 serde = { workspace = true }
 thiserror = { workspace = true }
 toml = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
