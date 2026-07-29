@@ -11,7 +11,7 @@ use commonware_cryptography::{
         primitives::{
             group::{Private, Scalar, Share},
             sharing::Mode,
-            variant::MinPk,
+            variant::{MinPk, MinSig},
         },
     },
     ed25519::{self},
@@ -675,5 +675,242 @@ fn test_dealer_handle_returns_false_for_duplicate_ack() {
             .handle(&mut storage, Epoch::zero(), player_pk, ack)
             .await;
         assert!(!result, "duplicate ack should return false");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// MinSig variant tests
+//
+// The production Actor uses MinSig (public keys in G2, signatures in G1),
+// but the above tests all use MinPk. MinSig has different serialized byte
+// sizes for DealerPubMsg, Output, Share, and PlayerAck. These tests ensure
+// that storage, codec roundtrips, and dealer state transitions work
+// correctly under the production BLS variant.
+// ---------------------------------------------------------------------------
+
+fn create_round_info_minsig(signers: &[ed25519::PrivateKey]) -> Info<MinSig, ed25519::PublicKey> {
+    let players = Set::from_iter_dedup(signers.iter().map(|s| s.public_key()));
+    let dealers = players.clone();
+    Info::new::<N3f1>(
+        TEST_NAMESPACE,
+        0,
+        None,
+        Mode::NonZeroCounter,
+        dealers,
+        players,
+    )
+    .expect("valid info")
+}
+
+async fn init_storage_minsig<E>(
+    context: E,
+    partition: &str,
+    key: [u8; 32],
+    namespace: Vec<u8>,
+    public_key: ed25519::PublicKey,
+) -> Storage<E, MinSig, ed25519::PublicKey>
+where
+    E: BufferPooler + Clock + RuntimeStorage + Metrics + CryptoRng,
+{
+    Storage::<_, MinSig, ed25519::PublicKey>::init(
+        context,
+        partition,
+        StorageProtector::new(key),
+        namespace,
+        public_key,
+        NZU32!(10),
+        crate::MAX_SUPPORTED_MODE,
+    )
+    .await
+    .expect("storage init should succeed")
+}
+
+fn test_dealing_minsig(
+    signers: &[ed25519::PrivateKey],
+) -> (ed25519::PublicKey, DealerPubMsg<MinSig>, DealerPrivMsg) {
+    let round_info = create_round_info_minsig(signers);
+    let dealer_signer = signers[0].clone();
+    let player = signers[1].public_key();
+    let mut rng = test_rng();
+    let (_crypto_dealer, pub_msg, priv_msgs) =
+        commonware_cryptography::bls12381::dkg::feldman_desmedt::Dealer::<MinSig, _>::start::<
+            N3f1,
+        >(&mut rng, round_info, dealer_signer.clone(), None)
+        .expect("valid dealer");
+    let priv_msg = priv_msgs
+        .into_iter()
+        .find(|(candidate, _)| *candidate == player)
+        .map(|(_, priv_msg)| priv_msg)
+        .expect("player should have a share");
+    (dealer_signer.public_key(), pub_msg, priv_msg)
+}
+
+#[test_traced]
+fn storage_roundtrip_minsig() {
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        let signers = create_test_signers(4);
+        let public_key = signers[0].public_key();
+        let partition = "minsig_roundtrip";
+        let epoch = Epoch::new(1);
+        let state = EpochState {
+            round: 7,
+            rng_seed: Summary::random(&mut context),
+            output: None,
+            share: Some(Share::new(Participant::new(1), Private::new(Scalar::one()))),
+        };
+        let (dealer, pub_msg, priv_msg) = test_dealing_minsig(&signers);
+
+        let mut storage = init_storage_minsig(
+            context.child("storage"),
+            partition,
+            TEST_STORAGE_KEY,
+            TEST_NAMESPACE.to_vec(),
+            public_key.clone(),
+        )
+        .await;
+        storage
+            .set_epoch(epoch, state.clone())
+            .await
+            .expect("set epoch should succeed");
+        storage
+            .append_dealing(epoch, dealer.clone(), pub_msg.clone(), priv_msg.clone())
+            .await
+            .expect("append dealing should succeed");
+        drop(storage);
+
+        let recovered = init_storage_minsig(
+            context.child("recovered_storage"),
+            partition,
+            TEST_STORAGE_KEY,
+            TEST_NAMESPACE.to_vec(),
+            public_key,
+        )
+        .await;
+
+        let (recovered_epoch, recovered_state) =
+            recovered.epoch().expect("epoch should recover");
+        assert_eq!(recovered_epoch, epoch);
+        assert_eq!(recovered_state.round, state.round);
+        assert_eq!(recovered_state.rng_seed, state.rng_seed);
+        assert_eq!(recovered_state.share, state.share);
+        assert_eq!(
+            recovered.dealings(epoch),
+            vec![(dealer, pub_msg, priv_msg)]
+        );
+    });
+}
+
+#[test_traced]
+fn storage_minsig_with_output_roundtrip() {
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        let signers = create_test_signers(4);
+        let public_key = signers[0].public_key();
+        let partition = "minsig_output_roundtrip";
+        let epoch = Epoch::new(3);
+        let participants = Set::from_iter_dedup(signers.iter().map(|s| s.public_key()));
+        let (output, _) =
+            commonware_cryptography::bls12381::dkg::feldman_desmedt::deal::<MinSig, _, N3f1>(
+                &mut context,
+                Default::default(),
+                participants,
+            )
+            .expect("deal should succeed");
+
+        let state = EpochState {
+            round: 3,
+            rng_seed: Summary::random(&mut context),
+            output: Some(output),
+            share: None,
+        };
+        let mut storage = init_storage_minsig(
+            context.child("storage"),
+            partition,
+            TEST_STORAGE_KEY,
+            TEST_NAMESPACE.to_vec(),
+            public_key.clone(),
+        )
+        .await;
+        storage
+            .set_epoch(epoch, state)
+            .await
+            .expect("set epoch should succeed");
+        drop(storage);
+
+        let recovered = init_storage_minsig(
+            context.child("recovered_storage"),
+            partition,
+            TEST_STORAGE_KEY,
+            TEST_NAMESPACE.to_vec(),
+            public_key,
+        )
+        .await;
+        let (recovered_epoch, recovered_state) =
+            recovered.epoch().expect("epoch should recover");
+        assert_eq!(recovered_epoch, epoch);
+        assert_eq!(recovered_state.round, 3);
+        assert!(recovered_state.output.is_some());
+        assert!(recovered_state.share.is_none());
+    });
+}
+
+#[test_traced]
+fn dealer_handle_valid_ack_minsig() {
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        let signers = create_test_signers(4);
+        let round_info = create_round_info_minsig(&signers);
+
+        let mut storage = Storage::<_, MinSig, _>::init(
+            context.child("storage"),
+            "test_minsig",
+            StorageProtector::new(TEST_STORAGE_KEY),
+            TEST_NAMESPACE.to_vec(),
+            signers[0].public_key(),
+            NZU32!(10),
+            crate::MAX_SUPPORTED_MODE,
+        )
+        .await
+        .expect("storage init should succeed");
+
+        let dealer_signer = signers[0].clone();
+        let mut rng = test_rng();
+        let (crypto_dealer, pub_msg, priv_msgs) =
+            commonware_cryptography::bls12381::dkg::feldman_desmedt::Dealer::<MinSig, _>::start::<
+                N3f1,
+            >(&mut rng, round_info.clone(), dealer_signer.clone(), None)
+            .expect("valid dealer");
+
+        let unsent: BTreeMap<_, _> = priv_msgs.into_iter().collect();
+        let mut dealer = Dealer::new(Some(crypto_dealer), pub_msg.clone(), unsent);
+
+        let player_signer = signers[1].clone();
+        let player_pk = player_signer.public_key();
+        let player_priv_msg = dealer
+            .shares_to_distribute()
+            .find(|(p, _, _)| *p == player_pk)
+            .map(|(_, _, priv_msg)| priv_msg)
+            .expect("player should have a share");
+
+        let mut crypto_player =
+            commonware_cryptography::bls12381::dkg::feldman_desmedt::Player::new(
+                round_info,
+                player_signer,
+            )
+            .expect("valid player");
+        let Verdict::Valid(ack) = crypto_player.dealer_message::<N3f1>(
+            dealer_signer.public_key(),
+            pub_msg,
+            player_priv_msg,
+        ) else {
+            panic!("valid ack");
+        };
+
+        let result = dealer
+            .handle(&mut storage, Epoch::zero(), player_pk, ack)
+            .await;
+
+        assert!(result, "handle should return true for valid MinSig ack");
     });
 }
