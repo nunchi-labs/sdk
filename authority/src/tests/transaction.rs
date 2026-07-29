@@ -8,10 +8,14 @@ use crate::{AuthorityOperation, MultisigPolicy, MAX_VALIDATORS};
 fn configure(owners: usize, validators: usize) -> AuthorityOperation {
     AuthorityOperation::Configure {
         policy: MultisigPolicy {
-            owners: vec![PrivateKey::from_seed(0).public_key(); owners],
+            owners: (0..owners as u64)
+                .map(|s| PrivateKey::from_seed(s).public_key())
+                .collect(),
             threshold: 1,
         },
-        initial_validators: vec![ed25519::PrivateKey::from_seed(0).public_key(); validators],
+        initial_validators: (0..validators as u64)
+            .map(|s| ed25519::PrivateKey::from_seed(s).public_key())
+            .collect(),
         epoch: 0,
     }
 }
