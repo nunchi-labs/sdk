@@ -13,8 +13,8 @@ coverage:
     @cargo llvm-cov nextest --workspace
 
 stability-check:
-    @echo "Running Commonware stability check (>= BETA) for noble-node..."
-    RUSTFLAGS="--cfg commonware_stability_BETA" cargo +nightly build -p noble-node
+    @echo "Running Commonware stability check (>= ALPHA)..."
+    RUSTFLAGS="--cfg commonware_stability_ALPHA" cargo +nightly build --workspace
 
 install-deps:
     #!/usr/bin/env bash
