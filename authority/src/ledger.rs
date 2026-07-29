@@ -37,6 +37,14 @@ pub enum AuthorityError {
     NotConfigured,
     #[error("invalid multisig policy")]
     InvalidPolicy,
+    #[error("multisig owner list is empty")]
+    EmptyOwners,
+    #[error("multisig owner list contains duplicates")]
+    DuplicateOwners,
+    #[error("multisig threshold must be greater than zero")]
+    ZeroThreshold,
+    #[error("multisig threshold {threshold} exceeds owner count {owners}")]
+    ThresholdExceedsOwners { threshold: u16, owners: usize },
     #[error("invalid authority epoch")]
     InvalidEpoch,
     #[error("unauthorized authority signer")]

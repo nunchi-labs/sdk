@@ -31,7 +31,6 @@ pub struct AuthorityPolicyGenesis {
 impl AuthorityGenesis {
     pub fn policy(&self) -> Result<MultisigPolicy, AuthorityError> {
         MultisigPolicy::new(self.policy.threshold, self.policy.owners.clone())
-            .ok_or(AuthorityError::InvalidPolicy)
     }
 
     pub fn validators(&self) -> Result<Vec<ValidatorId>, AuthorityError> {

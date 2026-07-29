@@ -1,3 +1,4 @@
+use crate::AuthorityError;
 use commonware_codec::{EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{ed25519, sha256::Digest};
 use nunchi_common::MAX_MULTISIG_SIGNERS;
@@ -18,12 +19,21 @@ pub struct MultisigPolicy {
 }
 
 impl MultisigPolicy {
-    pub fn new(threshold: u16, owners: Vec<OwnerId>) -> Option<Self> {
-        let owners = sorted_unique(owners)?;
-        if threshold == 0 || threshold as usize > owners.len() {
-            return None;
+    pub fn new(threshold: u16, owners: Vec<OwnerId>) -> Result<Self, AuthorityError> {
+        if owners.is_empty() {
+            return Err(AuthorityError::EmptyOwners);
         }
-        Some(Self { owners, threshold })
+        let owners = sorted_unique(owners).ok_or(AuthorityError::DuplicateOwners)?;
+        if threshold == 0 {
+            return Err(AuthorityError::ZeroThreshold);
+        }
+        if threshold as usize > owners.len() {
+            return Err(AuthorityError::ThresholdExceedsOwners {
+                threshold,
+                owners: owners.len(),
+            });
+        }
+        Ok(Self { owners, threshold })
     }
 }
 
