@@ -153,23 +153,25 @@ testing multiple seeds.
 
 To simulate network operations, use the commonware simulated network:
 ```rust
-let (network, mut oracle) = Network::new(
+let (network, oracle) = Network::<_, ed25519::PublicKey>::new_with_peers(
     context.child("network"),
-    Config {
+    simulated::Config {
         max_size: 1024 * 1024,
         disconnect_on_block: true,
         tracked_peer_sets: NZUsize!(1),
     },
-);
+    [peer_a.clone(), peer_b.clone()],
+)
+.await;
 network.start();
 
-// Register multiple channels per peer for different message types
-let (vote_sender, vote_receiver) = oracle.register(pk, 0).await.unwrap();
-let (certificate_sender, certificate_receiver) = oracle.register(pk, 1).await.unwrap();
-let (resolver_sender, resolver_receiver) = oracle.register(pk, 2).await.unwrap();
+// Register a channel for each peer.
+let quota = Quota::per_second(NZU32!(u32::MAX));
+let p2p_a = oracle.control(peer_a.clone()).register(0, quota).await.unwrap();
+let p2p_b = oracle.control(peer_b.clone()).register(0, quota).await.unwrap();
 
 // Configure network links with realistic conditions
-oracle.add_link(pk1, pk2, Link {
+oracle.add_link(peer_a, peer_b, Link {
     latency: Duration::from_millis(10),
     jitter: Duration::from_millis(3),
     success_rate: 0.95, // 95% success
