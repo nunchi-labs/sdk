@@ -3,7 +3,7 @@
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{ed25519::PublicKey as Ed25519PublicKey, PublicKey};
 use commonware_formatting::{from_hex, hex};
-use commonware_utils::{ordered::Set, TryCollect};
+use commonware_utils::ordered::Set;
 use rand::{rngs::StdRng, seq::IteratorRandom, SeedableRng};
 use serde::{Deserialize, Serialize};
 
@@ -50,14 +50,10 @@ impl<P: PublicKey> PeerConfig<P> {
         let p_iter = self.participants.iter().cloned();
         let to_choose = self.num_participants_in_round(round) as usize;
         if round == 0 {
-            return p_iter.take(to_choose).try_collect().unwrap();
+            return Set::from_iter_dedup(p_iter.take(to_choose));
         }
         let mut rng = StdRng::seed_from_u64(round);
-        p_iter
-            .sample(&mut rng, to_choose)
-            .into_iter()
-            .try_collect()
-            .unwrap()
+        Set::from_iter_dedup(p_iter.sample(&mut rng, to_choose))
     }
 }
 
@@ -112,5 +108,25 @@ mod serde_hex_ordered {
         }
 
         deserializer.deserialize_seq(HexVecVisitor(std::marker::PhantomData))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::{ed25519::PrivateKey, Signer};
+
+    #[test]
+    fn dealers_returns_a_set_when_requested_count_exceeds_participants() {
+        let participants = (0..2)
+            .map(|seed| PrivateKey::from_seed(seed).public_key())
+            .collect::<Vec<_>>();
+        let config = PeerConfig {
+            num_participants_per_round: vec![3],
+            participants: Set::from_iter_dedup(participants.clone()),
+        };
+
+        assert_eq!(config.dealers(0), config.participants);
+        assert_eq!(config.dealers(1), config.participants);
     }
 }
