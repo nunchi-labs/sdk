@@ -3,6 +3,14 @@ use thiserror::Error;
 /// Why a submitted transaction was not admitted to the pool.
 #[derive(Clone, Debug, Eq, PartialEq, Error)]
 pub enum AdmissionError {
+    /// The transaction's cryptographic signature failed verification.
+    ///
+    /// The inner `String` is the display output of the original verification
+    /// error. The original error type is erased at construction (via
+    /// `err.to_string()`) to preserve `Clone + Eq` on this enum.
+    /// [`Error::source`](std::error::Error::source) returns `None` for this
+    /// variant. Callers needing the original error chain should inspect the
+    /// verification result before converting to `AdmissionError`.
     #[error("invalid signature: {0}")]
     InvalidSignature(String),
     #[error("transaction is {size} bytes, above the {max} byte limit")]
