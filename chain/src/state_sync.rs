@@ -724,9 +724,15 @@ where
 
     async fn handle_produce(&mut self, key: Request, response: oneshot::Sender<Bytes>) {
         let State::HasDb(database) = &self.state else {
+            debug!(?key, "dropping produce request: no database attached");
             return;
         };
         if key.max_ops > self.config.max_serve_ops {
+            debug!(
+                ?key,
+                max_serve_ops = %self.config.max_serve_ops,
+                "dropping produce request: max_ops exceeds serve limit"
+            );
             return;
         }
         let (_cancel_tx, cancel_rx) = oneshot::channel();
