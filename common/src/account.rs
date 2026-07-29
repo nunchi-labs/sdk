@@ -23,11 +23,13 @@ pub struct Address(Digest);
 
 impl Address {
     /// Derive an external-account address from a curve-tagged public key.
+    #[must_use]
     pub fn external(public_key: &PublicKey) -> Self {
         Self::derive(ADDRESS_EXTERNAL, &public_key.encode())
     }
 
     /// Derive a multisig account's bootstrap address from its initial policy.
+    #[must_use]
     pub fn multisig(policy: &MultisigPolicy) -> Self {
         Self::derive(ADDRESS_MULTISIG, &policy.encode())
     }
@@ -37,11 +39,13 @@ impl Address {
     /// Reserved addresses live in a domain disjoint from external and multisig accounts, so no
     /// public key or policy can ever collide with one. Funds sent to a reserved address cannot be
     /// spent by any signature; a module (for example the bridge escrow) moves them programmatically.
+    #[must_use]
     pub fn reserved(label: &[u8]) -> Self {
         Self::derive(ADDRESS_RESERVED, label)
     }
 
     /// Encode this address using Nunchi's Bech32 human-facing format.
+    #[must_use]
     pub fn to_bech32(&self) -> String {
         let hrp = bech32::Hrp::parse(ADDRESS_HRP).expect("static address HRP is valid");
         bech32::encode::<bech32::Bech32>(hrp, self.encode().as_ref())
