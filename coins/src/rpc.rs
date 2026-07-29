@@ -224,7 +224,14 @@ fn decode_coin(value: &str) -> RpcResult<CoinId> {
 }
 
 fn rpc_error(error: LedgerError) -> jsonrpsee::types::ErrorObjectOwned {
-    module_error(error.to_string())
+    match &error {
+        // Internal errors: never expose raw details to RPC clients.
+        LedgerError::Storage(_)
+        | LedgerError::AllocationSumMismatch { .. }
+        | LedgerError::InvalidGenesis(_) => module_error("internal server error".to_string()),
+        // Client-facing errors: safe to expose.
+        _ => module_error(error.to_string()),
+    }
 }
 
 impl From<TokenDefinition> for TokenResponse {
