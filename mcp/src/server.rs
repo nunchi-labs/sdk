@@ -789,6 +789,12 @@ fn list_repo_files(repo_root: &Path, sub: &str) -> anyhow::Result<Vec<String>> {
 
 fn read_repo_file(repo_root: &Path, rel_path: &str) -> anyhow::Result<String> {
     let full = resolve_repo_path(repo_root, rel_path)?;
+    // Reject symlinks to enforce consistent policy with list_repo_files
+    // (which skips symlinks via follow_links(false) + is_file() check).
+    let meta = std::fs::symlink_metadata(&full)?;
+    if meta.file_type().is_symlink() {
+        anyhow::bail!("symlinks are not permitted: '{rel_path}'");
+    }
     if !full.is_file() {
         anyhow::bail!("not a file: '{rel_path}'");
     }
