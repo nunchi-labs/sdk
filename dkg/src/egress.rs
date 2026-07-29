@@ -58,3 +58,32 @@ impl<V: Variant, P> UpdateCallBack<V, P> for ContinueOnUpdate {
         Box::pin(async { PostUpdate::Continue })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_consensus::types::Epoch;
+    use commonware_cryptography::bls12381::primitives::variant::MinSig;
+
+    #[test]
+    fn continue_on_update_returns_continue_on_failure() {
+        let mut cb = ContinueOnUpdate;
+        let update = Update::<MinSig, ()>::Failure {
+            epoch: Epoch::zero(),
+        };
+        let result = futures::executor::block_on(
+            <ContinueOnUpdate as UpdateCallBack<MinSig, ()>>::on_update(&mut cb, update),
+        );
+        assert_eq!(result, PostUpdate::Continue);
+    }
+
+    #[test]
+    fn post_update_variants_are_distinct() {
+        assert_ne!(PostUpdate::Continue, PostUpdate::Stop);
+    }
+
+    #[test]
+    fn continue_on_update_boxed_creates_instance() {
+        let _: Box<ContinueOnUpdate> = ContinueOnUpdate::boxed();
+    }
+}
