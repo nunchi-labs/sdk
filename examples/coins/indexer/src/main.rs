@@ -5,6 +5,7 @@ use commonware_formatting::from_hex;
 use nunchi_coins_chain::{Identity, MAX_SUPPORTED_MODE};
 use nunchi_coins_indexer::{load_dkg_output, Api, DkgOutput, Indexer};
 use std::{num::NonZeroU32, path::PathBuf, sync::Arc};
+use tokio::signal;
 use tracing::info;
 
 #[derive(Debug, Parser)]
@@ -74,8 +75,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         dkg_output_state_dir = ?cli.dkg_output_state_dir,
         "started coins-chain indexer"
     );
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
 }
 
 fn optional_arg(value: Option<String>) -> Option<String> {
