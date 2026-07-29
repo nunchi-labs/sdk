@@ -2,6 +2,9 @@ use crate::{OracleDB, OracleError, OracleLedger};
 use serde::{Deserialize, Serialize};
 
 /// JSON-facing oracle module genesis state.
+///
+/// Currently empty because the oracle is fully permissionless: any account can write to any
+/// namespace. See the [crate-level security documentation](crate) for implications.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct OracleGenesis {}
 
