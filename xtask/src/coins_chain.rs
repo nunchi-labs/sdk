@@ -81,7 +81,7 @@ impl Generate {
     }
 }
 
-pub fn manifest_path(dir: &Path) -> PathBuf {
+pub(crate) fn manifest_path(dir: &Path) -> PathBuf {
     dir.join(LocalTestnetManifest::FILE_NAME)
 }
 

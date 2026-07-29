@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use narae::Config;
+use nunchi_coins_chain::testnet::LocalTestnetManifest;
 use std::path::{Path, PathBuf};
 
 const DEFAULT_BASE_METRICS_PORT: u16 = 9_090;
@@ -109,5 +110,5 @@ fn generate_local(chain: ChainCommand) -> Result<PathBuf, Box<dyn std::error::Er
 }
 
 fn manifest_path(dir: &Path) -> PathBuf {
-    nunchi_xtask::coins_chain::manifest_path(dir)
+    dir.join(LocalTestnetManifest::FILE_NAME)
 }
