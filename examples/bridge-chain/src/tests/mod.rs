@@ -173,7 +173,7 @@ fn chain_application_proposes_and_verifies_bridge_payload() {
             .await;
         assert!(verified.is_none());
 
-        bridge_mailbox.clear();
+        bridge_mailbox.clear().await;
         let proposed = <Application as StatefulApplication<deterministic::Context>>::propose(
             &mut app,
             (context.child("propose_empty"), consensus_context(2)),

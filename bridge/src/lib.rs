@@ -104,9 +104,12 @@ impl BridgeMailbox {
     }
 
     /// Clear the currently cached foreign finalization certificate.
-    pub fn clear(&self) {
+    ///
+    /// This method applies back-pressure: it will wait until the actor is ready
+    /// to receive the message rather than silently dropping the request.
+    pub async fn clear(&self) {
         let mut sender = self.sender.clone();
-        if sender.try_send(Message::Clear).is_err() {
+        if sender.send(Message::Clear).await.is_err() {
             warn!("bridge mailbox unavailable; dropping clear request");
         }
     }
