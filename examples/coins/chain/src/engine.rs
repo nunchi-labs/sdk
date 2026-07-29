@@ -94,6 +94,7 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
     pub share: Option<group::Share>,
     pub peer_config: PeerConfig<PublicKey>,
     pub epoch_length: NonZeroU64,
+    pub min_block_interval_ms: NonZeroU64,
     pub leader_timeout: Duration,
     pub certification_timeout: Duration,
     pub strategy: S,
@@ -468,6 +469,7 @@ where
         let app = Application::with_authenticated_dkg(
             submitter.clone(),
             config.max_block_transactions,
+            config.min_block_interval_ms,
             ClobExtension::new(clob_mailbox.clone()),
             dkg_mailbox.clone(),
             dkg_state.clone(),
@@ -612,6 +614,7 @@ where
             submitter,
             clob_mailbox.clone(),
             stateful_mailbox.clone(),
+            marshal_mailbox.clone(),
             applied_height,
         );
 

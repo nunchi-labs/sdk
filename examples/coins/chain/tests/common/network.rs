@@ -20,7 +20,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     ordered::{Map, Set},
-    N3f1, NZUsize, NZU32,
+    N3f1, NZUsize, NZU32, NZU64,
 };
 use governor::Quota;
 use nunchi_authority::AuthorityLedger;
@@ -112,6 +112,7 @@ pub(crate) fn lossy_link() -> Link {
 #[derive(Clone)]
 pub(crate) struct ValidatorConfig {
     pub(crate) epoch_length: NonZeroU64,
+    pub(crate) min_block_interval_ms: NonZeroU64,
     pub(crate) leader_timeout: Duration,
     pub(crate) certification_timeout: Duration,
     pub(crate) prune_config: PruneConfig,
@@ -121,6 +122,7 @@ impl Default for ValidatorConfig {
     fn default() -> Self {
         Self {
             epoch_length: BLOCKS_PER_EPOCH,
+            min_block_interval_ms: NZU64!(1),
             leader_timeout: Duration::from_secs(1),
             certification_timeout: Duration::from_secs(2),
             prune_config: default_state_prune_config(),
@@ -459,6 +461,27 @@ impl TestNetwork<'_> {
             .clone()
     }
 
+    pub(crate) async fn finalized_blocks(
+        &self,
+        index: usize,
+        heights: impl IntoIterator<Item = u64>,
+    ) -> Vec<nunchi_coins_chain::Block> {
+        let node = self
+            .nodes
+            .get(&self.participants[index])
+            .expect("validator not started");
+        let mut blocks = Vec::new();
+        for height in heights {
+            blocks.push(
+                node.marshal
+                    .get_block(commonware_consensus::types::Height::new(height))
+                    .await
+                    .expect("finalized block missing"),
+            );
+        }
+        blocks
+    }
+
     /// Snapshot, in registration order, every started validator's committed coin ledger.
     pub(crate) async fn ledgers(&self) -> Vec<ReadLedger> {
         let mut ledgers = Vec::new();
@@ -601,6 +624,7 @@ async fn start_validator(
         share: Some(share),
         peer_config,
         epoch_length: cfg.epoch_length,
+        min_block_interval_ms: cfg.min_block_interval_ms,
         leader_timeout: cfg.leader_timeout,
         certification_timeout: cfg.certification_timeout,
         strategy: Sequential,

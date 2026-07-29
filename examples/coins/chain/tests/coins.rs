@@ -83,6 +83,45 @@ fn reaches_height_with_reliable_links() {
 }
 
 #[test_traced]
+fn production_blocks_respect_minimum_timestamp_interval() {
+    with_large_stack(|| {
+        let executor = deterministic::Runner::timed(Duration::from_secs(60));
+        executor.start(|mut context| async move {
+            let cfg = ValidatorConfig {
+                min_block_interval_ms: nunchi_chain::MIN_BLOCK_INTERVAL_MS,
+                ..ValidatorConfig::default()
+            };
+            let mut network = TestNetworkBuilder::new(VALIDATORS)
+                .with_initial_link(reliable_link())
+                .with_validator_config(cfg)
+                .build(&mut context)
+                .await;
+            network.start_all().await;
+            network.run_until_height(8).await;
+
+            // Move wall clock ahead so later proposals can be produced in rapid succession.
+            network.context().sleep(Duration::from_secs(5)).await;
+            network.run_until_height(14).await;
+
+            let blocks = network.finalized_blocks(0, 1..=14).await;
+            assert!(
+                blocks.iter().all(|block| block.transactions.is_empty()),
+                "interval coverage should include empty blocks"
+            );
+            for adjacent in blocks.windows(2) {
+                assert!(
+                    adjacent[1].timestamp - adjacent[0].timestamp
+                        >= nunchi_chain::MIN_BLOCK_INTERVAL_MS.get(),
+                    "heights {} and {} violate the production interval",
+                    adjacent[0].height,
+                    adjacent[1].height,
+                );
+            }
+        });
+    });
+}
+
+#[test_traced]
 fn reaches_height_with_lossy_links() {
     with_large_stack(|| {
         let link = lossy_link();

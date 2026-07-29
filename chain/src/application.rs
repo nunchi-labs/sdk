@@ -22,7 +22,7 @@ use rand::{CryptoRng, Rng};
 use std::{
     collections::HashMap,
     marker::PhantomData,
-    num::NonZeroUsize,
+    num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -48,6 +48,7 @@ where
 {
     pub submitter: MempoolHandle<Tx>,
     pub max_block_transactions: usize,
+    pub min_block_interval_ms: NonZeroU64,
     pub consensus: Ext,
     pub events: Events,
     pub applied_height: SharedAppliedHeight,
@@ -66,6 +67,7 @@ where
 {
     submitter: MempoolHandle<R::Transaction>,
     max_block_transactions: usize,
+    min_block_interval_ms: NonZeroU64,
     dkg: Option<DkgMailbox<R::Transaction, Ext>>,
     dkg_state: Option<DkgState>,
     consensus: Ext,
@@ -158,6 +160,7 @@ where
         let ApplicationConfig {
             submitter,
             max_block_transactions,
+            min_block_interval_ms,
             consensus,
             events,
             applied_height,
@@ -168,6 +171,7 @@ where
         Self {
             submitter,
             max_block_transactions,
+            min_block_interval_ms,
             dkg,
             dkg_state: None,
             consensus,
@@ -206,15 +210,20 @@ where
             .expect("application strategy initialized")
     }
 
+    fn minimum_timestamp(&self, parent: &Block<R::Transaction, Ext>) -> Option<u64> {
+        parent
+            .timestamp
+            .checked_add(self.min_block_interval_ms.get())
+    }
+
     fn timestamp<E: Clock>(
+        &self,
         runtime_context: &E,
         parent: &Block<R::Transaction, Ext>,
     ) -> Option<u64> {
-        let mut current = runtime_context.current().epoch_millis();
-        if current <= parent.timestamp {
-            current = parent.timestamp.checked_add(1)?;
-        }
-        (current <= MAX_BLOCK_TIMESTAMP_MS).then_some(current)
+        let minimum = self.minimum_timestamp(parent)?;
+        let timestamp = runtime_context.current().epoch_millis().max(minimum);
+        (timestamp <= MAX_BLOCK_TIMESTAMP_MS).then_some(timestamp)
     }
 
     /// Execute txpool candidates in order, including the first `max_block_transactions` that
@@ -486,11 +495,15 @@ where
     }
 
     async fn verify_timestamp<E: Clock>(
+        &self,
         runtime_context: &E,
         block: &Block<R::Transaction, Ext>,
         parent: &Block<R::Transaction, Ext>,
     ) -> bool {
-        if block.timestamp <= parent.timestamp || block.timestamp > MAX_BLOCK_TIMESTAMP_MS {
+        let Some(minimum) = self.minimum_timestamp(parent) else {
+            return false;
+        };
+        if block.timestamp < minimum || block.timestamp > MAX_BLOCK_TIMESTAMP_MS {
             return false;
         }
 
@@ -508,9 +521,11 @@ where
     R::Transaction: PoolTransaction,
     Ext: ConsensusExtension + Sync,
 {
+    #[allow(clippy::too_many_arguments)]
     pub fn with_consensus(
         submitter: MempoolHandle<R::Transaction>,
         max_block_transactions: usize,
+        min_block_interval_ms: NonZeroU64,
         consensus: Ext,
         dkg: Option<DkgMailbox<R::Transaction, Ext>>,
         applied_height: SharedAppliedHeight,
@@ -521,6 +536,7 @@ where
             ApplicationConfig {
                 submitter,
                 max_block_transactions,
+                min_block_interval_ms,
                 consensus,
                 events: NoopEventConsumer,
                 applied_height,
@@ -536,6 +552,7 @@ where
     pub fn with_authenticated_dkg(
         submitter: MempoolHandle<R::Transaction>,
         max_block_transactions: usize,
+        min_block_interval_ms: NonZeroU64,
         consensus: Ext,
         dkg: DkgMailbox<R::Transaction, Ext>,
         dkg_state: DkgState,
@@ -546,6 +563,7 @@ where
         let mut application = Self::with_consensus(
             submitter,
             max_block_transactions,
+            min_block_interval_ms,
             consensus,
             Some(dkg),
             applied_height,
@@ -565,6 +583,7 @@ where
     pub fn new(
         submitter: MempoolHandle<R::Transaction>,
         max_block_transactions: usize,
+        min_block_interval_ms: NonZeroU64,
         applied_height: SharedAppliedHeight,
         genesis_state: StateCommitment,
         genesis_payload: sha256::Digest,
@@ -572,6 +591,7 @@ where
         Self::with_consensus(
             submitter,
             max_block_transactions,
+            min_block_interval_ms,
             NoConsensusExtension,
             None,
             applied_height,
@@ -590,6 +610,7 @@ where
     pub fn new_with_events(
         submitter: MempoolHandle<R::Transaction>,
         max_block_transactions: usize,
+        min_block_interval_ms: NonZeroU64,
         events: Events,
         applied_height: SharedAppliedHeight,
         genesis_state: StateCommitment,
@@ -599,6 +620,7 @@ where
             ApplicationConfig {
                 submitter,
                 max_block_transactions,
+                min_block_interval_ms,
                 consensus: NoConsensusExtension,
                 events,
                 applied_height,
@@ -619,6 +641,7 @@ where
     pub fn with_dkg(
         submitter: MempoolHandle<R::Transaction>,
         max_block_transactions: usize,
+        min_block_interval_ms: NonZeroU64,
         dkg: DkgMailbox<R::Transaction>,
         applied_height: SharedAppliedHeight,
         genesis_state: StateCommitment,
@@ -627,6 +650,7 @@ where
         Self::with_consensus(
             submitter,
             max_block_transactions,
+            min_block_interval_ms,
             NoConsensusExtension,
             Some(dkg),
             applied_height,
@@ -643,9 +667,11 @@ where
     Block<R::Transaction>: nunchi_dkg::ReshareBlock,
     Events: EventConsumer,
 {
+    #[allow(clippy::too_many_arguments)]
     pub fn with_dkg_and_events(
         submitter: MempoolHandle<R::Transaction>,
         max_block_transactions: usize,
+        min_block_interval_ms: NonZeroU64,
         dkg: DkgMailbox<R::Transaction>,
         events: Events,
         applied_height: SharedAppliedHeight,
@@ -656,6 +682,7 @@ where
             ApplicationConfig {
                 submitter,
                 max_block_transactions,
+                min_block_interval_ms,
                 consensus: NoConsensusExtension,
                 events,
                 applied_height,
@@ -699,7 +726,7 @@ where
         let metrics = self.metrics(&runtime_context);
         let mut ancestry = Box::pin(ancestry);
         let parent = ancestry.next().await?;
-        let timestamp = Self::timestamp(&runtime_context, &parent)?;
+        let timestamp = self.timestamp(&runtime_context, &parent)?;
         let selection_start = runtime_context.current();
         let candidates = input.pending(self.max_block_transactions).await;
         metrics
@@ -754,7 +781,10 @@ where
         let block = ancestry.next().await?;
         let parent = ancestry.next().await?;
 
-        if !Self::verify_timestamp(&runtime_context, &block, &parent).await {
+        if !self
+            .verify_timestamp(&runtime_context, &block, &parent)
+            .await
+        {
             return None;
         }
 

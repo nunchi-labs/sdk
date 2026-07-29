@@ -84,9 +84,28 @@ pub fn application(
     genesis_state: StateCommitment,
     genesis_payload: Digest,
 ) -> Application {
+    application_with_interval(
+        submitter,
+        bridge,
+        applied_height,
+        genesis_state,
+        genesis_payload,
+        nunchi_chain::MIN_BLOCK_INTERVAL_MS,
+    )
+}
+
+fn application_with_interval(
+    submitter: Submitter,
+    bridge: BridgeExtension,
+    applied_height: SharedAppliedHeight,
+    genesis_state: StateCommitment,
+    genesis_payload: Digest,
+    min_block_interval_ms: NonZeroU64,
+) -> Application {
     nunchi_chain::Application::with_consensus(
         submitter,
         0,
+        min_block_interval_ms,
         bridge,
         None,
         applied_height,

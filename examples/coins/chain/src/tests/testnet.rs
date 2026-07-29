@@ -22,7 +22,15 @@ use std::{
     time::Duration,
 };
 
-use crate::{testnet::*, NAMESPACE, BLOCKS_PER_EPOCH};
+use crate::{testnet::*, BLOCKS_PER_EPOCH, NAMESPACE};
+
+#[test]
+fn production_factory_uses_fixed_block_interval() {
+    assert_eq!(
+        production_min_block_interval_ms(),
+        nunchi_chain::MIN_BLOCK_INTERVAL_MS
+    );
+}
 
 #[test]
 fn generated_testnet_has_unique_ports_dirs_and_complete_peer_sets() {

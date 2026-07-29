@@ -358,9 +358,19 @@ pub fn validate_state_prune_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_consensus::{
+        marshal::ancestry::{self, Ancestry},
+        types::{Epoch, Round, View},
+    };
+    use commonware_cryptography::{ed25519, sha256, Digest as _, Signer as _};
+    use commonware_runtime::{Runner as _, Supervisor as _};
     use commonware_runtime::telemetry::metrics::{raw, Registered, Registration};
     use futures::{pin_mut, task::noop_waker};
-    use std::task::{Context, Poll};
+    use nunchi_dkg::{Context as ConsensusContext, Scheme};
+    use std::{
+        sync::atomic::{AtomicBool, Ordering},
+        task::{Context, Poll},
+    };
 
     fn metrics() -> VerifyLimiterMetrics {
         VerifyLimiterMetrics {
@@ -374,6 +384,47 @@ mod tests {
                 raw::Counter::default(),
                 Registration::from(()),
             ),
+        }
+    }
+
+    #[derive(Clone)]
+    struct PendingApplication {
+        pending_once: Arc<AtomicBool>,
+    }
+
+    impl<E> commonware_consensus::Application<E> for PendingApplication
+    where
+        E: Rng + Spawner + Metrics + Clock,
+    {
+        type SigningScheme = Scheme;
+        type Context = ConsensusContext;
+        type Block = crate::Block<()>;
+
+        async fn propose(
+            &mut self,
+            _context: (E, Self::Context),
+            _ancestry: impl Ancestry<Self::Block>,
+        ) -> Option<Self::Block> {
+            None
+        }
+
+        async fn verify(
+            &mut self,
+            _context: (E, Self::Context),
+            _ancestry: impl Ancestry<Self::Block>,
+        ) -> bool {
+            if self.pending_once.swap(false, Ordering::SeqCst) {
+                futures::future::pending().await
+            }
+            true
+        }
+    }
+
+    fn consensus_context() -> ConsensusContext {
+        ConsensusContext {
+            round: Round::new(Epoch::zero(), View::new(1)),
+            leader: ed25519::PrivateKey::from_seed(1).public_key(),
+            parent: (View::zero(), sha256::Digest::EMPTY),
         }
     }
 
@@ -399,6 +450,58 @@ mod tests {
 
         drop(first);
         assert!(matches!(second.as_mut().poll(&mut context), Poll::Ready(_)));
+    }
+
+    #[test]
+    fn verify_limiter_restores_permit_after_cancellation() {
+        commonware_runtime::deterministic::Runner::default().start(|context| async move {
+            let application = PendingApplication {
+                pending_once: Arc::new(AtomicBool::new(true)),
+            };
+            let mut limiter = VerifyLimiter::new(&context, application, NZUsize!(1));
+            let limiter_state = limiter.limiter.clone();
+
+            {
+                let verification = commonware_consensus::Application::verify(
+                    &mut limiter,
+                    (context.child("first"), consensus_context()),
+                    ancestry::from_iter(Vec::<Arc<crate::Block<()>>>::new()),
+                );
+                pin_mut!(verification);
+                let waker = noop_waker();
+                let mut task_context = Context::from_waker(&waker);
+                assert!(matches!(
+                    verification.as_mut().poll(&mut task_context),
+                    Poll::Pending
+                ));
+                let state = limiter_state
+                    .state
+                    .lock()
+                    .expect("verify limiter mutex poisoned");
+                assert_eq!(state.in_flight, 1);
+                assert_eq!(state.waiting, 0);
+            }
+
+            {
+                let state = limiter_state
+                    .state
+                    .lock()
+                    .expect("verify limiter mutex poisoned");
+                assert_eq!(state.in_flight, 0);
+                assert_eq!(state.waiting, 0);
+                assert_eq!(state.available, 1);
+            }
+            assert_eq!(limiter.metrics.complete_total.get(), 1);
+
+            assert!(
+                commonware_consensus::Application::verify(
+                    &mut limiter,
+                    (context.child("second"), consensus_context()),
+                    ancestry::from_iter(Vec::<Arc<crate::Block<()>>>::new()),
+                )
+                .await
+            );
+        });
     }
 
     #[test]

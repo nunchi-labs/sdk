@@ -685,6 +685,7 @@ async fn start_node(
         share: Some(share),
         peer_config: config.peer_config.clone(),
         epoch_length: config.epoch_length,
+        min_block_interval_ms: production_min_block_interval_ms(),
         leader_timeout: Duration::from_millis(config.consensus.leader_timeout_ms),
         certification_timeout: Duration::from_millis(config.consensus.certification_timeout_ms),
         strategy: context
@@ -749,6 +750,10 @@ async fn start_node(
 
     info!(node = %config.name, "coins-chain validator started");
     Ok((rpc_server, engine_handle))
+}
+
+pub(crate) const fn production_min_block_interval_ms() -> NonZeroU64 {
+    nunchi_chain::MIN_BLOCK_INTERVAL_MS
 }
 
 async fn upload_current_dkg_output(
