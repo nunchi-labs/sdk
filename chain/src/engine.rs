@@ -150,6 +150,7 @@ struct VerifyLimiterMetrics {
     waiting: Gauge,
     spawn_total: Counter,
     complete_total: Counter,
+    wakeup_dropped_total: Counter,
 }
 
 struct Limiter {
@@ -199,6 +200,10 @@ impl<A> VerifyLimiter<A> {
                 complete_total: context.counter(
                     "application_verify_complete_total",
                     "application verification tasks completed",
+                ),
+                wakeup_dropped_total: context.counter(
+                    "application_verify_wakeup_dropped_total",
+                    "verification waiters abandoned before being woken",
                 ),
             },
         }
@@ -252,6 +257,7 @@ impl Limiter {
                 metrics.in_flight.try_set(state.in_flight).ok();
                 return;
             }
+            metrics.wakeup_dropped_total.inc();
         }
 
         state.available += 1;
