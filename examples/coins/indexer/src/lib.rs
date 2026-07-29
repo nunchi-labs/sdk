@@ -742,10 +742,10 @@ fn persist_dkg_output(path: &FsPath, epoch: Epoch, output: &DkgOutput) -> io::Re
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now()
+    let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or_default()
+        .expect("system clock is before the Unix epoch");
+    u64::try_from(duration.as_millis()).expect("millisecond timestamp overflows u64")
 }
 
 #[cfg(test)]
