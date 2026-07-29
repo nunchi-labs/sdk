@@ -1,6 +1,6 @@
 use crate::StateCommitment;
 use nunchi_authority::{AuthorityGenesis, AuthorityLedger};
-use nunchi_coins::{CoinsGenesis, Ledger};
+use nunchi_coins::{CoinsGenesis, CoinLedger};
 use nunchi_common::{CommitState, QmdbState};
 
 use commonware_cryptography::{ed25519, Signer as _};
@@ -190,7 +190,7 @@ fn unmarked_non_empty_state_is_rejected() {
         let mut state = QmdbState::init(context.child("state"), "genesis-unmarked")
             .await
             .unwrap();
-        let mut ledger = Ledger::new(state);
+        let mut ledger = CoinLedger::new(state);
         let issuer = external(100);
         ledger
             .create_token(
@@ -270,7 +270,7 @@ fn coins_genesis_creates_token_and_initial_balances() {
             1_000,
             Some(2_000),
         );
-        let ledger = Ledger::new(state);
+        let ledger = CoinLedger::new(state);
         let factory_nonce = CoinDB::factory_nonce(ledger.db())
             .await
             .unwrap()

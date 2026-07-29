@@ -20,7 +20,7 @@ use jsonrpsee::{
 use nunchi_rpc::{decode_hex, encode_hex, invalid_params, module_error, RpcRouter};
 use serde::{Deserialize, Serialize};
 
-use crate::{Address, CoinDB, CoinId, Ledger, LedgerError, TokenDefinition};
+use crate::{Address, CoinDB, CoinId, CoinLedger, LedgerError, TokenDefinition};
 use nunchi_common::CommitState;
 
 /// Read-only coin state required by the coin RPC server.
@@ -38,23 +38,23 @@ pub trait CoinQuery: Clone + Send + Sync + 'static {
 }
 
 /// Shared committed coin ledger handle suitable for RPC query servers.
-pub struct SharedLedger<D> {
-    ledger: Arc<AsyncMutex<Ledger<D>>>,
+pub struct SharedCoinLedger<D> {
+    ledger: Arc<AsyncMutex<CoinLedger<D>>>,
 }
 
-impl<D> SharedLedger<D> {
-    pub fn new(ledger: Ledger<D>) -> Self {
+impl<D> SharedCoinLedger<D> {
+    pub fn new(ledger: CoinLedger<D>) -> Self {
         Self {
             ledger: Arc::new(AsyncMutex::new(ledger)),
         }
     }
 
-    pub async fn lock(&self) -> futures::lock::MutexGuard<'_, Ledger<D>> {
+    pub async fn lock(&self) -> futures::lock::MutexGuard<'_, CoinLedger<D>> {
         self.ledger.lock().await
     }
 }
 
-impl<D> Clone for SharedLedger<D> {
+impl<D> Clone for SharedCoinLedger<D> {
     fn clone(&self) -> Self {
         Self {
             ledger: self.ledger.clone(),
@@ -63,7 +63,7 @@ impl<D> Clone for SharedLedger<D> {
 }
 
 #[async_trait]
-impl<D> CoinQuery for SharedLedger<D>
+impl<D> CoinQuery for SharedCoinLedger<D>
 where
     D: CoinDB + CommitState + Send + Sync + 'static,
 {

@@ -2,7 +2,7 @@
 //!
 //! The chain reuses the consensus, marshal, and engine wiring of the `nunchi-template` example, but
 //! its blocks carry [`nunchi_coins`] transactions and the Commonware stateful actor executes each
-//! finalized block into an authenticated coin [`Ledger`](nunchi_coins::Ledger).
+//! finalized block into an authenticated coin [`CoinLedger`](nunchi_coins::CoinLedger).
 //!
 //! Transactions enter the chain exactly as they would on a real network: a client signs a
 //! transaction and submits it to a *specific* node's [`nunchi_mempool::MempoolHandle`] (there is no

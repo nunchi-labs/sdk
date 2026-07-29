@@ -1,7 +1,7 @@
 use crate::{
     account::{multisig_account_id, Address, MultisigPolicy, PrivateKey},
     asset::{TokenError, TokenName, TokenSymbol},
-    AccountPolicyRegistered, Burned, CoinOperation, CoinSpec, Ledger, LedgerError, Minted,
+    AccountPolicyRegistered, Burned, CoinOperation, CoinSpec, CoinLedger, LedgerError, Minted,
     TokenCreated, Transaction, Transferred, ACCOUNT_POLICY_REGISTERED_EVENT, BURNED_EVENT,
     MINTED_EVENT, TOKEN_CREATED_EVENT, TRANSFERRED_EVENT,
 };
@@ -9,11 +9,11 @@ use commonware_codec::DecodeExt;
 use commonware_runtime::{deterministic, Runner as _};
 use nunchi_common::{QmdbState, VecEventSink};
 
-async fn ledger(context: deterministic::Context) -> Ledger<QmdbState<deterministic::Context>> {
+async fn ledger(context: deterministic::Context) -> CoinLedger<QmdbState<deterministic::Context>> {
     let db = QmdbState::init(context, "coins-events-test")
         .await
         .expect("init state db");
-    Ledger::new(db)
+    CoinLedger::new(db)
 }
 
 fn spec(supply: u128, max: Option<u128>) -> Result<CoinSpec, TokenError> {
@@ -327,7 +327,7 @@ fn failed_transactions_emit_no_events() {
 }
 
 async fn assert_no_event(
-    ledger: &mut Ledger<QmdbState<deterministic::Context>>,
+    ledger: &mut CoinLedger<QmdbState<deterministic::Context>>,
     tx: &Transaction,
     expected: LedgerError,
 ) {

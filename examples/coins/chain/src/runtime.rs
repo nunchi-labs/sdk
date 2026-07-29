@@ -4,7 +4,7 @@ use commonware_codec::EncodeSize;
 use nunchi_authority::{AuthorityError, AuthorityLedger};
 use nunchi_bridge::{escrow_address, BridgeError, BridgeLedger, BridgeOperation};
 use nunchi_clob::{ClobError, ClobLedger};
-use nunchi_coins::{CoinId, Ledger, LedgerError};
+use nunchi_coins::{CoinId, CoinLedger, LedgerError};
 use nunchi_common::{EventSink, NoopEventSink, Overlay, Runtime, RuntimeContext, StateStore};
 use nunchi_oracle::{OracleError, OracleLedger};
 
@@ -85,7 +85,7 @@ where
 {
     // Fee ante: charge the authorizing account before module dispatch. The fee is staged in the
     // same overlay as the operation, so a failed transaction reverts its fee.
-    let mut fees = Ledger::new(&mut *state);
+    let mut fees = CoinLedger::new(&mut *state);
     fees.charge_fee(
         transaction.account_id(),
         transaction.encode_size(),
@@ -95,7 +95,7 @@ where
 
     match transaction {
         Transaction::Coin(transaction) => {
-            let mut ledger = Ledger::new(state);
+            let mut ledger = CoinLedger::new(state);
             ledger.apply_transaction(transaction, events).await?;
         }
         Transaction::Authority(transaction) => {
@@ -119,7 +119,7 @@ where
                     amount,
                     ..
                 } => {
-                    let mut coins = Ledger::new(&mut overlay);
+                    let mut coins = CoinLedger::new(&mut overlay);
                     coins
                         .transfer(
                             &transaction.account_id,

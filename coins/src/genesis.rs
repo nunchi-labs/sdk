@@ -1,5 +1,5 @@
 use crate::{
-    multisig_account_id, AccountPolicy, Address, CoinDB, CoinId, CoinSpec, FeeConfig, Ledger,
+    multisig_account_id, AccountPolicy, Address, CoinDB, CoinId, CoinSpec, CoinLedger, FeeConfig,
     LedgerError, MultisigPolicy,
 };
 use commonware_codec::{DecodeExt, Encode};
@@ -89,7 +89,7 @@ impl MultisigPolicyGenesis {
     }
 }
 
-impl<D: CoinDB> Ledger<D> {
+impl<D: CoinDB> CoinLedger<D> {
     /// Seed coin state from genesis while preserving ledger invariants.
     pub async fn apply_genesis(&mut self, genesis: &CoinsGenesis) -> Result<(), LedgerError> {
         for account in &genesis.account_policies {

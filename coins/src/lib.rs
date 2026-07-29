@@ -36,7 +36,10 @@ pub use genesis::{
     AccountPolicyGenesis, AllocationGenesis, CoinsGenesis, FeeGenesis, MultisigPolicyGenesis,
     TokenGenesis,
 };
-pub use ledger::{Ledger, LedgerError};
+pub use ledger::{CoinLedger, LedgerError};
+
+#[deprecated(since = "2026.7.0", note = "renamed to CoinLedger for consistency with other modules")]
+pub type Ledger<D> = CoinLedger<D>;
 pub use nunchi_common::{AccountSignature, Authorization};
 pub use transaction::{CoinOperation, Transaction, TransactionPayload};
 

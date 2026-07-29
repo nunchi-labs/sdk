@@ -10,7 +10,7 @@ pub struct TokenFactory {
 
 impl TokenFactory {
     /// Reconstruct a factory from a persisted nonce, so token-id derivation stays deterministic
-    /// across restarts when the factory state lives in a [`crate::Ledger`]'s database.
+    /// across restarts when the factory state lives in a [`crate::CoinLedger`]'s database.
     pub fn with_nonce(next_nonce: u64) -> Self {
         Self { next_nonce }
     }

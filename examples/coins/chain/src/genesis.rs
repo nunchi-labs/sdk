@@ -4,7 +4,7 @@ use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_storage::{mmr::Family, qmdb::sync::Target, Context};
 use nunchi_authority::{AuthorityGenesis, AuthorityLedger};
 use nunchi_clob::{ClobGenesis, ClobLedger};
-use nunchi_coins::{CoinsGenesis, Ledger};
+use nunchi_coins::{CoinsGenesis, CoinLedger};
 use nunchi_common::{
     CommitState, Namespace, Overlay, QmdbConfig, QmdbState, StateError, StateStore,
 };
@@ -101,7 +101,7 @@ impl ChainGenesis {
             overlay = ledger.into_inner();
         }
         if let Some(coins) = &self.coins {
-            let mut ledger = Ledger::new(overlay);
+            let mut ledger = CoinLedger::new(overlay);
             ledger.apply_genesis(coins).await?;
             overlay = ledger.into_inner();
         }

@@ -66,14 +66,14 @@ pub enum LedgerError {
 
 /// Deterministic state machine for accounts and tokens over a [`CoinDB`] backend.
 ///
-/// State lives in the shared, authenticated database; [`Ledger::root`] commits to it succinctly.
-/// Operations stage writes that become durable on [`Ledger::commit`].
+/// State lives in the shared, authenticated database; [`CoinLedger::root`] commits to it succinctly.
+/// Operations stage writes that become durable on [`CoinLedger::commit`].
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Ledger<D> {
+pub struct CoinLedger<D> {
     db: D,
 }
 
-impl<D: CoinDB> Ledger<D> {
+impl<D: CoinDB> CoinLedger<D> {
     /// Wrap a database backend as a coin ledger.
     pub fn new(db: D) -> Self {
         Self { db }
@@ -481,7 +481,7 @@ impl<D: CoinDB> Ledger<D> {
     }
 }
 
-impl<D: CoinDB + CommitState> Ledger<D> {
+impl<D: CoinDB + CommitState> CoinLedger<D> {
     /// Flush staged writes, returning the new authenticated state root.
     pub async fn commit(&mut self) -> Result<Digest, LedgerError> {
         self.db

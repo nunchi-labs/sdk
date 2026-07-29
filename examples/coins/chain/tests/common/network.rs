@@ -23,7 +23,7 @@ use commonware_utils::{
 };
 use governor::Quota;
 use nunchi_authority::AuthorityLedger;
-use nunchi_coins::{Address, Ledger};
+use nunchi_coins::{Address, CoinLedger};
 use nunchi_coins_chain::{
     engine::{Config, Engine},
     execution::NodeHandle,
@@ -57,7 +57,7 @@ type Channel = (
     Sender<PublicKey, deterministic::Context>,
     Receiver<PublicKey>,
 );
-type ReadLedger = Ledger<QmdbReader<deterministic::Context>>;
+type ReadLedger = CoinLedger<QmdbReader<deterministic::Context>>;
 type ReadAuthorityLedger = AuthorityLedger<QmdbReader<deterministic::Context>>;
 type ReadOracleLedger = OracleLedger<QmdbReader<deterministic::Context>>;
 
@@ -384,7 +384,7 @@ impl TestNetwork<'_> {
                 continue;
             };
             let db = node.stateful.subscribe_databases().await;
-            ledgers.push(Ledger::new(QmdbReader::new(db)));
+            ledgers.push(CoinLedger::new(QmdbReader::new(db)));
         }
         ledgers
     }

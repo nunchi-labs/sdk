@@ -7,7 +7,7 @@ use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_storage::Context;
 use jsonrpsee::core::async_trait;
 use nunchi_clob::ClobMailbox;
-use nunchi_coins::{rpc::CoinQuery, Address, CoinId, Ledger, LedgerError, TokenDefinition};
+use nunchi_coins::{rpc::CoinQuery, Address, CoinId, CoinLedger, LedgerError, TokenDefinition};
 use nunchi_common::QmdbReader;
 use nunchi_mempool::MempoolHandle;
 
@@ -77,8 +77,8 @@ where
         Self { stateful }
     }
 
-    async fn ledger(&self) -> Ledger<QmdbReader<E>> {
-        Ledger::new(QmdbReader::new(self.stateful.subscribe_databases().await))
+    async fn ledger(&self) -> CoinLedger<QmdbReader<E>> {
+        CoinLedger::new(QmdbReader::new(self.stateful.subscribe_databases().await))
     }
 }
 

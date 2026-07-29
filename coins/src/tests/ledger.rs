@@ -3,17 +3,17 @@ use crate::{
         multisig_account_id, AccountPolicy, AccountType, Address, MultisigPolicy, PrivateKey,
     },
     asset::{TokenError, TokenName, TokenSymbol},
-    CoinSpec, FeeCharged, FeeConfig, Ledger, LedgerError, Transaction,
+    CoinSpec, FeeCharged, FeeConfig, CoinLedger, LedgerError, Transaction,
 };
 use commonware_codec::DecodeExt;
 use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
 use nunchi_common::{NoopEventSink, QmdbState, VecEventSink};
 
-async fn ledger(context: deterministic::Context) -> Ledger<QmdbState<deterministic::Context>> {
+async fn ledger(context: deterministic::Context) -> CoinLedger<QmdbState<deterministic::Context>> {
     let db = QmdbState::init(context, "coins-test")
         .await
         .expect("init state db");
-    Ledger::new(db)
+    CoinLedger::new(db)
 }
 
 fn spec(supply: u128, max: Option<u128>) -> Result<CoinSpec, TokenError> {
