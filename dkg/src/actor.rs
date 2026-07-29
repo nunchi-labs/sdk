@@ -339,6 +339,11 @@ where
             let am_dealer = dealers.position(&self_pk).is_some();
             let am_player = players.position(&self_pk).is_some();
 
+            // Keep references to the participant sets for sender validation in the
+            // network message handler (the originals are moved into Info::new below).
+            let epoch_dealers = dealers.clone();
+            let epoch_players = players.clone();
+
             // Inform the orchestrator of the epoch transition
             let transition: EpochTransition<MinSig, ed25519::PublicKey> = EpochTransition {
                 epoch,
@@ -394,10 +399,26 @@ where
                 on_stopped => {
                     break 'actor;
                 },
-                // Process incoming network messages
+                // Process incoming network messages.
+                //
+                // The sender_pk is transport-authenticated by the p2p layer — it is
+                // the peer's verified ed25519 public key, not a self-reported field.
+                // We additionally check that the sender is a known participant
+                // (dealer or player) for the current epoch before performing any
+                // expensive deserialization of BLS12-381 group elements.
                 network_msg = round_receiver.recv() => {
                     match network_msg {
                         Ok((sender_pk, msg_bytes)) => {
+                            // Drop messages from peers that are not participants in
+                            // this epoch to avoid wasting CPU on deserialization and
+                            // storage writes from non-participants.
+                            let is_participant = epoch_dealers.position(&sender_pk).is_some()
+                                || epoch_players.position(&sender_pk).is_some();
+                            if !is_participant {
+                                warn!(?epoch, ?sender_pk, "message from non-participant, dropping");
+                                continue;
+                            }
+
                             let msg = match Message::<MinSig, ed25519::PublicKey>::read_cfg(
                                 &mut msg_bytes.clone(),
                                 &max_read_size,
