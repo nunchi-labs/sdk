@@ -102,3 +102,58 @@ fn normalize_path(path: Option<PathBuf>) -> Result<Option<PathBuf>, std::io::Err
     })
     .transpose()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_generation_uses_localhost_defaults() {
+        let generate = Generate::local(
+            4,
+            PathBuf::from("testnet"),
+            30_000,
+            8_545,
+            DEFAULT_BASE_METRICS_PORT,
+            7,
+        );
+
+        assert_eq!(generate.bind_ip, IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert!(generate.public_host.is_empty());
+        assert!(generate.storage_dir.is_none());
+        assert!(generate.genesis_path.is_none());
+        assert!(generate.indexer_url.is_none());
+    }
+
+    #[test]
+    fn manifest_path_uses_manifest_filename() {
+        let directory = PathBuf::from("testnet");
+
+        assert_eq!(
+            manifest_path(&directory),
+            directory.join(LocalTestnetManifest::FILE_NAME)
+        );
+    }
+
+    #[test]
+    fn normalize_path_leaves_absolute_path_unchanged() {
+        let path = PathBuf::from("/tmp/genesis.toml");
+
+        assert_eq!(normalize_path(Some(path.clone())).unwrap(), Some(path));
+    }
+
+    #[test]
+    fn normalize_path_resolves_relative_path_from_current_directory() {
+        let path = PathBuf::from("genesis.toml");
+
+        assert_eq!(
+            normalize_path(Some(path.clone())).unwrap(),
+            Some(std::env::current_dir().unwrap().join(path))
+        );
+    }
+
+    #[test]
+    fn normalize_path_preserves_none() {
+        assert_eq!(normalize_path(None).unwrap(), None);
+    }
+}
