@@ -1,7 +1,7 @@
 //! Bridge module events.
 
 use crate::record::{AssetId, ChainId, TransferRecordId};
-use commonware_codec::{Encode, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{Encode, Error, FixedSize, Read, ReadExt, Write};
 use nunchi_common::{Address, Event};
 
 /// Topic for the event emitted when a source-chain lock records a transfer.
@@ -50,17 +50,15 @@ impl Read for TransferLocked {
     }
 }
 
-impl EncodeSize for TransferLocked {
-    fn encode_size(&self) -> usize {
-        self.record_id.encode_size()
-            + self.source_chain_id.encode_size()
-            + self.destination_chain_id.encode_size()
-            + self.source_asset.encode_size()
-            + self.amount.encode_size()
-            + self.sender.encode_size()
-            + self.recipient.encode_size()
-            + self.nonce.encode_size()
-    }
+impl FixedSize for TransferLocked {
+    const SIZE: usize = TransferRecordId::SIZE
+        + ChainId::SIZE
+        + ChainId::SIZE
+        + AssetId::SIZE
+        + u128::SIZE
+        + Address::SIZE
+        + Address::SIZE
+        + u64::SIZE;
 }
 
 /// Build the [`Event`] for a recorded lock.
