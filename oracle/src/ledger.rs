@@ -27,6 +27,8 @@ pub enum OracleError {
     ProofTooLarge,
     #[error("oracle record index is full")]
     IndexFull,
+    #[error("duplicate oracle record")]
+    DuplicateRecord,
     #[error("invalid oracle query: {0}")]
     InvalidQuery(&'static str),
     #[error("oracle record index references a missing record")]
@@ -185,6 +187,9 @@ impl<D: OracleDB> OracleLedger<D> {
         }
 
         let id = record_id(signer, nonce, namespace, interval);
+        if self.db.record(&id).await?.is_some() {
+            return Err(OracleError::DuplicateRecord);
+        }
         let record = OracleRecord {
             id,
             writer: signer.clone(),
