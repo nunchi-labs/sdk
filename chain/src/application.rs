@@ -126,10 +126,14 @@ where
     Events: EventConsumer,
 {
     /// The genesis block, committing to `genesis_state`.
+    ///
+    /// The genesis block is synthetic and has no real leader. The leader field
+    /// uses a placeholder key derived from `u64::MAX` that must not appear in
+    /// any validator set.
     pub fn genesis_block(&self) -> Block<R::Transaction, Ext> {
         let genesis_context = Context {
             round: Round::new(Epoch::zero(), View::zero()),
-            leader: ed25519::PrivateKey::from_seed(0).public_key(),
+            leader: ed25519::PrivateKey::from_seed(u64::MAX).public_key(),
             parent: (View::zero(), sha256::Digest::EMPTY),
         };
         Block::new(
