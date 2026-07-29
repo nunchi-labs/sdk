@@ -338,8 +338,10 @@ fn signing_bytes<Operation: EncodeSize + Write>(
     authorization_tag: u8,
     payload: &TransactionPayload<Operation>,
 ) -> Vec<u8> {
-    let mut bytes = account_id.encode().as_ref().to_vec();
+    let capacity = account_id.encode_size() + 1 + payload.encode_size();
+    let mut bytes = Vec::with_capacity(capacity);
+    account_id.write(&mut bytes);
     bytes.push(authorization_tag);
-    bytes.extend_from_slice(payload.encode().as_ref());
+    payload.write(&mut bytes);
     bytes
 }
