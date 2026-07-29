@@ -14,7 +14,11 @@ pub trait Operation: EncodeSize + Read<Cfg = ()> + Write {
 }
 
 /// Signable transaction payload. The nonce is scoped to the account being authorized.
+///
+/// This struct is marked `#[non_exhaustive]` to prevent construction via struct
+/// literal syntax from outside this crate. Use [`TransactionPayload::new`] instead.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct TransactionPayload<Operation> {
     pub nonce: u64,
     pub operation: Operation,
@@ -51,13 +55,33 @@ impl<Operation: EncodeSize> EncodeSize for TransactionPayload<Operation> {
 }
 
 /// A signer-specific signature over a transaction payload.
+///
+/// This struct is marked `#[non_exhaustive]` to prevent construction via struct
+/// literal syntax from outside this crate. Use [`AccountSignature::new`] to
+/// construct with curve-consistency validation, or [`AccountSignature::sign`] to
+/// create from a private key.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct AccountSignature {
     pub signer: PublicKey,
     pub signature: Signature,
 }
 
 impl AccountSignature {
+    /// Constructs a new `AccountSignature` after validating that the signer and
+    /// signature use the same cryptographic curve.
+    ///
+    /// Returns a codec [`Error`] if the curves do not match.
+    pub fn new(signer: PublicKey, signature: Signature) -> Result<Self, Error> {
+        if signer.curve() != signature.curve() {
+            return Err(Error::Invalid(
+                "account signature",
+                "signature curve does not match signer curve",
+            ));
+        }
+        Ok(Self { signer, signature })
+    }
+
     pub fn sign<Operation: self::Operation>(
         signer: &PrivateKey,
         account_id: &Address,
@@ -237,7 +261,12 @@ impl EncodeSize for Authorization {
 }
 
 /// A signed Nunchi transaction over a caller-defined operation enum.
+///
+/// This struct is marked `#[non_exhaustive]` to prevent construction via struct
+/// literal syntax from outside this crate. Use [`Transaction::sign`] or
+/// [`Transaction::sign_multisig`] to construct validated transactions.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct Transaction<Operation> {
     pub account_id: Address,
     pub payload: TransactionPayload<Operation>,
