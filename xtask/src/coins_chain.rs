@@ -23,6 +23,8 @@ pub struct Generate {
     pub base_metrics_port: u16,
     #[arg(long, default_value_t = IpAddr::V4(Ipv4Addr::LOCALHOST))]
     pub bind_ip: IpAddr,
+    /// Public IP address for each validator. When specified, this list must contain one address
+    /// per validator.
     #[arg(long)]
     pub public_host: Vec<IpAddr>,
     #[arg(long)]
@@ -60,6 +62,7 @@ impl Generate {
     }
 
     pub fn run(self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        self.validate_public_hosts()?;
         let manifest_path = manifest_path(&self.out);
         let genesis_path = normalize_path(self.genesis_path)?;
         let mut manifest = generate_local_testnet(LocalTestnetConfig {
@@ -78,6 +81,17 @@ impl Generate {
         manifest.executable_path = coins_chain_executable();
         manifest.write(&manifest_path)?;
         Ok(manifest_path)
+    }
+
+    fn validate_public_hosts(&self) -> Result<(), std::io::Error> {
+        if !self.public_host.is_empty() && self.public_host.len() != self.validators as usize {
+            return Err(std::io::Error::other(format!(
+                "expected one public host per validator ({} validators, {} public hosts)",
+                self.validators,
+                self.public_host.len()
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -101,4 +115,33 @@ fn normalize_path(path: Option<PathBuf>) -> Result<Option<PathBuf>, std::io::Err
         }
     })
     .transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_mismatched_public_host_count() {
+        let mut generate = Generate::local(2, PathBuf::from("testnet"), 30_000, 8_545, 9_090, 0);
+        generate.public_host = vec![IpAddr::V4(Ipv4Addr::LOCALHOST)];
+
+        let error = generate.validate_public_hosts().unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "expected one public host per validator (2 validators, 1 public hosts)"
+        );
+    }
+
+    #[test]
+    fn accepts_empty_or_complete_public_host_list() {
+        let mut generate = Generate::local(2, PathBuf::from("testnet"), 30_000, 8_545, 9_090, 0);
+        assert!(generate.validate_public_hosts().is_ok());
+
+        generate.public_host = vec![
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        ];
+        assert!(generate.validate_public_hosts().is_ok());
+    }
 }
