@@ -3,7 +3,7 @@ use commonware_codec::{
 };
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use nunchi_crypto::PublicKey;
-use std::{fmt, str::FromStr};
+use std::{fmt, str::FromStr, sync::OnceLock};
 use thiserror::Error;
 
 const ADDRESS_DOMAIN: &[u8] = b"nunchi/account/v1";
@@ -43,8 +43,11 @@ impl Address {
 
     /// Encode this address using Nunchi's Bech32 human-facing format.
     pub fn to_bech32(&self) -> String {
-        let hrp = bech32::Hrp::parse(ADDRESS_HRP).expect("static address HRP is valid");
-        bech32::encode::<bech32::Bech32>(hrp, self.encode().as_ref())
+        static HRP: OnceLock<bech32::Hrp> = OnceLock::new();
+        let hrp = HRP.get_or_init(|| {
+            bech32::Hrp::parse(ADDRESS_HRP).expect("static address HRP is valid")
+        });
+        bech32::encode::<bech32::Bech32>(*hrp, self.encode().as_ref())
             .expect("fixed-width address always encodes")
     }
 
