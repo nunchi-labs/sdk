@@ -78,7 +78,7 @@ impl<T: PoolTransaction> Pool<T> {
         self.admit_verified(tx)
     }
 
-    pub fn check_stateless(tx: &T, config: &PoolConfig) -> Result<(), AdmissionError> {
+    pub(crate) fn check_stateless(tx: &T, config: &PoolConfig) -> Result<(), AdmissionError> {
         if let Err(err) = tx.verify() {
             return Err(AdmissionError::InvalidSignature(err.to_string()));
         }
