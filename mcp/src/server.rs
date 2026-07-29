@@ -435,27 +435,7 @@ impl NunchiServer {
                         Returns hex-encoded transaction bytes to submit via coins_submit_transaction."
     )]
     async fn sdk_build_transfer(&self, Parameters(p): Parameters<BuildTransferParams>) -> String {
-        match (|| -> anyhow::Result<String> {
-            let signer = decode_value::<PrivateKey>(&p.private_key_hex, "private key")?;
-            let coin = decode_value::<CoinId>(&p.coin, "coin id")?;
-            let from = decode_value::<nunchi_coins::Address>(&p.from, "from address")?;
-            let to = decode_value::<nunchi_coins::Address>(&p.to, "to address")?;
-            let amount = p
-                .amount
-                .parse::<u128>()
-                .map_err(|_| anyhow::anyhow!("amount is not a valid u128"))?;
-            let tx = Transaction::sign(
-                &signer,
-                p.nonce,
-                CoinOperation::Transfer {
-                    coin,
-                    from,
-                    to,
-                    amount,
-                },
-            );
-            Ok(encode_value(&tx))
-        })() {
+        match Self::build_transfer_inner(&p) {
             Ok(hex) => hex,
             Err(e) => format!("Error: {e}"),
         }
@@ -471,17 +451,7 @@ impl NunchiServer {
                         Returns hex-encoded transaction bytes to submit via coins_submit_transaction."
     )]
     async fn sdk_build_mint(&self, Parameters(p): Parameters<BuildMintParams>) -> String {
-        match (|| -> anyhow::Result<String> {
-            let signer = decode_value::<PrivateKey>(&p.private_key_hex, "private key")?;
-            let coin = decode_value::<CoinId>(&p.coin, "coin id")?;
-            let to = decode_value::<nunchi_coins::Address>(&p.to, "to address")?;
-            let amount = p
-                .amount
-                .parse::<u128>()
-                .map_err(|_| anyhow::anyhow!("amount is not a valid u128"))?;
-            let tx = Transaction::sign(&signer, p.nonce, CoinOperation::Mint { coin, to, amount });
-            Ok(encode_value(&tx))
-        })() {
+        match Self::build_mint_inner(&p) {
             Ok(hex) => hex,
             Err(e) => format!("Error: {e}"),
         }
@@ -497,18 +467,7 @@ impl NunchiServer {
                         Returns hex-encoded transaction bytes to submit via coins_submit_transaction."
     )]
     async fn sdk_build_burn(&self, Parameters(p): Parameters<BuildBurnParams>) -> String {
-        match (|| -> anyhow::Result<String> {
-            let signer = decode_value::<PrivateKey>(&p.private_key_hex, "private key")?;
-            let coin = decode_value::<CoinId>(&p.coin, "coin id")?;
-            let from = decode_value::<nunchi_coins::Address>(&p.from, "from address")?;
-            let amount = p
-                .amount
-                .parse::<u128>()
-                .map_err(|_| anyhow::anyhow!("amount is not a valid u128"))?;
-            let tx =
-                Transaction::sign(&signer, p.nonce, CoinOperation::Burn { coin, from, amount });
-            Ok(encode_value(&tx))
-        })() {
+        match Self::build_burn_inner(&p) {
             Ok(hex) => hex,
             Err(e) => format!("Error: {e}"),
         }
@@ -530,18 +489,7 @@ impl NunchiServer {
         &self,
         Parameters(p): Parameters<BuildCreateTokenParams>,
     ) -> String {
-        match (|| -> anyhow::Result<String> {
-            let signer = decode_value::<PrivateKey>(&p.private_key_hex, "private key")?;
-            let spec = build_coin_spec_from_params(
-                &p.symbol,
-                &p.name,
-                p.decimals,
-                &p.initial_supply,
-                p.max_supply.as_deref(),
-            )?;
-            let tx = Transaction::sign(&signer, p.nonce, CoinOperation::CreateToken { spec });
-            Ok(encode_value(&tx))
-        })() {
+        match Self::build_create_token_inner(&p) {
             Ok(hex) => hex,
             Err(e) => format!("Error: {e}"),
         }
@@ -562,17 +510,7 @@ impl NunchiServer {
         &self,
         Parameters(p): Parameters<BuildRegisterAccountPolicyParams>,
     ) -> String {
-        match (|| -> anyhow::Result<String> {
-            let signer = decode_value::<PrivateKey>(&p.private_key_hex, "private key")?;
-            let account_id = decode_value::<nunchi_coins::Address>(&p.account_id, "account_id")?;
-            let policy = build_multisig_policy(p.threshold, &p.signer_public_keys_hex)?;
-            let tx = Transaction::sign(
-                &signer,
-                p.nonce,
-                CoinOperation::RegisterAccountPolicy { account_id, policy },
-            );
-            Ok(encode_value(&tx))
-        })() {
+        match Self::build_register_account_policy_inner(&p) {
             Ok(hex) => hex,
             Err(e) => format!("Error: {e}"),
         }
@@ -650,6 +588,83 @@ impl NunchiServer {
             Ok(v) => v.to_string(),
             Err(e) => format!("Error: {e}"),
         }
+    }
+}
+
+// ── build helpers ─────────────────────────────────────────────────────────────
+
+impl NunchiServer {
+    fn build_transfer_inner(p: &BuildTransferParams) -> anyhow::Result<String> {
+        let signer = decode_value::<PrivateKey>(&p.private_key_hex, "private key")?;
+        let coin = decode_value::<CoinId>(&p.coin, "coin id")?;
+        let from = decode_value::<nunchi_coins::Address>(&p.from, "from address")?;
+        let to = decode_value::<nunchi_coins::Address>(&p.to, "to address")?;
+        let amount = p
+            .amount
+            .parse::<u128>()
+            .map_err(|_| anyhow::anyhow!("amount is not a valid u128"))?;
+        let tx = Transaction::sign(
+            &signer,
+            p.nonce,
+            CoinOperation::Transfer {
+                coin,
+                from,
+                to,
+                amount,
+            },
+        );
+        Ok(encode_value(&tx))
+    }
+
+    fn build_mint_inner(p: &BuildMintParams) -> anyhow::Result<String> {
+        let signer = decode_value::<PrivateKey>(&p.private_key_hex, "private key")?;
+        let coin = decode_value::<CoinId>(&p.coin, "coin id")?;
+        let to = decode_value::<nunchi_coins::Address>(&p.to, "to address")?;
+        let amount = p
+            .amount
+            .parse::<u128>()
+            .map_err(|_| anyhow::anyhow!("amount is not a valid u128"))?;
+        let tx = Transaction::sign(&signer, p.nonce, CoinOperation::Mint { coin, to, amount });
+        Ok(encode_value(&tx))
+    }
+
+    fn build_burn_inner(p: &BuildBurnParams) -> anyhow::Result<String> {
+        let signer = decode_value::<PrivateKey>(&p.private_key_hex, "private key")?;
+        let coin = decode_value::<CoinId>(&p.coin, "coin id")?;
+        let from = decode_value::<nunchi_coins::Address>(&p.from, "from address")?;
+        let amount = p
+            .amount
+            .parse::<u128>()
+            .map_err(|_| anyhow::anyhow!("amount is not a valid u128"))?;
+        let tx = Transaction::sign(&signer, p.nonce, CoinOperation::Burn { coin, from, amount });
+        Ok(encode_value(&tx))
+    }
+
+    fn build_create_token_inner(p: &BuildCreateTokenParams) -> anyhow::Result<String> {
+        let signer = decode_value::<PrivateKey>(&p.private_key_hex, "private key")?;
+        let spec = build_coin_spec_from_params(
+            &p.symbol,
+            &p.name,
+            p.decimals,
+            &p.initial_supply,
+            p.max_supply.as_deref(),
+        )?;
+        let tx = Transaction::sign(&signer, p.nonce, CoinOperation::CreateToken { spec });
+        Ok(encode_value(&tx))
+    }
+
+    fn build_register_account_policy_inner(
+        p: &BuildRegisterAccountPolicyParams,
+    ) -> anyhow::Result<String> {
+        let signer = decode_value::<PrivateKey>(&p.private_key_hex, "private key")?;
+        let account_id = decode_value::<nunchi_coins::Address>(&p.account_id, "account_id")?;
+        let policy = build_multisig_policy(p.threshold, &p.signer_public_keys_hex)?;
+        let tx = Transaction::sign(
+            &signer,
+            p.nonce,
+            CoinOperation::RegisterAccountPolicy { account_id, policy },
+        );
+        Ok(encode_value(&tx))
     }
 }
 
