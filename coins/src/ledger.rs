@@ -54,6 +54,8 @@ pub enum LedgerError {
     FeeOverflow,
     #[error("supply overflow")]
     SupplyOverflow,
+    #[error("supply underflow")]
+    SupplyUnderflow,
     #[error("allocation sum mismatch: expected {expected}, got {actual}")]
     AllocationSumMismatch { expected: u128, actual: u128 },
     #[error("max supply exceeded: max {max}, attempted {attempted}")]
@@ -435,7 +437,7 @@ impl<D: CoinDB> Ledger<D> {
         let total_supply = token
             .total_supply
             .checked_sub(amount)
-            .ok_or(LedgerError::SupplyOverflow)?;
+            .ok_or(LedgerError::SupplyUnderflow)?;
         token.total_supply = total_supply;
         self.db.set_token(&token);
         Ok(total_supply)
