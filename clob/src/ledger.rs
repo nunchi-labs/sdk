@@ -230,6 +230,22 @@ impl<D: ClobDB> ClobLedger<D> {
     }
 
     /// Verify and record a proposer match batch from signed order intents.
+    ///
+    /// # Cross-account ordering
+    ///
+    /// This method validates that each account's nonces are consecutive within
+    /// the batch (same-account orders must appear in nonce-ascending order),
+    /// but places **no constraint on the relative ordering of orders from
+    /// different accounts**. Because the match engine assigns sequence numbers
+    /// in the order that transactions appear in `batch.orders`, the proposer
+    /// has full discretion over which cross-account orders execute first at any
+    /// given price level. This is an inherent property of proposer-based CLOB
+    /// systems and confers MEV (Maximal Extractable Value) ability to the
+    /// proposer.
+    ///
+    /// The `fills_equivalent` check only verifies that validators reproduce
+    /// the same fills as the proposer when replaying `batch.orders` in the
+    /// same order; it does not detect or prevent proposer reordering.
     pub async fn apply_match_batch(
         &mut self,
         batch: &MatchBatch,

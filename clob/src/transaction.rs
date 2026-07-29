@@ -29,9 +29,22 @@ impl TryFrom<u8> for OperationTag {
 }
 
 /// Proposer-supplied CLOB match batch carried in a block extension.
+///
+/// # Ordering invariants
+///
+/// Orders from the **same account** must appear in consecutive nonce order
+/// (the ledger rejects out-of-order nonces). However, the relative ordering
+/// of orders from **different accounts** is entirely at the proposer's
+/// discretion. The match engine assigns sequence numbers in the order
+/// transactions appear in [`orders`](MatchBatch::orders), so the proposer
+/// controls time-priority at each price level across accounts.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MatchBatch {
     /// Fresh signed owner order intents whose nonces should advance if replay succeeds.
+    ///
+    /// Same-account orders must be in nonce-ascending order. Cross-account
+    /// ordering is proposer-discretionary and determines sequence-number
+    /// (time-priority) assignment.
     pub orders: Vec<Transaction>,
     /// Fills derived from committed resting orders and replaying `orders`.
     pub fills: Vec<Fill>,
