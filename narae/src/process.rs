@@ -36,6 +36,7 @@ pub struct Node {
     pub spec: NodeSpec,
     pub status: NodeStatus,
     pub logs: VecDeque<String>,
+    pub logs_lower: VecDeque<String>,
     child: Option<Child>,
 }
 
@@ -45,6 +46,7 @@ impl Node {
             spec,
             status: NodeStatus::Stopped,
             logs: VecDeque::with_capacity(MAX_LOG_LINES),
+            logs_lower: VecDeque::with_capacity(MAX_LOG_LINES),
             child: None,
         }
     }
@@ -59,10 +61,13 @@ impl Node {
     // Status is judged by process lifecycle (spawn failures, exit codes), never by scanning log
     // content: chatty consensus logs contain transient "failed ..." lines on healthy nodes.
     pub fn add_log(&mut self, line: impl Into<String>) {
+        let line = line.into();
         if self.logs.len() == MAX_LOG_LINES {
             self.logs.pop_front();
+            self.logs_lower.pop_front();
         }
-        self.logs.push_back(line.into());
+        self.logs_lower.push_back(line.to_lowercase());
+        self.logs.push_back(line);
     }
 
     pub fn start(
@@ -139,6 +144,49 @@ impl Node {
                 self.add_log(format!("failed to inspect process: {error}"));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn add_log_caches_lowercase_text() {
+        let spec = NodeSpec {
+            name: "node".to_string(),
+            command: "command".to_string(),
+            args: Vec::new(),
+            cwd: None,
+            env: Vec::new(),
+        };
+        let mut node = Node::new(spec);
+
+        node.add_log("HeLLo W\u{00d6}RLD");
+
+        assert_eq!(node.logs, ["HeLLo W\u{00d6}RLD"]);
+        assert_eq!(node.logs_lower, ["hello w\u{00f6}rld"]);
+    }
+
+    #[test]
+    fn add_log_evicts_cached_text_with_display_text() {
+        let spec = NodeSpec {
+            name: "node".to_string(),
+            command: "command".to_string(),
+            args: Vec::new(),
+            cwd: None,
+            env: Vec::new(),
+        };
+        let mut node = Node::new(spec);
+
+        for index in 0..=MAX_LOG_LINES {
+            node.add_log(format!("LoG {index}"));
+        }
+
+        assert_eq!(node.logs.len(), MAX_LOG_LINES);
+        assert_eq!(node.logs_lower.len(), MAX_LOG_LINES);
+        assert_eq!(node.logs.front(), Some(&"LoG 1".to_string()));
+        assert_eq!(node.logs_lower.front(), Some(&"log 1".to_string()));
     }
 }
 

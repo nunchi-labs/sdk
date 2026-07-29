@@ -44,6 +44,7 @@ struct App {
     input_mode: InputMode,
     filter_input: String,
     log_filter: Option<String>,
+    log_filter_lower: Option<String>,
 }
 
 impl App {
@@ -64,6 +65,7 @@ impl App {
             input_mode: InputMode::Normal,
             filter_input: String::new(),
             log_filter: None,
+            log_filter_lower: None,
         }
     }
 
@@ -195,12 +197,14 @@ fn handle_key(app: &mut App, code: KeyCode) {
         InputMode::Filter => match code {
             KeyCode::Enter => {
                 app.log_filter = (!app.filter_input.is_empty()).then(|| app.filter_input.clone());
+                app.log_filter_lower = app.log_filter.as_ref().map(|filter| filter.to_lowercase());
                 app.scroll_offset = 0;
                 app.input_mode = InputMode::Normal;
             }
             KeyCode::Esc => {
                 app.filter_input.clear();
                 app.log_filter = None;
+                app.log_filter_lower = None;
                 app.scroll_offset = 0;
                 app.input_mode = InputMode::Normal;
             }
@@ -215,6 +219,7 @@ fn handle_key(app: &mut App, code: KeyCode) {
             KeyCode::Esc => {
                 if app.log_filter.is_some() {
                     app.log_filter = None;
+                    app.log_filter_lower = None;
                     app.filter_input.clear();
                     app.scroll_offset = 0;
                 } else {
@@ -300,15 +305,16 @@ fn render_logs(frame: &mut Frame<'_>, app: &App, area: Rect) {
     };
     let node = node.lock().unwrap();
     let visible_height = log_area.height.saturating_sub(2) as usize;
-    let filter = app.log_filter.as_ref().map(|filter| filter.to_lowercase());
     let logs = node
         .logs
         .iter()
-        .filter(|line| {
-            filter
+        .zip(node.logs_lower.iter())
+        .filter(|(_, line_lower)| {
+            app.log_filter_lower
                 .as_ref()
-                .is_none_or(|filter| line.to_lowercase().contains(filter))
+                .is_none_or(|filter| line_lower.contains(filter))
         })
+        .map(|(line, _)| line)
         .collect::<Vec<_>>();
     let lines = logs
         .iter()
