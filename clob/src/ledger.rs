@@ -490,9 +490,5 @@ pub(crate) fn validate_market(
 
 fn prune_oldest_fill_ids(fill_ids: &mut Vec<FillId>) -> Vec<FillId> {
     let excess = fill_ids.len().saturating_sub(MAX_FILLS_PER_MARKET);
-    if excess == 0 {
-        Vec::new()
-    } else {
-        fill_ids.drain(..excess).collect()
-    }
+    fill_ids.drain(..excess).collect()
 }
