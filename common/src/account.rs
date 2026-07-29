@@ -157,8 +157,11 @@ impl MultisigPolicy {
             });
         }
         let original_signers = signers.len();
+        // Sort and deduplicate by encoded representation. Both operations
+        // use the same key (encoded bytes) to ensure consistency regardless
+        // of how PublicKey::PartialEq is implemented.
         signers.sort_by_cached_key(|signer| signer.encode().as_ref().to_vec());
-        signers.dedup();
+        signers.dedup_by(|a, b| a.encode().as_ref() == b.encode().as_ref());
         if signers.len() != original_signers {
             return Err(AccountPolicyError::DuplicateSigner);
         }
