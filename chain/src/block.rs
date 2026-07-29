@@ -105,8 +105,8 @@ where
             && self.height == other.height
             && self.timestamp == other.timestamp
             && self.transactions == other.transactions
-            && self.reshare_log.encode() == other.reshare_log.encode()
-            && self.extension.encode() == other.extension.encode()
+            && self.reshare_log == other.reshare_log
+            && self.extension == other.extension
             && self.state_root == other.state_root
             && self.state_range == other.state_range
             && self.digest == other.digest

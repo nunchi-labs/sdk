@@ -8,6 +8,7 @@ pub trait BlockExtension: 'static {
     /// Extension payload embedded in a proposed block.
     type Payload: Clone
         + Debug
+        + PartialEq
         + EncodeSize
         + Read<Cfg = Self::ReadCfg>
         + Write

@@ -170,6 +170,33 @@ fn custom_extension_payload_is_encoded_and_committed() {
 }
 
 #[test]
+fn block_equality_compares_extension_payloads() {
+    let left = Block::<u8, TestExtension>::new(
+        context(),
+        sha256::Digest::EMPTY,
+        Height::zero(),
+        1,
+        vec![7],
+        None,
+        TestPayload(1),
+        state(),
+    );
+    let right = Block::<u8, TestExtension>::new(
+        context(),
+        sha256::Digest::EMPTY,
+        Height::zero(),
+        1,
+        vec![7],
+        None,
+        TestPayload(2),
+        state(),
+    );
+
+    assert_eq!(left, left.clone());
+    assert_ne!(left, right);
+}
+
+#[test]
 fn composite_extension_payloads_are_encoded_and_committed() {
     type TestComposite = Composite<TestExtension, TestExtension>;
 
