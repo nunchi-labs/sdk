@@ -51,7 +51,8 @@ fn runtime_apply_forwards_coin_events() {
                     9,
                     1_000,
                     Some(2_000),
-                ),
+                )
+                .unwrap(),
             },
         );
         let tx = Transaction::from(tx);
@@ -87,7 +88,8 @@ fn runtime_validate_has_no_event_sink_surface() {
                     9,
                     1_000,
                     None,
-                ),
+                )
+                .unwrap(),
             },
         ));
 
@@ -119,7 +121,8 @@ fn fee_genesis(issuer: Address, collector: Address, base: u128, per_byte: u128) 
                 9,
                 1_000,
                 None,
-            ),
+            )
+            .unwrap(),
             allocations: vec![],
         }],
         fees: Some(FeeGenesis {
@@ -194,7 +197,8 @@ fn bridge_lock_escrows_funds_and_records_transfer() {
                     9,
                     1_000,
                     None,
-                ),
+                )
+                .unwrap(),
             },
         ));
         CoinsRuntime::apply(&mut state, RuntimeContext::default(), &create, &mut events)
@@ -278,7 +282,8 @@ fn bridge_lock_reverts_escrow_when_bridge_rejects() {
                     9,
                     1_000,
                     None,
-                ),
+                )
+                .unwrap(),
             },
         ));
         CoinsRuntime::apply(&mut state, RuntimeContext::default(), &create, &mut events)
@@ -394,7 +399,8 @@ fn bridge_lock_rejects_insufficient_balance_without_side_effects() {
                     9,
                     1_000,
                     None,
-                ),
+                )
+                .unwrap(),
             },
         ));
         CoinsRuntime::apply(&mut state, RuntimeContext::default(), &create, &mut events)

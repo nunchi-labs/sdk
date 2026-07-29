@@ -66,7 +66,8 @@ fn sample_transaction() -> Transaction {
                 9,
                 1_000,
                 None,
-            ),
+            )
+            .unwrap(),
         },
     )
 }

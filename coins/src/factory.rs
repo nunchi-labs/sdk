@@ -33,7 +33,6 @@ impl TokenFactory {
         issuer: Address,
         spec: CoinSpec,
     ) -> Result<TokenDefinition, LedgerError> {
-        validate_spec(&spec)?;
         let nonce = self.next_nonce;
         self.next_nonce = self
             .next_nonce
@@ -42,18 +41,6 @@ impl TokenFactory {
         let id = Self::derive_coin_id(&issuer, nonce, &spec);
         Ok(TokenDefinition::from_spec(id, issuer, spec))
     }
-}
-
-fn validate_spec(spec: &CoinSpec) -> Result<(), LedgerError> {
-    if let Some(max_supply) = spec.max_supply {
-        if spec.initial_supply > max_supply {
-            return Err(LedgerError::MaxSupplyExceeded {
-                max: max_supply,
-                attempted: spec.initial_supply,
-            });
-        }
-    }
-    Ok(())
 }
 
 impl Write for TokenFactory {

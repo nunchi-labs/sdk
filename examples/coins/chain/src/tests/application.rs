@@ -29,6 +29,7 @@ fn spec() -> CoinSpec {
         1_000,
         None,
     )
+    .expect("valid spec")
 }
 
 fn clob_asset(seed: &'static [u8]) -> AssetId {
@@ -167,7 +168,8 @@ fn profile_block_execution() {
                     9,
                     0,
                     None,
-                ),
+                )
+                .expect("valid spec"),
             )
             .await
             .expect("create token");

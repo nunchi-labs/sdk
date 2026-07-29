@@ -230,7 +230,7 @@ impl<'de> Deserialize<'de> for TokenName {
 }
 
 /// Metadata and supply policy requested when creating a token.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct CoinSpec {
     pub symbol: TokenSymbol,
     pub name: TokenName,
@@ -246,14 +246,41 @@ impl CoinSpec {
         decimals: u8,
         initial_supply: u128,
         max_supply: Option<u128>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, TokenError> {
+        if let Some(max) = max_supply {
+            if initial_supply > max {
+                return Err(TokenError::InvalidTokenSpec(
+                    "initial_supply exceeds max_supply",
+                ));
+            }
+        }
+        Ok(Self {
             symbol,
             name,
             decimals,
             initial_supply,
             max_supply,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for CoinSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            symbol: TokenSymbol,
+            name: TokenName,
+            decimals: u8,
+            initial_supply: u128,
+            max_supply: Option<u128>,
         }
+
+        let raw = Raw::deserialize(deserializer)?;
+        CoinSpec::new(raw.symbol, raw.name, raw.decimals, raw.initial_supply, raw.max_supply)
+            .map_err(serde::de::Error::custom)
     }
 }
 

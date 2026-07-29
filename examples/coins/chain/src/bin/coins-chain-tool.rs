@@ -1054,7 +1054,7 @@ fn token_spec(
         decimals,
         initial_supply,
         max_supply,
-    ))
+    )?)
 }
 
 fn parse_coin(value: &str) -> Result<CoinId, Box<dyn Error>> {

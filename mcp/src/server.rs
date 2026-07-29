@@ -691,7 +691,7 @@ fn build_coin_spec_from_params(
         decimals,
         initial_supply,
         max_supply,
-    ))
+    )?)
 }
 
 #[tool_handler(

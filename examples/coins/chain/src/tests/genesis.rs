@@ -56,7 +56,8 @@ fn sample_genesis() -> ChainGenesis {
                     9,
                     1_000,
                     Some(2_000),
-                ),
+                )
+                .unwrap(),
                 allocations: vec![
                     nunchi_coins::AllocationGenesis {
                         account: alice,
@@ -201,7 +202,8 @@ fn unmarked_non_empty_state_is_rejected() {
                     0,
                     0,
                     None,
-                ),
+                )
+                .unwrap(),
             )
             .await
             .unwrap();
@@ -269,7 +271,8 @@ fn coins_genesis_creates_token_and_initial_balances() {
             9,
             1_000,
             Some(2_000),
-        );
+        )
+        .unwrap();
         let ledger = Ledger::new(state);
         let factory_nonce = CoinDB::factory_nonce(ledger.db())
             .await

@@ -57,6 +57,7 @@ fn gold_spec() -> CoinSpec {
         1_000_000,
         None,
     )
+    .expect("valid spec")
 }
 
 /// The id Alice's token will be assigned: it is the first token created on the chain, so the token
@@ -632,7 +633,8 @@ fn mempool_replaces_same_nonce_resubmission() {
                 9,
                 500_000,
                 None,
-            );
+            )
+            .expect("valid spec");
 
             let original = node0
                 .submit(

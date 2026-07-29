@@ -25,7 +25,8 @@ fn coin_transaction(seed: u64, nonce: u64) -> CoinTransaction {
                 9,
                 1_000,
                 None,
-            ),
+            )
+            .unwrap(),
         },
     )
 }

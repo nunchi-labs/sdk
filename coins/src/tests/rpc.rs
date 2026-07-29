@@ -30,7 +30,8 @@ impl MockQuery {
             9,
             1_000,
             Some(2_000),
-        );
+        )
+        .expect("valid spec");
         let coin = TokenFactory::derive_coin_id(&account, 0, &spec);
         let token = TokenDefinition::from_spec(coin, account.clone(), spec);
         Self {

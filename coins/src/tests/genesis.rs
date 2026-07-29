@@ -24,6 +24,7 @@ fn spec(supply: u128, max: Option<u128>) -> CoinSpec {
         supply,
         max,
     )
+    .expect("valid spec")
 }
 
 fn address(key: &PrivateKey) -> Address {

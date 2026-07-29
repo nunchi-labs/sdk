@@ -17,13 +17,13 @@ async fn ledger(context: deterministic::Context) -> Ledger<QmdbState<determinist
 }
 
 fn spec(supply: u128, max: Option<u128>) -> Result<CoinSpec, TokenError> {
-    Ok(CoinSpec::new(
+    CoinSpec::new(
         TokenSymbol::new("NCH")?,
         TokenName::new("Nunchi")?,
         9,
         supply,
         max,
-    ))
+    )
 }
 
 fn address(key: &PrivateKey) -> Address {

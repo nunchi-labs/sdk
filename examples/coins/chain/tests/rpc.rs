@@ -77,7 +77,8 @@ fn rpc_serves_status_and_filters_submissions_over_http() {
                     9,
                     1_000_000,
                     None,
-                ),
+                )
+                .expect("valid spec"),
             },
         );
         let accepted: SubmitTransactionResponse = client
