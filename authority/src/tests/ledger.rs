@@ -396,6 +396,53 @@ fn configure_rejects_empty_validator_set() {
     });
 }
 
+#[test]
+fn configure_rejects_zero_threshold() {
+    commonware_runtime::deterministic::Runner::default().start(|_| async move {
+        let owners = vec![owner(1), owner(2), owner(3)];
+        let mut ledger = AuthorityLedger::new(MemoryState::default());
+        let result = submit(
+            &mut ledger,
+            &owners[0],
+            AuthorityOperation::Configure {
+                policy: MultisigPolicy {
+                    owners: owners.iter().map(PrivateKey::public_key).collect(),
+                    threshold: 0,
+                },
+                initial_validators: vec![validator(10), validator(11)],
+                epoch: 0,
+            },
+            0,
+        )
+        .await;
+        assert_eq!(result, Err(AuthorityError::InvalidPolicy));
+    });
+}
+
+#[test]
+fn configure_rejects_threshold_exceeding_owners() {
+    commonware_runtime::deterministic::Runner::default().start(|_| async move {
+        let owners = vec![owner(1), owner(2)];
+        let mut ledger = AuthorityLedger::new(MemoryState::default());
+        // 2 owners but threshold = 3
+        let result = submit(
+            &mut ledger,
+            &owners[0],
+            AuthorityOperation::Configure {
+                policy: MultisigPolicy {
+                    owners: owners.iter().map(PrivateKey::public_key).collect(),
+                    threshold: 3,
+                },
+                initial_validators: vec![validator(10), validator(11)],
+                epoch: 0,
+            },
+            0,
+        )
+        .await;
+        assert_eq!(result, Err(AuthorityError::InvalidPolicy));
+    });
+}
+
 // ----- configuration -----
 
 #[test]
