@@ -535,8 +535,17 @@ async fn seed_upload(
     body: Bytes,
 ) -> impl IntoResponse {
     match Seed::decode(body.as_ref()) {
-        Ok(seed) => upload_status(indexer.submit_seed(seed)),
-        Err(_) => StatusCode::BAD_REQUEST,
+        Ok(seed) => {
+            let result = indexer.submit_seed(seed);
+            if let Err(reason) = &result {
+                warn!(error = reason, "seed upload rejected");
+            }
+            upload_status(result)
+        }
+        Err(e) => {
+            warn!(error = %e, "seed upload: decode error");
+            StatusCode::BAD_REQUEST
+        }
     }
 }
 
@@ -555,8 +564,17 @@ async fn notarization_upload(
     body: Bytes,
 ) -> impl IntoResponse {
     match Notarized::decode_cfg(body.as_ref(), &indexer.block_cfg()) {
-        Ok(notarized) => upload_status(indexer.submit_notarization(notarized)),
-        Err(_) => StatusCode::BAD_REQUEST,
+        Ok(notarized) => {
+            let result = indexer.submit_notarization(notarized);
+            if let Err(reason) = &result {
+                warn!(error = reason, "notarization upload rejected");
+            }
+            upload_status(result)
+        }
+        Err(e) => {
+            warn!(error = %e, "notarization upload: decode error");
+            StatusCode::BAD_REQUEST
+        }
     }
 }
 
@@ -575,8 +593,17 @@ async fn finalization_upload(
     body: Bytes,
 ) -> impl IntoResponse {
     match Finalized::decode_cfg(body.as_ref(), &indexer.block_cfg()) {
-        Ok(finalized) => upload_status(indexer.submit_finalization(finalized)),
-        Err(_) => StatusCode::BAD_REQUEST,
+        Ok(finalized) => {
+            let result = indexer.submit_finalization(finalized);
+            if let Err(reason) = &result {
+                warn!(error = reason, "finalization upload rejected");
+            }
+            upload_status(result)
+        }
+        Err(e) => {
+            warn!(error = %e, "finalization upload: decode error");
+            StatusCode::BAD_REQUEST
+        }
     }
 }
 
@@ -613,9 +640,15 @@ async fn dkg_output_upload(
     match DkgOutput::decode_cfg(body.as_ref(), &indexer.dkg_output_cfg()) {
         Ok(output) => match indexer.submit_dkg_output(Epoch::new(epoch), output) {
             Ok(()) => StatusCode::OK,
-            Err(_) => StatusCode::UNAUTHORIZED,
+            Err(reason) => {
+                warn!(epoch, error = reason, "DKG output upload rejected");
+                StatusCode::UNAUTHORIZED
+            }
         },
-        Err(_) => StatusCode::BAD_REQUEST,
+        Err(e) => {
+            warn!(epoch, error = %e, "DKG output upload: decode error");
+            StatusCode::BAD_REQUEST
+        }
     }
 }
 
