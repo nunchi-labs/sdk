@@ -199,7 +199,7 @@ impl Indexer {
 
     pub fn submit_dkg_output(&self, epoch: Epoch, output: DkgOutput) -> Result<(), &'static str> {
         let installed = {
-            let mut store = self.store.write().unwrap();
+            let mut store = self.store.write().unwrap_or_else(|e| e.into_inner());
             store.verifier.install_output(epoch, output.clone())?
         };
         if installed {
@@ -216,7 +216,7 @@ impl Indexer {
         let round = seed.round();
         let view = seed.view();
         let scheme = {
-            let mut store = self.store.write().unwrap();
+            let mut store = self.store.write().unwrap_or_else(|e| e.into_inner());
             if store.seeds.contains_key(&round) {
                 return Ok(());
             }
@@ -226,11 +226,11 @@ impl Indexer {
             store.verifier.scheme(seed.epoch())
         };
         if !seed.verify(&scheme) {
-            self.store.write().unwrap().seed_uploads.remove(&round);
+            self.store.write().unwrap_or_else(|e| e.into_inner()).seed_uploads.remove(&round);
             return Err("invalid seed signature");
         }
 
-        let mut store = self.store.write().unwrap();
+        let mut store = self.store.write().unwrap_or_else(|e| e.into_inner());
         store.seed_uploads.remove(&round);
         if store.seeds.insert(round, seed.clone()).is_some() {
             return Ok(());
@@ -253,7 +253,7 @@ impl Indexer {
     }
 
     pub fn get_seed(&self, query: &str) -> Option<Seed> {
-        let store = self.store.read().unwrap();
+        let store = self.store.read().unwrap_or_else(|e| e.into_inner());
         if query == LATEST {
             store.seeds.last_key_value().map(|(_, seed)| seed.clone())
         } else {
@@ -274,7 +274,7 @@ impl Indexer {
         };
         let key = ArtifactKey { epoch, view };
         let scheme = {
-            let mut store = self.store.write().unwrap();
+            let mut store = self.store.write().unwrap_or_else(|e| e.into_inner());
             if store.notarizations.contains_key(&key) {
                 return Ok(());
             }
@@ -292,7 +292,7 @@ impl Indexer {
             return Err("invalid notarization signature");
         }
 
-        let mut store = self.store.write().unwrap();
+        let mut store = self.store.write().unwrap_or_else(|e| e.into_inner());
         store.notarization_uploads.remove(&key);
         store
             .blocks_by_digest
@@ -313,7 +313,7 @@ impl Indexer {
     }
 
     pub fn get_notarization(&self, query: &str) -> Option<Notarized> {
-        let store = self.store.read().unwrap();
+        let store = self.store.read().unwrap_or_else(|e| e.into_inner());
         if query == LATEST {
             store
                 .notarizations
@@ -337,7 +337,7 @@ impl Indexer {
         };
         let key = ArtifactKey { epoch, view };
         let scheme = {
-            let mut store = self.store.write().unwrap();
+            let mut store = self.store.write().unwrap_or_else(|e| e.into_inner());
             if store.finalizations.contains_key(&key) {
                 return Ok(());
             }
@@ -355,7 +355,7 @@ impl Indexer {
             return Err("invalid finalization signature");
         }
 
-        let mut store = self.store.write().unwrap();
+        let mut store = self.store.write().unwrap_or_else(|e| e.into_inner());
         store.finalization_uploads.remove(&key);
         store
             .blocks_by_digest
@@ -378,7 +378,7 @@ impl Indexer {
     }
 
     pub fn get_finalization(&self, query: &str) -> Option<Finalized> {
-        let store = self.store.read().unwrap();
+        let store = self.store.read().unwrap_or_else(|e| e.into_inner());
         if query == LATEST {
             store
                 .finalizations
@@ -396,7 +396,7 @@ impl Indexer {
     }
 
     pub fn get_block(&self, query: &str) -> Option<BlockResult> {
-        let store = self.store.read().unwrap();
+        let store = self.store.read().unwrap_or_else(|e| e.into_inner());
         if query == LATEST {
             return store
                 .finalizations
@@ -433,7 +433,7 @@ impl Indexer {
     }
 
     pub fn latest_summary(&self) -> Option<SummaryEvent> {
-        let store = self.store.read().unwrap();
+        let store = self.store.read().unwrap_or_else(|e| e.into_inner());
         store
             .finalizations
             .last_key_value()
@@ -836,7 +836,7 @@ mod tests {
         indexer.submit_seed(seed(&schemes, 0, 1)).unwrap();
         indexer.submit_seed(seed(&schemes, 1, 1)).unwrap();
 
-        let store = indexer.store.read().unwrap();
+        let store = indexer.store.read().unwrap_or_else(|e| e.into_inner());
         assert_eq!(store.seeds.len(), 2);
         assert!(store
             .seeds
@@ -868,7 +868,7 @@ mod tests {
 
         assert_eq!(result, Err("DKG output changed the threshold identity"));
         assert_eq!(
-            indexer.store.read().unwrap().verifier.latest_epoch,
+            indexer.store.read().unwrap_or_else(|e| e.into_inner()).verifier.latest_epoch,
             Epoch::zero()
         );
     }
