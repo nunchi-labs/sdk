@@ -174,6 +174,7 @@ impl<T: PoolTransaction> MempoolHandle<T> {
 
     /// Fetch up to `limit` executable transactions, gap-free within each nonce
     /// lane. Returns an empty list if the pool has shut down.
+    #[must_use = "discarding the pending transactions list means no transactions are proposed"]
     pub async fn pending(&self, limit: usize) -> Vec<T> {
         let (responder, receiver) = oneshot::channel();
         let mut sender = self.sender.clone();
@@ -217,6 +218,7 @@ impl<T: PoolTransaction> MempoolHandle<T> {
     /// Status of a transaction the pool has seen. In-memory only: history is
     /// lost on restart, and old entries are evicted once the status cache is
     /// at capacity.
+    #[must_use = "discarding the status means the caller cannot distinguish included from pending"]
     pub async fn status(&self, digest: Digest) -> Option<TxStatus> {
         let (responder, receiver) = oneshot::channel();
         let mut sender = self.sender.clone();
