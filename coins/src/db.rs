@@ -34,7 +34,20 @@ impl From<Table> for u8 {
     }
 }
 
-fn encoded<T: Encode>(value: &T) -> Vec<u8> {
+/// Encode a value for use as a DB key component.
+///
+/// Returns `Bytes` directly to avoid a heap-allocated `Vec<u8>` copy on
+/// every call. The caller can pass `encoded_key(...).as_ref()` wherever
+/// `&[u8]` is needed.
+fn encoded_key<T: Encode>(value: &T) -> bytes::Bytes {
+    value.encode()
+}
+
+/// Encode a value into a `Vec<u8>` for storage as a DB value.
+///
+/// `StateStore::set` requires `Vec<u8>`, so this allocation is unavoidable
+/// for values that are written to the store.
+fn encoded_value<T: Encode>(value: &T) -> Vec<u8> {
     value.encode().as_ref().to_vec()
 }
 
@@ -44,8 +57,11 @@ fn decoded<T: Read<Cfg = ()>>(bytes: &[u8]) -> Result<T, LedgerError> {
 }
 
 fn balance_key(account: &Address, coin: &CoinId) -> Digest {
-    let mut logical = encoded(account);
-    logical.extend_from_slice(coin.encode().as_ref());
+    let account_bytes = account.encode();
+    let coin_bytes = coin.encode();
+    let mut logical = Vec::with_capacity(account_bytes.len() + coin_bytes.len());
+    logical.extend_from_slice(account_bytes.as_ref());
+    logical.extend_from_slice(coin_bytes.as_ref());
     NS.key(Table::Balance, &logical)
 }
 
@@ -91,7 +107,7 @@ pub trait CoinDB {
 #[async_trait]
 impl<S: StateStore + Send + Sync> CoinDB for S {
     async fn nonce(&self, id: &Address) -> Result<u64, LedgerError> {
-        let key = NS.key(Table::Account, &encoded(id));
+        let key = NS.key(Table::Account, encoded_key(id).as_ref());
         match StateStore::get(self, &key)
             .await
             .map_err(|err| LedgerError::Storage(err.to_string()))?
@@ -102,12 +118,12 @@ impl<S: StateStore + Send + Sync> CoinDB for S {
     }
 
     fn set_nonce(&mut self, id: &Address, nonce: u64) {
-        let key = NS.key(Table::Account, &encoded(id));
-        StateStore::set(self, key, encoded(&nonce));
+        let key = NS.key(Table::Account, encoded_key(id).as_ref());
+        StateStore::set(self, key, encoded_value(&nonce));
     }
 
     async fn account_policy(&self, id: &Address) -> Result<Option<AccountPolicy>, LedgerError> {
-        let key = NS.key(Table::AccountPolicy, &encoded(id));
+        let key = NS.key(Table::AccountPolicy, encoded_key(id).as_ref());
         match StateStore::get(self, &key)
             .await
             .map_err(|err| LedgerError::Storage(err.to_string()))?
@@ -118,8 +134,8 @@ impl<S: StateStore + Send + Sync> CoinDB for S {
     }
 
     fn set_account_policy(&mut self, id: &Address, policy: &AccountPolicy) {
-        let key = NS.key(Table::AccountPolicy, &encoded(id));
-        StateStore::set(self, key, encoded(policy));
+        let key = NS.key(Table::AccountPolicy, encoded_key(id).as_ref());
+        StateStore::set(self, key, encoded_value(policy));
     }
 
     async fn factory_nonce(&self) -> Result<u64, LedgerError> {
@@ -135,11 +151,11 @@ impl<S: StateStore + Send + Sync> CoinDB for S {
 
     fn set_factory_nonce(&mut self, nonce: u64) {
         let key = NS.key(Table::Factory, &[]);
-        StateStore::set(self, key, encoded(&nonce));
+        StateStore::set(self, key, encoded_value(&nonce));
     }
 
     async fn token(&self, coin: &CoinId) -> Result<Option<TokenDefinition>, LedgerError> {
-        let key = NS.key(Table::Token, &encoded(coin));
+        let key = NS.key(Table::Token, encoded_key(coin).as_ref());
         match StateStore::get(self, &key)
             .await
             .map_err(|err| LedgerError::Storage(err.to_string()))?
@@ -150,8 +166,8 @@ impl<S: StateStore + Send + Sync> CoinDB for S {
     }
 
     fn set_token(&mut self, token: &TokenDefinition) {
-        let key = NS.key(Table::Token, &encoded(&token.id));
-        StateStore::set(self, key, encoded(token));
+        let key = NS.key(Table::Token, encoded_key(&token.id).as_ref());
+        StateStore::set(self, key, encoded_value(token));
     }
 
     async fn balance(&self, account: &Address, coin: &CoinId) -> Result<u128, LedgerError> {
@@ -170,7 +186,7 @@ impl<S: StateStore + Send + Sync> CoinDB for S {
         if amount == 0 {
             StateStore::remove(self, key);
         } else {
-            StateStore::set(self, key, encoded(&amount));
+            StateStore::set(self, key, encoded_value(&amount));
         }
     }
 
@@ -187,6 +203,6 @@ impl<S: StateStore + Send + Sync> CoinDB for S {
 
     fn set_fee_config(&mut self, config: &FeeConfig) {
         let key = NS.key(Table::Fee, &[]);
-        StateStore::set(self, key, encoded(config));
+        StateStore::set(self, key, encoded_value(config));
     }
 }
