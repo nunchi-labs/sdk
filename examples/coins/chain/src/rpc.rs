@@ -41,9 +41,18 @@ impl<Q: CoinQuery> RpcContext<Q> {
     }
 }
 
+/// Snapshot of this node's committed on-chain state.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StatusResponse {
+    /// The height of the last block whose transactions were applied to the committed state.
+    ///
+    /// Zero means no block has been applied yet (only genesis initialization has run).
+    /// This is the executed height, which may lag behind the current consensus tip if
+    /// execution is still catching up.
     pub applied_height: u64,
+
+    /// Lower-hex-encoded SHA-256 root of the authenticated QMDB state trie after the
+    /// last applied block. This is a 32-byte (64-character) hex string.
     pub state_root: String,
 }
 
