@@ -606,7 +606,7 @@ impl ProofFailure {
         self.attempts = self.attempts.saturating_add(1);
         let elapsed = context
             .current()
-            .duration_since(self.first_seen.expect("proof failure start"))
+            .duration_since(self.first_seen.unwrap_or_else(|| context.current()))
             .unwrap_or_default();
         (elapsed >= grace).then_some(Completion::Stale {
             reason,
