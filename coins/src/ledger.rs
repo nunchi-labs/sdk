@@ -39,6 +39,8 @@ pub enum LedgerError {
     DuplicateToken(CoinId),
     #[error("unauthorized coin operation")]
     Unauthorized,
+    #[error("self-transfer is not allowed")]
+    SelfTransfer,
     #[error("invalid account policy: {0}")]
     InvalidAccountPolicy(#[from] super::AccountPolicyError),
     #[error("insufficient balance for {account:?} in {coin:?}: available {available}, required {required}")]
@@ -380,6 +382,9 @@ impl<D: CoinDB> Ledger<D> {
                 ensure_positive(*amount)?;
                 if signer != from {
                     return Err(LedgerError::Unauthorized);
+                }
+                if from == to {
+                    return Err(LedgerError::SelfTransfer);
                 }
                 self.debit(from, *coin, *amount).await?;
                 self.credit(to, *coin, *amount).await?;

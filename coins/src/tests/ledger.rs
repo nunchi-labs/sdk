@@ -918,7 +918,7 @@ fn transfer_rejects_unauthorized_signer() {
 }
 
 #[test]
-fn transfer_to_self_preserves_balance() {
+fn transfer_to_self_is_rejected() {
     let runner = deterministic::Runner::default();
     runner.start(|context| async move {
         let mut ledger = ledger(context).await;
@@ -940,13 +940,18 @@ fn transfer_to_self_preserves_balance() {
                 amount: 250,
             },
         );
-        ledger
+        let err = ledger
             .apply_transaction(&tx, NoopEventSink)
             .await
-            .expect("self transfer");
+            .expect_err("self-transfer should be rejected");
 
+        assert!(
+            matches!(err, LedgerError::SelfTransfer),
+            "expected SelfTransfer error, got: {err}"
+        );
+        // Balance and nonce should be unchanged
         assert_eq!(ledger.balance(&alice, &coin).await.unwrap(), 1_000);
-        assert_eq!(ledger.nonce(&alice).await.unwrap(), 1);
+        assert_eq!(ledger.nonce(&alice).await.unwrap(), 0);
     });
 }
 
