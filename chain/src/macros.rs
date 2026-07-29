@@ -26,15 +26,6 @@ macro_rules! transaction_wrapper {
         }
 
         impl $name {
-            /// Verify the wrapped transaction's stateless authorization.
-            pub fn verify(&self) -> bool {
-                match self {
-                    $(
-                        Self::$variant(tx) => tx.verify().is_ok(),
-                    )+
-                }
-            }
-
             /// Return the wrapped transaction digest.
             pub fn digest(&self) -> ::commonware_cryptography::sha256::Digest {
                 match self {
