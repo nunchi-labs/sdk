@@ -18,7 +18,7 @@ use nunchi_common::{
     QmdbState, Runtime, RuntimeContext, StateError, StateStore,
 };
 use nunchi_dkg::Context;
-use nunchi_mempool::{Mempool, PoolConfig, PoolTransaction};
+use nunchi_mempool::{AdmissionError, Mempool, MempoolHandle, PoolConfig, PoolTransaction};
 use thiserror::Error;
 
 use crate::{
@@ -245,6 +245,37 @@ async fn application(
     application_with_events(context, NoopEventConsumer).await
 }
 
+async fn application_with_mempool(
+    context: deterministic::Context,
+) -> (
+    Application<TestRuntime>,
+    MempoolHandle<TestTx>,
+    QmdbDatabaseSet<deterministic::Context>,
+    Block<TestTx>,
+) {
+    let (mempool, submitter) = Mempool::new(PoolConfig::default());
+    mempool.start(context.child("mempool"));
+    let config = QmdbState::<deterministic::Context>::config(&context, "finalized-nonce-test");
+    let db = QmdbBackend::init(context, config)
+        .await
+        .expect("init state db");
+    let databases: QmdbDatabaseSet<deterministic::Context> = shared_database(db);
+    let genesis_target = databases.committed_targets().await;
+    let genesis_state = StateCommitment {
+        root: genesis_target.root,
+        range: genesis_target.range,
+    };
+    let app = Application::new(
+        submitter.clone(),
+        16,
+        Arc::new(AsyncMutex::new(Height::zero())),
+        genesis_state,
+        Sha256::hash(b"test genesis"),
+    );
+    let parent = app.genesis_block();
+    (app, submitter, databases, parent)
+}
+
 async fn application_with_events<Events>(
     context: deterministic::Context,
     events: Events,
@@ -302,6 +333,45 @@ fn verification_uses_noop_event_sink() {
             .await;
 
         assert!(verified.is_some());
+    });
+}
+
+#[test]
+fn finalized_saturates_maximum_nonce() {
+    deterministic::Runner::default().start(|context| async move {
+        let (mut app, submitter, databases, parent) =
+            application_with_mempool(context.child("app")).await;
+        let transaction = TestTx {
+            account: 1,
+            nonce: u64::MAX,
+            id: 99,
+            value: 1,
+        };
+        let state = committed_state(&databases, std::slice::from_ref(&transaction)).await;
+        let block = block(&parent, vec![transaction], state);
+
+        <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::finalized(
+            &mut app,
+            (context.child("finalized"), block.context.clone()),
+            &block,
+            &databases,
+        )
+        .await;
+
+        assert_eq!(
+            submitter
+                .submit(TestTx {
+                    account: 1,
+                    nonce: 0,
+                    id: 100,
+                    value: 1,
+                })
+                .await,
+            Err(AdmissionError::StaleNonce {
+                nonce: 0,
+                committed: u64::MAX,
+            })
+        );
     });
 }
 

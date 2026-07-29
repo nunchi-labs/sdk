@@ -766,7 +766,7 @@ where
         let mut lane_nonces: HashMap<<R::Transaction as PoolTransaction>::NonceKey, u64> =
             HashMap::new();
         for transaction in &block.transactions {
-            let next = transaction.nonce() + 1;
+            let next = transaction.nonce().saturating_add(1);
             lane_nonces
                 .entry(transaction.nonce_key())
                 .and_modify(|nonce| *nonce = (*nonce).max(next))
