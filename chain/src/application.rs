@@ -697,6 +697,14 @@ where
             return None;
         }
 
+        // Reject blocks containing a reshare_log when no DKG actor is
+        // configured.  A reshare_log is only meaningful on DKG-enabled chains;
+        // accepting one without a DKG actor would deliver unverified dealer
+        // material to apply().
+        if block.reshare_log.is_some() && self.dkg.is_none() {
+            return None;
+        }
+
         let execution_context = Self::block_runtime_context(&block);
         let merkleized = self
             .execute_block(
