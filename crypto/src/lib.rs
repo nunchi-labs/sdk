@@ -1,3 +1,16 @@
+//! Cryptographic key types for the Nunchi SDK.
+//!
+//! This crate provides [`PublicKey`], [`PrivateKey`], and [`Signature`] enums
+//! that tag the underlying key material with its curve ([`Curve::Ed25519`] or
+//! [`Curve::Secp256r1`]). All types implement the `commonware-codec` encode/decode
+//! traits for wire serialization.
+//!
+//! # Security
+//!
+//! [`PrivateKey`] serializes raw secret key material. Callers that persist encoded
+//! private keys **must** apply their own encryption layer before storing the bytes.
+//! Do not log, transmit, or cache encoded private keys without encryption at rest.
+
 commonware_macros::stability_scope!(ALPHA {
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use commonware_cryptography::{ed25519, secp256r1, Signer as _, Verifier as _};

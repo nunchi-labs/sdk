@@ -1,5 +1,9 @@
 [package]
 name = "nunchi-crypto"
+description = "Cryptographic key and signature types for the Nunchi SDK"
+repository = "https://github.com/nunchi-labs/sdk"
+keywords = ["cryptography", "blockchain", "ed25519", "secp256r1"]
+categories = ["cryptography"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true
