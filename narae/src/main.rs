@@ -1,6 +1,10 @@
 use clap::{Parser, Subcommand};
 use narae::Config;
-use std::path::{Path, PathBuf};
+use std::{
+    env,
+    ffi::OsStr,
+    path::{Path, PathBuf},
+};
 
 const DEFAULT_BASE_METRICS_PORT: u16 = 9_090;
 
@@ -57,7 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn ensure_executables(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     for node in &config.nodes {
         let command = Path::new(&node.command);
-        if command.is_absolute() && !command.exists() {
+        if !command_exists(command, env::var_os("PATH").as_deref()) {
             return Err(format!(
                 "node executable not found: {} (build it with `cargo build -p nunchi-coins-chain --bin coins-chain-node`)",
                 command.display()
@@ -66,6 +70,53 @@ fn ensure_executables(config: &Config) -> Result<(), Box<dyn std::error::Error>>
         }
     }
     Ok(())
+}
+
+fn command_exists(command: &Path, path: Option<&OsStr>) -> bool {
+    if command.components().count() != 1 {
+        return command.is_file();
+    }
+
+    path.into_iter()
+        .flat_map(env::split_paths)
+        .any(|directory| directory.join(command).is_file())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::command_exists;
+    use std::{
+        ffi::OsString,
+        fs,
+        path::Path,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    #[test]
+    fn command_exists_searches_path_for_bare_command() {
+        let directory = std::env::temp_dir().join(format!(
+            "narae-command-exists-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time before Unix epoch")
+                .as_nanos()
+        ));
+        fs::create_dir(&directory).expect("create temporary directory");
+        let command = directory.join("coins-chain-node");
+        fs::write(&command, []).expect("create command");
+
+        assert!(command_exists(
+            Path::new("coins-chain-node"),
+            Some(OsString::from(&directory).as_os_str())
+        ));
+
+        fs::remove_dir_all(directory).expect("remove temporary directory");
+    }
+
+    #[test]
+    fn command_exists_rejects_missing_bare_command() {
+        assert!(!command_exists(Path::new("coins-chain-node"), None));
+    }
 }
 
 #[derive(Debug, Subcommand)]
