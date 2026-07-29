@@ -231,10 +231,11 @@ impl Indexer {
         }
 
         let mut store = self.store.write().unwrap();
-        store.seed_uploads.remove(&round);
         if store.seeds.insert(round, seed.clone()).is_some() {
+            store.seed_uploads.remove(&round);
             return Ok(());
         }
+        store.seed_uploads.remove(&round);
 
         let mut data = vec![0u8; u8::SIZE + seed.encode_size()];
         data[0] = Kind::Seed as u8;
@@ -293,14 +294,15 @@ impl Indexer {
         }
 
         let mut store = self.store.write().unwrap();
-        store.notarization_uploads.remove(&key);
         store
             .blocks_by_digest
             .insert(notarized.block.digest(), notarized.block.clone());
 
         if store.notarizations.insert(key, notarized.clone()).is_some() {
+            store.notarization_uploads.remove(&key);
             return Ok(());
         }
+        store.notarization_uploads.remove(&key);
 
         let mut data = vec![0u8; u8::SIZE + notarized.encode_size()];
         data[0] = Kind::Notarization as u8;
@@ -356,14 +358,15 @@ impl Indexer {
         }
 
         let mut store = self.store.write().unwrap();
-        store.finalization_uploads.remove(&key);
         store
             .blocks_by_digest
             .insert(finalized.block.digest(), finalized.block.clone());
 
         if store.finalizations.insert(key, finalized.clone()).is_some() {
+            store.finalization_uploads.remove(&key);
             return Ok(());
         }
+        store.finalization_uploads.remove(&key);
         store
             .finalized_height_to_key
             .insert(finalized.block.height.get(), key);
