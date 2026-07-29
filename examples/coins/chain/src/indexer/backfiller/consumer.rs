@@ -569,11 +569,20 @@ impl<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> Consumer<
         self.uploads.lock().restart_above(tip_height);
     }
 
+    /// Return the most recent finalized height that has a stored finalization proof.
+    ///
+    /// The scan is bounded to the most recent `MAX_TIP_LOOKBACK` heights to avoid
+    /// an O(N) linear scan over the entire chain history, which would block the
+    /// consumer actor for an indeterminate time on long chains.
     async fn latest_proof_bearing_tip(
         marshal: MarshalMailbox<Scheme, Standard<Block>>,
     ) -> Option<(u64, Digest)> {
+        const MAX_TIP_LOOKBACK: u64 = 1_000;
+
         let (height, _) = marshal.get_info(Identifier::Latest).await?;
-        for height in (0..=height.get()).rev() {
+        let tip = height.get();
+        let floor = tip.saturating_sub(MAX_TIP_LOOKBACK);
+        for height in (floor..=tip).rev() {
             if let Some(proof) = marshal.get_finalization(Height::new(height)).await {
                 return Some((height, proof.proposal.payload));
             }
