@@ -1,3 +1,4 @@
+mod events;
 mod genesis;
 mod ledger;
 mod record;
