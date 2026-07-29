@@ -2451,7 +2451,7 @@ dependencies = [
 
 [[package]]
 name = "narae"
-version = "2026.6.0"
+version = "2026.7.0-alpha.1"
 dependencies = [
  "ansi-to-tui",
  "clap",
@@ -2574,7 +2574,7 @@ dependencies = [
 
 [[package]]
 name = "nunchi-authority"
-version = "2026.6.0"
+version = "2026.7.0-alpha.1"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -2590,7 +2590,7 @@ dependencies = [
 
 [[package]]
 name = "nunchi-bridge"
-version = "2026.6.0"
+version = "2026.7.0-alpha.1"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -2617,7 +2617,7 @@ dependencies = [
 
 [[package]]
 name = "nunchi-bridge-chain"
-version = "2026.6.0"
+version = "2026.7.0-alpha.1"
 dependencies = [
  "bytes",
  "clap",
@@ -2656,7 +2656,7 @@ dependencies = [
 
 [[package]]
 name = "nunchi-chain"
-version = "2026.6.0"
+version = "2026.7.0-alpha.1"
 dependencies = [
  "bytes",
  "commonware-actor",
@@ -2682,7 +2682,7 @@ dependencies = [
 
 [[package]]
 name = "nunchi-clob"
-version = "2026.6.0"
+version = "2026.7.0-alpha.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2708,7 +2708,7 @@ dependencies = [
 
 [[package]]
 name = "nunchi-coins"
-version = "2026.6.0"
+version = "2026.7.0-alpha.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2730,7 +2730,7 @@ dependencies = [
 
 [[package]]
 name = "nunchi-coins-chain"
-version = "2026.6.0"
+version = "2026.7.0-alpha.1"
 dependencies = [
  "bytes",
  "clap",
@@ -2777,7 +2777,7 @@ dependencies = [
 
 [[package]]
 name = "nunchi-coins-indexer"
-version = "2026.6.0"
+version = "2026.7.0-alpha.1"
 dependencies = [
  "axum",
  "bytes",
@@ -2801,7 +2801,7 @@ dependencies = [
 
 [[package]]
 name = "nunchi-common"
-version = "2026.6.0"
+version = "2026.7.0-alpha.1"
 dependencies = [
  "bech32",
  "bytes",
@@ -2819,7 +2819,7 @@ dependencies = [
 
 [[package]]
 name = "nunchi-crypto"
-version = "2026.6.0"
+version = "2026.7.0-alpha.1"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -2830,7 +2830,7 @@ dependencies = [
 
 [[package]]
 name = "nunchi-custom-module"
-version = "2026.6.0"
+version = "2026.7.0-alpha.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2849,7 +2849,7 @@ dependencies = [
 
 [[package]]
 name = "nunchi-dkg"
-version = "2026.6.0"
+version = "2026.7.0-alpha.1"
 dependencies = [
  "bytes",
  "chacha20poly1305",
@@ -2877,7 +2877,7 @@ dependencies = [
 
 [[package]]
 name = "nunchi-mcp"
-version = "2026.6.0"
+version = "2026.7.0-alpha.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2898,7 +2898,7 @@ dependencies = [
 
 [[package]]
 name = "nunchi-mempool"
-version = "2026.6.0"
+version = "2026.7.0-alpha.1"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -2917,7 +2917,7 @@ dependencies = [
 
 [[package]]
 name = "nunchi-oracle"
-version = "2026.6.0"
+version = "2026.7.0-alpha.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2934,7 +2934,7 @@ dependencies = [
 
 [[package]]
 name = "nunchi-rpc"
-version = "2026.6.0"
+version = "2026.7.0-alpha.1"
 dependencies = [
  "commonware-codec",
  "commonware-formatting",
@@ -5471,7 +5471,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "2026.6.0"
+version = "2026.7.0-alpha.1"
 dependencies = [
  "clap",
  "nunchi-coins-chain",
