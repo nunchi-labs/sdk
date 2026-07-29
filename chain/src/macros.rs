@@ -17,6 +17,20 @@ macro_rules! transaction_wrapper {
             ),+ $(,)?
         }
     ) => {
+        // Compile-time assertion: all transaction tags must be unique.
+        const _: () = {
+            let tags: &[u8] = &[$($tag as u8,)+];
+            let mut i = 0;
+            while i < tags.len() {
+                let mut j = i + 1;
+                while j < tags.len() {
+                    assert!(tags[i] != tags[j], "duplicate transaction wrapper tags");
+                    j += 1;
+                }
+                i += 1;
+            }
+        };
+
         $(#[$meta])*
         #[derive(Clone, Debug, Eq, PartialEq)]
         $vis enum $name {
