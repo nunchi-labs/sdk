@@ -5,6 +5,12 @@ use nunchi_crypto::SignatureError;
 use std::{fmt::Debug, hash::Hash};
 
 /// Nonce sequence key for a module transaction.
+///
+/// The `namespace` component must be globally unique to the operation type. Two different
+/// operation types that share a namespace will have their nonce sequences merged into a
+/// single lane, causing incorrect ordering and premature stale-nonce drops.
+///
+/// An empty namespace (`b""`) is invalid and will trigger a debug assertion.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct NonceKey {
     namespace: &'static [u8],
@@ -12,7 +18,16 @@ pub struct NonceKey {
 }
 
 impl NonceKey {
+    /// Create a new nonce key from a namespace and account.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if `namespace` is empty.
     pub fn new(namespace: &'static [u8], account: Address) -> Self {
+        debug_assert!(
+            !namespace.is_empty(),
+            "NonceKey namespace must not be empty: an empty namespace causes all operation types to collide into a single nonce lane"
+        );
         Self { namespace, account }
     }
 
@@ -37,6 +52,16 @@ pub trait PoolTransaction: Clone + Send + 'static {
 
     /// Content-addressed SHA-256 identity of the transaction.
     fn digest(&self) -> Digest;
+    /// Returns the nonce-sequence key for this transaction.
+    ///
+    /// The key's namespace **must** be globally unique to the operation type.
+    /// Using the same namespace across multiple operation types causes their nonce
+    /// sequences to share a lane, resulting in incorrect ordering and premature
+    /// stale-nonce drops. An empty namespace (`b""`) is invalid.
+    ///
+    /// For the built-in [`Transaction<Op>`](nunchi_common::Transaction) blanket impl,
+    /// the namespace is always `Op::NAMESPACE`, which satisfies this requirement
+    /// by construction.
     fn nonce_key(&self) -> Self::NonceKey;
     /// Nonce within the account's sequence.
     fn nonce(&self) -> u64;
