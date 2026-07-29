@@ -89,18 +89,31 @@ impl<D: ClobDB> ClobLedger<D> {
         self.db
     }
 
+    /// Returns the committed transaction nonce for `account`.
+    ///
+    /// The CLOB uses per-account nonces to deduplicate order submissions.
+    /// A new account starts at nonce 0.
     pub async fn nonce(&self, account: &Address) -> Result<u64, ClobError> {
         self.db.nonce(account).await
     }
 
+    /// Looks up a market definition by its [`MarketId`].
+    ///
+    /// Returns `Ok(None)` if the market has not been created.
     pub async fn market(&self, id: &MarketId) -> Result<Option<Market>, ClobError> {
         self.db.market(id).await
     }
 
+    /// Returns the committed fill sequence number for a market.
+    ///
+    /// This is the sequence counter used by the CLOB actor to detect gaps in
+    /// proposer match batches. A batch whose fill sequence starts above
+    /// `market_sequence + 1` indicates a missed batch.
     pub async fn market_sequence(&self, id: &MarketId) -> Result<u64, ClobError> {
         self.db.market_sequence(id).await
     }
 
+    /// Returns all known markets.
     pub async fn markets(&self) -> Result<Vec<Market>, ClobError> {
         let ids = self.db.market_index().await?;
         let mut markets = Vec::with_capacity(ids.len());
@@ -110,24 +123,43 @@ impl<D: ClobDB> ClobLedger<D> {
         Ok(markets)
     }
 
+    /// Looks up an order by its [`OrderId`].
+    ///
+    /// Returns the current state of the order (open, partially filled, or
+    /// cancelled). Returns `Ok(None)` if the order does not exist.
     pub async fn order(&self, id: &OrderId) -> Result<Option<Order>, ClobError> {
         self.db.order(id).await
     }
 
+    /// Returns the open orders on one side of the book for `market`, in
+    /// price-time priority (best price first, FIFO within a price level).
+    ///
+    /// The result is bounded by [`MAX_BOOK_ORDERS`].
     pub async fn book(&self, market: &MarketId, side: Side) -> Result<Vec<Order>, ClobError> {
         let ids = self.db.side_book(market, side).await?;
         self.load_orders(ids).await
     }
 
+    /// Returns all open orders associated with `account`.
+    ///
+    /// The result is bounded by [`MAX_ACCOUNT_ORDERS`].
     pub async fn account_orders(&self, account: &Address) -> Result<Vec<Order>, ClobError> {
         let ids = self.db.account_orders(account).await?;
         self.load_orders(ids).await
     }
 
+    /// Looks up a fill record by its [`FillId`].
+    ///
+    /// Returns `Ok(None)` if the fill does not exist.
     pub async fn fill(&self, id: &FillId) -> Result<Option<Fill>, ClobError> {
         self.db.fill(id).await
     }
 
+    /// Returns the fill history for a market.
+    ///
+    /// Only the most recent [`MAX_FILLS_PER_MARKET`] fills are retained;
+    /// earlier fills may have been pruned. Callers that need a complete fill
+    /// history should index fills separately.
     pub async fn market_fills(&self, market: &MarketId) -> Result<Vec<Fill>, ClobError> {
         let ids = self.db.market_fills(market).await?;
         let mut fills = Vec::with_capacity(ids.len());
