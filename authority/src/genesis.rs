@@ -6,6 +6,9 @@ use commonware_formatting::{from_hex, hex};
 use serde::{Deserialize, Serialize};
 
 /// JSON-facing authority module genesis state.
+///
+/// The `epoch` field defaults to `0` when omitted from JSON, meaning the initial
+/// validator set is materialized starting at epoch zero.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AuthorityGenesis {
     /// Initial authority policy.
@@ -29,11 +32,19 @@ pub struct AuthorityPolicyGenesis {
 }
 
 impl AuthorityGenesis {
+    /// Construct and validate the [`MultisigPolicy`] from the genesis configuration.
+    ///
+    /// Returns [`AuthorityError::InvalidPolicy`] if the threshold is zero,
+    /// exceeds the owner count, or the owner list contains duplicates.
     pub fn policy(&self) -> Result<MultisigPolicy, AuthorityError> {
         MultisigPolicy::new(self.policy.threshold, self.policy.owners.clone())
             .ok_or(AuthorityError::InvalidPolicy)
     }
 
+    /// Return the initial validator set from the genesis configuration.
+    ///
+    /// The returned list is used by [`AuthorityLedger::apply_genesis`] to seed
+    /// the authority registry at [`self.epoch`].
     pub fn validators(&self) -> Result<Vec<ValidatorId>, AuthorityError> {
         Ok(self.validators.clone())
     }
