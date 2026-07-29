@@ -59,6 +59,12 @@ where
     pub state_range: NonEmptyRange<Location>,
 
     /// Pre-computed digest of the block.
+    ///
+    /// The digest commits to every field: `context`, `parent`, `height`,
+    /// `timestamp`, `transactions`, `reshare_log`, `extension`, `state_root`,
+    /// and `state_range`. It is computed once at construction time (in
+    /// [`Block::new`] and during deserialization) so that
+    /// [`Digestible::digest`] can return the value without re-hashing.
     digest: Digest,
 }
 
@@ -142,6 +148,26 @@ where
         hasher.finalize()
     }
 
+    /// Construct a new block, computing its digest from all fields.
+    ///
+    /// # Parameters
+    ///
+    /// - `context`: The consensus round context when this block was proposed.
+    /// - `parent`: The digest of the parent block (i.e., `parent_block.digest()`).
+    /// - `height`: The block height; must equal `parent.height.next()`.
+    /// - `timestamp`: Block timestamp in milliseconds since the Unix epoch;
+    ///   must be strictly greater than the parent block's timestamp.
+    /// - `transactions`: Runtime transactions to execute; must not exceed
+    ///   [`MAX_TRANSACTIONS`] (4096).
+    /// - `reshare_log`: Optional DKG resharing payload; `None` for
+    ///   non-resharing blocks.
+    /// - `extension`: Consensus extension payload for this block.
+    /// - `state`: Authenticated state commitment after executing all
+    ///   transactions. The `root` and `range` fields are stored separately on
+    ///   the resulting `Block` as `state_root` and `state_range`.
+    ///
+    /// The block's `digest` is pre-computed at construction time and commits to
+    /// all fields, including the state commitment.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         context: Context,
