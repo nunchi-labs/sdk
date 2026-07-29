@@ -53,7 +53,7 @@ impl Config {
                 env: vec![EnvVar {
                     key: "RUST_LOG".to_string(),
                     // Let the operator turn the node log level knob from outside.
-                    value: std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
+                    value: std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned()),
                 }],
             })
             .collect();
