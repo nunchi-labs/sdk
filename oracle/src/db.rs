@@ -15,6 +15,8 @@ const NS: Namespace = Namespace::new(ORACLE_NAMESPACE);
 #[derive(Clone, Copy)]
 enum Table {
     Nonce = 0,
+    // Discriminants 1 and 2 were used by tables removed during early development.
+    // They must remain reserved to prevent key-space collisions on existing chains.
     Record = 3,
     NamespaceInterval = 4,
     WriterInterval = 5,
