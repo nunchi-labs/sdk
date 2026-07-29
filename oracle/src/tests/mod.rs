@@ -7,7 +7,7 @@ use nunchi_common::{Address, RuntimeContext, StateError, StateStore};
 use nunchi_crypto::PrivateKey;
 
 use crate::{
-    IntervalKey, NamespaceId, OracleError, OracleGenesis, OracleLedger, OracleOperation,
+    IntervalKey, NamespaceId, OracleError, OracleGenesis, OracleLedger, OracleOperation, RecordId,
     Transaction, MAX_PAYLOAD_SIZE, MAX_PROOF_SIZE,
 };
 
@@ -272,5 +272,41 @@ fn genesis_is_noop_for_permissionless_oracle() {
             .await
             .unwrap();
         assert_eq!(records[0].payload, b"from-genesis");
+    });
+}
+
+#[test]
+fn record_lookup_by_id_returns_correct_record() {
+    run_test(|| async {
+        let writer = PrivateKey::from_seed(2);
+        let mut ledger = OracleLedger::new(MemoryStore::default());
+        let tx = append_tx(&writer, 0, namespace(), 5, b"lookup-me".to_vec());
+        ledger.apply_transaction(&tx, context(1_000)).await.unwrap();
+
+        // Retrieve via namespace query to get the RecordId
+        let records = ledger
+            .records_by_namespace(&namespace(), IntervalKey::new(5), IntervalKey::new(5))
+            .await
+            .unwrap();
+        let id = records[0].id;
+
+        // Direct lookup by id
+        let record = ledger.record(&id).await.unwrap();
+        assert!(record.is_some());
+        let record = record.unwrap();
+        assert_eq!(record.payload, b"lookup-me");
+        assert_eq!(record.id, id);
+        assert_eq!(record.namespace, namespace());
+        assert_eq!(record.interval, IntervalKey::new(5));
+    });
+}
+
+#[test]
+fn record_lookup_for_unknown_id_returns_none() {
+    run_test(|| async {
+        let ledger = OracleLedger::new(MemoryStore::default());
+        let fake_id = RecordId(Sha256::hash(b"nonexistent-record"));
+        let result = ledger.record(&fake_id).await.unwrap();
+        assert!(result.is_none());
     });
 }
