@@ -172,6 +172,35 @@ fn transaction_codec_round_trips() {
 }
 
 #[test]
+fn cancel_order_codec_round_trips() {
+    let signer = PrivateKey::from_seed(1);
+    let order_id = OrderId(Sha256::hash(b"test-order"));
+    let tx = Transaction::sign(&signer, 0, ClobOperation::CancelOrder { order: order_id });
+    let encoded = tx.encode();
+
+    assert_eq!(Transaction::decode(encoded).unwrap(), tx);
+}
+
+#[test]
+fn cancel_order_is_offchain_only_for_ledger_transactions() {
+    run_test(|| async {
+        let creator = PrivateKey::from_seed(1);
+        let trader = PrivateKey::from_seed(2);
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        seed_market(&mut ledger, &creator).await;
+
+        let order_id = OrderId(Sha256::hash(b"some-order"));
+        let cancel_tx =
+            Transaction::sign(&trader, 0, ClobOperation::CancelOrder { order: order_id });
+        let err = ledger
+            .apply_transaction(&cancel_tx, context(2))
+            .await
+            .unwrap_err();
+        assert_eq!(err, ClobError::OffchainOnly);
+    });
+}
+
+#[test]
 fn genesis_seeds_markets() {
     run_test(|| async {
         let creator = PrivateKey::from_seed(1);
