@@ -174,8 +174,16 @@ impl MultisigPolicy {
         &self.signers
     }
 
+    /// Returns `true` if `signer` is in this policy.
+    ///
+    /// The signers are maintained in sorted order by their encoded bytes
+    /// (established in [`MultisigPolicy::new`]), so this uses binary search
+    /// for O(log n) lookup instead of a linear scan.
     pub fn contains(&self, signer: &PublicKey) -> bool {
-        self.signers.iter().any(|candidate| candidate == signer)
+        let key = signer.encode();
+        self.signers
+            .binary_search_by(|candidate| candidate.encode().as_ref().cmp(key.as_ref()))
+            .is_ok()
     }
 }
 
