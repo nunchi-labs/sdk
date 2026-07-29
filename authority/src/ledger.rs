@@ -319,10 +319,18 @@ impl<D: AuthorityDB> AuthorityLedger<D> {
         if proposal.proposed_epoch < current_epoch {
             return Err(AuthorityError::InvalidEpoch);
         }
-        if proposal.approvals.len() < policy.threshold as usize {
+        // Count only approvals from current policy owners. This is forward-compatible
+        // with future policy update functionality: approvals from owners removed since
+        // the approval was recorded will no longer count toward the threshold.
+        let valid_approvals = proposal
+            .approvals
+            .iter()
+            .filter(|approver| policy.owners.contains(approver))
+            .count();
+        if valid_approvals < policy.threshold as usize {
             return Err(AuthorityError::InsufficientApprovals {
                 required: policy.threshold,
-                actual: proposal.approvals.len(),
+                actual: valid_approvals,
             });
         }
 
