@@ -33,9 +33,20 @@ pub struct Event {
 
 impl Event {
     /// Create an event from name and value bytes.
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Debug-asserts that `name` is non-empty and valid UTF-8. These checks
+    /// are compiled out of release builds to keep the hot path zero-cost.
     pub fn new(name: impl Into<Bytes>, value: impl Into<Bytes>) -> Self {
+        let name = name.into();
+        debug_assert!(!name.is_empty(), "event name must not be empty");
+        debug_assert!(
+            std::str::from_utf8(&name).is_ok(),
+            "event name must be valid UTF-8"
+        );
         Self {
-            name: name.into(),
+            name,
             value: value.into(),
         }
     }
