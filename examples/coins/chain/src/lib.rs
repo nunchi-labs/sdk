@@ -67,9 +67,11 @@ pub mod channels {
 /// Live consensus derives later epochs from [`BLOCKS_PER_EPOCH`].
 pub const EPOCH: Epoch = Epoch::zero();
 
-/// The number of blocks in an epoch.
+/// The number of blocks in an epoch for this example chain.
 ///
-/// Production systems should use a much larger value, as DKG/reshare safety depends on
-/// synchrony during the epoch window.
+/// At 200,000 blocks this is intentionally large to keep DKG/reshare infrequent.
+/// Production deployments should tune this based on expected block interval,
+/// desired validator churn frequency, and DKG round completion time.
+/// Smaller values increase reshare frequency and reduce the time window for completion.
 pub const BLOCKS_PER_EPOCH: NonZeroU64 = commonware_utils::NZU64!(200_000);
 });
