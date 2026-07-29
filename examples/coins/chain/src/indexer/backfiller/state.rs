@@ -168,10 +168,13 @@ impl State {
     }
 
     pub fn finish_certificate_upload(&mut self, digest: &Digest, uploaded_height: Option<u64>) {
-        let count = self
-            .certificate_uploads
-            .get_mut(digest)
-            .expect("missing in-flight certificate upload");
+        let Some(count) = self.certificate_uploads.get_mut(digest) else {
+            tracing::error!(
+                ?digest,
+                "finish_certificate_upload called with no matching in-flight entry"
+            );
+            return;
+        };
         *count -= 1;
         self.certificate_upload_refs -= 1;
         if *count == 0 {
