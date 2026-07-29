@@ -125,6 +125,7 @@ impl App {
             node.status = NodeStatus::Error;
             node.add_log(format!("failed to restart node: {error}"));
         }
+        self.scroll_offset = 0;
     }
 
     fn shutdown_selected(&mut self) {
