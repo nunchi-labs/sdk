@@ -25,5 +25,10 @@ pub use ledger::{CustomError, CustomLedger};
 pub use transaction::{CustomOperation, Transaction, TransactionPayload};
 
 /// Domain separator used for custom transaction signatures and state keys.
-pub const CUSTOM_NAMESPACE: &[u8] = b"_NUNCHI_CUSTOM_MODULE";
+///
+/// IMPORTANT: The `_NUNCHI_` prefix is reserved for first-party production
+/// modules. Third-party and example modules must use a different prefix to
+/// avoid cross-module transaction replay and storage-key collisions.
+/// Rename this constant to a globally unique value before deploying.
+pub const CUSTOM_NAMESPACE: &[u8] = b"_EXAMPLE_CUSTOM_MODULE";
 });
