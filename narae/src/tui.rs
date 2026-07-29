@@ -298,11 +298,10 @@ fn render_logs(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let Some(node) = app.nodes.get(app.selected) else {
         return;
     };
-    let node = node.lock().unwrap();
+    let (node_name, logs_snapshot) = snapshot_logs(node);
     let visible_height = log_area.height.saturating_sub(2) as usize;
     let filter = app.log_filter.as_ref().map(|filter| filter.to_lowercase());
-    let logs = node
-        .logs
+    let logs = logs_snapshot
         .iter()
         .filter(|line| {
             filter
@@ -326,8 +325,8 @@ fn render_logs(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .collect::<Vec<_>>();
 
     let title = match &app.log_filter {
-        Some(filter) => format!(" {} [filter: {filter}] ", node.spec.name),
-        None => format!(" {} - {} ", app.title, node.spec.name),
+        Some(filter) => format!(" {} [filter: {filter}] ", node_name),
+        None => format!(" {} - {} ", app.title, node_name),
     };
     let logs = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title));
     frame.render_widget(logs, log_area);
@@ -335,6 +334,11 @@ fn render_logs(frame: &mut Frame<'_>, app: &App, area: Rect) {
     if app.input_mode == InputMode::Filter || app.log_filter.is_some() {
         render_filter(frame, app);
     }
+}
+
+fn snapshot_logs(node: &SharedNode) -> (String, Vec<String>) {
+    let node = node.lock().unwrap();
+    (node.spec.name.clone(), node.logs.iter().cloned().collect())
 }
 
 fn render_filter(frame: &mut Frame<'_>, app: &App) {
@@ -394,5 +398,29 @@ fn status_color(status: NodeStatus) -> Color {
         NodeStatus::Running => Color::Green,
         NodeStatus::Error => Color::Red,
         NodeStatus::Stopped => Color::Gray,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::NodeSpec;
+
+    #[test]
+    fn snapshot_logs_releases_node_lock() {
+        let node = Arc::new(Mutex::new(Node::new(NodeSpec {
+            name: "node-0".to_string(),
+            command: "node".to_string(),
+            args: Vec::new(),
+            cwd: None,
+            env: Vec::new(),
+        })));
+        node.lock().unwrap().add_log("first");
+
+        let (name, logs) = snapshot_logs(&node);
+        node.try_lock().expect("snapshot must release node lock").add_log("second");
+
+        assert_eq!(name, "node-0");
+        assert_eq!(logs, ["first"]);
     }
 }
