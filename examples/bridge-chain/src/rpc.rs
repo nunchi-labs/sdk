@@ -56,7 +56,7 @@ pub struct SubmitFinalizationParams {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SubmitFinalizationResponse {
     pub result: String,
-    pub accepted_view: Option<u64>,
+    pub latest_view: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -141,10 +141,10 @@ where
         let finalization: Finalization = decode_hex(&params.finalization, "finalization")?;
         let result = context.node.bridge.submit(finalization).await;
         let latest = context.node.bridge.latest().await;
-        let accepted_view = latest.map(|f| f.view().get());
+        let latest_view = latest.map(|f| f.view().get());
         RpcResult::Ok(SubmitFinalizationResponse {
             result: submit_result(result).to_string(),
-            accepted_view,
+            latest_view,
         })
     })?;
 

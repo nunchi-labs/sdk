@@ -130,10 +130,10 @@ where
     ) -> RpcResult<SubmitFinalizationResponse> {
         let finalization: Finalization = decode_hex(&finalization, "finalization")?;
         let result = self.bridge.submit(finalization).await;
-        let accepted_view = self.bridge.latest().await.map(|f| f.view().get());
+        let latest_view = self.bridge.latest().await.map(|f| f.view().get());
         Ok(SubmitFinalizationResponse {
             result: submit_result(result).to_string(),
-            accepted_view,
+            latest_view,
         })
     }
 
@@ -166,7 +166,7 @@ pub struct SubmitFinalizationParams {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SubmitFinalizationResponse {
     pub result: String,
-    pub accepted_view: Option<u64>,
+    pub latest_view: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -82,7 +82,7 @@ async fn relay_one(
                 from = from_name,
                 to = to_name,
                 result = %response.result,
-                accepted_view = ?response.accepted_view,
+                latest_view = ?response.latest_view,
                 "relayed finalization"
             );
             *last = Some(finalization);
