@@ -131,6 +131,100 @@ fn private_keys_roundtrip_with_secp256r1() {
 }
 
 #[test]
+fn truncated_ed25519_public_key_is_rejected() {
+    // Valid Ed25519 tag (0x01) but zero key bytes
+    let truncated = vec![0x01u8];
+    assert!(PublicKey::decode(truncated.as_ref()).is_err());
+
+    // Valid Ed25519 tag but only 16 of 32 required key bytes
+    let mut truncated = vec![0x01u8];
+    truncated.extend_from_slice(&[0xAB; 16]);
+    assert!(PublicKey::decode(truncated.as_ref()).is_err());
+}
+
+#[test]
+fn truncated_secp256r1_public_key_is_rejected() {
+    // Valid Secp256r1 tag (0x02) but zero key bytes
+    let truncated = vec![0x02u8];
+    assert!(PublicKey::decode(truncated.as_ref()).is_err());
+
+    // Valid Secp256r1 tag but only 10 of 33 required bytes
+    let mut truncated = vec![0x02u8];
+    truncated.extend_from_slice(&[0xAB; 10]);
+    assert!(PublicKey::decode(truncated.as_ref()).is_err());
+}
+
+#[test]
+fn truncated_ed25519_signature_is_rejected() {
+    // Valid Ed25519 tag but only 16 of 64 required signature bytes
+    let mut truncated = vec![0x01u8];
+    truncated.extend_from_slice(&[0xAB; 16]);
+    assert!(Signature::decode(truncated.as_ref()).is_err());
+}
+
+#[test]
+fn truncated_secp256r1_signature_is_rejected() {
+    // Valid Secp256r1 tag but only 16 of 64 required signature bytes
+    let mut truncated = vec![0x02u8];
+    truncated.extend_from_slice(&[0xAB; 16]);
+    assert!(Signature::decode(truncated.as_ref()).is_err());
+}
+
+#[test]
+fn all_zeros_ed25519_key_is_rejected() {
+    // Ed25519 tag followed by 32 zero bytes (identity point)
+    let mut all_zeros = vec![0x01u8];
+    all_zeros.extend_from_slice(&[0x00; 32]);
+    // The all-zeros key should either be rejected at decode time or fail verification.
+    // We document whichever behavior the library exhibits.
+    if let Ok(key) = PublicKey::decode(all_zeros.as_ref()) {
+        // If decode accepts it, it must not verify any signature
+        let private = PrivateKey::ed25519_from_seed(1);
+        let sig = private.sign(NAMESPACE, MESSAGE);
+        assert!(key.verify(NAMESPACE, MESSAGE, &sig).is_err());
+    }
+}
+
+#[test]
+fn all_zeros_secp256r1_key_is_rejected() {
+    // Secp256r1 tag followed by 33 zero bytes (not a valid compressed point)
+    let mut all_zeros = vec![0x02u8];
+    all_zeros.extend_from_slice(&[0x00; 33]);
+    // The all-zeros key is not a valid compressed secp256r1 point and should be rejected
+    assert!(PublicKey::decode(all_zeros.as_ref()).is_err());
+}
+
+#[test]
+fn empty_input_is_rejected_for_public_key() {
+    assert!(PublicKey::decode([].as_ref()).is_err());
+}
+
+#[test]
+fn empty_input_is_rejected_for_signature() {
+    assert!(Signature::decode([].as_ref()).is_err());
+}
+
+#[test]
+fn public_key_extra_trailing_bytes_rejected_by_exact_decode() {
+    // Encode a valid public key, then append garbage bytes.
+    // DecodeExt::decode (used by our tests) calls Read::read then checks remaining == 0.
+    let private = PrivateKey::ed25519_from_seed(1);
+    let mut encoded = private.public_key().encode().to_vec();
+    encoded.extend_from_slice(&[0xFF, 0xFF]);
+    // Using the strict DecodeExt::decode path which rejects trailing data
+    assert!(PublicKey::decode(encoded.as_ref()).is_err());
+}
+
+#[test]
+fn signature_extra_trailing_bytes_rejected_by_exact_decode() {
+    let private = PrivateKey::ed25519_from_seed(1);
+    let sig = private.sign(NAMESPACE, MESSAGE);
+    let mut encoded = sig.encode().to_vec();
+    encoded.extend_from_slice(&[0xFF, 0xFF]);
+    assert!(Signature::decode(encoded.as_ref()).is_err());
+}
+
+#[test]
 fn private_key_debug_redacts_key_material() {
     let private = PrivateKey::ed25519_from_seed(7);
     let debug = format!("{private:?}");
