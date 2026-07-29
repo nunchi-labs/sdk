@@ -20,30 +20,98 @@ use std::{
     time::Duration,
 };
 
+// --- Actor / consensus settings ---
+
+/// Channel capacity for the consensus actor mailbox. Messages are
+/// back-pressured (not dropped) when the mailbox is full.
 pub const MAILBOX_SIZE: NonZeroUsize = NZUsize!(1024);
+
+/// Maximum number of recent views held in the ancestry deque.
 pub const DEQUE_SIZE: usize = 10;
+
+/// Number of views without observed activity before a participant is
+/// considered inactive. Measured in consensus views.
 pub const ACTIVITY_TIMEOUT: ViewDelta = ViewDelta::new(256);
+
+/// Multiplier applied to [`ACTIVITY_TIMEOUT`] when the node is syncing,
+/// giving the syncer extra time before declaring peers inactive.
 pub const SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER: u64 = 10;
+
+// --- Storage / freezer settings ---
+
+/// Items per section in the prunable (mutable) portion of the freezer.
 pub const PRUNABLE_ITEMS_PER_SECTION: NonZero<u64> = NZU64!(4_096);
+
+/// Items per section in the immutable (append-only) portion of the freezer.
 pub const IMMUTABLE_ITEMS_PER_SECTION: NonZero<u64> = NZU64!(262_144);
+
+/// How often (in sections) the freezer resizes its backing tables.
 pub const FREEZER_TABLE_RESIZE_FREQUENCY: u8 = 4;
-pub const FREEZER_TABLE_RESIZE_CHUNK_SIZE: u32 = 2u32.pow(16); // 3MB
+
+/// Chunk size in bytes for freezer table resizing. 2^16 = 64 KB.
+pub const FREEZER_TABLE_RESIZE_CHUNK_SIZE: u32 = 2u32.pow(16); // 64KB
+
+/// Target size in bytes for freezer value files. 1 GB.
 pub const FREEZER_VALUE_TARGET_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
+
+/// Zstd compression level for freezer values. `None` disables compression.
 pub const FREEZER_VALUE_COMPRESSION: Option<u8> = Some(3);
+
+/// Size in bytes of the write-ahead-log replay buffer. 8 MB.
 pub const REPLAY_BUFFER: NonZero<usize> = NZUsize!(8 * 1024 * 1024); // 8MB
+
+/// Size in bytes of the write buffer used during flushes. 1 MB.
 pub const WRITE_BUFFER: NonZero<usize> = NZUsize!(1024 * 1024); // 1MB
+
+/// Page size in bytes for the page cache. 4 KB.
 pub const PAGE_CACHE_PAGE_SIZE: NonZeroU16 = NZU16!(4_096); // 4KB
+
+/// Number of pages held in the page cache (8192 x 4 KB = 32 MB).
 pub const PAGE_CACHE_CAPACITY: NonZero<usize> = NZUsize!(8_192); // 32MB
+
+// --- Peer repair / ack settings ---
+
+/// Maximum number of blocks that can be requested from a peer in a single
+/// repair round.
 pub const MAX_REPAIR: NonZero<usize> = NZUsize!(50);
+
+/// Maximum number of unacknowledged finalized blocks before back-pressure
+/// is applied to consensus.
 pub const MAX_PENDING_ACKS: NonZero<usize> = NZUsize!(16);
+
+// --- State sync settings ---
+
+/// Number of key-value pairs fetched from a peer in each state-sync batch.
 pub const STATE_SYNC_FETCH_BATCH_SIZE: NonZero<u64> = NZU64!(1_024);
+
+/// Number of key-value pairs applied locally in each state-sync batch.
 pub const STATE_SYNC_APPLY_BATCH_SIZE: usize = 4_096;
+
+/// Maximum number of in-flight state-sync fetch requests to peers.
 pub const STATE_SYNC_MAX_OUTSTANDING_REQUESTS: usize = 8;
+
+/// Channel capacity for state-sync progress updates.
 pub const STATE_SYNC_UPDATE_CHANNEL_SIZE: NonZero<usize> = NZUsize!(256);
+
+/// Number of recent state roots retained for serving lagging state-sync peers.
 pub const STATE_SYNC_MAX_RETAINED_ROOTS: usize = 32;
+
+// --- Application settings ---
+
+/// Maximum number of transactions verified concurrently during block
+/// application. Higher values trade memory for throughput on multi-core
+/// machines.
 pub const APPLICATION_VERIFY_CONCURRENCY: NonZeroUsize = NZUsize!(16);
+
+// --- State sync resolver timeouts ---
+
+/// Initial timeout for resolving a state-sync peer endpoint.
 pub const STATE_SYNC_RESOLVER_INITIAL: Duration = Duration::from_secs(1);
+
+/// Maximum timeout for resolving a state-sync peer endpoint.
 pub const STATE_SYNC_RESOLVER_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Delay between retries when a state-sync resolver request fails.
 pub const STATE_SYNC_RESOLVER_RETRY: Duration = Duration::from_millis(100);
 /// Prune cadence in finalized heights (retention floors are independent of this).
 pub const PRUNE_MAINTENANCE_INTERVAL: NonZero<usize> = NZUsize!(32);
