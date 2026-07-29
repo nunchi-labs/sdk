@@ -260,7 +260,7 @@ fn apply_genesis_rejects_allocation_overflow() {
         };
         assert_eq!(
             ledger.apply_genesis(&genesis).await.unwrap_err(),
-            LedgerError::BalanceOverflow
+            LedgerError::InvalidGenesis("allocation amounts overflow u128".to_string())
         );
     });
 }

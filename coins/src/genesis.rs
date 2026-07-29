@@ -156,9 +156,11 @@ impl<D: CoinDB> Ledger<D> {
             if allocation.amount == 0 {
                 return Err(LedgerError::InvalidAmount);
             }
-            total = total
-                .checked_add(allocation.amount)
-                .ok_or(LedgerError::BalanceOverflow)?;
+            total = total.checked_add(allocation.amount).ok_or_else(|| {
+                LedgerError::InvalidGenesis(
+                    "allocation amounts overflow u128".to_string(),
+                )
+            })?;
         }
         if total != initial_supply {
             return Err(LedgerError::AllocationSumMismatch {
