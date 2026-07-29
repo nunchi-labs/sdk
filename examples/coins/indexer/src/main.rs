@@ -59,14 +59,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         },
     };
-    if let Some(path) = cli.dkg_output_state_dir.clone() {
-        indexer = indexer.with_dkg_output_state_dir(path);
-    }
-    let indexer = Arc::new(indexer);
-    let app = Api::new(indexer).router_with_frontend(cli.frontend_dir.clone());
-
     let addr = format!("0.0.0.0:{}", cli.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
+
+    // Log before consuming the CLI values to avoid unnecessary clones.
     info!(
         %addr,
         participants = %cli.participants,
@@ -74,6 +70,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         dkg_output_state_dir = ?cli.dkg_output_state_dir,
         "started coins-chain indexer"
     );
+
+    if let Some(path) = cli.dkg_output_state_dir {
+        indexer = indexer.with_dkg_output_state_dir(path);
+    }
+    let indexer = Arc::new(indexer);
+    let app = Api::new(indexer).router_with_frontend(cli.frontend_dir);
+
     axum::serve(listener, app).await?;
     Ok(())
 }
