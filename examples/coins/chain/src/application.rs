@@ -5,7 +5,15 @@ use nunchi_clob::ClobExtension;
 
 use crate::CoinsRuntime;
 
-/// Genesis message to use during initialization.
+/// Seed for the coins chain's genesis block payload digest.
+///
+/// This constant is hashed with SHA-256 to produce the very first consensus
+/// block's payload digest (see [`genesis_payload`]). It is a **network constant**:
+/// every node on the coins chain must agree on this exact byte sequence.
+///
+/// Changing this value -- even a single character -- produces a different genesis
+/// digest, making the modified node incompatible with all existing nodes. Only
+/// change this when intentionally starting a new, incompatible network.
 const GENESIS: &[u8] = b"nunchi coins chain";
 
 /// The consensus application for the DKG-backed coins chain.
