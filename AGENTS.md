@@ -202,47 +202,17 @@ let lossy_link = Link {
 };
 ```
 
-### Byzantine Testing Patterns
+### Byzantine and Adversarial Testing
 
-```rust
-// Test Byzantine actors by replacing normal participants
-if idx_scheme == 0 {
-    // Create Byzantine actor instead of normal engine
-    let cfg = mocks::conflicter::Config { /* ... */ };
-    let engine = mocks::conflicter::Conflicter::new(context, cfg);
-    engine.start(pending);
-} else {
-    // Normal honest participant
-    let engine = Engine::new(context, cfg);
-    engine.start(pending, recovered, resolver);
-}
+Byzantine test infrastructure lives in the upstream `commonware` crates and is not
+re-exported by this SDK. For adversarial testing patterns within this repository,
+refer to the DKG actor tests in `dkg/src/tests/actor.rs` and the simulated network
+examples above. When testing fault tolerance:
 
-// Verify Byzantine behavior is detected
-let blocked = oracle.blocked().await.unwrap();
-assert!(!blocked.is_empty()); // Byzantine nodes should be blocked
-```
-
-### Verification Patterns
-
-```rust
-// Use supervisors to monitor and verify distributed behavior
-let supervisor = mocks::supervisor::Supervisor::new(config);
-let (mut latest, mut monitor) = supervisor.subscribe().await;
-
-// Wait for progress with explicit monitoring
-while latest < required_containers {
-    latest = monitor.next().await.expect("event missing");
-}
-
-// Verify no Byzantine faults occurred
-let faults = supervisor.faults.lock().unwrap();
-assert!(faults.is_empty());
-
-// Verify determinism across runs
-let state1 = slow_and_lossy_links::<MinPk>(seed);
-let state2 = slow_and_lossy_links::<MinPk>(seed);
-assert_eq!(state1, state2); // Must be deterministic with same seed
-```
+- Use the simulated network to introduce packet loss, latency, and partitions.
+- Verify determinism across runs by comparing `context.auditor().state()` with the
+  same seed.
+- Test crash recovery using the stateful recovery pattern shown above.
 
 ### Key Testing Patterns
 
