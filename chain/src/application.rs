@@ -671,6 +671,14 @@ where
         let block = ancestry.next().await?;
         let parent = ancestry.next().await?;
 
+        // Defense-in-depth: verify structural consistency with the provided parent.
+        if block.height != parent.height.next() {
+            return None;
+        }
+        if block.parent != parent.digest() {
+            return None;
+        }
+
         if !Self::verify_timestamp(&runtime_context, &block, &parent).await {
             return None;
         }
