@@ -745,7 +745,7 @@ fn resolve_repo_path(repo_root: &Path, sub: &str) -> anyhow::Result<PathBuf> {
     if !canonical_candidate.starts_with(&canonical_root) {
         anyhow::bail!("path traversal denied: '{sub}' escapes the repository root");
     }
-    Ok(candidate)
+    Ok(canonical_candidate)
 }
 
 /// Returns `true` if any component of `path` is an excluded directory.
