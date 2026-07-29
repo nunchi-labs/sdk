@@ -78,47 +78,78 @@ fn market_sequence_key(market: &MarketId) -> Digest {
     NS.key(Table::MarketSequence, market.encode().as_ref())
 }
 
-/// Typed state access required by [`crate::ClobLedger`].
+/// Storage backend for CLOB ledger state.
+///
+/// # Write model
+///
+/// All `set_*` and `remove_*` methods are synchronous and infallible because
+/// they buffer writes locally. Writes are made durable only when the
+/// underlying [`StateStore::commit`] is called. Callers must not assume that
+/// a `set_*` call persists the value before the next commit.
+///
+/// Async `get` methods (`nonce`, `market`, `order`, etc.) read from the
+/// current overlay and fall back to persistent storage if no buffered value
+/// is present.
 #[async_trait]
 pub trait ClobDB {
+    /// Returns the current nonce for `account`, or 0 if it has never transacted.
     async fn nonce(&self, account: &Address) -> Result<u64, ClobError>;
 
+    /// Buffer a nonce update. The change is not durable until `commit` is called.
     fn set_nonce(&mut self, account: &Address, nonce: u64);
 
+    /// Look up a market definition by id.
     async fn market(&self, id: &MarketId) -> Result<Option<Market>, ClobError>;
 
+    /// Buffer a market definition (insert or update). Not durable until `commit`.
     fn set_market(&mut self, market: &Market);
 
+    /// Return the list of all registered market ids.
     async fn market_index(&self) -> Result<Vec<MarketId>, ClobError>;
 
+    /// Buffer an update to the market index. Not durable until `commit`.
     fn set_market_index(&mut self, markets: &[MarketId]);
 
+    /// Look up an order by id.
     async fn order(&self, id: &OrderId) -> Result<Option<Order>, ClobError>;
 
+    /// Buffer an order (insert or update). Not durable until `commit`.
     fn set_order(&mut self, order: &Order);
 
+    /// Buffer the removal of an order. Not durable until `commit`.
     fn remove_order(&mut self, order: &OrderId);
 
+    /// Return the order ids on one side of a market's book.
     async fn side_book(&self, market: &MarketId, side: Side) -> Result<Vec<OrderId>, ClobError>;
 
+    /// Buffer an update to a side of the order book. Not durable until `commit`.
     fn set_side_book(&mut self, market: &MarketId, side: Side, orders: &[OrderId]);
 
+    /// Return the order ids associated with an account.
     async fn account_orders(&self, account: &Address) -> Result<Vec<OrderId>, ClobError>;
 
+    /// Buffer an update to the account's order index. Not durable until `commit`.
     fn set_account_orders(&mut self, account: &Address, orders: &[OrderId]);
 
+    /// Look up a fill by id.
     async fn fill(&self, id: &FillId) -> Result<Option<Fill>, ClobError>;
 
+    /// Buffer a fill record. Not durable until `commit`.
     fn set_fill(&mut self, fill: &Fill);
 
+    /// Buffer the removal of a fill. Not durable until `commit`.
     fn remove_fill(&mut self, fill: &FillId);
 
+    /// Return the fill ids for a market.
     async fn market_fills(&self, market: &MarketId) -> Result<Vec<FillId>, ClobError>;
 
+    /// Buffer an update to the market's fill index. Not durable until `commit`.
     fn set_market_fills(&mut self, market: &MarketId, fills: &[FillId]);
 
+    /// Return the current sequence number for a market, or 0 if not yet set.
     async fn market_sequence(&self, market: &MarketId) -> Result<u64, ClobError>;
 
+    /// Buffer a market sequence number update. Not durable until `commit`.
     fn set_market_sequence(&mut self, market: &MarketId, sequence: u64);
 }
 
