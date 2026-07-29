@@ -7,6 +7,17 @@ use commonware_utils::{ordered::Set, TryCollect};
 use rand::{rngs::StdRng, seq::IteratorRandom, SeedableRng};
 use serde::{Deserialize, Serialize};
 
+/// Error returned when [`PeerConfig::new`] receives invalid parameters.
+#[derive(Debug, thiserror::Error)]
+pub enum PeerConfigError {
+    #[error("num_participants_per_round must not be empty")]
+    EmptyParticipantsPerRound,
+    #[error("num_participants_per_round must not contain zero")]
+    ZeroParticipants,
+    #[error("need {need} participants but only {have} are available")]
+    TooFewParticipants { need: u32, have: usize },
+}
+
 /// A list of all peers' public keys.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerConfig<P: PublicKey = Ed25519PublicKey> {
@@ -25,6 +36,36 @@ pub struct PeerConfig<P: PublicKey = Ed25519PublicKey> {
 }
 
 impl<P: PublicKey> PeerConfig<P> {
+    /// Create a validated `PeerConfig`.
+    ///
+    /// Returns an error if:
+    /// - `num_participants_per_round` is empty,
+    /// - any entry is zero, or
+    /// - any entry exceeds the number of participants.
+    pub fn new(
+        num_participants_per_round: Vec<u32>,
+        participants: Set<P>,
+    ) -> Result<Self, PeerConfigError> {
+        if num_participants_per_round.is_empty() {
+            return Err(PeerConfigError::EmptyParticipantsPerRound);
+        }
+        for &n in &num_participants_per_round {
+            if n == 0 {
+                return Err(PeerConfigError::ZeroParticipants);
+            }
+            if (n as usize) > participants.len() {
+                return Err(PeerConfigError::TooFewParticipants {
+                    need: n,
+                    have: participants.len(),
+                });
+            }
+        }
+        Ok(Self {
+            num_participants_per_round,
+            participants,
+        })
+    }
+
     /// Returns the maximum number of participants per round.
     pub fn max_participants_per_round(&self) -> u32 {
         self.num_participants_per_round
