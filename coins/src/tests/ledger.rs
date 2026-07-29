@@ -995,20 +995,17 @@ fn credit_rejects_balance_overflow() {
 }
 
 #[test]
-fn credit_and_debit_reject_unknown_token() {
+fn transfer_rejects_unknown_token() {
     let runner = deterministic::Runner::default();
     runner.start(|context| async move {
         let mut ledger = ledger(context).await;
         let alice = address(&PrivateKey::ed25519_from_seed(1));
+        let bob = address(&PrivateKey::ed25519_from_seed(2));
         let unknown =
             crate::TokenFactory::derive_coin_id(&alice, 1, &spec(1, None).expect("valid coin spec"));
 
         assert_eq!(
-            ledger.credit(&alice, unknown, 1).await.unwrap_err(),
-            LedgerError::UnknownToken(unknown)
-        );
-        assert_eq!(
-            ledger.debit(&alice, unknown, 1).await.unwrap_err(),
+            ledger.transfer(&alice, &bob, unknown, 1).await.unwrap_err(),
             LedgerError::UnknownToken(unknown)
         );
     });

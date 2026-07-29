@@ -145,6 +145,9 @@ impl<D: CoinDB> Ledger<D> {
         if amount == 0 {
             return Ok(());
         }
+        if self.db.token(&config.coin).await?.is_none() {
+            return Err(LedgerError::UnknownToken(config.coin));
+        }
         self.debit(payer, config.coin, amount).await?;
         self.credit(&config.collector, config.coin, amount).await?;
         events.emit(fee_charged_event(FeeCharged {
@@ -169,6 +172,9 @@ impl<D: CoinDB> Ledger<D> {
         coin: CoinId,
         amount: u128,
     ) -> Result<(), LedgerError> {
+        if self.db.token(&coin).await?.is_none() {
+            return Err(LedgerError::UnknownToken(coin));
+        }
         self.debit(from, coin, amount).await?;
         self.credit(to, coin, amount).await?;
         Ok(())
@@ -441,15 +447,19 @@ impl<D: CoinDB> Ledger<D> {
         Ok(total_supply)
     }
 
+    /// Increase the balance of `account` for `coin` by `amount`.
+    ///
+    /// # Precondition
+    ///
+    /// The caller must ensure `coin` exists in the ledger before calling this
+    /// method. All public entry points (`charge_fee`, `transfer`,
+    /// `apply_operation`) verify token existence before reaching this helper.
     pub(crate) async fn credit(
         &mut self,
         account: &Address,
         coin: CoinId,
         amount: u128,
     ) -> Result<(), LedgerError> {
-        if self.db.token(&coin).await?.is_none() {
-            return Err(LedgerError::UnknownToken(coin));
-        }
         let current = self.db.balance(account, &coin).await?;
         let updated = current
             .checked_add(amount)
@@ -458,15 +468,19 @@ impl<D: CoinDB> Ledger<D> {
         Ok(())
     }
 
+    /// Decrease the balance of `account` for `coin` by `amount`.
+    ///
+    /// # Precondition
+    ///
+    /// The caller must ensure `coin` exists in the ledger before calling this
+    /// method. All public entry points (`charge_fee`, `transfer`,
+    /// `apply_operation`) verify token existence before reaching this helper.
     pub(crate) async fn debit(
         &mut self,
         account: &Address,
         coin: CoinId,
         amount: u128,
     ) -> Result<(), LedgerError> {
-        if self.db.token(&coin).await?.is_none() {
-            return Err(LedgerError::UnknownToken(coin));
-        }
         let available = self.db.balance(account, &coin).await?;
         if available < amount {
             return Err(LedgerError::InsufficientBalance {
