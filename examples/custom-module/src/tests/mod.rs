@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 
 mod events;
 mod ledger;
+#[cfg(feature = "rpc")]
+mod rpc;
 mod transaction;
 
 #[derive(Default)]
