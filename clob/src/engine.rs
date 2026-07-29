@@ -257,6 +257,10 @@ fn insert_resting(book: &mut Vec<Order>, order: Order) {
 }
 
 fn has_better_priority(candidate: &Order, resting: &Order) -> bool {
+    debug_assert_eq!(
+        candidate.side, resting.side,
+        "has_better_priority called with orders from different sides"
+    );
     match candidate.side {
         Side::Bid => {
             candidate.price > resting.price
