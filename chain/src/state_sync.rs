@@ -729,7 +729,7 @@ where
         if key.max_ops > self.config.max_serve_ops {
             return;
         }
-        let (_cancel_tx, cancel_rx) = oneshot::channel();
+        let (cancel_tx, cancel_rx) = oneshot::channel();
         let result = database
             .get_operations(
                 key.op_count,
@@ -739,6 +739,7 @@ where
                 cancel_rx,
             )
             .await;
+        drop(cancel_tx);
         let Ok(fetch) = result else {
             return;
         };
