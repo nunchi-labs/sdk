@@ -335,7 +335,18 @@ fn certified_apply_uses_default_noop_consumer() {
 }
 
 #[test]
-fn certified_apply_discards_events_from_failed_transaction() {
+fn certified_apply_panics_on_failed_transaction_discarding_all_events() {
+    // This test exercises the PANIC path in `execute_block` for certified blocks.
+    // The block contains two transactions: `applied` (succeeds, value=9) and `failing`
+    // (fails, value=u8::MAX). The `apply` method emits events unconditionally before
+    // checking for rejection, so both transactions emit events. However, because certified
+    // blocks must execute deterministically, the failure causes a panic (via `expect`),
+    // which triggers `discard_block` for the ENTIRE block. This discards all events,
+    // including those from the successfully applied first transaction.
+    //
+    // As a result, `report.transactions.is_empty()` holds for ALL transactions in the
+    // block, not just the failing one. The finalized report is empty because no event
+    // handoff was committed before the panic.
     deterministic::Runner::default().start(|context| async move {
         let consumer = InMemoryEventConsumer::new();
         let (mut app, databases, parent) =
@@ -352,9 +363,14 @@ fn certified_apply_discards_events_from_failed_transaction() {
             id: 13,
             value: u8::MAX,
         };
+        // Compute state for only the first (successful) transaction, since the second
+        // will be rejected. This means the block's state commitment is correct for the
+        // first transaction but the block also includes the failing transaction.
         let state = committed_state(&databases, std::slice::from_ref(&applied)).await;
         let block = block(&parent, vec![applied, failing], state);
 
+        // Certified apply panics because a certified block must not contain failing
+        // transactions. The panic discards the entire block's event buffer.
         let apply = <ReportingApplication as StatefulApplication<deterministic::Context>>::apply(
             &mut app,
             (context.child("apply"), block.context.clone()),
@@ -364,6 +380,7 @@ fn certified_apply_discards_events_from_failed_transaction() {
         assert!(AssertUnwindSafe(apply).catch_unwind().await.is_err());
         assert!(consumer.is_empty());
 
+        // Finalized is still called to verify the report is empty (no events survived).
         <ReportingApplication as StatefulApplication<deterministic::Context>>::finalized(
             &mut app,
             (context.child("finalized"), block.context.clone()),
@@ -378,6 +395,8 @@ fn certified_apply_discards_events_from_failed_transaction() {
         assert_eq!(report.height, block.height);
         assert_eq!(report.block_digest, block.digest());
         assert_eq!(report.block_timestamp, block.timestamp);
+        // All events are discarded because the panic triggered discard_block for the
+        // entire block, not just for the failing transaction.
         assert!(report.transactions.is_empty());
     });
 }
