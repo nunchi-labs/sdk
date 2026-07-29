@@ -8,20 +8,31 @@ const OP_PROPOSE: u8 = 1;
 const OP_APPROVE: u8 = 2;
 const OP_EXECUTE: u8 = 3;
 
+/// A governance operation applied to the authority validator registry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AuthorityOperation {
+    /// Installs the owner policy and initial validator set for an unconfigured registry.
+    ///
+    /// This first configuration is first-come-first-served until the chain's genesis is pinned.
     Configure {
         policy: crate::MultisigPolicy,
         initial_validators: Vec<crate::ValidatorId>,
         epoch: crate::EpochNumber,
     },
+    /// Proposes adding or removing a validator at a future epoch.
+    ///
+    /// The submitting owner automatically records an approval for the proposal.
     Propose {
         change: RegistryChange,
         effective_epoch: crate::EpochNumber,
     },
+    /// Records an owner approval for an existing proposal.
     Approve {
         proposal: Digest,
     },
+    /// Applies an approved proposal at its configured effective epoch.
+    ///
+    /// The submitting owner must provide the approvals required by the configured policy.
     Execute {
         proposal: Digest,
     },
@@ -111,5 +122,8 @@ impl CommonOperation for AuthorityOperation {
     const NAMESPACE: &'static [u8] = AUTHORITY_NAMESPACE;
 }
 
+/// An authority-specific transaction payload re-exported from `nunchi_common`.
 pub type TransactionPayload = nunchi_common::TransactionPayload<AuthorityOperation>;
+
+/// An authority-specific signed transaction re-exported from `nunchi_common`.
 pub type Transaction = nunchi_common::Transaction<AuthorityOperation>;
