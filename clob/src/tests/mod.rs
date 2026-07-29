@@ -41,7 +41,17 @@ impl CommitState for MemoryStore {
     }
 
     fn root(&self) -> Digest {
-        Sha256::hash(b"clob-test-root")
+        // Compute a content-based root from the stored key-value pairs so that
+        // state mutations are reflected in the root hash.
+        let mut hasher = Sha256::new();
+        for (key, value) in &self.values {
+            hasher.update(key.as_ref());
+            match value {
+                Some(v) => hasher.update(v),
+                None => hasher.update(&[0u8]),
+            }
+        }
+        hasher.finalize()
     }
 }
 
@@ -1178,7 +1188,15 @@ fn rpc_queries_ledger_state() {
         assert_eq!(fill_response.taker_order, encoded_id(&bid_id));
 
         let root = rpc.state_root().await.unwrap();
-        assert_eq!(root.root, encoded_id(&Sha256::hash(b"clob-test-root")));
+        // The root should reflect the content written during the test, not a
+        // hardcoded constant. An empty MemoryStore produces a different root
+        // from one with data, so verify the root differs from the empty root.
+        let empty_root = MemoryStore::default().root();
+        assert_ne!(
+            root.root,
+            encoded_id(&empty_root),
+            "state root should change after writes"
+        );
 
         assert!(rpc
             .book(encoded_id(&market), "crossed".to_string())
