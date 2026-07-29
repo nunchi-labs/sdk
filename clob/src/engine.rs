@@ -292,6 +292,13 @@ pub(crate) fn validate_order(
     price: u128,
     base_quantity: u128,
 ) -> Result<(), ClobError> {
+    // Guard against corrupt market records before any division operation.
+    if market.tick_size == 0 {
+        return Err(ClobError::InvalidMarket("tick size must be non-zero"));
+    }
+    if market.lot_size == 0 {
+        return Err(ClobError::InvalidMarket("lot size must be non-zero"));
+    }
     if price == 0 {
         return Err(ClobError::InvalidOrder("price must be non-zero"));
     }
