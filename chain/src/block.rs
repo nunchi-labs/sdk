@@ -184,6 +184,10 @@ where
     Ext: BlockExtension,
 {
     fn write(&self, writer: &mut impl BufMut) {
+        debug_assert!(
+            self.transactions.len() <= MAX_TRANSACTIONS as usize,
+            "transaction count exceeds maximum"
+        );
         self.context.write(writer);
         self.parent.write(writer);
         self.height.write(writer);
@@ -262,6 +266,10 @@ where
     Ext: BlockExtension,
 {
     fn encode_size(&self) -> usize {
+        debug_assert!(
+            self.transactions.len() <= MAX_TRANSACTIONS as usize,
+            "transaction count exceeds maximum"
+        );
         self.context.encode_size()
             + self.parent.encode_size()
             + self.height.encode_size()

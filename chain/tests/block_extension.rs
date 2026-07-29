@@ -6,6 +6,7 @@ use commonware_storage::mmr::Location;
 use commonware_utils::{non_empty_range, NZU32};
 use nunchi_chain::{
     Block, BlockExtension, Composite, ConsensusExtension, NoConsensusExtension, StateCommitment,
+    MAX_TRANSACTIONS,
 };
 use nunchi_common::{RuntimeContext, StateError, StateStore};
 use nunchi_dkg::{Context, ReshareBlock};
@@ -136,6 +137,23 @@ fn default_block_extension_is_empty_payload() {
         Block::<u8>::decode_cfg(block.encode().as_ref(), &block_cfg()).unwrap(),
         block
     );
+}
+
+#[test]
+#[should_panic(expected = "transaction count exceeds maximum")]
+fn block_encoding_rejects_too_many_transactions() {
+    let block = Block::<u8>::new(
+        context(),
+        sha256::Digest::EMPTY,
+        Height::zero(),
+        1,
+        vec![0; MAX_TRANSACTIONS as usize + 1],
+        None,
+        (),
+        state(),
+    );
+
+    block.encode();
 }
 
 #[test]
