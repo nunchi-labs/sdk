@@ -133,7 +133,7 @@ pub enum Bech32Error {
 pub const MAX_MULTISIG_SIGNERS: usize = 256;
 
 /// A threshold multisig policy over Nunchi public keys.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct MultisigPolicy {
     threshold: u16,
     signers: Vec<PublicKey>,
