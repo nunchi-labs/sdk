@@ -74,16 +74,15 @@ pub struct HttpClient {
 }
 
 impl HttpClient {
-    pub fn new(uri: impl Into<String>) -> Self {
-        Self {
+    pub fn new(uri: impl Into<String>) -> Result<Self, reqwest::Error> {
+        Ok(Self {
             uri: uri.into(),
             http: reqwest::Client::builder()
                 .connect_timeout(CONNECT_TIMEOUT)
                 .timeout(REQUEST_TIMEOUT)
-                .build()
-                .expect("valid indexer HTTP client configuration"),
+                .build()?,
             metrics: None,
-        }
+        })
     }
 
     pub(crate) fn with_metrics(mut self, metrics: IndexerMetrics) -> Self {

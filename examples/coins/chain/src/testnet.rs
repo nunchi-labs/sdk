@@ -290,6 +290,8 @@ pub enum Error {
     EngineTask(commonware_runtime::Error),
     #[error("runtime shutdown failed: {0}")]
     Shutdown(commonware_runtime::Error),
+    #[error("failed to build HTTP client: {0}")]
+    HttpClient(#[from] reqwest::Error),
 }
 
 /// Generate node keys, run the trusted initial deal, and write per-node configs plus the
@@ -582,13 +584,17 @@ async fn start_node(
     let state_sync = register(channels::STATE_SYNC);
     network.start();
 
-    let indexer_client = config.indexer_url.as_deref().map(|url| {
-        let metrics = indexer::IndexerMetrics::register(&context.child("indexer"));
-        (
-            indexer::HttpClient::new(url).with_metrics(metrics.clone()),
-            metrics,
-        )
-    });
+    let indexer_client = config
+        .indexer_url
+        .as_deref()
+        .map(|url| {
+            let metrics = indexer::IndexerMetrics::register(&context.child("indexer"));
+            Ok::<_, Error>((
+                indexer::HttpClient::new(url)?.with_metrics(metrics.clone()),
+                metrics,
+            ))
+        })
+        .transpose()?;
     if let Some((client, metrics)) = indexer_client.clone() {
         spawn_current_dkg_output_uploader(
             context,
