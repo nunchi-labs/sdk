@@ -320,6 +320,7 @@ where
         Self { proof, block }
     }
 
+    #[must_use = "ignoring a block proof verification result is a security bug"]
     pub fn verify(&self, scheme: &Scheme, strategy: &impl Strategy) -> bool {
         self.proof.verify(&mut sys_rng(), scheme, strategy)
     }
@@ -384,6 +385,7 @@ where
         Self { proof, block }
     }
 
+    #[must_use = "ignoring a block proof verification result is a security bug"]
     pub fn verify(&self, scheme: &Scheme, strategy: &impl Strategy) -> bool {
         self.proof.verify(&mut sys_rng(), scheme, strategy)
     }
