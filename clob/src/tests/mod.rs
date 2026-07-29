@@ -1281,7 +1281,7 @@ fn clob_mailbox_reports_stopped_actor() {
         assert_eq!(err, ClobError::ActorStopped);
         assert!(mailbox.propose().await.is_empty());
 
-        mailbox.upsert_market(crate::Market {
+        mailbox.upsert_market_state(crate::Market {
             id: market(),
             base_asset: asset(b"base"),
             quote_asset: asset(b"quote"),
@@ -1290,6 +1290,6 @@ fn clob_mailbox_reports_stopped_actor() {
             created_by: Address::external(&trader.public_key()),
             created_at_height: 0,
             created_at_ms: 0,
-        });
+        }, 0);
     });
 }

@@ -71,12 +71,11 @@ impl ClobMailbox {
         receiver.await.unwrap_or(Err(ClobError::ActorStopped))
     }
 
-    /// Make market metadata available to local proposer matching.
-    pub fn upsert_market(&self, market: Market) {
-        self.upsert_market_state(market, 0);
-    }
-
     /// Make market metadata and the current committed sequence available locally.
+    ///
+    /// The caller must supply the correct committed `sequence` for the market.
+    /// Passing a stale or incorrect sequence may cause the actor to re-propose
+    /// already-committed fills.
     pub fn upsert_market_state(&self, market: Market, sequence: u64) {
         let mut sender = self.sender.clone();
         if sender

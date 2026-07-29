@@ -263,7 +263,7 @@ fn clob_mailbox_extension_records_verified_fill() {
 
         let (actor, mailbox) = ClobActor::new(ClobConfig::default());
         let _actor_handle = actor.start(context.child("clob"));
-        mailbox.upsert_market(market);
+        mailbox.upsert_market_state(market, 0);
         let ask = ClobTransaction::sign(
             &maker,
             0,
