@@ -12,7 +12,7 @@ pub struct NodeSpec {
     pub name: String,
     pub command: String,
     pub args: Vec<String>,
-    pub cwd: Option<String>,
+    pub cwd: Option<PathBuf>,
     pub env: Vec<EnvVar>,
 }
 

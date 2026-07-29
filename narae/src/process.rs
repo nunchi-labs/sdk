@@ -81,7 +81,7 @@ impl Node {
 
         let mut command = Command::new(&spec.command);
         command.args(&spec.args);
-        command.current_dir(spec.cwd.as_deref().map_or(workspace, PathBuf::from));
+        command.current_dir(spec.cwd.as_deref().unwrap_or(&workspace));
         for env in spec.env {
             command.env(env.key, env.value);
         }
