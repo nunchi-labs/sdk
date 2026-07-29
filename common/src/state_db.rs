@@ -429,14 +429,41 @@ pub fn verify_state_update(proof: &StateProof, root: &Digest, key: &Digest, valu
 /// A [`StateProof`] is otherwise self-describing, but its length-prefixed vectors (proof digests,
 /// operations, operation values) must be capped so a malicious sender cannot force an unbounded
 /// allocation. Callers pick bounds appropriate for the message that carries the proof.
+///
+/// Use [`StateProofCfg::network_default`] for proofs received from untrusted network peers.
+/// Setting any field to `usize::MAX` defeats the allocation bounds and allows an attacker
+/// to force unbounded heap allocation.
 #[derive(Clone, Copy, Debug)]
 pub struct StateProofCfg {
     /// Maximum number of internal Merkle digests accepted in the proof.
+    ///
+    /// Setting this to `usize::MAX` allows an attacker to force unbounded allocation.
     pub max_proof_digests: usize,
     /// Accepted range for the number of operations the proof carries.
+    ///
+    /// The upper bound should not exceed the practical batch size limit. Setting the upper
+    /// bound to `usize::MAX` allows an attacker to force unbounded allocation.
     pub operations: RangeCfg<usize>,
     /// Accepted range for the byte length of each operation's value.
+    ///
+    /// The upper bound **must not** exceed [`MAX_STATE_VALUE_SIZE`] (512 KiB) to prevent
+    /// oversized value allocation from untrusted input.
     pub value_len: RangeCfg<usize>,
+}
+
+impl StateProofCfg {
+    /// Safe default bounds for proofs received from untrusted network peers.
+    ///
+    /// - `max_proof_digests`: 1024 (sufficient for all current Merkle tree depths)
+    /// - `operations`: 0..=1024 (matches the practical batch size limit)
+    /// - `value_len`: 0..=[`MAX_STATE_VALUE_SIZE`] (the chain-wide ceiling for state values)
+    pub fn network_default() -> Self {
+        Self {
+            max_proof_digests: 1024,
+            operations: RangeCfg::new(0..=1024),
+            value_len: RangeCfg::new(0..=MAX_STATE_VALUE_SIZE),
+        }
+    }
 }
 
 impl Write for StateProof {
