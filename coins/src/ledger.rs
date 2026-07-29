@@ -348,8 +348,8 @@ impl<D: CoinDB> Ledger<D> {
             CoinOperation::Mint { coin, to, amount } => {
                 ensure_positive(*amount)?;
                 self.ensure_issuer(signer, coin).await?;
-                let total_supply = self.increase_supply(*coin, *amount).await?;
                 self.credit(to, *coin, *amount).await?;
+                let total_supply = self.increase_supply(*coin, *amount).await?;
                 Ok(minted_event(Minted {
                     coin: *coin,
                     to: to.clone(),
