@@ -393,17 +393,21 @@ where
             .apply_transactions_duration
             .observe_between(apply_start, runtime_context.current());
         let merkleize_start = runtime_context.current();
-        Some(
-            batch
-                .merkleize()
-                .await
-                .expect("merkleization failed while executing block"),
-        )
-        .inspect(|_| {
-            metrics
-                .apply_merkleize_duration
-                .observe_between(merkleize_start, runtime_context.current());
-        })
+        match batch.merkleize().await {
+            Ok(merkleized) => {
+                metrics
+                    .apply_merkleize_duration
+                    .observe_between(merkleize_start, runtime_context.current());
+                Some(merkleized)
+            }
+            Err(error) => {
+                error!(?error, "merkleization failed while executing block");
+                if let Some(digest) = context.block_digest {
+                    events.discard_block(digest).await;
+                }
+                None
+            }
+        }
     }
 
     fn proposal_runtime_context(epoch: u64, height: Height, timestamp_ms: u64) -> RuntimeContext {
