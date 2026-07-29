@@ -389,8 +389,27 @@ impl<T: PoolTransaction> Pool<T> {
         let victim = self
             .queues
             .iter()
-            // On equal lengths, prefer the smaller account id
-            .max_by(|(a_id, a), (b_id, b)| a.len().cmp(&b.len()).then_with(|| b_id.cmp(a_id)))
+            // On equal lengths, evict the lane whose highest-nonce entry was
+            // admitted earliest (smallest `admitted_at`). This avoids
+            // permanently penalizing the lexicographically-smallest account.
+            // A final deterministic tiebreak on account id ensures consistent
+            // ordering across replicas.
+            .max_by(|(a_id, a), (b_id, b)| {
+                a.len()
+                    .cmp(&b.len())
+                    .then_with(|| {
+                        let a_age = a
+                            .last_key_value()
+                            .map(|(_, e)| e.admitted_at)
+                            .unwrap_or(0);
+                        let b_age = b
+                            .last_key_value()
+                            .map(|(_, e)| e.admitted_at)
+                            .unwrap_or(0);
+                        b_age.cmp(&a_age) // older (smaller admitted_at) wins max → evicted first
+                    })
+                    .then_with(|| b_id.cmp(a_id))
+            })
             .map(|(id, queue)| {
                 let (&nonce, _) = queue.last_key_value().expect("queues are never empty");
                 (id.clone(), nonce)
