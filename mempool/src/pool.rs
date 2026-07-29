@@ -379,6 +379,39 @@ impl<T: PoolTransaction> Pool<T> {
         }
     }
 
+    /// Assert that all internal invariants between `ready_lanes`,
+    /// `ready_positions`, `ready_counts`, `total_ready_count`, `total_count`,
+    /// and `index` are satisfied. Only available in tests.
+    #[cfg(test)]
+    pub fn assert_invariants(&self) {
+        assert_eq!(
+            self.ready_positions.len(),
+            self.ready_lanes.len(),
+            "ready_positions and ready_lanes are out of sync"
+        );
+        assert_eq!(
+            self.total_ready_count,
+            self.ready_counts.values().sum::<usize>(),
+            "total_ready_count out of sync with ready_counts sum"
+        );
+        assert_eq!(
+            self.total_count,
+            self.index.len(),
+            "total_count out of sync with digest index"
+        );
+        for (i, lane) in self.ready_lanes.iter().enumerate() {
+            assert_eq!(
+                self.ready_positions.get(lane).copied(),
+                Some(i),
+                "ready_positions[lane] does not point back to its index in ready_lanes"
+            );
+            assert!(
+                self.queues.contains_key(lane),
+                "ready_lanes contains a lane with no queue entry"
+            );
+        }
+    }
+
     /// Make room for an incoming transaction by evicting the highest-nonce
     /// entry from the largest lane queue
     fn evict_for(

@@ -23,12 +23,16 @@ fn small_config() -> PoolConfig {
 fn pending_round_robins_ready_lanes() {
     let mut pool = pool(PoolConfig::default());
     pool.admit(tx(2, 0, 20)).unwrap();
+    pool.assert_invariants();
     pool.admit(tx(1, 1, 11)).unwrap();
+    pool.assert_invariants();
     pool.admit(tx(1, 0, 10)).unwrap();
+    pool.assert_invariants();
     let ids: Vec<u64> = pool.pending(10).iter().map(|t| t.id).collect();
     assert_eq!(ids, vec![20, 10, 11]);
     assert_eq!(pool.pending(2).len(), 2);
     assert!(pool.pending(0).is_empty());
+    pool.assert_invariants();
 }
 
 #[test]
@@ -79,7 +83,9 @@ fn rejects_stale_nonce_after_finalization() {
 fn same_nonce_resubmission_replaces() {
     let mut pool = pool(PoolConfig::default());
     pool.admit(tx(1, 0, 10)).unwrap();
+    pool.assert_invariants();
     pool.admit(tx(1, 0, 99)).unwrap();
+    pool.assert_invariants();
     let ids: Vec<u64> = pool.pending(10).iter().map(|t| t.id).collect();
     assert_eq!(ids, vec![99]);
     assert_eq!(
@@ -95,11 +101,15 @@ fn same_nonce_resubmission_replaces() {
 fn nonce_gaps_are_admitted_but_not_proposed() {
     let mut pool = pool(PoolConfig::default());
     pool.admit(tx(1, 0, 10)).unwrap();
+    pool.assert_invariants();
     pool.admit(tx(1, 1, 11)).unwrap();
+    pool.assert_invariants();
     pool.admit(tx(1, 3, 13)).unwrap();
+    pool.assert_invariants();
     let ids: Vec<u64> = pool.pending(10).iter().map(|t| t.id).collect();
     assert_eq!(ids, vec![10, 11]);
     pool.admit(tx(1, 2, 12)).unwrap();
+    pool.assert_invariants();
     let ids: Vec<u64> = pool.pending(10).iter().map(|t| t.id).collect();
     assert_eq!(ids, vec![10, 11, 12, 13]);
 }
@@ -108,9 +118,12 @@ fn nonce_gaps_are_admitted_but_not_proposed() {
 fn pending_handles_max_nonce() {
     let mut pool = pool(PoolConfig::default());
     pool.finalize(vec![], vec![(1, u64::MAX)], 1);
+    pool.assert_invariants();
     pool.admit(tx(1, u64::MAX, 10)).unwrap();
+    pool.assert_invariants();
     let ids: Vec<u64> = pool.pending(10).iter().map(|t| t.id).collect();
     assert_eq!(ids, vec![10]);
+    pool.assert_invariants();
 }
 
 #[test]
@@ -118,12 +131,15 @@ fn enforces_per_account_cap() {
     let mut pool = pool(small_config());
     for nonce in 0..3 {
         pool.admit(tx(1, nonce, nonce)).unwrap();
+        pool.assert_invariants();
     }
     assert_eq!(
         pool.admit(tx(1, 3, 3)),
         Err(AdmissionError::AccountQueueFull)
     );
+    pool.assert_invariants();
     pool.admit(tx(1, 2, 99)).unwrap();
+    pool.assert_invariants();
 }
 
 #[test]
@@ -133,7 +149,9 @@ fn evicts_highest_nonce_of_largest_queue_when_full() {
     pool.admit(tx(1, 1, 11)).unwrap();
     pool.admit(tx(1, 2, 12)).unwrap();
     pool.admit(tx(2, 0, 20)).unwrap();
+    pool.assert_invariants();
     pool.admit(tx(3, 0, 30)).unwrap();
+    pool.assert_invariants();
     assert_eq!(
         pool.status_of(&digest(12)),
         Some(TxStatus::Dropped {
@@ -153,8 +171,11 @@ fn refuses_admission_that_would_be_next_victim() {
     pool.admit(tx(1, 1, 11)).unwrap();
     pool.admit(tx(2, 0, 20)).unwrap();
     pool.admit(tx(2, 1, 21)).unwrap();
+    pool.assert_invariants();
     assert_eq!(pool.admit(tx(1, 2, 12)), Err(AdmissionError::PoolFull));
+    pool.assert_invariants();
     pool.admit(tx(3, 0, 30)).unwrap();
+    pool.assert_invariants();
     assert_eq!(
         pool.status_of(&digest(11)),
         Some(TxStatus::Dropped {
@@ -169,7 +190,9 @@ fn finalize_marks_included_and_prunes_stale() {
     pool.admit(tx(1, 0, 10)).unwrap();
     pool.admit(tx(1, 1, 11)).unwrap();
     pool.admit(tx(1, 2, 12)).unwrap();
+    pool.assert_invariants();
     pool.finalize(vec![digest(10)], vec![(1, 2)], 7);
+    pool.assert_invariants();
     assert_eq!(
         pool.status_of(&digest(10)),
         Some(TxStatus::Finalized { height: 7 })
@@ -191,8 +214,10 @@ fn finalize_keeps_lane_ready_after_committed_nonce_advances() {
     for nonce in 0..128 {
         pool.admit(tx(1, nonce, nonce)).unwrap();
     }
+    pool.assert_invariants();
     let finalized = (0..64).map(digest).collect();
     pool.finalize(finalized, vec![(1, 64)], 7);
+    pool.assert_invariants();
     let ids: Vec<u64> = pool.pending(64).iter().map(|t| t.id).collect();
     assert_eq!(ids, (64..128).collect::<Vec<_>>());
 }
@@ -201,6 +226,7 @@ fn finalize_keeps_lane_ready_after_committed_nonce_advances() {
 fn finalize_records_unpooled_digests() {
     let mut pool = pool(PoolConfig::default());
     pool.finalize(vec![digest(42)], vec![], 3);
+    pool.assert_invariants();
     assert_eq!(
         pool.status_of(&digest(42)),
         Some(TxStatus::Finalized { height: 3 })
@@ -211,9 +237,12 @@ fn finalize_records_unpooled_digests() {
 fn ttl_expires_unincluded_transactions() {
     let mut pool = pool(small_config());
     pool.admit(tx(1, 5, 15)).unwrap();
+    pool.assert_invariants();
     pool.finalize(vec![], vec![], 10);
+    pool.assert_invariants();
     assert_eq!(pool.status_of(&digest(15)), Some(TxStatus::Pending));
     pool.finalize(vec![], vec![], 11);
+    pool.assert_invariants();
     assert_eq!(
         pool.status_of(&digest(15)),
         Some(TxStatus::Dropped {
@@ -227,10 +256,14 @@ fn ttl_expires_unincluded_transactions() {
 fn ttl_is_measured_from_admission_height() {
     let mut pool = pool(small_config());
     pool.finalize(vec![], vec![], 100);
+    pool.assert_invariants();
     pool.admit(tx(1, 5, 15)).unwrap();
+    pool.assert_invariants();
     pool.finalize(vec![], vec![], 110);
+    pool.assert_invariants();
     assert_eq!(pool.status_of(&digest(15)), Some(TxStatus::Pending));
     pool.finalize(vec![], vec![], 111);
+    pool.assert_invariants();
     assert_eq!(
         pool.status_of(&digest(15)),
         Some(TxStatus::Dropped {
@@ -298,6 +331,7 @@ fn stress_ready_tracking_stays_consistent() {
             pool.ready_transaction_count(),
             "round {round}: pending(MAX) disagrees with ready count"
         );
+        pool.assert_invariants();
 
         // Build and finalize a block from the selection, mimicking the
         // application: include candidates whose nonce matches chain state.
@@ -315,6 +349,7 @@ fn stress_ready_tracking_stays_consistent() {
         }
         height += 1;
         pool.finalize(digests, lane_nonces.into_iter().collect(), height);
+        pool.assert_invariants();
 
         let all_ready = pool.pending(usize::MAX);
         assert_eq!(
@@ -414,6 +449,7 @@ fn stress_pipelined_finalization_makes_progress() {
             pool.ready_transaction_count(),
             "round {round}: pending(MAX) disagrees with ready count"
         );
+        pool.assert_invariants();
     }
     // Liveness: the chain must have made real progress.
     assert!(
