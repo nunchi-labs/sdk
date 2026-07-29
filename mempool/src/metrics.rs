@@ -61,9 +61,9 @@ pub(crate) struct MempoolMetrics {
     finalized_transactions: Counter,
     pending_requests: Counter,
     pending_returned_transactions: Counter,
-    pub submit_duration: Histogram,
-    pub pending_duration: Histogram,
-    pub finalize_duration: Histogram,
+    pub(crate) submit_duration: Histogram,
+    pub(crate) pending_duration: Histogram,
+    pub(crate) finalize_duration: Histogram,
 }
 
 impl MempoolMetrics {
