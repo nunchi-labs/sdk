@@ -44,14 +44,19 @@ just check
 
 ### Financial Primitives
 
-* `margin` - user has BTC + nunchi and doesn't want to sell, and deposits BTC+nunchi and gets a stablecoin.  Could be backed by other coins, not just btc and nunchi. 
+* `margin` - user has BTC + nunchi and doesn't want to sell, and deposits BTC+nunchi and gets a stablecoin.  Could be backed by other coins, not just btc and nunchi.
 * `securities` - Non-synthetic perps contracts (delivery of tokenized stock)
 * `vaults` - a module for running vaults composed of many types of capital, traded by an authorised offchain party
 * `clob` - used on the global chain, provides liquidity between local chain tokens
 * `derivatives` - ingests a price feed and creates derivatives products
 * `stablecoin` - a wrapper of coins special for the needs of stablecoins
 
-_All workspace crates can be found in the [Cargo.toml](Cargo.toml) file (anything with a `nunchi-` prefix)._
+### Tooling
+
+* [`narae`](narae/) - local devnet process runner with a TUI dashboard for running multi-node testnets during development
+* [`mcp`](mcp/) - MCP server exposing the SDK JSON-RPC surface as AI-readable tools
+
+_All workspace crates can be found in the [Cargo.toml](Cargo.toml) file. Most library crates use the `nunchi-` prefix; tooling and example crates may use different naming._
 
 
 ### Key Design Principles
