@@ -39,7 +39,7 @@ This repository will contain modules for building public and private blockchains
 * [`nunchi-crypto`](crypto/) - core primitives/wrappers around commonware cryptographic primitives
 * [`nunchi-rpc`](rpc/) - core abstractions for modular RPC
 * [`nunchi-dkg`](dkg/) - contains dkg resharing ceremony logic and a consensus engine orchestator
-* [`nunchi-bridge`](bridge/) - bridges state roots from other chains, to verify against
+* [`nunchi-bridge`](bridge/) - bridges foreign finalization certificates from other chains into consensus blocks
 * [`nunchi-mempool`](mempool/) - simple p2p mempool
 * [`nunchi-oracle`](oracle/) - ingests namespaced, arbitrary data for interpretation by other modules 
 * `nunchi-chat` - allows humans or agents to publish to permanent on-chain public conversations
