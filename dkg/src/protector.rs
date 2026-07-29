@@ -7,10 +7,20 @@
 //!
 //! # Examples
 //!
-//! ```ignore
+//! ```no_run
+//! # use nunchi_dkg::protector::{StorageProtector, ProtectionError, NONCE_SIZE};
+//! # fn main() -> Result<(), ProtectionError> {
+//! let dkg_storage_key = [0u8; 32];
 //! let protector = StorageProtector::new(dkg_storage_key);
+//!
+//! let plaintext = b"dkg recovery material";
+//! let associated_data = b"epoch-42";
+//! let nonce = [0u8; NONCE_SIZE];
+//!
 //! let record = protector.seal(plaintext, associated_data, nonce)?;
-//! let plaintext = protector.open(&record, associated_data)?;
+//! let opened = protector.open(&record, associated_data)?;
+//! # Ok(())
+//! # }
 //! ```
 
 use bytes::Bytes;
@@ -92,7 +102,9 @@ impl StorageProtector {
     ///
     /// # Examples
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use nunchi_dkg::protector::StorageProtector;
+    /// let dkg_storage_key = [0u8; 32];
     /// let protector = StorageProtector::new(dkg_storage_key);
     /// ```
     pub fn new(key: StorageKey) -> Self {
@@ -105,8 +117,17 @@ impl StorageProtector {
     ///
     /// # Examples
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use nunchi_dkg::protector::{StorageProtector, ProtectionError, NONCE_SIZE};
+    /// # fn main() -> Result<(), ProtectionError> {
+    /// let protector = StorageProtector::new([0u8; 32]);
+    /// let plaintext = b"dkg recovery material";
+    /// let associated_data = b"epoch-42";
+    /// let nonce = [0u8; NONCE_SIZE];
+    ///
     /// let record = protector.seal(plaintext, associated_data, nonce)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn seal(
         &self,
@@ -136,8 +157,15 @@ impl StorageProtector {
     ///
     /// # Examples
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use nunchi_dkg::protector::{StorageProtector, ProtectionError, NONCE_SIZE};
+    /// # fn main() -> Result<(), ProtectionError> {
+    /// # let protector = StorageProtector::new([0u8; 32]);
+    /// # let associated_data = b"epoch-42";
+    /// # let record = protector.seal(b"data", associated_data, [0u8; NONCE_SIZE])?;
     /// let plaintext = protector.open(&record, associated_data)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn open(&self, record: &SealedRecord, ad: &[u8]) -> Result<Bytes, ProtectionError> {
         if record.version != SEALED_RECORD_VERSION {
