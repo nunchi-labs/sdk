@@ -233,10 +233,12 @@ pub struct RepoSearchCodeParams {
 
 /// MCP server exposing the Nunchi SDK's chain RPC, offline SDK utilities, and repo source code.
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct NunchiServer {
     rpc: RpcClient,
     repo_path: PathBuf,
+    /// Stored so the `rmcp` `#[tool_router]` proc macro can reference it.
+    /// The compiler cannot see this usage statically, hence the lint suppression.
+    #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
 
