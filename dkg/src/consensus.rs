@@ -74,6 +74,11 @@ impl<S: CertificateScheme, C: Signer> certificate::Provider for Provider<S, C> {
     type Scheme = S;
 
     fn scoped(&self, epoch: Epoch) -> Option<Scoped<S>> {
+        // The certificate_verifier is derived from the BLS group public key, which remains
+        // constant across reshares (only the share distribution changes). It is therefore
+        // safe to return the same verifier regardless of epoch. For schemes that do not
+        // support epoch-independent verification (e.g., Ed25519 during the initial DKG),
+        // `certificate_verifier` is `None` and we fall through to the per-epoch scheme.
         if let Some(verifier) = &self.certificate_verifier {
             return Some(Scoped::verifier(verifier.clone()));
         }
