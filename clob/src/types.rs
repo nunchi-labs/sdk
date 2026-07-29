@@ -202,6 +202,11 @@ pub struct Market {
     pub quote_asset: AssetId,
     pub tick_size: u128,
     pub lot_size: u128,
+    /// Optional upper bound on order price.
+    ///
+    /// When set, [`crate::engine::validate_order`] rejects any order whose
+    /// price exceeds this value. When `None`, no upper bound is enforced.
+    pub max_price: Option<u128>,
     pub created_by: Address,
     pub created_at_height: u64,
     pub created_at_ms: u64,
@@ -214,6 +219,7 @@ impl Write for Market {
         self.quote_asset.write(buf);
         self.tick_size.write(buf);
         self.lot_size.write(buf);
+        self.max_price.write(buf);
         self.created_by.write(buf);
         self.created_at_height.write(buf);
         self.created_at_ms.write(buf);
@@ -230,6 +236,7 @@ impl Read for Market {
             quote_asset: AssetId::read(buf)?,
             tick_size: u128::read(buf)?,
             lot_size: u128::read(buf)?,
+            max_price: Option::<u128>::read(buf)?,
             created_by: Address::read(buf)?,
             created_at_height: u64::read(buf)?,
             created_at_ms: u64::read(buf)?,
@@ -244,6 +251,7 @@ impl EncodeSize for Market {
             + self.quote_asset.encode_size()
             + self.tick_size.encode_size()
             + self.lot_size.encode_size()
+            + self.max_price.encode_size()
             + self.created_by.encode_size()
             + self.created_at_height.encode_size()
             + self.created_at_ms.encode_size()

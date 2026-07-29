@@ -90,6 +90,7 @@ fn create_market_tx(signer: &PrivateKey, nonce: u64) -> Transaction {
             quote_asset: asset(b"quote"),
             tick_size: MARKET_TICK,
             lot_size: MARKET_LOT,
+            max_price: None,
         },
     )
 }
@@ -1287,6 +1288,7 @@ fn clob_mailbox_reports_stopped_actor() {
             quote_asset: asset(b"quote"),
             tick_size: MARKET_TICK,
             lot_size: MARKET_LOT,
+            max_price: None,
             created_by: Address::external(&trader.public_key()),
             created_at_height: 0,
             created_at_ms: 0,

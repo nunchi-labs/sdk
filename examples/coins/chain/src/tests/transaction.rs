@@ -70,6 +70,7 @@ fn clob_transaction(seed: u64, nonce: u64) -> ClobTransaction {
             quote_asset: AssetId(Sha256::hash(b"quote")),
             tick_size: 1,
             lot_size: 1,
+            max_price: None,
         },
     )
 }

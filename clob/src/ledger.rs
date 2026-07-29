@@ -173,6 +173,7 @@ impl<D: ClobDB> ClobLedger<D> {
                 quote_asset,
                 tick_size,
                 lot_size,
+                max_price,
             } => {
                 self.create_market(
                     &tx.account_id,
@@ -180,6 +181,7 @@ impl<D: ClobDB> ClobLedger<D> {
                     *quote_asset,
                     *tick_size,
                     *lot_size,
+                    *max_price,
                     context,
                 )
                 .await
@@ -197,6 +199,7 @@ impl<D: ClobDB> ClobLedger<D> {
         quote_asset: AssetId,
         tick_size: u128,
         lot_size: u128,
+        max_price: Option<u128>,
         context: RuntimeContext,
     ) -> Result<(), ClobError> {
         validate_market(base_asset, quote_asset, tick_size, lot_size)?;
@@ -218,6 +221,7 @@ impl<D: ClobDB> ClobLedger<D> {
             quote_asset,
             tick_size,
             lot_size,
+            max_price,
             created_by: signer.clone(),
             created_at_height: context.height,
             created_at_ms: context.timestamp_ms,

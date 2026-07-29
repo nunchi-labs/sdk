@@ -76,6 +76,8 @@ pub enum ClobOperation {
         quote_asset: AssetId,
         tick_size: u128,
         lot_size: u128,
+        /// Optional upper bound on order price. `None` means no limit.
+        max_price: Option<u128>,
     },
     /// Signed limit-order intent for the off-chain matcher.
     PlaceOrder {
@@ -100,12 +102,14 @@ impl Write for ClobOperation {
                 quote_asset,
                 tick_size,
                 lot_size,
+                max_price,
             } => {
                 (OperationTag::CreateMarket as u8).write(buf);
                 base_asset.write(buf);
                 quote_asset.write(buf);
                 tick_size.write(buf);
                 lot_size.write(buf);
+                max_price.write(buf);
             }
             Self::PlaceOrder {
                 market,
@@ -143,6 +147,7 @@ impl Read for ClobOperation {
                 quote_asset: AssetId::read(buf)?,
                 tick_size: u128::read(buf)?,
                 lot_size: u128::read(buf)?,
+                max_price: Option::<u128>::read(buf)?,
             }),
             OperationTag::PlaceOrder => Ok(Self::PlaceOrder {
                 market: MarketId::read(buf)?,
@@ -169,11 +174,13 @@ impl EncodeSize for ClobOperation {
                 quote_asset,
                 tick_size,
                 lot_size,
+                max_price,
             } => {
                 base_asset.encode_size()
                     + quote_asset.encode_size()
                     + tick_size.encode_size()
                     + lot_size.encode_size()
+                    + max_price.encode_size()
             }
             Self::PlaceOrder {
                 market,

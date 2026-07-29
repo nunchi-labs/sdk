@@ -250,6 +250,7 @@ fn clob_mailbox_extension_records_verified_fill() {
                 quote_asset: clob_asset(b"quote"),
                 tick_size: 5,
                 lot_size: 2,
+                max_price: None,
             },
         );
         let market = {

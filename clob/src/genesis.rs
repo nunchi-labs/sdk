@@ -23,6 +23,9 @@ pub struct ClobMarketGenesis {
     pub quote_asset: String,
     pub tick_size: u128,
     pub lot_size: u128,
+    /// Optional upper bound on order price. `None` means no limit.
+    #[serde(default)]
+    pub max_price: Option<u128>,
     /// Bech32 account recorded as the market creator.
     pub created_by: String,
 }
@@ -43,6 +46,7 @@ impl ClobMarketGenesis {
             quote_asset,
             tick_size: self.tick_size,
             lot_size: self.lot_size,
+            max_price: self.max_price,
             created_by,
             created_at_height: 0,
             created_at_ms: 0,
