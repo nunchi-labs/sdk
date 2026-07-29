@@ -46,12 +46,40 @@ where
     Ext: ConsensusExtension + Sync,
     Events: EventConsumer,
 {
+    /// Handle to the mempool used to fetch proposal candidates and report
+    /// finalized transactions. Dropping this handle disconnects the application
+    /// from the mempool.
     pub submitter: MempoolHandle<Tx>,
+
+    /// Maximum number of runtime transactions a single block may contain.
+    ///
+    /// Must be <= [`MAX_TRANSACTIONS`](crate::block::MAX_TRANSACTIONS) (4096)
+    /// and must be identical across all validators in the network -- differing
+    /// values cause consensus splits.
     pub max_block_transactions: usize,
+
+    /// The consensus extension that produces and verifies per-block extension
+    /// payloads (e.g. bridge finalizations, DKG commitments). Use
+    /// [`NoConsensusExtension`] when no extension logic is needed.
     pub consensus: Ext,
+
+    /// Consumer that receives transaction lifecycle events (proposal,
+    /// verification, finalization). Use [`NoopEventConsumer`] in tests or
+    /// when event reporting is not needed.
     pub events: Events,
+
+    /// Shared, mutex-protected height of the last finalized block that has
+    /// been applied to the node's ledger. Multiple components (e.g. RPC
+    /// layer, syncer) may hold a reference to observe finalization progress.
     pub applied_height: SharedAppliedHeight,
+
+    /// State commitment (root hash) of the genesis state. Must match the
+    /// actual database state at initialization; a mismatch will cause
+    /// verification failures on the first block.
     pub genesis_state: StateCommitment,
+
+    /// Digest of the genesis payload. Must be identical across all nodes in
+    /// the network to ensure they agree on the initial chain state.
     pub genesis_payload: sha256::Digest,
 }
 
