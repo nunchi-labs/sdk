@@ -31,7 +31,6 @@ use commonware_cryptography::{
 };
 use commonware_glue::stateful::{
     Application as StatefulApplication,
-    db::ManagedDb as _,
     probe::{Config as ProbeConfig, Probe},
     Config as StatefulConfig, Mailbox as StatefulMailbox, Stateful as StatefulActor, SyncPlan,
 };
@@ -55,7 +54,7 @@ use nunchi_chain::state_sync::{
     Mailbox as StateSyncMailbox,
 };
 use nunchi_clob::{ClobActor, ClobConfig, ClobExtension};
-use nunchi_common::{QmdbBackend, QmdbState};
+use nunchi_common::QmdbState;
 use nunchi_dkg::{self as dkg, orchestrator, PeerConfig, UpdateCallBack, MAX_SUPPORTED_MODE};
 use nunchi_mempool::{Mempool, PoolConfig};
 use rand::{CryptoRng, Rng};
@@ -370,16 +369,13 @@ where
         // Derive the empty-state target from QMDB so the genesis commitment stays coupled to the
         // storage implementation instead of a hardcoded digest.
         let empty_state = {
-            let empty = QmdbBackend::init(
+            let target = QmdbState::<E>::empty_sync_target(
                 context.child("empty_genesis_state"),
-                QmdbState::<E>::config_with_page_cache(
-                    &format!("{}-empty-genesis-coins", config.partition_prefix),
-                    page_cache.clone(),
-                ),
+                page_cache.clone(),
             )
             .await
-            .expect("failed to initialize empty state database for genesis commitment");
-            state_commitment(empty.sync_target())
+            .expect("failed to compute empty state commitment for genesis");
+            state_commitment(target)
         };
         let genesis_state = if let Some(genesis) = &config.genesis {
             let fingerprint = commonware_formatting::hex(

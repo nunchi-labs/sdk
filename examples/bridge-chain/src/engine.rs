@@ -26,7 +26,6 @@ use commonware_cryptography::{
     BatchVerifier, Digestible, Hasher, Signer,
 };
 use commonware_glue::stateful::{
-    db::ManagedDb as _,
     probe::{Config as ProbeConfig, Probe},
     Config as StatefulConfig, Mailbox as StatefulMailbox, Stateful as StatefulActor, SyncPlan,
 };
@@ -46,7 +45,7 @@ use nunchi_chain::state_sync::{
     Actor as StateSyncActor, Config as StateSyncConfig, FloorProvider,
     Mailbox as StateSyncMailbox,
 };
-use nunchi_common::{QmdbBackend, QmdbState};
+use nunchi_common::QmdbState;
 use nunchi_dkg::{self as dkg, orchestrator, PeerConfig, UpdateCallBack, MAX_SUPPORTED_MODE};
 use nunchi_mempool::{Mempool, PoolConfig};
 use rand::{CryptoRng, Rng};
@@ -323,16 +322,12 @@ where
         let db_config =
             QmdbState::<E>::config_with_page_cache(&state_partition, page_cache.clone());
         let empty_state = {
-            let empty = QmdbBackend::init(
+            let target = QmdbState::<E>::empty_sync_target(
                 context.child("empty_genesis_state"),
-                QmdbState::<E>::config_with_page_cache(
-                    &format!("{}-empty-genesis-bridge", config.partition_prefix),
-                    page_cache.clone(),
-                ),
+                page_cache.clone(),
             )
             .await
-            .expect("failed to initialize empty state database for genesis commitment");
-            let target = empty.sync_target();
+            .expect("failed to compute empty state commitment for genesis");
             nunchi_chain::StateCommitment {
                 root: target.root,
                 range: target.range,

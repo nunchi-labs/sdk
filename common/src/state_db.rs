@@ -262,6 +262,24 @@ impl<E: Context + BufferPooler> QmdbState<E> {
     pub fn sync_target(&self) -> Target<Family, Digest> {
         self.db.sync_target()
     }
+
+    /// Return the sync target of a freshly initialized (empty) QMDB database.
+    ///
+    /// This is used to derive the genesis block's state commitment without
+    /// hardcoding the empty Merkle root. The helper uses a fixed, well-known
+    /// partition name (`"empty-genesis"`) so that at most one throwaway
+    /// partition is created on disk across all nodes and restarts, instead of
+    /// accumulating per-node stale partitions.
+    pub async fn empty_sync_target(
+        context: E,
+        page_cache: CacheRef,
+    ) -> Result<Target<Family, Digest>, StateError> {
+        let cfg = Self::config_with_page_cache("empty-genesis", page_cache);
+        let db = QmdbBackend::init(context, cfg)
+            .await
+            .map_err(backend_err)?;
+        Ok(db.sync_target())
+    }
 }
 
 impl<E: Context> StateStore for QmdbState<E> {
