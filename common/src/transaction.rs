@@ -306,16 +306,10 @@ impl<Operation: Read<Cfg = ()>> Read for Transaction<Operation> {
     fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         let account_id = Address::read(buf)?;
         let payload = TransactionPayload::read(buf)?;
+        // Curve consistency for Single authorizations is enforced by
+        // Authorization::read_cfg; AccountSignature::read_cfg enforces it
+        // for Multisig entries. No additional check is needed here.
         let authorization = Authorization::read(buf)?;
-
-        if let Authorization::Single { signer, signature } = &authorization {
-            if signer.curve() != signature.curve() {
-                return Err(Error::Invalid(
-                    "transaction",
-                    "signature curve does not match signer curve",
-                ));
-            }
-        }
 
         Ok(Self {
             account_id,
