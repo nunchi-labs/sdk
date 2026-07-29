@@ -57,6 +57,8 @@ impl ConsensusExtension for ClobExtension {
 
     async fn commit_payload<S>(
         &mut self,
+        // `ConsensusExtension` requires mutable state even though committing a CLOB payload
+        // only reads the state to synchronize the local actor.
         state: &mut S,
         _context: RuntimeContext,
         payload: &Self::Payload,
