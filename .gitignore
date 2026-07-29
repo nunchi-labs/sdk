@@ -2,10 +2,24 @@
 *.DS_Store
 /target
 /testnet
-*.vscode
+.vscode/
 /assets
 /test
 /types/pkg
 /.idea
 /.local
 /devnet
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+
+# Cryptographic key material
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Rust backup files
+*.rs.bk
