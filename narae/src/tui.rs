@@ -371,7 +371,7 @@ fn render_help(frame: &mut Frame<'_>, app: &App) {
         "s stop"
     };
     let help = Paragraph::new(Line::from(vec![
-        Span::styled(" up/down ", Style::default().fg(Color::Yellow)),
+        Span::styled(" up/down/jk ", Style::default().fg(Color::Yellow)),
         Span::raw("select  "),
         Span::styled(" pgup/pgdn ", Style::default().fg(Color::Yellow)),
         Span::raw("scroll  "),
