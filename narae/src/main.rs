@@ -1,8 +1,7 @@
 use clap::{Parser, Subcommand};
 use narae::Config;
+use nunchi_coins_chain::testnet::DEFAULT_BASE_METRICS_PORT;
 use std::path::{Path, PathBuf};
-
-const DEFAULT_BASE_METRICS_PORT: u16 = 9_090;
 
 #[derive(Debug, Parser)]
 #[command(about = "Generate and run local testnets in a ratatui dashboard")]

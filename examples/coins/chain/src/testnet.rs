@@ -53,6 +53,9 @@ const DEFAULT_MAX_BLOCK_TRANSACTIONS: usize = 4_096;
 const DEFAULT_MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 const DEFAULT_CHANNEL_BACKLOG: usize = 1024;
 
+/// Default first Prometheus metrics port for generated local testnets.
+pub const DEFAULT_BASE_METRICS_PORT: u16 = 9_090;
+
 #[derive(Clone, Debug)]
 pub struct LocalTestnetConfig {
     pub validators: u32,

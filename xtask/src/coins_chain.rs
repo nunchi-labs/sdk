@@ -1,13 +1,11 @@
 use clap::Args;
 use nunchi_coins_chain::testnet::{
-    generate_local_testnet, LocalTestnetConfig, LocalTestnetManifest,
+    generate_local_testnet, LocalTestnetConfig, LocalTestnetManifest, DEFAULT_BASE_METRICS_PORT,
 };
 use std::{
     net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
 };
-
-const DEFAULT_BASE_METRICS_PORT: u16 = 9_090;
 
 #[derive(Debug, Args)]
 pub struct Generate {
