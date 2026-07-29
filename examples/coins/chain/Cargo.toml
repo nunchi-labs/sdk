@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "A demo blockchain that executes the Nunchi coins module, used for coin-operation integration tests."
+repository.workspace = true
+homepage.workspace = true
 
 [lints]
 workspace = true

@@ -3,6 +3,9 @@ name = "nunchi-rpc"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Shared JSON-RPC wiring for Nunchi applications."
+repository.workspace = true
+homepage.workspace = true
 
 [lints]
 workspace = true

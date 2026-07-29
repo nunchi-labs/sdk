@@ -3,6 +3,9 @@ name = "nunchi-chain"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Reusable chain execution primitives for Nunchi runtimes."
+repository.workspace = true
+homepage.workspace = true
 
 [lints]
 workspace = true

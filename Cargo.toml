@@ -25,6 +25,8 @@ resolver = "2"
 version = "2026.7.0-alpha.1"
 edition = "2021"
 license = "BSL"
+repository = "https://github.com/nunchi-labs/sdk"
+homepage = "https://nunchi.trade"
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [

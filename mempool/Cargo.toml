@@ -3,6 +3,9 @@ name = "nunchi-mempool"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "A reusable, nonce-aware transaction mempool for Nunchi chains."
+repository.workspace = true
+homepage.workspace = true
 
 [lints]
 workspace = true

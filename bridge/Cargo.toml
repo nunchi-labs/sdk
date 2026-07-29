@@ -3,6 +3,9 @@ name = "nunchi-bridge"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Bridge consensus extension for carrying foreign finalization certificates."
+repository.workspace = true
+homepage.workspace = true
 
 [lints]
 workspace = true

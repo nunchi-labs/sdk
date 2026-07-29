@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "MCP server exposing the Nunchi SDK's JSON-RPC surface as AI-readable tools."
+repository.workspace = true
+homepage.workspace = true
 
 [lints]
 workspace = true

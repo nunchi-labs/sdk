@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "A compiled custom module skeleton for downstream Nunchi SDK modules."
+repository.workspace = true
+homepage.workspace = true
 
 [lints]
 workspace = true

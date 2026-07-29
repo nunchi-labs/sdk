@@ -3,6 +3,9 @@ name = "nunchi-common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Shared primitives used across Nunchi application crates."
+repository.workspace = true
+homepage.workspace = true
 
 [lints]
 workspace = true
