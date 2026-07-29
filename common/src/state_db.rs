@@ -126,6 +126,10 @@ pub trait StateDb: StateStore + CommitState {}
 
 impl<T: StateStore + CommitState> StateDb for T {}
 
+// `T: Sync` is required because `get(&self)` captures `&&mut T`, and `&mut T`
+// is only `Sync` when `T: Sync`. The `StateStore::get` return type requires
+// `Send`, so the future's captured `&&mut T` must also be `Send`, which in turn
+// requires `&mut T: Sync` and therefore `T: Sync`.
 impl<T: StateStore + Send + Sync + ?Sized> StateStore for &mut T {
     async fn get(&self, key: &Digest) -> Result<Option<Vec<u8>>, StateError> {
         (**self).get(key).await
