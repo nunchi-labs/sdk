@@ -526,8 +526,34 @@ impl Api {
     }
 }
 
-async fn health_check() -> impl IntoResponse {
-    (StatusCode::OK, "ok")
+async fn health_check(AxumState(indexer): AxumState<Arc<Indexer>>) -> impl IntoResponse {
+    match indexer.store.try_read() {
+        Ok(store) => {
+            let response = HealthDetail {
+                status: "ok",
+                latest_epoch: store.verifier.latest_epoch.get(),
+                seed_count: store.seeds.len(),
+                notarization_count: store.notarizations.len(),
+                finalization_count: store.finalizations.len(),
+                latest_finalized_height: store
+                    .finalizations
+                    .last_key_value()
+                    .map(|(_, f)| f.block.height.get()),
+            };
+            (StatusCode::OK, Json(response)).into_response()
+        }
+        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "store lock poisoned").into_response(),
+    }
+}
+
+#[derive(Serialize)]
+struct HealthDetail {
+    status: &'static str,
+    latest_epoch: u64,
+    seed_count: usize,
+    notarization_count: usize,
+    finalization_count: usize,
+    latest_finalized_height: Option<u64>,
 }
 
 async fn seed_upload(
