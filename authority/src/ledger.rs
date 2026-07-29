@@ -55,6 +55,8 @@ pub enum AuthorityError {
     ValidatorAlreadyActive(Box<ValidatorId>),
     #[error("unknown validator: {0:?}")]
     UnknownValidator(Box<ValidatorId>),
+    #[error("validator not active at epoch: {0:?}")]
+    ValidatorNotActive(Box<ValidatorId>),
     #[error("state storage error: {0}")]
     Storage(String),
 }
@@ -401,7 +403,7 @@ impl<D: AuthorityDB> AuthorityLedger<D> {
             .await?
             .ok_or_else(|| AuthorityError::UnknownValidator(Box::new(validator.clone())))?;
         if !schedule.is_player_at(proposed_epoch) && !schedule.is_dealer_at(proposed_epoch) {
-            return Err(AuthorityError::UnknownValidator(Box::new(validator)));
+            return Err(AuthorityError::ValidatorNotActive(Box::new(validator)));
         }
         schedule.removed_from = Some(removed_from);
         self.db.set_validator(&schedule);
