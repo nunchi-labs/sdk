@@ -203,12 +203,18 @@ impl FixedSize for BridgeTransferRecord {
         + u64::SIZE;
 }
 
-/// Authenticated-state key for the transfer record `id`.
+/// Return the authenticated-state key for the transfer record with the given `id`.
+///
+/// The key is deterministic and domain-separated under the [`Table::TransferRecord`] namespace.
 pub fn transfer_record_key(id: &TransferRecordId) -> Digest {
     NS.key(Table::TransferRecord, id.encode().as_ref())
 }
 
-/// Authenticated-state key for the consumed marker of `id`, scoped by its source chain.
+/// Return the authenticated-state key for the consumed-record marker of `id`, scoped by its
+/// source chain.
+///
+/// Scoping by `source_chain_id` prevents record ids from different source chains from aliasing
+/// each other in the consumed-record table.
 pub fn consumed_record_key(source_chain_id: &ChainId, id: &TransferRecordId) -> Digest {
     let mut logical = source_chain_id.encode().as_ref().to_vec();
     logical.extend_from_slice(id.encode().as_ref());
@@ -217,6 +223,10 @@ pub fn consumed_record_key(source_chain_id: &ChainId, id: &TransferRecordId) -> 
 
 /// Stage a transfer record at its deterministic key. Records are append-only: a given `record_id`
 /// maps to exactly one record and must not be rewritten.
+///
+/// **Caller responsibility:** This function does not enforce the append-only invariant. Calling
+/// it twice with the same `record_id` will silently overwrite the previous record. The caller
+/// (typically `BridgeLedger`) must ensure that each record id is written exactly once.
 pub fn put_transfer_record<S: StateStore>(store: &mut S, record: &BridgeTransferRecord) {
     let key = transfer_record_key(&record.record_id());
     store.set(key, record.encode().as_ref().to_vec());
@@ -237,6 +247,10 @@ pub async fn transfer_record<S: StateStore>(
 
 /// Mark the transfer record `id` consumed (claimed). Scoped by source chain so ids from different
 /// source chains never alias.
+///
+/// This operation is idempotent at the storage layer: calling it twice for the same
+/// `(source_chain_id, id)` pair unconditionally writes the same marker value and has no
+/// additional side effects.
 pub fn mark_consumed<S: StateStore>(
     store: &mut S,
     source_chain_id: &ChainId,
@@ -246,6 +260,11 @@ pub fn mark_consumed<S: StateStore>(
 }
 
 /// Whether the transfer record `id` from `source_chain_id` has already been consumed.
+///
+/// Visibility of staged-but-uncommitted state depends on the `StateStore` implementation.
+/// Overlay-backed stores typically provide read-your-own-writes semantics, so a
+/// [`mark_consumed`] followed by `is_consumed` in the same transaction will return `true`
+/// even before [`CommitState::commit`](nunchi_common::CommitState::commit) is called.
 pub async fn is_consumed<S: StateStore>(
     store: &S,
     source_chain_id: &ChainId,
@@ -257,7 +276,10 @@ pub async fn is_consumed<S: StateStore>(
         .is_some())
 }
 
-/// Authenticated-state key for `account`'s per-sender lock nonce.
+/// Return the authenticated-state key for `account`'s per-sender lock nonce.
+///
+/// Each account has an independent nonce counter so that concurrent senders produce distinct
+/// transfer record ids without coordination.
 pub fn nonce_key(account: &Address) -> Digest {
     NS.key(Table::Nonce, account.encode().as_ref())
 }
@@ -272,7 +294,11 @@ pub async fn bridge_nonce<S: StateStore>(store: &S, account: &Address) -> Result
     }
 }
 
-/// Stage `account`'s next lock nonce.
+/// Stage `account`'s lock nonce to `nonce`.
+///
+/// The caller is responsible for ensuring the nonce advances monotonically (typically
+/// `bridge_nonce(store, account) + 1`). This function is a raw setter and does not enforce
+/// ordering.
 pub fn set_bridge_nonce<S: StateStore>(store: &mut S, account: &Address, nonce: u64) {
     store.set(nonce_key(account), nonce.encode().as_ref().to_vec());
 }
@@ -294,6 +320,10 @@ pub async fn local_chain_id<S: StateStore>(store: &S) -> Result<Option<ChainId>,
 
 /// Pin this chain's [`ChainId`]. Written once at genesis; every lock stamps it as the record's
 /// `source_chain_id`.
+///
+/// **Caller responsibility:** This is a raw setter with no once-only enforcement. Calling it
+/// more than once will silently overwrite the previous chain id. The caller (typically
+/// `BridgeGenesis::apply`) must ensure this is invoked exactly once during chain initialization.
 pub fn set_local_chain_id<S: StateStore>(store: &mut S, chain_id: &ChainId) {
     store.set(local_chain_id_key(), chain_id.encode().as_ref().to_vec());
 }
