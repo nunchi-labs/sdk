@@ -53,6 +53,7 @@ use nunchi_mempool::{Mempool, PoolConfig};
 use rand::{CryptoRng, Rng};
 use std::{
     marker::PhantomData,
+    num::NonZeroU64,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -72,6 +73,7 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
     pub output: Output<MinSig, PublicKey>,
     pub share: Option<group::Share>,
     pub peer_config: PeerConfig<PublicKey>,
+    pub min_block_interval_ms: NonZeroU64,
     pub leader_timeout: Duration,
     pub certification_timeout: Duration,
     pub strategy: S,
@@ -365,6 +367,7 @@ where
             applied_height.clone(),
             empty_state,
             commonware_cryptography::Sha256::hash(&config.namespace),
+            config.min_block_interval_ms,
         );
         let genesis = app.genesis_block();
         let genesis_digest = genesis.digest();

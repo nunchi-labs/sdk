@@ -25,14 +25,6 @@ use std::{
 use crate::{testnet::*, BLOCKS_PER_EPOCH, NAMESPACE};
 
 #[test]
-fn production_factory_uses_fixed_block_interval() {
-    assert_eq!(
-        production_min_block_interval_ms(),
-        nunchi_chain::MIN_BLOCK_INTERVAL_MS
-    );
-}
-
-#[test]
 fn generated_testnet_has_unique_ports_dirs_and_complete_peer_sets() {
     let dir = std::env::temp_dir().join(format!("coins-chain-testnet-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
@@ -92,6 +84,10 @@ fn generated_testnet_has_unique_ports_dirs_and_complete_peer_sets() {
         assert_eq!(config.rpc_address.port(), node.rpc_port);
         assert_eq!(config.metrics_address.port(), node.metrics_port);
         assert_eq!(config.epoch_length, BLOCKS_PER_EPOCH);
+        assert_eq!(
+            config.min_block_interval_ms,
+            nunchi_chain::DEFAULT_MIN_BLOCK_INTERVAL_MS
+        );
         assert_eq!(config.max_pending_acks, NZUsize!(16));
         assert_eq!(config.maintenance_interval, NZUsize!(32));
         assert_eq!(config.retained_marshal_blocks, 200);
@@ -208,7 +204,7 @@ fn prune_config_is_required_and_validated() {
 }
 
 #[test]
-fn node_config_uses_default_epoch_length_when_omitted_and_reads_overrides() {
+fn node_config_uses_defaults_when_omitted_and_reads_overrides() {
     let dir = std::env::temp_dir().join(format!(
         "coins-chain-epoch-config-{}",
         std::process::id()
@@ -231,24 +227,24 @@ fn node_config_uses_default_epoch_length_when_omitted_and_reads_overrides() {
     let path = &manifest.nodes[0].config_path;
     let raw = fs::read_to_string(path).expect("read generated config");
 
-    let legacy = raw.replace("epoch_length = 200000\n", "");
+    let legacy = raw
+        .replace("epoch_length = 200000\n", "")
+        .replace("min_block_interval_ms = 1\n", "");
     fs::write(path, legacy).expect("write legacy config");
+    let legacy = NodeConfig::read(path).expect("read legacy config");
+    assert_eq!(legacy.epoch_length, BLOCKS_PER_EPOCH);
     assert_eq!(
-        NodeConfig::read(path)
-            .expect("read legacy config")
-            .epoch_length,
-        BLOCKS_PER_EPOCH
+        legacy.min_block_interval_ms,
+        nunchi_chain::DEFAULT_MIN_BLOCK_INTERVAL_MS
     );
 
-    let configured = raw.replace("epoch_length = 200000", "epoch_length = 100");
+    let configured = raw
+        .replace("epoch_length = 200000", "epoch_length = 100")
+        .replace("min_block_interval_ms = 1", "min_block_interval_ms = 500");
     fs::write(path, configured).expect("write configured config");
-    assert_eq!(
-        NodeConfig::read(path)
-            .expect("read configured config")
-            .epoch_length
-            .get(),
-        100
-    );
+    let configured = NodeConfig::read(path).expect("read configured config");
+    assert_eq!(configured.epoch_length.get(), 100);
+    assert_eq!(configured.min_block_interval_ms.get(), 500);
 
     let _ = fs::remove_dir_all(dir);
 }

@@ -83,12 +83,13 @@ fn reaches_height_with_reliable_links() {
 }
 
 #[test_traced]
-fn production_blocks_respect_minimum_timestamp_interval() {
+fn blocks_respect_configured_minimum_timestamp_interval() {
     with_large_stack(|| {
         let executor = deterministic::Runner::timed(Duration::from_secs(60));
         executor.start(|mut context| async move {
+            let min_block_interval_ms = NZU64!(500);
             let cfg = ValidatorConfig {
-                min_block_interval_ms: nunchi_chain::MIN_BLOCK_INTERVAL_MS,
+                min_block_interval_ms,
                 ..ValidatorConfig::default()
             };
             let mut network = TestNetworkBuilder::new(VALIDATORS)
@@ -110,9 +111,8 @@ fn production_blocks_respect_minimum_timestamp_interval() {
             );
             for adjacent in blocks.windows(2) {
                 assert!(
-                    adjacent[1].timestamp - adjacent[0].timestamp
-                        >= nunchi_chain::MIN_BLOCK_INTERVAL_MS.get(),
-                    "heights {} and {} violate the production interval",
+                    adjacent[1].timestamp - adjacent[0].timestamp >= min_block_interval_ms.get(),
+                    "heights {} and {} violate the configured interval",
                     adjacent[0].height,
                     adjacent[1].height,
                 );

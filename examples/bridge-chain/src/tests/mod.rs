@@ -22,7 +22,7 @@ use nunchi_dkg::{Context, Finalization, Scheme};
 use nunchi_mempool::PoolConfig;
 use std::sync::Arc;
 
-use crate::{application, application_with_interval, Application, Block, TxPool};
+use crate::{application, Application, Block, TxPool};
 
 const FOREIGN_NAMESPACE: &[u8] = b"_NUNCHI_BRIDGE_CHAIN_FOREIGN";
 const WRONG_NAMESPACE: &[u8] = b"_NUNCHI_BRIDGE_CHAIN_WRONG";
@@ -37,7 +37,7 @@ fn peer_state_sync_is_rejected_until_bridge_authenticates_dkg_state() {
 }
 
 #[test]
-fn production_application_uses_fixed_block_interval() {
+fn application_uses_configured_block_interval() {
     deterministic::Runner::default().start(|context| async move {
         let foreign = schemes(FOREIGN_NAMESPACE, 1);
         let (bridge_actor, bridge_mailbox) = BridgeActor::new(foreign[0].clone(), 16);
@@ -65,6 +65,7 @@ fn production_application_uses_fixed_block_interval() {
                 range: genesis_target.range,
             },
             Sha256::hash(b"bridge-chain production genesis"),
+            NZU64!(500),
         );
         let genesis =
             <Application as StatefulApplication<deterministic::Context>>::genesis(&mut app).await;
@@ -80,7 +81,7 @@ fn production_application_uses_fixed_block_interval() {
 
         assert!(
             proposed.block.timestamp - genesis.timestamp
-                >= nunchi_chain::MIN_BLOCK_INTERVAL_MS.get()
+                >= 500
         );
     });
 }
@@ -157,7 +158,7 @@ fn chain_application_proposes_and_verifies_bridge_payload() {
             range: genesis_target.range,
         };
         let applied_height = Arc::new(futures::lock::Mutex::new(Height::zero()));
-        let mut app = application_with_interval(
+        let mut app = application(
             submitter,
             bridge,
             applied_height,

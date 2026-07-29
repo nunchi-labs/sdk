@@ -40,7 +40,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    num::{NonZeroU32, NonZeroUsize, TryFromIntError},
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize, TryFromIntError},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -120,6 +120,9 @@ pub struct NodeConfig {
     pub rpc_address: SocketAddr,
     pub bootstrappers: Vec<BootstrapperConfig>,
     pub storage_dir: PathBuf,
+    /// Minimum timestamp delta between a block and its parent.
+    #[serde(default = "default_min_block_interval_ms")]
+    pub min_block_interval_ms: NonZeroU64,
     pub consensus: ConsensusConfig,
     pub networking: NetworkConfig,
     /// Enable one-time peer QMDB state sync for a fresh joining node.
@@ -156,6 +159,10 @@ impl NodeConfig {
             retained_qmdb_blocks: self.retained_qmdb_blocks,
         })
     }
+}
+
+fn default_min_block_interval_ms() -> NonZeroU64 {
+    nunchi_chain::DEFAULT_MIN_BLOCK_INTERVAL_MS
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -400,6 +407,7 @@ fn write_chain(
             rpc_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), rpc_port),
             bootstrappers,
             storage_dir: storage_dir.clone(),
+            min_block_interval_ms: default_min_block_interval_ms(),
             consensus: ConsensusConfig::default(),
             networking: NetworkConfig::default(),
             state_sync: false,
@@ -588,6 +596,7 @@ async fn start_node(
         output,
         share: Some(share),
         peer_config: config.peer_config.clone(),
+        min_block_interval_ms: config.min_block_interval_ms,
         leader_timeout: Duration::from_millis(config.consensus.leader_timeout_ms),
         certification_timeout: Duration::from_millis(config.consensus.certification_timeout_ms),
         strategy: Sequential,
@@ -768,6 +777,10 @@ mod tests {
             assert_eq!(config.maintenance_interval, NZUsize!(32));
             assert_eq!(config.retained_marshal_blocks, 200);
             assert_eq!(config.retained_qmdb_blocks, 200);
+            assert_eq!(
+                config.min_block_interval_ms,
+                nunchi_chain::DEFAULT_MIN_BLOCK_INTERVAL_MS
+            );
             assert!(!config
                 .bootstrappers
                 .iter()

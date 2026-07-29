@@ -143,6 +143,9 @@ pub struct NodeConfig {
     /// Number of finalized blocks in each consensus epoch.
     #[serde(default = "default_epoch_length")]
     pub epoch_length: NonZeroU64,
+    /// Minimum timestamp delta between a block and its parent.
+    #[serde(default = "default_min_block_interval_ms")]
+    pub min_block_interval_ms: NonZeroU64,
     /// Maximum self-contained finalized payloads retained while the indexer is unavailable.
     #[serde(default = "default_indexer_spool_max_entries")]
     pub indexer_spool_max_entries: u64,
@@ -197,6 +200,10 @@ impl NodeConfig {
 
 fn default_epoch_length() -> NonZeroU64 {
     BLOCKS_PER_EPOCH
+}
+
+fn default_min_block_interval_ms() -> NonZeroU64 {
+    nunchi_chain::DEFAULT_MIN_BLOCK_INTERVAL_MS
 }
 
 fn default_indexer_spool_max_entries() -> u64 {
@@ -455,6 +462,7 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
             genesis_path: config.genesis_path.clone(),
             indexer_url: config.indexer_url.clone(),
             epoch_length: default_epoch_length(),
+            min_block_interval_ms: default_min_block_interval_ms(),
             indexer_spool_max_entries: default_indexer_spool_max_entries(),
             indexer_spool_max_bytes: default_indexer_spool_max_bytes(),
             indexer_spool_max_payload_bytes: default_indexer_spool_max_payload_bytes(),
@@ -685,7 +693,7 @@ async fn start_node(
         share: Some(share),
         peer_config: config.peer_config.clone(),
         epoch_length: config.epoch_length,
-        min_block_interval_ms: production_min_block_interval_ms(),
+        min_block_interval_ms: config.min_block_interval_ms,
         leader_timeout: Duration::from_millis(config.consensus.leader_timeout_ms),
         certification_timeout: Duration::from_millis(config.consensus.certification_timeout_ms),
         strategy: context
@@ -750,10 +758,6 @@ async fn start_node(
 
     info!(node = %config.name, "coins-chain validator started");
     Ok((rpc_server, engine_handle))
-}
-
-pub(crate) const fn production_min_block_interval_ms() -> NonZeroU64 {
-    nunchi_chain::MIN_BLOCK_INTERVAL_MS
 }
 
 async fn upload_current_dkg_output(

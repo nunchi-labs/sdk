@@ -1,6 +1,7 @@
 //! Reusable chain execution primitives for generated Nunchi runtimes.
 
-pub const MIN_BLOCK_INTERVAL_MS: std::num::NonZeroU64 = commonware_utils::NZU64!(500);
+/// Default minimum timestamp delta between a block and its parent.
+pub const DEFAULT_MIN_BLOCK_INTERVAL_MS: std::num::NonZeroU64 = commonware_utils::NZU64!(1);
 
 commonware_macros::stability_scope!(ALPHA {
 pub mod application;
