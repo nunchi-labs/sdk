@@ -103,8 +103,20 @@ impl EncodeSize for PublicKey {
 
 /// A Nunchi private key tagged with its signature curve.
 ///
-/// Private keys encode raw key material for controlled SDK persistence/export flows. Callers that
-/// store encoded private keys should wrap the bytes with their own keystore encryption.
+/// # Security
+///
+/// The [`Write`] / [`Read`] / [`EncodeSize`] implementations on this type
+/// serialize and deserialize the **raw, unencrypted** private key material.
+/// Calling `.encode()` produces a `Vec<u8>` containing the secret key in
+/// plaintext.
+///
+/// **You MUST encrypt these bytes before persisting them to disk, logging
+/// them, or transmitting them over any channel.**  Prefer a hardware
+/// keystore or OS keychain where possible.
+///
+/// The [`Debug`] implementation redacts the key material, but the codec
+/// traits do not -- any code path that calls `.encode()` or `.write()`
+/// will emit the raw secret bytes.
 #[derive(Clone)]
 pub enum PrivateKey {
     Ed25519(ed25519::PrivateKey),
@@ -156,6 +168,11 @@ impl core::fmt::Debug for PrivateKey {
     }
 }
 
+/// # Security
+///
+/// This serializes the **raw unencrypted private key**. The output of
+/// `.encode()` / `.write()` contains secret key material. Encrypt before
+/// writing to disk or transmitting over any channel.
 impl Write for PrivateKey {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.curve().tag().write(buf);
