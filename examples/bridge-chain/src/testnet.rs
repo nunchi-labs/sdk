@@ -703,16 +703,18 @@ mod tests {
             .collect::<HashSet<_>>();
         assert_eq!(rpc_ports.len(), 8);
 
-        let chain_a = NodeConfig::read(&manifest.nodes[0].config_path).expect("read chain a");
-        let chain_b = NodeConfig::read(&manifest.nodes[4].config_path).expect("read chain b");
-        assert_eq!(
-            manifest.nodes[0].executable_path,
-            PathBuf::from("bridge-chain-a-node")
-        );
-        assert_eq!(
-            manifest.nodes[4].executable_path,
-            PathBuf::from("bridge-chain-b-node")
-        );
+        let chain_a_node = manifest
+            .nodes
+            .iter()
+            .find(|n| n.executable_path == PathBuf::from("bridge-chain-a-node"))
+            .expect("chain-a node not found in manifest");
+        let chain_b_node = manifest
+            .nodes
+            .iter()
+            .find(|n| n.executable_path == PathBuf::from("bridge-chain-b-node"))
+            .expect("chain-b node not found in manifest");
+        let chain_a = NodeConfig::read(&chain_a_node.config_path).expect("read chain a");
+        let chain_b = NodeConfig::read(&chain_b_node.config_path).expect("read chain b");
         assert_eq!(chain_a.chain, "chain-a");
         assert_eq!(chain_b.chain, "chain-b");
         assert_ne!(
