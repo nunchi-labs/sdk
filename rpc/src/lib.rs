@@ -103,4 +103,46 @@ pub fn invalid_params(message: impl Into<String>) -> ErrorObjectOwned {
 pub fn module_error(message: impl Into<String>) -> ErrorObjectOwned {
     ErrorObjectOwned::owned(MODULE_ERROR_CODE, "Module error", Some(message.into()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hex_round_trip_preserves_codec_value() {
+        let value = 42_u64;
+
+        let decoded: u64 = decode_hex(&encode_hex(&value), "value").unwrap();
+
+        assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn decode_hex_reports_invalid_params_for_malformed_or_invalid_values() {
+        for value in ["not hex", "aabb"] {
+            let error = decode_hex::<u64>(value, "value").unwrap_err();
+            assert_eq!(error.code(), ErrorCode::InvalidParams.code());
+            assert_eq!(error.message(), "Invalid params");
+        }
+    }
+
+    #[test]
+    fn error_helpers_preserve_their_error_classes() {
+        let invalid = invalid_params("bad request");
+        assert_eq!(invalid.code(), ErrorCode::InvalidParams.code());
+        assert_eq!(invalid.message(), "Invalid params");
+
+        let module = module_error("backend failure");
+        assert_eq!(module.code(), MODULE_ERROR_CODE);
+        assert_eq!(module.message(), "Module error");
+    }
+
+    #[test]
+    fn router_retains_context_and_starts_empty() {
+        let router = RpcRouter::new(42_u64);
+
+        assert_eq!(*router.context(), 42);
+        assert!(router.method_names().is_empty());
+    }
+}
 });
