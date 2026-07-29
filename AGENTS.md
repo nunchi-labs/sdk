@@ -72,7 +72,9 @@ When reviewing PRs, focus the majority of your effort on correctness and style. 
 
 Exclusively use commonware's deterministic runtime for reproducible async tests:
 ```rust
-#[test]
+use commonware_macros::{select, test_traced};
+
+#[test_traced]
 fn test_async_behavior() {
     let executor = deterministic::Runner::seeded(42); // Use seed for reproducibility
     executor.start(|context| async move {
@@ -94,6 +96,8 @@ fn test_async_behavior() {
 }
 ```
 
+Use `#[test_traced]` from `commonware_macros` for deterministic async tests so failures
+include tracing diagnostics. Use plain `#[test]` for simple synchronous tests.
 
 ### Advanced Testing Patterns
 
