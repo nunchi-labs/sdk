@@ -64,6 +64,9 @@ pub trait ConsensusExtension: BlockExtension + Clone + Send + 'static {
 }
 
 /// Pair of extra consensus extensions carried in one block extension slot.
+///
+/// Both extensions apply their payloads even when one reports failure, ensuring their state
+/// mutations remain synchronized.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Composite<A, B>(pub A, pub B);
 
@@ -110,8 +113,9 @@ where
     where
         S: StateStore + Send + Sync,
     {
-        self.0.apply_payload(state, context, &payload.0).await
-            && self.1.apply_payload(state, context, &payload.1).await
+        let left = self.0.apply_payload(state, context.clone(), &payload.0).await;
+        let right = self.1.apply_payload(state, context, &payload.1).await;
+        left && right
     }
 
     async fn commit_payload<S>(

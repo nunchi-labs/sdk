@@ -1,3 +1,8 @@
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+
 use bytes::{Buf, BufMut};
 use commonware_codec::{Decode, Encode, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_consensus::types::{Epoch, Height, Round, View};
@@ -79,6 +84,35 @@ impl ConsensusExtension for TestConsensusExtension {
         S: StateStore + Send + Sync,
     {
         payload.0 == self.0
+    }
+}
+
+#[derive(Clone)]
+struct AppliedExtension {
+    applied: Arc<AtomicUsize>,
+    result: bool,
+}
+
+impl BlockExtension for AppliedExtension {
+    type Payload = TestPayload;
+    type ReadCfg = ();
+
+    fn genesis_payload() -> Self::Payload {
+        TestPayload(0)
+    }
+}
+
+impl ConsensusExtension for AppliedExtension {
+    fn propose(&mut self) -> impl std::future::Future<Output = Self::Payload> + Send {
+        std::future::ready(TestPayload(0))
+    }
+
+    async fn apply_payload<S>(&mut self, _: &mut S, _: RuntimeContext, _: &Self::Payload) -> bool
+    where
+        S: StateStore + Send + Sync,
+    {
+        self.applied.fetch_add(1, Ordering::SeqCst);
+        self.result
     }
 }
 
@@ -260,6 +294,31 @@ fn composite_consensus_extension_applies_both_payloads() {
         RuntimeContext::default(),
         &(TestPayload(1), TestPayload(3))
     )));
+}
+
+#[test]
+fn composite_consensus_extension_applies_right_payload_after_left_failure() {
+    let left_applied = Arc::new(AtomicUsize::new(0));
+    let right_applied = Arc::new(AtomicUsize::new(0));
+    let mut extension = Composite::new(
+        AppliedExtension {
+            applied: left_applied.clone(),
+            result: false,
+        },
+        AppliedExtension {
+            applied: right_applied.clone(),
+            result: true,
+        },
+    );
+    let mut state = NoopState;
+
+    assert!(!futures::executor::block_on(extension.apply_payload(
+        &mut state,
+        RuntimeContext::default(),
+        &(TestPayload(1), TestPayload(2))
+    )));
+    assert_eq!(left_applied.load(Ordering::SeqCst), 1);
+    assert_eq!(right_applied.load(Ordering::SeqCst), 1);
 }
 
 #[test]
