@@ -13,13 +13,13 @@ name = "narae"
 path = "src/main.rs"
 
 [dependencies]
-ansi-to-tui = "7"
+ansi-to-tui = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 commonware-macros = { workspace = true }
-crossterm = "0.28"
+crossterm = { workspace = true }
 nunchi-coins-chain = { workspace = true }
 nunchi-xtask = { workspace = true }
-ratatui = "0.29"
+ratatui = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 toml = { workspace = true }
