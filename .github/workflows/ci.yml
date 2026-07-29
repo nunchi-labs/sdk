@@ -24,7 +24,7 @@ jobs:
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Detect Rust Changes
         id: filter
@@ -50,10 +50,10 @@ jobs:
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           components: rustfmt
 
@@ -67,25 +67,29 @@ jobs:
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Install mold
         run: command -v mold || (sudo apt-get update && sudo apt-get install -y mold)
 
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           cache: false
           components: llvm-tools-preview
 
       - name: Install llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
+        with:
+          tool: cargo-llvm-cov
 
       - name: Install nextest
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
+        with:
+          tool: nextest
 
       - name: Expose Runtime
-        uses: crazy-max/ghaction-github-runtime@v4
+        uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
 
       - name: Run Tests and Collect Coverage
         run: |
@@ -94,7 +98,7 @@ jobs:
 
       - name: Upload Coverage Data
         if: github.actor != 'dependabot[bot]'
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
         with:
           fail_ci_if_error: false
           files: codecov.info
@@ -108,19 +112,21 @@ jobs:
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Install mold
         run: command -v mold || (sudo apt-get update && sudo apt-get install -y mold)
 
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           cache: false
           toolchain: nightly
 
       - name: Install udeps
-        uses: taiki-e/install-action@cargo-udeps
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
+        with:
+          tool: cargo-udeps
 
       - name: Check Unused Dependencies
         run: cargo +nightly udeps --locked --all-features --all-targets
@@ -132,7 +138,7 @@ jobs:
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Install Dependencies
         run: |
@@ -140,7 +146,7 @@ jobs:
             (sudo apt-get update && sudo apt-get install -y fontconfig libfontconfig1-dev mold)
 
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           cache: false
           components: clippy
