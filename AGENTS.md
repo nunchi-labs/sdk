@@ -323,7 +323,11 @@ pub trait PrivateKeyExt: PrivateKey {
 
 ### Test Organization
 
-Put tests in a `tests/mod.rs` file under a crate's `src` directory.
+- **Unit tests**: Put them in a `src/tests/` directory with a `mod.rs` file. Use
+  `#[cfg(test)] mod tests;` in `src/lib.rs` to include them.
+- **Integration tests**: Put them in a crate-root `tests/` directory when testing
+  the public API or multi-crate interactions. Put shared helpers in
+  `tests/common/mod.rs`.
 
 ### Module Structure
 
