@@ -473,7 +473,7 @@ impl Read for StateProof {
 
 /// A speculative QMDB batch used by `commonware_glue::stateful` execution.
 ///
-/// Mutations accumulate in [`QmdbBatch::pending`] so [`QmdbBatch::merkleize`] can use the
+/// Mutations accumulate in `pending` so [`QmdbBatch::merkleize`] can use the
 /// staged read-then-write path (location reuse) instead of write-then-merkleize.
 pub struct QmdbBatch<E: Context> {
     inner: Option<QmdbUnmerkleized<E>>,
