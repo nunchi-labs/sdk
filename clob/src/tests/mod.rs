@@ -724,6 +724,54 @@ fn duplicate_fill_commit_is_rejected() {
 }
 
 #[test]
+fn match_batch_rejects_duplicate_order_id_from_previous_batch() {
+    run_test(|| async {
+        let creator = PrivateKey::from_seed(1);
+        let maker = PrivateKey::from_seed(2);
+        let taker = PrivateKey::from_seed(3);
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        seed_market(&mut ledger, &creator).await;
+
+        let ask = place_tx(
+            &maker,
+            0,
+            Side::Ask,
+            100,
+            4,
+            TimeInForce::GoodTilCancelled,
+        );
+        let first_bid = place_tx(
+            &taker,
+            0,
+            Side::Bid,
+            100,
+            2,
+            TimeInForce::ImmediateOrCancel,
+        );
+        let first_batch = batch_from_orders(&ledger, vec![ask.clone(), first_bid], context(2)).await;
+        ledger
+            .apply_match_batch(&first_batch, context(2))
+            .await
+            .unwrap();
+
+        let second_bid = place_tx(
+            &taker,
+            1,
+            Side::Bid,
+            100,
+            4,
+            TimeInForce::ImmediateOrCancel,
+        );
+        let second_batch = batch_from_orders(&ledger, vec![ask, second_bid], context(3)).await;
+        let err = ledger
+            .apply_match_batch(&second_batch, context(3))
+            .await
+            .unwrap_err();
+        assert_eq!(err, ClobError::InvalidOrder("duplicate order id"));
+    });
+}
+
+#[test]
 fn full_market_fill_index_retains_recent_fills_without_blocking() {
     run_test(|| async {
         let creator = PrivateKey::from_seed(1);
