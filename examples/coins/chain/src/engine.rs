@@ -560,7 +560,7 @@ where
         }
         let startup_reporter = nunchi_chain::startup::StartupReporter::new(
             startup_coordinator.clone(),
-            certified_payloads.into_iter(),
+            certified_payloads,
             block_state_target,
         );
         let marshal_start = recovered_floor
