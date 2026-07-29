@@ -154,16 +154,6 @@ where
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct FinalizationParams {
-    pub height: u64,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct SubmitFinalizationParams {
-    pub finalization: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SubmitFinalizationResponse {
     pub result: String,
     pub accepted_view: Option<u64>,
