@@ -696,7 +696,7 @@ fn build_coin_spec_from_params(
 
 #[tool_handler(
     name = "nunchi-mcp",
-    version = "2026.5.0",
+    version = env!("CARGO_PKG_VERSION"),
     instructions = "This server exposes the full Nunchi SDK as a set of tools. \
                     There are three groups: \
                     (1) Chain tools (prefix coins_ / chain_) that query a running node or submit transactions. \
