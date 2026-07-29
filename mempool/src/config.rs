@@ -13,6 +13,9 @@ pub struct PoolConfig {
     /// unexecutable transactions.
     pub ttl_blocks: u64,
     /// Number of per-digest status entries retained (FIFO eviction beyond).
+    ///
+    /// A capacity of zero disables status retention, so status queries always
+    /// return `None`.
     pub status_cache_capacity: usize,
     /// Bound on the actor's message mailbox.
     pub mailbox_size: usize,

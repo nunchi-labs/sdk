@@ -26,5 +26,7 @@ fn update_in_place_keeps_ring_slot() {
 fn zero_capacity_retains_nothing() {
     let mut cache = StatusCache::new(0);
     cache.insert(1u64, TxStatus::Pending);
+    cache.insert(2, TxStatus::Finalized { height: 1 });
     assert_eq!(cache.get(&1), None);
+    assert_eq!(cache.get(&2), None);
 }

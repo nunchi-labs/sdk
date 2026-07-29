@@ -14,6 +14,9 @@ pub enum TxStatus {
 }
 
 /// Bounded per-digest status map with insertion-order (FIFO) eviction.
+///
+/// A zero capacity disables retention: inserted statuses are discarded and
+/// lookups return `None`.
 pub(crate) struct StatusCache<D> {
     ring: VecDeque<D>,
     map: HashMap<D, TxStatus>,
