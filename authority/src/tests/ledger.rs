@@ -482,6 +482,78 @@ fn non_owner_cannot_propose() {
     });
 }
 
+#[test]
+fn non_owner_cannot_approve() {
+    commonware_runtime::deterministic::Runner::default().start(|_| async move {
+        let (mut ledger, owners, _) = configured().await;
+        let change = RegistryChange::AddValidator {
+            validator: validator(12),
+        };
+        let proposal = crate::proposal_id(&change, 1);
+        submit(
+            &mut ledger,
+            &owners[0],
+            AuthorityOperation::Propose {
+                change,
+                effective_epoch: 1,
+            },
+            0,
+        )
+        .await
+        .unwrap();
+
+        let stranger = owner(99);
+        let result = submit(
+            &mut ledger,
+            &stranger,
+            AuthorityOperation::Approve { proposal },
+            0,
+        )
+        .await;
+        assert_eq!(result, Err(AuthorityError::Unauthorized));
+    });
+}
+
+#[test]
+fn non_owner_cannot_execute() {
+    commonware_runtime::deterministic::Runner::default().start(|_| async move {
+        let (mut ledger, owners, _) = configured().await;
+        let change = RegistryChange::AddValidator {
+            validator: validator(12),
+        };
+        let proposal = crate::proposal_id(&change, 1);
+        submit(
+            &mut ledger,
+            &owners[0],
+            AuthorityOperation::Propose {
+                change,
+                effective_epoch: 1,
+            },
+            0,
+        )
+        .await
+        .unwrap();
+        submit(
+            &mut ledger,
+            &owners[1],
+            AuthorityOperation::Approve { proposal },
+            0,
+        )
+        .await
+        .unwrap();
+
+        let stranger = owner(99);
+        let result = submit(
+            &mut ledger,
+            &stranger,
+            AuthorityOperation::Execute { proposal },
+            0,
+        )
+        .await;
+        assert_eq!(result, Err(AuthorityError::Unauthorized));
+    });
+}
+
 // ----- proposal lifecycle -----
 
 #[test]
