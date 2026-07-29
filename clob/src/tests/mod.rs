@@ -12,8 +12,8 @@ use nunchi_crypto::PrivateKey;
 
 use crate::{
     market_id, AssetId, ClobActor, ClobConfig, ClobDB, ClobError, ClobGenesis, ClobLedger,
-    ClobMailbox, ClobMarketGenesis, ClobOperation, FillId, Market, MatchBatch, MatchEngine,
-    OrderId, Side, TimeInForce, Transaction, MAX_FILLS_PER_MARKET,
+    ClobMailbox, ClobMarketGenesis, ClobOperation, Fill, FillId, Market, MarketId, MatchBatch,
+    MatchEngine, OrderId, Side, TimeInForce, Transaction, MAX_FILLS_PER_MARKET,
 };
 
 #[derive(Default)]
@@ -75,6 +75,26 @@ fn market() -> crate::MarketId {
 
 fn fake_fill_id(seed: u64) -> FillId {
     FillId(Sha256::hash(seed.encode().as_ref()))
+}
+
+fn fake_fill(id: FillId, market: MarketId) -> Fill {
+    let dummy_order = OrderId(Sha256::hash(b"dummy"));
+    let dummy_addr = Address::external(&PrivateKey::from_seed(0).public_key());
+    Fill {
+        id,
+        market,
+        maker_order: dummy_order,
+        taker_order: dummy_order,
+        maker: dummy_addr.clone(),
+        taker: dummy_addr,
+        taker_side: Side::Bid,
+        price: 0,
+        base_quantity: 0,
+        quote_quantity: 0,
+        sequence: 0,
+        written_at_height: 0,
+        written_at_ms: 0,
+    }
 }
 
 fn encoded_id<T: Encode>(id: &T) -> String {
@@ -737,6 +757,9 @@ fn full_market_fill_index_retains_recent_fills_without_blocking() {
         let stale_fill_ids = (0..MAX_FILLS_PER_MARKET as u64)
             .map(fake_fill_id)
             .collect::<Vec<_>>();
+        for fill_id in &stale_fill_ids {
+            ledger.db.set_fill(&fake_fill(*fill_id, market));
+        }
         ledger.db.set_market_fills(&market, &stale_fill_ids);
 
         let ask = place_tx(
@@ -771,7 +794,8 @@ fn full_market_fill_index_retains_recent_fills_without_blocking() {
         assert_eq!(recent_fill.base_quantity, 2);
 
         let queryable_fills = ledger.market_fills(&market).await.unwrap();
-        assert_eq!(queryable_fills, vec![recent_fill]);
+        assert_eq!(queryable_fills.len(), MAX_FILLS_PER_MARKET);
+        assert_eq!(queryable_fills.last().unwrap(), &recent_fill);
     });
 }
 

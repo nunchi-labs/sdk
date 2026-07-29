@@ -47,6 +47,8 @@ pub enum ClobError {
     FillIndexFull,
     #[error("order book index references a missing order")]
     MissingOrder,
+    #[error("fill index references a missing fill record")]
+    MissingFill,
     #[error("cannot cancel order owned by another account")]
     UnauthorizedCancel,
     #[error("invalid order: {0}")]
@@ -132,9 +134,7 @@ impl<D: ClobDB> ClobLedger<D> {
         let ids = self.db.market_fills(market).await?;
         let mut fills = Vec::with_capacity(ids.len());
         for id in ids {
-            if let Some(fill) = self.db.fill(&id).await? {
-                fills.push(fill);
-            }
+            fills.push(self.db.fill(&id).await?.ok_or(ClobError::MissingFill)?);
         }
         Ok(fills)
     }
