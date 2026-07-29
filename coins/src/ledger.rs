@@ -89,6 +89,10 @@ impl<D: CoinDB> Ledger<D> {
         self.db
     }
 
+    /// Return a snapshot of the account's kind and current nonce.
+    ///
+    /// Accounts that have no registered multisig policy are classified as
+    /// [`AccountType::External`].
     pub async fn account(&self, id: &Address) -> Result<Account, LedgerError> {
         let kind = if self.db.account_policy(id).await?.is_some() {
             AccountType::Multisig
@@ -98,18 +102,29 @@ impl<D: CoinDB> Ledger<D> {
         Ok(Account::new(id.clone(), kind, self.db.nonce(id).await?))
     }
 
+    /// Return the committed transaction nonce for `id`.
     pub async fn nonce(&self, id: &Address) -> Result<u64, LedgerError> {
         self.db.nonce(id).await
     }
 
+    /// Return the factory nonce used to derive deterministic coin IDs.
+    ///
+    /// This value increments with each [`create_token`](Self::create_token) call and must be
+    /// persisted across restarts to ensure coin IDs remain deterministic.
     pub async fn factory_nonce(&self) -> Result<u64, LedgerError> {
         self.db.factory_nonce().await
     }
 
+    /// Look up a token definition by its coin ID.
+    ///
+    /// Returns `None` if no token with the given ID has been created.
     pub async fn token(&self, coin: &CoinId) -> Result<Option<TokenDefinition>, LedgerError> {
         self.db.token(coin).await
     }
 
+    /// Return the token balance for `account` holding `coin`.
+    ///
+    /// Returns `0` if no balance record exists for the `(account, coin)` pair.
     pub async fn balance(&self, account: &Address, coin: &CoinId) -> Result<u128, LedgerError> {
         self.db.balance(account, coin).await
     }
@@ -212,6 +227,12 @@ impl<D: CoinDB> Ledger<D> {
         self.ensure_authorized(tx).await
     }
 
+    /// Register a multisig policy at its derived address.
+    ///
+    /// This is a no-op if an identical policy is already registered at the
+    /// address. Returns [`LedgerError::AccountPolicyMismatch`] if a different
+    /// policy is already registered at the same address, or if `account_id`
+    /// does not match the address derived from `policy`.
     pub async fn register_account_policy(
         &mut self,
         account_id: Address,
@@ -232,6 +253,10 @@ impl<D: CoinDB> Ledger<D> {
         Ok(account_id)
     }
 
+    /// Create a token from a [`CoinSpec`](super::CoinSpec), crediting `initial_supply` to
+    /// the issuer.
+    ///
+    /// Returns [`LedgerError::DuplicateToken`] if a token with the derived ID already exists.
     pub async fn create_token(
         &mut self,
         issuer: Address,
