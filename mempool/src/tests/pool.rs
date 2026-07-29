@@ -12,6 +12,7 @@ fn small_config() -> PoolConfig {
     PoolConfig {
         max_total_txs: 4,
         max_per_account_txs: 3,
+        max_pending_limit: 4_096,
         max_tx_bytes: 1_000,
         ttl_blocks: 10,
         status_cache_capacity: 100,
@@ -29,6 +30,21 @@ fn pending_round_robins_ready_lanes() {
     assert_eq!(ids, vec![20, 10, 11]);
     assert_eq!(pool.pending(2).len(), 2);
     assert!(pool.pending(0).is_empty());
+}
+
+#[test]
+fn pending_enforces_per_request_limit() {
+    let mut config = small_config();
+    config.max_total_txs = 10;
+    config.max_per_account_txs = 10;
+    config.max_pending_limit = 2;
+    let mut pool = pool(config);
+    for nonce in 0..3 {
+        pool.admit(tx(1, nonce, nonce)).unwrap();
+    }
+
+    let ids: Vec<u64> = pool.pending(usize::MAX).iter().map(|tx| tx.id).collect();
+    assert_eq!(ids, vec![0, 1]);
 }
 
 #[test]
@@ -248,6 +264,7 @@ fn stress_ready_tracking_stays_consistent() {
     let mut pool = pool(PoolConfig {
         max_total_txs: 2_000,
         max_per_account_txs: 64,
+        max_pending_limit: 2_000,
         max_tx_bytes: 1_000,
         ttl_blocks: 50,
         status_cache_capacity: 100_000,
@@ -335,6 +352,7 @@ fn stress_pipelined_finalization_makes_progress() {
     let mut pool = pool(PoolConfig {
         max_total_txs: 50_000,
         max_per_account_txs: 256,
+        max_pending_limit: 50_000,
         max_tx_bytes: 1_000,
         ttl_blocks: 1_000,
         status_cache_capacity: 1_000_000,

@@ -155,9 +155,10 @@ impl<T: PoolTransaction> Pool<T> {
     }
 
     /// Up to `limit` executable transactions, round-robin across ready nonce
-    /// lanes. Never includes a nonce gap, so every returned transaction can
-    /// apply in order.
+    /// lanes. The configured per-request maximum is always enforced. Never
+    /// includes a nonce gap, so every returned transaction can apply in order.
     pub fn pending(&mut self, limit: usize) -> Vec<T> {
+        let limit = limit.min(self.config.max_pending_limit);
         let mut out = Vec::with_capacity(limit.min(self.total_ready_count));
         if limit == 0 || self.ready_lanes.is_empty() {
             return out;

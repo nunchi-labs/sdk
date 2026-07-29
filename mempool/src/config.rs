@@ -5,6 +5,13 @@ pub struct PoolConfig {
     pub max_total_txs: usize,
     /// Maximum pending transactions in any single account's queue.
     pub max_per_account_txs: usize,
+    /// Maximum executable transactions returned by one [`crate::MempoolHandle::pending`]
+    /// request.
+    ///
+    /// This bounds work performed by the single-threaded mempool actor while
+    /// cloning a block candidate. Set this to the maximum number of
+    /// transactions a block builder needs in one request.
+    pub max_pending_limit: usize,
     /// Maximum encoded byte size of a single transaction. This is a pool
     /// resource bound, not a consensus validity rule.
     pub max_tx_bytes: usize,
@@ -23,6 +30,7 @@ impl Default for PoolConfig {
         Self {
             max_total_txs: 1_000_000,
             max_per_account_txs: 256,
+            max_pending_limit: 4_096,
             max_tx_bytes: 64 * 1024,
             ttl_blocks: 25_000,
             status_cache_capacity: 100_000,

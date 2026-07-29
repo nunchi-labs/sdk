@@ -173,7 +173,11 @@ impl<T: PoolTransaction> MempoolHandle<T> {
     }
 
     /// Fetch up to `limit` executable transactions, gap-free within each nonce
-    /// lane. Returns an empty list if the pool has shut down.
+    /// lane.
+    ///
+    /// The result is capped by [`PoolConfig::max_pending_limit`] to bound work
+    /// on the single-threaded mempool actor. Returns an empty list if the pool
+    /// has shut down.
     pub async fn pending(&self, limit: usize) -> Vec<T> {
         let (responder, receiver) = oneshot::channel();
         let mut sender = self.sender.clone();
