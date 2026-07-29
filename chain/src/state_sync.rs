@@ -715,8 +715,14 @@ where
         }
         let mut peer_valid = true;
         for approval in approvals {
-            if let Ok(approved) = approval.await {
-                peer_valid &= approved;
+            match approval.await {
+                Ok(approved) => peer_valid &= approved,
+                Err(_) => {
+                    // Peer disconnected or task panicked before responding.
+                    // Treat as rejection to be conservative.
+                    debug!("peer approval channel dropped during state sync; treating as rejection");
+                    peer_valid = false;
+                }
             }
         }
         response.send_lossy(peer_valid);
