@@ -2,6 +2,7 @@ use commonware_consensus::types::Height;
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_glue::stateful::db::DatabaseSet as _;
 use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
+use commonware_utils::NZU64;
 use futures::lock::Mutex as AsyncMutex;
 use nunchi_chain::{ConsensusExtension, StateCommitment};
 use nunchi_clob::{
@@ -67,6 +68,7 @@ fn proposal_skips_unregistered_multisig() {
         let app = BasicApplication::new(
             submitter,
             16,
+            NZU64!(1),
             applied_height,
             genesis_state,
             genesis_payload(),
@@ -138,6 +140,7 @@ fn profile_block_execution() {
         let app = BasicApplication::new(
             submitter,
             4096,
+            NZU64!(1),
             applied_height,
             genesis_state,
             genesis_payload(),

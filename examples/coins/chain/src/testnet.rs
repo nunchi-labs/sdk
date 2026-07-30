@@ -10,7 +10,7 @@ use crate::{
     channels,
     engine::{Config as EngineConfig, Engine},
     genesis::{ChainGenesis, GenesisError},
-    indexer, rpc, PublicKey, NAMESPACE,
+    indexer, rpc, PublicKey, BLOCKS_PER_EPOCH, NAMESPACE,
 };
 use commonware_codec::{Decode, DecodeExt, Encode, EncodeSize};
 use commonware_consensus::marshal;
@@ -22,6 +22,7 @@ use commonware_cryptography::{
     ed25519, Signer,
 };
 use commonware_formatting::{from_hex, hex};
+use commonware_glue::stateful::PruneConfig;
 use commonware_p2p::{
     authenticated::discovery::{self, Network},
     Ingress, Manager,
@@ -36,19 +37,21 @@ use nunchi_dkg::{
     UpdateCallBack, MAX_SUPPORTED_MODE,
 };
 use nunchi_mempool::PoolConfig;
+use nunchi_chain::engine::{
+    default_state_prune_config, validate_state_prune_config, PruneConfigError,
+};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
     net::{IpAddr, SocketAddr},
-    num::{NonZeroU32, TryFromIntError},
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize, TryFromIntError},
     path::{Path, PathBuf},
     str::FromStr,
     time::{Duration, Instant},
 };
 use tracing::{info, warn, Level};
 
-const FREEZER_TABLE_INITIAL_SIZE: u32 = 2u32.pow(14);
 const DEFAULT_MAX_BLOCK_TRANSACTIONS: usize = 4_096;
 const DEFAULT_MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 const DEFAULT_CHANNEL_BACKLOG: usize = 1024;
@@ -137,24 +140,86 @@ pub struct NodeConfig {
     pub genesis_path: Option<PathBuf>,
     #[serde(default)]
     pub indexer_url: Option<String>,
+    /// Number of finalized blocks in each consensus epoch.
+    #[serde(default = "default_epoch_length")]
+    pub epoch_length: NonZeroU64,
+    /// Minimum timestamp delta between a block and its parent.
+    #[serde(default = "default_min_block_interval_ms")]
+    pub min_block_interval_ms: NonZeroU64,
+    /// Maximum self-contained finalized payloads retained while the indexer is unavailable.
+    #[serde(default = "default_indexer_spool_max_entries")]
+    pub indexer_spool_max_entries: u64,
+    /// Maximum logical encoded payload bytes retained by the indexer spool.
+    #[serde(default = "default_indexer_spool_max_bytes")]
+    pub indexer_spool_max_bytes: u64,
+    /// Maximum encoded size accepted for one finalized payload.
+    #[serde(default = "default_indexer_spool_max_payload_bytes")]
+    pub indexer_spool_max_payload_bytes: u64,
+    /// Maximum payload age before visible terminal expiry.
+    #[serde(default = "default_indexer_spool_max_age_seconds")]
+    pub indexer_spool_max_age_seconds: u64,
     pub consensus: ConsensusConfig,
     pub networking: NetworkConfig,
     /// Enable one-time peer QMDB state sync for a fresh joining node.
     #[serde(default)]
     pub state_sync: bool,
+    /// Maximum number of marshal acknowledgements that may remain pending.
+    pub max_pending_acks: NonZeroUsize,
+    /// Finalized-height cadence for marshal and QMDB pruning maintenance.
+    pub maintenance_interval: NonZeroUsize,
+    /// Blocks retained by marshal beyond the mandatory acknowledgement window.
+    pub retained_marshal_blocks: usize,
+    /// Operation-history blocks retained by QMDB beyond the mandatory acknowledgement window.
+    pub retained_qmdb_blocks: usize,
     pub max_block_transactions: usize,
 }
 
 impl NodeConfig {
     pub fn read(path: impl AsRef<Path>) -> Result<Self, Error> {
         let raw = fs::read_to_string(path).map_err(Error::Io)?;
-        toml::from_str(&raw).map_err(Error::TomlDeserialize)
+        let config: Self = toml::from_str(&raw).map_err(Error::TomlDeserialize)?;
+        let prune_config = config.prune_config()?;
+        crate::history::RetentionPolicy::new(prune_config)?;
+        Ok(config)
     }
 
     pub fn write(&self, path: impl AsRef<Path>) -> Result<(), Error> {
         let raw = toml::to_string_pretty(self).map_err(Error::TomlSerialize)?;
         fs::write(path, raw).map_err(Error::Io)
     }
+
+    pub fn prune_config(&self) -> Result<PruneConfig, PruneConfigError> {
+        validate_state_prune_config(PruneConfig {
+            max_pending_acks: self.max_pending_acks,
+            maintenance_interval: self.maintenance_interval,
+            retained_marshal_blocks: self.retained_marshal_blocks,
+            retained_qmdb_blocks: self.retained_qmdb_blocks,
+        })
+    }
+}
+
+fn default_epoch_length() -> NonZeroU64 {
+    BLOCKS_PER_EPOCH
+}
+
+fn default_min_block_interval_ms() -> NonZeroU64 {
+    nunchi_chain::DEFAULT_MIN_BLOCK_INTERVAL_MS
+}
+
+fn default_indexer_spool_max_entries() -> u64 {
+    indexer::SpoolLimits::default().max_entries
+}
+
+fn default_indexer_spool_max_bytes() -> u64 {
+    indexer::SpoolLimits::default().max_bytes
+}
+
+fn default_indexer_spool_max_payload_bytes() -> u64 {
+    indexer::SpoolLimits::default().max_payload_bytes
+}
+
+fn default_indexer_spool_max_age_seconds() -> u64 {
+    indexer::SpoolLimits::default().max_age.as_secs()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -284,6 +349,12 @@ pub enum Error {
     TomlSerialize(#[from] toml::ser::Error),
     #[error("failed to parse toml: {0}")]
     TomlDeserialize(#[from] toml::de::Error),
+    #[error("invalid prune configuration: {0}")]
+    PruneConfig(#[from] PruneConfigError),
+    #[error("invalid finalized-history retention policy: {0}")]
+    RetentionPolicy(#[from] crate::history::RetentionPolicyError),
+    #[error("engine startup failed: {0}")]
+    EngineStartup(#[from] crate::engine::StartupError),
     #[error("engine stopped unexpectedly: {0}")]
     Engine(#[from] crate::engine::EngineError),
     #[error("engine task failed: {0}")]
@@ -390,9 +461,19 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
             storage_dir: storage_dir.clone(),
             genesis_path: config.genesis_path.clone(),
             indexer_url: config.indexer_url.clone(),
+            epoch_length: default_epoch_length(),
+            min_block_interval_ms: default_min_block_interval_ms(),
+            indexer_spool_max_entries: default_indexer_spool_max_entries(),
+            indexer_spool_max_bytes: default_indexer_spool_max_bytes(),
+            indexer_spool_max_payload_bytes: default_indexer_spool_max_payload_bytes(),
+            indexer_spool_max_age_seconds: default_indexer_spool_max_age_seconds(),
             consensus: ConsensusConfig::default(),
             networking: NetworkConfig::default(),
             state_sync: false,
+            max_pending_acks: default_state_prune_config().max_pending_acks,
+            maintenance_interval: default_state_prune_config().maintenance_interval,
+            retained_marshal_blocks: default_state_prune_config().retained_marshal_blocks,
+            retained_qmdb_blocks: default_state_prune_config().retained_qmdb_blocks,
             max_block_transactions: DEFAULT_MAX_BLOCK_TRANSACTIONS,
         };
         node_config.write(&config_path)?;
@@ -526,6 +607,8 @@ async fn start_node(
     ),
     Error,
 > {
+    let prune_config = config.prune_config()?;
+    crate::history::RetentionPolicy::new(prune_config)?;
     let private_key = decode_unit::<ed25519::PrivateKey>(&config.private_key, "private_key")?;
     let dkg_storage_key = decode_storage_key(&config.dkg_storage_key)?;
     let public_key = private_key.public_key();
@@ -604,22 +687,29 @@ async fn start_node(
         blocker: oracle.clone(),
         manager: oracle.clone(),
         partition_prefix: config.name.clone(),
-        blocks_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
-        finalized_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
         signer: private_key,
         dkg_storage_key,
         output,
         share: Some(share),
         peer_config: config.peer_config.clone(),
+        epoch_length: config.epoch_length,
+        min_block_interval_ms: config.min_block_interval_ms,
         leader_timeout: Duration::from_millis(config.consensus.leader_timeout_ms),
         certification_timeout: Duration::from_millis(config.consensus.certification_timeout_ms),
         strategy: context
             .strategy(std::thread::available_parallelism().unwrap_or(std::num::NonZeroUsize::MIN)),
         state_sync: config.state_sync,
+        prune_config,
         max_block_transactions: config.max_block_transactions,
         pool_config: PoolConfig::default(),
         genesis: read_genesis(config.genesis_path.as_ref())?,
         indexer: indexer_client.map(|(client, _metrics)| client),
+        indexer_spool_limits: indexer::SpoolLimits {
+            max_entries: config.indexer_spool_max_entries,
+            max_bytes: config.indexer_spool_max_bytes,
+            max_payload_bytes: config.indexer_spool_max_payload_bytes,
+            max_age: Duration::from_secs(config.indexer_spool_max_age_seconds),
+        },
     };
     let dkg_callback: Box<dyn UpdateCallBack<MinSig, PublicKey>> = ContinueOnUpdate::boxed();
 
@@ -643,7 +733,7 @@ async fn start_node(
         probe,
         state_sync,
     )
-    .await;
+    .await?;
     let engine_handle = engine.start(
         pending,
         recovered,

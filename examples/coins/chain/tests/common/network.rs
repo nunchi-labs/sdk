@@ -8,6 +8,7 @@ use commonware_cryptography::{
     sha256::Digest,
     Signer,
 };
+use commonware_glue::stateful::PruneConfig;
 use commonware_p2p::{
     simulated::{self, Link, Network, Oracle, Receiver, Sender},
     Manager,
@@ -15,19 +16,20 @@ use commonware_p2p::{
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     deterministic::{self, Runner},
-    Clock, Metrics, Runner as _, Supervisor,
+    Clock, Error as RuntimeError, Metrics, Runner as _, Storage, Supervisor,
 };
 use commonware_utils::{
     ordered::{Map, Set},
-    N3f1, NZUsize, NZU32,
+    N3f1, NZUsize, NZU32, NZU64,
 };
 use governor::Quota;
 use nunchi_authority::AuthorityLedger;
+use nunchi_chain::engine::default_state_prune_config;
 use nunchi_coins::{Address, Ledger};
 use nunchi_coins_chain::{
     engine::{Config, Engine},
     execution::NodeHandle,
-    PublicKey, Transaction,
+    PublicKey, Transaction, BLOCKS_PER_EPOCH,
 };
 use nunchi_common::QmdbReader;
 use nunchi_dkg::{ContinueOnUpdate, PeerConfig};
@@ -35,10 +37,10 @@ use nunchi_mempool::{MempoolHandle, PoolConfig};
 use nunchi_oracle::OracleLedger;
 use std::{
     collections::{HashMap, HashSet},
+    num::NonZeroU64,
     time::Duration,
 };
 
-const FREEZER_TABLE_INITIAL_SIZE: u32 = 2u32.pow(14); // 1MB
 const TEST_QUOTA: Quota = Quota::per_second(NZU32!(u32::MAX));
 const MAX_BLOCK_TRANSACTIONS: usize = 256;
 
@@ -109,15 +111,21 @@ pub(crate) fn lossy_link() -> Link {
 
 #[derive(Clone)]
 pub(crate) struct ValidatorConfig {
+    pub(crate) epoch_length: NonZeroU64,
+    pub(crate) min_block_interval_ms: NonZeroU64,
     pub(crate) leader_timeout: Duration,
     pub(crate) certification_timeout: Duration,
+    pub(crate) prune_config: PruneConfig,
 }
 
 impl Default for ValidatorConfig {
     fn default() -> Self {
         Self {
+            epoch_length: BLOCKS_PER_EPOCH,
+            min_block_interval_ms: NZU64!(1),
             leader_timeout: Duration::from_secs(1),
             certification_timeout: Duration::from_secs(2),
+            prune_config: default_state_prune_config(),
         }
     }
 }
@@ -356,6 +364,83 @@ impl TestNetwork<'_> {
         }
     }
 
+    pub(crate) fn assert_validator_metric(
+        &self,
+        suffix: &str,
+        required_labels: &[(&str, &str)],
+        expected_value: u64,
+    ) {
+        let expected = self.started_validator_ids();
+        let mut observed = HashSet::new();
+        let metrics = self.context.encode();
+        for line in metrics.lines() {
+            let Some((metric, labels, value)) = validator_metric_sample(line) else {
+                continue;
+            };
+            if !metric.ends_with(suffix)
+                || !required_labels
+                    .iter()
+                    .all(|(name, expected)| metric_label(labels, name) == Some(*expected))
+            {
+                continue;
+            }
+            let Some(id) = metric_label(labels, "id") else {
+                continue;
+            };
+            if !expected.contains(id) {
+                continue;
+            }
+            assert_eq!(
+                value.parse::<u64>().unwrap(),
+                expected_value,
+                "unexpected {suffix} value for {id}: {line}",
+            );
+            assert!(
+                observed.insert(id.to_string()),
+                "duplicate {suffix} for {id}"
+            );
+        }
+        assert_eq!(
+            observed, expected,
+            "missing {suffix} samples in metrics: {metrics}",
+        );
+    }
+
+    pub(crate) async fn assert_consensus_partition_missing(&self, epoch: u64) {
+        for signer in &self.private_keys {
+            let public_key = signer.public_key();
+            if self.registrations.contains_key(&public_key) {
+                continue;
+            }
+            let partition = format!("validator_{public_key}_consensus_consensus_{epoch}");
+            let result = self.context.scan(&partition).await;
+            assert!(
+                matches!(
+                    result,
+                    Err(RuntimeError::PartitionMissing(ref missing)) if missing == &partition
+                ),
+                "retired consensus partition {partition} still exists: {result:?}",
+            );
+        }
+    }
+
+    pub(crate) fn running_tasks(&self, prefix: &str) -> usize {
+        self.context
+            .encode()
+            .lines()
+            .filter_map(|line| {
+                if !line.starts_with("runtime_tasks_running{") {
+                    return None;
+                }
+                let name = line.split("name=\"").nth(1)?.split('"').next()?;
+                if !name.starts_with(prefix) {
+                    return None;
+                }
+                line.rsplit(' ').next()?.parse::<usize>().ok()
+            })
+            .sum()
+    }
+
     fn started_validator_ids(&self) -> HashSet<String> {
         self.private_keys
             .iter()
@@ -374,6 +459,27 @@ impl TestNetwork<'_> {
             .expect("validator not started")
             .submitter
             .clone()
+    }
+
+    pub(crate) async fn finalized_blocks(
+        &self,
+        index: usize,
+        heights: impl IntoIterator<Item = u64>,
+    ) -> Vec<nunchi_coins_chain::Block> {
+        let node = self
+            .nodes
+            .get(&self.participants[index])
+            .expect("validator not started");
+        let mut blocks = Vec::new();
+        for height in heights {
+            blocks.push(
+                node.marshal
+                    .get_block(commonware_consensus::types::Height::new(height))
+                    .await
+                    .expect("finalized block missing"),
+            );
+        }
+        blocks
     }
 
     /// Snapshot, in registration order, every started validator's committed coin ledger.
@@ -512,21 +618,23 @@ async fn start_validator(
         blocker: oracle.control(public_key.clone()),
         manager: oracle.manager(),
         partition_prefix: uid.clone(),
-        blocks_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
-        finalized_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
         signer: signer.clone(),
         dkg_storage_key: [9u8; 32],
         output,
         share: Some(share),
         peer_config,
+        epoch_length: cfg.epoch_length,
+        min_block_interval_ms: cfg.min_block_interval_ms,
         leader_timeout: cfg.leader_timeout,
         certification_timeout: cfg.certification_timeout,
         strategy: Sequential,
         state_sync,
+        prune_config: cfg.prune_config,
         max_block_transactions: MAX_BLOCK_TRANSACTIONS,
         pool_config: PoolConfig::default(),
         genesis: None,
         indexer: None,
+        indexer_spool_limits: Default::default(),
     };
 
     let validator_context = context.child("validator").with_attribute("id", &uid);
@@ -553,7 +661,8 @@ async fn start_validator(
         channels.probe,
         channels.state_sync,
     )
-    .await;
+    .await
+    .expect("valid prune config");
     engine.start(
         channels.pending,
         channels.recovered,

@@ -15,6 +15,7 @@ use commonware_cryptography::{
     ed25519, Signer,
 };
 use commonware_formatting::{from_hex, hex};
+use commonware_glue::stateful::PruneConfig;
 use commonware_p2p::{
     authenticated::discovery::{self, Network},
     Ingress, Manager,
@@ -31,12 +32,15 @@ use nunchi_dkg::{
     ContinueOnUpdate, EpochProvider, PeerConfig, Provider, StorageKey, MAX_SUPPORTED_MODE,
 };
 use nunchi_mempool::PoolConfig;
+use nunchi_chain::engine::{
+    default_state_prune_config, validate_state_prune_config, PruneConfigError,
+};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    num::{NonZeroU32, TryFromIntError},
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize, TryFromIntError},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -116,23 +120,49 @@ pub struct NodeConfig {
     pub rpc_address: SocketAddr,
     pub bootstrappers: Vec<BootstrapperConfig>,
     pub storage_dir: PathBuf,
+    /// Minimum timestamp delta between a block and its parent.
+    #[serde(default = "default_min_block_interval_ms")]
+    pub min_block_interval_ms: NonZeroU64,
     pub consensus: ConsensusConfig,
     pub networking: NetworkConfig,
     /// Enable one-time peer QMDB state sync for a fresh joining node.
     #[serde(default)]
     pub state_sync: bool,
+    /// Maximum number of marshal acknowledgements that may remain pending.
+    pub max_pending_acks: NonZeroUsize,
+    /// Finalized-height cadence for marshal and QMDB pruning maintenance.
+    pub maintenance_interval: NonZeroUsize,
+    /// Blocks retained by marshal beyond the mandatory acknowledgement window.
+    pub retained_marshal_blocks: usize,
+    /// Operation-history blocks retained by QMDB beyond the mandatory acknowledgement window.
+    pub retained_qmdb_blocks: usize,
 }
 
 impl NodeConfig {
     pub fn read(path: impl AsRef<Path>) -> Result<Self, Error> {
         let raw = fs::read_to_string(path).map_err(Error::Io)?;
-        toml::from_str(&raw).map_err(Error::TomlDeserialize)
+        let config: Self = toml::from_str(&raw).map_err(Error::TomlDeserialize)?;
+        config.prune_config()?;
+        Ok(config)
     }
 
     pub fn write(&self, path: impl AsRef<Path>) -> Result<(), Error> {
         let raw = toml::to_string_pretty(self).map_err(Error::TomlSerialize)?;
         fs::write(path, raw).map_err(Error::Io)
     }
+
+    pub fn prune_config(&self) -> Result<PruneConfig, PruneConfigError> {
+        validate_state_prune_config(PruneConfig {
+            max_pending_acks: self.max_pending_acks,
+            maintenance_interval: self.maintenance_interval,
+            retained_marshal_blocks: self.retained_marshal_blocks,
+            retained_qmdb_blocks: self.retained_qmdb_blocks,
+        })
+    }
+}
+
+fn default_min_block_interval_ms() -> NonZeroU64 {
+    nunchi_chain::DEFAULT_MIN_BLOCK_INTERVAL_MS
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -207,8 +237,12 @@ pub enum Error {
     TomlSerialize(#[from] toml::ser::Error),
     #[error("failed to parse toml: {0}")]
     TomlDeserialize(#[from] toml::de::Error),
+    #[error("invalid prune configuration: {0}")]
+    PruneConfig(#[from] PruneConfigError),
     #[error("engine stopped unexpectedly: {0}")]
     Engine(commonware_runtime::Error),
+    #[error("engine startup failed: {0}")]
+    EngineStartup(#[from] crate::engine::StartupError),
 }
 
 struct Material {
@@ -373,9 +407,14 @@ fn write_chain(
             rpc_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), rpc_port),
             bootstrappers,
             storage_dir: storage_dir.clone(),
+            min_block_interval_ms: default_min_block_interval_ms(),
             consensus: ConsensusConfig::default(),
             networking: NetworkConfig::default(),
             state_sync: false,
+            max_pending_acks: default_state_prune_config().max_pending_acks,
+            maintenance_interval: default_state_prune_config().maintenance_interval,
+            retained_marshal_blocks: default_state_prune_config().retained_marshal_blocks,
+            retained_qmdb_blocks: default_state_prune_config().retained_qmdb_blocks,
         };
         node_config.write(&config_path)?;
         nodes.push(ManifestNode {
@@ -480,6 +519,7 @@ async fn start_node(
     context: tokio::Context,
     config: NodeConfig,
 ) -> Result<(nunchi_rpc::ServerHandle, Handle<()>), Error> {
+    let prune_config = config.prune_config()?;
     let private_key = decode_unit::<ed25519::PrivateKey>(&config.private_key, "private_key")?;
     let dkg_storage_key = decode_storage_key(&config.dkg_storage_key)?;
     let public_key = private_key.public_key();
@@ -556,10 +596,12 @@ async fn start_node(
         output,
         share: Some(share),
         peer_config: config.peer_config.clone(),
+        min_block_interval_ms: config.min_block_interval_ms,
         leader_timeout: Duration::from_millis(config.consensus.leader_timeout_ms),
         certification_timeout: Duration::from_millis(config.consensus.certification_timeout_ms),
         strategy: Sequential,
         state_sync: config.state_sync,
+        prune_config,
         pool_config: PoolConfig::default(),
         bridge: bridge_mailbox,
         bridge_handle,
@@ -585,7 +627,7 @@ async fn start_node(
         probe,
         state_sync,
     )
-    .await;
+    .await?;
     let engine_handle = engine.start(
         pending,
         recovered,
@@ -657,6 +699,7 @@ fn storage_key(seed: u64, index: usize) -> StorageKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_utils::NZUsize;
     use std::collections::HashSet;
 
     #[test]
@@ -730,6 +773,14 @@ mod tests {
             let config = NodeConfig::read(&node.config_path).expect("read node config");
             assert_eq!(config.peer_config.participants.len(), 4);
             assert_eq!(config.bootstrappers.len(), 3);
+            assert_eq!(config.max_pending_acks, NZUsize!(16));
+            assert_eq!(config.maintenance_interval, NZUsize!(32));
+            assert_eq!(config.retained_marshal_blocks, 200);
+            assert_eq!(config.retained_qmdb_blocks, 200);
+            assert_eq!(
+                config.min_block_interval_ms,
+                nunchi_chain::DEFAULT_MIN_BLOCK_INTERVAL_MS
+            );
             assert!(!config
                 .bootstrappers
                 .iter()
@@ -753,6 +804,85 @@ mod tests {
         manifest.write(&manifest_path).expect("write manifest");
         let read = LocalBridgePairManifest::read(&manifest_path).expect("read manifest");
         assert_eq!(read.nodes.len(), manifest.nodes.len());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn prune_config_is_required_and_validated() {
+        let dir =
+            std::env::temp_dir().join(format!("bridge-chain-prune-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let manifest = generate_bridge_pair(LocalBridgePairConfig {
+            validators: 1,
+            base_port_a: 44_000,
+            base_rpc_port_a: 44_100,
+            base_port_b: 44_200,
+            base_rpc_port_b: 44_300,
+            base_data_dir: dir.clone(),
+            seed_a: 13,
+            seed_b: 14,
+        })
+        .expect("generate bridge pair");
+        let generated_path = &manifest.nodes[0].config_path;
+        let raw = fs::read_to_string(generated_path).expect("read generated config");
+
+        for field in [
+            "max_pending_acks",
+            "maintenance_interval",
+            "retained_marshal_blocks",
+            "retained_qmdb_blocks",
+        ] {
+            let path = dir.join(format!("missing-{field}.toml"));
+            let filtered = raw
+                .lines()
+                .filter(|line| !line.starts_with(&format!("{field} = ")))
+                .collect::<Vec<_>>()
+                .join("\n");
+            fs::write(&path, filtered).expect("write incomplete config");
+            assert!(matches!(
+                NodeConfig::read(path),
+                Err(Error::TomlDeserialize(_))
+            ));
+        }
+
+        let mut asymmetric = NodeConfig::read(generated_path).expect("read generated config");
+        asymmetric.max_pending_acks = NZUsize!(1);
+        asymmetric.maintenance_interval = NZUsize!(3);
+        asymmetric.retained_marshal_blocks = 5;
+        asymmetric.retained_qmdb_blocks = 1;
+        let path = dir.join("asymmetric.toml");
+        asymmetric.write(&path).expect("write asymmetric config");
+        assert_eq!(
+            NodeConfig::read(&path)
+                .expect("read asymmetric config")
+                .prune_config()
+                .unwrap(),
+            asymmetric.prune_config().unwrap()
+        );
+
+        asymmetric.retained_qmdb_blocks = 6;
+        asymmetric.write(&path).expect("write unordered config");
+        assert!(matches!(
+            NodeConfig::read(&path),
+            Err(Error::PruneConfig(_))
+        ));
+
+        asymmetric.max_pending_acks = NZUsize!(1);
+        asymmetric.retained_marshal_blocks = usize::MAX - 1;
+        asymmetric.retained_qmdb_blocks = 0;
+        asymmetric.write(&path).expect("write overflowing window");
+        assert!(matches!(
+            NodeConfig::read(&path),
+            Err(Error::PruneConfig(_))
+        ));
+
+        let zero = raw.replace("maintenance_interval = 32", "maintenance_interval = 0");
+        fs::write(&path, zero).expect("write zero config");
+        assert!(matches!(
+            NodeConfig::read(&path),
+            Err(Error::TomlDeserialize(_))
+        ));
 
         let _ = fs::remove_dir_all(dir);
     }

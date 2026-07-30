@@ -6,9 +6,11 @@ use common::network::{
 };
 use commonware_cryptography::Signer as _;
 use commonware_cryptography::{Hasher, Sha256};
+use commonware_glue::stateful::PruneConfig;
 use commonware_macros::{select, test_traced};
 use commonware_p2p::simulated::Link;
-use commonware_runtime::{deterministic, Clock, Runner as _};
+use commonware_runtime::{deterministic, Clock, Runner as _, Spawner as _, Supervisor as _};
+use commonware_utils::{NZUsize, NZU64};
 use nunchi_authority::{
     proposal_id, AuthorityOperation, MultisigPolicy, RegistryChange,
     Transaction as AuthorityTransaction,
@@ -81,6 +83,45 @@ fn reaches_height_with_reliable_links() {
 }
 
 #[test_traced]
+fn blocks_respect_configured_minimum_timestamp_interval() {
+    with_large_stack(|| {
+        let executor = deterministic::Runner::timed(Duration::from_secs(60));
+        executor.start(|mut context| async move {
+            let min_block_interval_ms = NZU64!(500);
+            let cfg = ValidatorConfig {
+                min_block_interval_ms,
+                ..ValidatorConfig::default()
+            };
+            let mut network = TestNetworkBuilder::new(VALIDATORS)
+                .with_initial_link(reliable_link())
+                .with_validator_config(cfg)
+                .build(&mut context)
+                .await;
+            network.start_all().await;
+            network.run_until_height(8).await;
+
+            // Move wall clock ahead so later proposals can be produced in rapid succession.
+            network.context().sleep(Duration::from_secs(5)).await;
+            network.run_until_height(14).await;
+
+            let blocks = network.finalized_blocks(0, 1..=14).await;
+            assert!(
+                blocks.iter().all(|block| block.transactions.is_empty()),
+                "interval coverage should include empty blocks"
+            );
+            for adjacent in blocks.windows(2) {
+                assert!(
+                    adjacent[1].timestamp - adjacent[0].timestamp >= min_block_interval_ms.get(),
+                    "heights {} and {} violate the configured interval",
+                    adjacent[0].height,
+                    adjacent[1].height,
+                );
+            }
+        });
+    });
+}
+
+#[test_traced]
 fn reaches_height_with_lossy_links() {
     with_large_stack(|| {
         let link = lossy_link();
@@ -105,12 +146,92 @@ fn reaches_height_100() {
 }
 
 #[test_traced]
+fn configurable_pruning_policy_remains_live() {
+    with_large_stack(|| {
+        let executor = deterministic::Runner::timed(Duration::from_secs(60));
+        executor.start(|mut context| async move {
+            let cfg = ValidatorConfig {
+                prune_config: PruneConfig {
+                    max_pending_acks: NZUsize!(1),
+                    maintenance_interval: NZUsize!(3),
+                    retained_marshal_blocks: 5,
+                    retained_qmdb_blocks: 1,
+                },
+                ..ValidatorConfig::default()
+            };
+            let mut network = TestNetworkBuilder::new(VALIDATORS)
+                .with_initial_link(reliable_link())
+                .with_validator_config(cfg)
+                .build(&mut context)
+                .await;
+            network.start_all().await;
+            network.run_until_height(15).await;
+        });
+    });
+}
+
+#[test_traced]
+fn crosses_epoch_boundary_and_reclaims_retired_partition() {
+    with_large_stack(|| {
+        let executor = deterministic::Runner::timed(Duration::from_secs(60));
+        executor.start(|mut context| async move {
+            let cfg = ValidatorConfig {
+                epoch_length: NZU64!(20),
+                ..ValidatorConfig::default()
+            };
+            let mut network = TestNetworkBuilder::new(VALIDATORS)
+                .with_initial_link(reliable_link())
+                .with_validator_config(cfg)
+                .build(&mut context)
+                .await;
+            network.start_all().await;
+
+            let validator_task_prefix = "validator";
+            assert!(network.running_tasks(validator_task_prefix) > 0);
+
+            network.run_until_height(25).await;
+
+            network.assert_validator_metric("engine_orchestrator_latest_epoch", &[], 1);
+            network.assert_validator_metric(
+                "engine_orchestrator_consensus_partitions_active",
+                &[],
+                1,
+            );
+            network.assert_validator_metric(
+                "engine_orchestrator_consensus_partition_cleanup_watermark",
+                &[],
+                1,
+            );
+            network.assert_validator_metric(
+                "engine_orchestrator_consensus_partition_cleanup_total",
+                &[("status", "removed")],
+                1,
+            );
+            network.assert_consensus_partition_missing(0).await;
+            assert!(network.running_tasks(validator_task_prefix) > 0);
+
+            let shutdown = network.context().child("shutdown");
+            shutdown
+                .stop(0, Some(Duration::from_secs(10)))
+                .await
+                .expect("validator tasks should stop cleanly");
+            assert_eq!(network.running_tasks(validator_task_prefix), 0);
+        });
+    });
+}
+
+#[test_traced]
 fn state_syncs_late_validator() {
     with_large_stack(|| {
         let executor = deterministic::Runner::timed(Duration::from_secs(60));
         executor.start(|mut context| async move {
+            let cfg = ValidatorConfig {
+                epoch_length: NZU64!(20),
+                ..ValidatorConfig::default()
+            };
             let mut network = TestNetworkBuilder::new(5)
                 .without_initial_links()
+                .with_validator_config(cfg)
                 .build(&mut context)
                 .await;
 
@@ -122,7 +243,11 @@ fn state_syncs_late_validator() {
             for index in 1..5 {
                 network.start_validator(index).await;
             }
-            network.run_until_height(10).await;
+            // Select a state-sync anchor inside epoch 1. The joining validator
+            // has no marshal archive, so its orchestrator must use the
+            // certificate-verified in-epoch finalization rather than infer an
+            // epoch-0 boundary digest from the QMDB anchor.
+            network.run_until_height(25).await;
 
             network
                 .link_where(link, |from, to| {
@@ -130,7 +255,7 @@ fn state_syncs_late_validator() {
                 })
                 .await;
             network.start_validator_with_state_sync(0).await;
-            network.run_until_height(20).await;
+            network.run_until_height(30).await;
         });
     });
 }
@@ -154,6 +279,7 @@ fn recovers_unclean_shutdown() {
                 let cfg = ValidatorConfig {
                     leader_timeout: Duration::from_millis(250),
                     certification_timeout: Duration::from_millis(500),
+                    ..ValidatorConfig::default()
                 };
 
                 let wait =

@@ -1,6 +1,7 @@
 //! Coins-chain node-facing handles and query adapter.
 
-use crate::{application::Application, Transaction};
+use crate::{application::Application, Block, Scheme, Transaction};
+use commonware_consensus::marshal::{core::Mailbox as MarshalMailbox, standard::Standard};
 use commonware_cryptography::sha256::Digest;
 use commonware_glue::stateful::Mailbox as StatefulMailbox;
 use commonware_runtime::{Clock, Metrics, Spawner};
@@ -17,28 +18,31 @@ pub use nunchi_chain::SharedAppliedHeight;
 #[derive(Clone)]
 pub struct NodeHandle<E>
 where
-    E: Context + Spawner + Metrics + Clock + rand::Rng,
+    E: Context + Spawner + Metrics + Clock + rand::Rng + rand::CryptoRng,
 {
     pub submitter: MempoolHandle<Transaction>,
     pub clob: ClobMailbox,
     pub stateful: StatefulMailbox<E, Application>,
+    pub marshal: MarshalMailbox<Scheme, Standard<Block>>,
     pub applied_height: SharedAppliedHeight,
 }
 
 impl<E> NodeHandle<E>
 where
-    E: Context + Spawner + Metrics + Clock + rand::Rng,
+    E: Context + Spawner + Metrics + Clock + rand::Rng + rand::CryptoRng,
 {
     pub fn new(
         submitter: MempoolHandle<Transaction>,
         clob: ClobMailbox,
         stateful: StatefulMailbox<E, Application>,
+        marshal: MarshalMailbox<Scheme, Standard<Block>>,
         applied_height: SharedAppliedHeight,
     ) -> Self {
         Self {
             submitter,
             clob,
             stateful,
+            marshal,
             applied_height,
         }
     }
@@ -53,14 +57,14 @@ where
 /// Read-only coin queries answered from the stateful actor's committed databases.
 pub struct StatefulQuery<E>
 where
-    E: Context + Spawner + Metrics + Clock + rand::Rng,
+    E: Context + Spawner + Metrics + Clock + rand::Rng + rand::CryptoRng,
 {
     stateful: StatefulMailbox<E, Application>,
 }
 
 impl<E> Clone for StatefulQuery<E>
 where
-    E: Context + Spawner + Metrics + Clock + rand::Rng,
+    E: Context + Spawner + Metrics + Clock + rand::Rng + rand::CryptoRng,
 {
     fn clone(&self) -> Self {
         Self {
@@ -71,7 +75,7 @@ where
 
 impl<E> StatefulQuery<E>
 where
-    E: Context + Spawner + Metrics + Clock + rand::Rng,
+    E: Context + Spawner + Metrics + Clock + rand::Rng + rand::CryptoRng,
 {
     pub fn new(stateful: StatefulMailbox<E, Application>) -> Self {
         Self { stateful }
@@ -85,7 +89,15 @@ where
 #[async_trait]
 impl<E> CoinQuery for StatefulQuery<E>
 where
-    E: Context + Spawner + Metrics + Clock + rand::Rng + Send + Sync + 'static,
+    E: Context
+        + Spawner
+        + Metrics
+        + Clock
+        + rand::Rng
+        + rand::CryptoRng
+        + Send
+        + Sync
+        + 'static,
 {
     async fn nonce(&self, account: Address) -> Result<u64, LedgerError> {
         self.ledger().await.nonce(&account).await

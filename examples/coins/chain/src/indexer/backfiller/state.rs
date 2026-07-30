@@ -5,10 +5,10 @@ use crate::{
         },
         IndexerMetrics,
     },
-    Block,
+    Block, Finalized,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{self, FixedSize, Read, Write};
+use commonware_codec::{self, EncodeSize, FixedSize, Read, Write};
 use commonware_cryptography::{sha256::Digest, Digestible};
 use commonware_utils::{sync::Mutex, PrioritySet};
 use std::{collections::BTreeMap, sync::Arc};
@@ -19,30 +19,84 @@ pub enum Decision {
     Proceed,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Entry {
+pub struct Candidate {
     pub height: u64,
     pub digest: Digest,
 }
 
-impl FixedSize for Entry {
-    const SIZE: usize = u64::SIZE + Digest::SIZE;
+const ENTRY_VERSION: u8 = 1;
+
+#[derive(Clone)]
+pub struct Entry {
+    pub version: u8,
+    pub enqueued_at_millis: u64,
+    pub encoded_len: u64,
+    pub finalized: Finalized,
+}
+
+impl Entry {
+    pub fn new(enqueued_at_millis: u64, finalized: Finalized) -> Self {
+        let mut entry = Self {
+            version: ENTRY_VERSION,
+            enqueued_at_millis,
+            encoded_len: 0,
+            finalized,
+        };
+        entry.encoded_len = entry.encode_size() as u64;
+        entry
+    }
+
+    pub fn height(&self) -> u64 {
+        self.finalized.block.height.get()
+    }
+
+    pub fn digest(&self) -> Digest {
+        self.finalized.block.digest()
+    }
 }
 
 impl Write for Entry {
     fn write(&self, buf: &mut impl BufMut) {
-        self.height.write(buf);
-        self.digest.write(buf);
+        self.version.write(buf);
+        self.enqueued_at_millis.write(buf);
+        self.encoded_len.write(buf);
+        self.finalized.write(buf);
     }
 }
 
 impl Read for Entry {
-    type Cfg = ();
+    type Cfg = <Finalized as Read>::Cfg;
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
-        let height = u64::read_cfg(buf, &())?;
-        let digest = Digest::read_cfg(buf, &())?;
-        Ok(Self { height, digest })
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let version = u8::read_cfg(buf, &())?;
+        if version != ENTRY_VERSION {
+            return Err(commonware_codec::Error::Invalid(
+                "indexer spool entry",
+                "unsupported version",
+            ));
+        }
+        let enqueued_at_millis = u64::read_cfg(buf, &())?;
+        let encoded_len = u64::read_cfg(buf, &())?;
+        let finalized = Finalized::read_cfg(buf, cfg)?;
+        let entry = Self {
+            version,
+            enqueued_at_millis,
+            encoded_len,
+            finalized,
+        };
+        if entry.encode_size() as u64 != encoded_len {
+            return Err(commonware_codec::Error::Invalid(
+                "indexer spool entry",
+                "encoded length mismatch",
+            ));
+        }
+        Ok(entry)
+    }
+}
+
+impl EncodeSize for Entry {
+    fn encode_size(&self) -> usize {
+        u8::SIZE + u64::SIZE + u64::SIZE + self.finalized.encode_size()
     }
 }
 
@@ -55,6 +109,8 @@ pub struct State {
     cached_block_estimated_bytes: u64,
     certificate_uploads: BTreeMap<Digest, usize>,
     certificate_upload_refs: usize,
+    queued: BTreeMap<Digest, (u64, u64, u64, u64)>,
+    queued_bytes: u64,
     metrics: Option<IndexerMetrics>,
 }
 
@@ -74,6 +130,8 @@ impl State {
             cached_block_estimated_bytes: 0,
             certificate_uploads: BTreeMap::new(),
             certificate_upload_refs: 0,
+            queued: BTreeMap::new(),
+            queued_bytes: 0,
             metrics: None,
         }
     }
@@ -89,8 +147,8 @@ impl State {
         self.uploaded.contains(digest)
     }
 
-    pub fn record(&mut self, block: &Block) -> Option<Entry> {
-        let entry = Entry {
+    pub fn record(&mut self, block: &Block) -> Option<Candidate> {
+        let entry = Candidate {
             height: block.height.get(),
             digest: block.digest(),
         };
@@ -99,7 +157,7 @@ impl State {
             self.sync_metrics();
             return None;
         }
-        if self.is_uploaded(&entry.digest) {
+        if self.is_uploaded(&entry.digest) || self.queued(&entry.digest) {
             self.sync_metrics();
             return None;
         }
@@ -108,12 +166,74 @@ impl State {
         Some(entry)
     }
 
+    pub fn queued(&self, digest: &Digest) -> bool {
+        self.queued.contains_key(digest)
+    }
+
+    pub fn mark_queued(&mut self, position: u64, entry: &Entry) {
+        if let Some((_, _, old_bytes, _)) =
+            self.queued
+                .insert(
+                    entry.digest(),
+                    (
+                        position,
+                        entry.height(),
+                        entry.encoded_len,
+                        entry.enqueued_at_millis,
+                    ),
+                )
+        {
+            self.queued_bytes = self.queued_bytes.saturating_sub(old_bytes);
+        }
+        self.queued_bytes = self.queued_bytes.saturating_add(entry.encoded_len);
+        self.sync_metrics();
+    }
+
+    pub fn recover_queued(&mut self, position: u64, entry: &Entry) {
+        self.observe_finalization(entry.height());
+        self.mark_queued(position, entry);
+    }
+
+    pub fn finish_queued(&mut self, digest: &Digest) {
+        if let Some((_, _, bytes, _)) = self.queued.remove(digest) {
+            self.queued_bytes = self.queued_bytes.saturating_sub(bytes);
+        }
+        self.sync_metrics();
+    }
+
+    pub fn spool_usage(&self) -> (u64, u64) {
+        (self.queued.len() as u64, self.queued_bytes)
+    }
+
+    pub fn oldest_queued(&self) -> Option<(Digest, u64, u64, u64, u64)> {
+        self.queued
+            .iter()
+            .min_by_key(|(_, (position, _, _, _))| *position)
+            .map(|(digest, (position, height, bytes, enqueued_at))| {
+                (*digest, *position, *height, *bytes, *enqueued_at)
+            })
+    }
+
+    pub fn expire_through(&mut self, position: u64) -> Vec<(Digest, u64, u64)> {
+        let expired: Vec<_> = self
+            .queued
+            .iter()
+            .filter(|(_, (queued_position, _, _, _))| *queued_position <= position)
+            .map(|(digest, (_, height, bytes, _))| (*digest, *height, *bytes))
+            .collect();
+        for (digest, _, _) in &expired {
+            self.finish_queued(digest);
+        }
+        expired
+    }
+
     pub fn advance_queue_floor(&mut self, height: u64) {
         self.acked_through = self.acked_through.max(height);
         self.prune();
         self.sync_metrics();
     }
 
+    #[cfg(test)]
     pub fn restart_above(&mut self, height: u64) {
         self.restart_watermark = self.restart_watermark.max(height);
         let pruned = self
@@ -145,6 +265,7 @@ impl State {
         self.sync_metrics();
     }
 
+    #[cfg(test)]
     pub fn cached_block(&self, digest: &Digest) -> Option<Block> {
         self.cached_blocks
             .get(digest)
@@ -279,6 +400,20 @@ impl State {
                 uploaded_digests: self.uploaded.len(),
                 latest_finalized_height: self.latest_finalized,
                 acked_through_height: self.acked_through,
+                spool_entries: self.queued.len(),
+                spool_logical_bytes: self.queued_bytes,
+                spool_oldest_height: self
+                    .queued
+                    .values()
+                    .map(|(_, height, _, _)| *height)
+                    .min()
+                    .unwrap_or(0),
+                spool_oldest_enqueued_at_millis: self
+                    .queued
+                    .values()
+                    .map(|(_, _, _, enqueued_at)| *enqueued_at)
+                    .min()
+                    .unwrap_or(0),
             });
         }
     }
@@ -290,7 +425,6 @@ pub type SharedState = Arc<Mutex<State>>;
 mod tests {
     use super::*;
     use crate::{StateCommitment, Transaction, EPOCH};
-    use commonware_codec::{DecodeExt, Encode};
     use commonware_consensus::types::{Height, Round, View};
     use commonware_cryptography::{ed25519, Hasher, Sha256, Signer};
     use commonware_runtime::{deterministic, Metrics as _, Runner as _, Supervisor as _};
@@ -323,20 +457,6 @@ mod tests {
             Default::default(),
             state(height),
         )
-    }
-
-    #[test]
-    fn entry_codec_roundtrips() {
-        let entry = Entry {
-            height: 7,
-            digest: Sha256::hash(b"block"),
-        };
-
-        let encoded = entry.encode();
-        let decoded = Entry::decode(encoded).expect("decode entry");
-
-        assert_eq!(decoded.height, entry.height);
-        assert_eq!(decoded.digest, entry.digest);
     }
 
     #[test]

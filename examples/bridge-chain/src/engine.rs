@@ -28,7 +28,8 @@ use commonware_cryptography::{
 use commonware_glue::stateful::{
     db::ManagedDb as _,
     probe::{Config as ProbeConfig, Probe},
-    Config as StatefulConfig, Mailbox as StatefulMailbox, Stateful as StatefulActor, SyncPlan,
+    Config as StatefulConfig, Mailbox as StatefulMailbox, PruneConfig, Stateful as StatefulActor,
+    SyncPlan,
 };
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
 use commonware_parallel::Strategy;
@@ -52,6 +53,7 @@ use nunchi_mempool::{Mempool, PoolConfig};
 use rand::{CryptoRng, Rng};
 use std::{
     marker::PhantomData,
+    num::NonZeroU64,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -71,14 +73,31 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
     pub output: Output<MinSig, PublicKey>,
     pub share: Option<group::Share>,
     pub peer_config: PeerConfig<PublicKey>,
+    pub min_block_interval_ms: NonZeroU64,
     pub leader_timeout: Duration,
     pub certification_timeout: Duration,
     pub strategy: S,
     /// Discover a finalized floor and perform peer QMDB state sync on a fresh database.
     pub state_sync: bool,
+    pub prune_config: PruneConfig,
     pub pool_config: PoolConfig,
     pub bridge: BridgeMailbox,
     pub bridge_handle: Handle<()>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum StartupError {
+    #[error("invalid prune configuration: {0}")]
+    PruneConfig(#[from] PruneConfigError),
+    #[error("bridge-chain does not authenticate DKG progress in QMDB; state_sync = true is unsupported")]
+    UnsupportedDkgStateSync,
+}
+
+pub fn validate_state_sync(enabled: bool) -> Result<(), StartupError> {
+    if enabled {
+        return Err(StartupError::UnsupportedDkgStateSync);
+    }
+    Ok(())
 }
 
 type DkgActor<E, P> = nunchi_chain::DkgActor<E, P, NoopTransaction, BridgeExtension>;
@@ -168,7 +187,9 @@ where
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
-    ) -> (Self, NodeHandle<E>) {
+    ) -> Result<(Self, NodeHandle<E>), StartupError> {
+        let prune_config = validate_state_prune_config(config.prune_config)?;
+        validate_state_sync(config.state_sync)?;
         let (mempool, submitter) = Mempool::<NoopTransaction>::new(config.pool_config.clone());
         let mempool = mempool.start(context.child("mempool"));
 
@@ -346,6 +367,7 @@ where
             applied_height.clone(),
             empty_state,
             commonware_cryptography::Sha256::hash(&config.namespace),
+            config.min_block_interval_ms,
         );
         let genesis = app.genesis_block();
         let genesis_digest = genesis.digest();
@@ -412,7 +434,7 @@ where
                 value_write_buffer: WRITE_BUFFER,
                 block_codec_config,
                 max_repair: MAX_REPAIR,
-                max_pending_acks: MAX_PENDING_ACKS,
+                max_pending_acks: prune_config.max_pending_acks,
                 strategy: config.strategy.clone(),
             },
         )
@@ -430,7 +452,7 @@ where
                 plan,
                 resolvers: state_sync_mailbox,
                 sync_config: state_sync_config(),
-                prune_config: Some(state_prune_config()),
+                prune_config: Some(prune_config),
             },
         );
         let node_handle = NodeHandle::new(
@@ -469,6 +491,8 @@ where
                 epoch_length: BLOCKS_PER_EPOCH,
                 genesis_digest,
                 recovered_floor,
+                startup_finalization: None,
+                startup_floor: None,
                 _phantom: PhantomData,
             },
         );
@@ -489,7 +513,7 @@ where
             stateful,
             stateful_mailbox,
         };
-        (engine, node_handle)
+        Ok((engine, node_handle))
     }
 
     #[allow(clippy::too_many_arguments)]

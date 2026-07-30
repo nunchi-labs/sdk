@@ -1,17 +1,14 @@
-use super::{Decision, Entry, SharedState};
+use super::{
+    producer::{Admission, AdmissionReceiver},
+    Decision, Entry, SharedState,
+};
 use crate::indexer::{
     metrics::{
-        estimated_finalized_bytes, BackfillDecision, BackfillPhase, BackfillResetReason,
-        BackfillUploadGuard, BackfillWaitReason, BlockMetricSource, QueueReadSource, QueueStatus,
-        SharedCacheSource,
+        estimated_finalized_bytes, BackfillDecision, BackfillPhase, BackfillWaitReason,
+        BlockMetricSource, ProducerStatus, QueueReadSource, QueueStatus,
     },
-    Client, IndexerMetrics,
+    Client, IndexerMetrics, SpoolLimits,
 };
-use crate::{Block, Finalized, Scheme};
-use commonware_consensus::marshal::{
-    core::Mailbox as MarshalMailbox, standard::Standard, Identifier,
-};
-use commonware_consensus::types::Height;
 use commonware_cryptography::sha256::Digest;
 use commonware_macros::select_loop;
 use commonware_runtime::{
@@ -22,7 +19,7 @@ use commonware_storage::queue;
 use commonware_utils::futures::{OptionFuture, Pool};
 use std::{
     num::NonZeroUsize,
-    time::{Duration, Instant},
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 use tracing::{debug, warn};
 
@@ -45,47 +42,39 @@ enum Completion {
     Skipped {
         position: u64,
         height: u64,
-    },
-    Stale {
-        reason: BackfillResetReason,
-        first_height: u64,
-        first_digest: Digest,
-        attempts: u64,
-        elapsed: Duration,
+        digest: Digest,
     },
 }
 
 pub(crate) struct Config {
     pub(crate) max_active: NonZeroUsize,
     pub(crate) retry: Duration,
-    pub(crate) missing_finalization_grace: Duration,
-    pub(crate) mismatched_finalization_grace: Duration,
+    pub(crate) spool_limits: SpoolLimits,
 }
 
 pub struct Consumer<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> {
     context: ContextCell<E>,
     client: C,
-    marshal: MarshalMailbox<Scheme, Standard<Block>>,
     metrics: IndexerMetrics,
     upload_results: status::Counter,
     uploads: SharedState,
     writer: queue::Writer<E, Entry>,
     reader: queue::Reader<E, Entry>,
+    admission: AdmissionReceiver,
     active: Pool<Completion>,
     max_active: NonZeroUsize,
     retry: Duration,
-    missing_finalization_grace: Duration,
-    mismatched_finalization_grace: Duration,
+    spool_limits: SpoolLimits,
 }
 
 impl<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
     pub fn new(
         context: E,
         client: C,
-        marshal: MarshalMailbox<Scheme, Standard<Block>>,
         metrics: IndexerMetrics,
         uploads: SharedState,
         backfiller: (queue::Writer<E, Entry>, queue::Reader<E, Entry>),
+        admission: AdmissionReceiver,
         config: Config,
     ) -> Self {
         let upload_results = context.register(
@@ -96,25 +85,23 @@ impl<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> Consumer<
         let Config {
             max_active,
             retry,
-            missing_finalization_grace,
-            mismatched_finalization_grace,
+            spool_limits,
         } = config;
         metrics.backfill_configured(max_active.get());
         let (writer, reader) = backfiller;
         Self {
             context: ContextCell::new(context),
             client,
-            marshal,
             metrics,
             upload_results,
             uploads,
             writer,
             reader,
+            admission,
             active: Pool::default(),
             max_active,
             retry,
-            missing_finalization_grace,
-            mismatched_finalization_grace,
+            spool_limits,
         }
     }
 
@@ -127,24 +114,23 @@ impl<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> Consumer<
             self.context,
             on_start => {
                 self.fill_slots().await;
-                if self.active.is_empty() {
-                    let item = Self::recv_queue(&mut self.reader, self.metrics.clone()).await;
-                    let Some((position, entry)) = item else {
-                        warn!("consumer queue closed");
-                        break;
-                    };
-                    self.start_upload(position, entry).await;
-                    continue;
-                }
                 let item = OptionFuture::from(
                     (self.active.len() < self.max_active.get()).then(|| {
                         Self::recv_queue(&mut self.reader, self.metrics.clone())
                     }),
                 );
+                let admission = self.admission.recv();
             },
             on_stopped => {},
             completion = self.active.next_completed() => {
                 self.complete(completion).await;
+            },
+            request = admission => {
+                let Some(request) = request else {
+                    warn!("indexer spool admission coordinator closed");
+                    break;
+                };
+                self.admit(request).await;
             },
             item = item => {
                 match item {
@@ -158,6 +144,87 @@ impl<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> Consumer<
                 }
             },
         }
+    }
+
+    async fn admit(&mut self, admission: Admission) {
+        let Admission { entry, response } = admission;
+        loop {
+            let now_millis: u64 = self
+                .context
+                .current()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX);
+            let next = {
+                let uploads = self.uploads.lock();
+                let (entries, bytes) = uploads.spool_usage();
+                uploads.oldest_queued().and_then(
+                    |(digest, position, height, old_bytes, enqueued_at)| {
+                        let age = Duration::from_millis(
+                            now_millis.saturating_sub(enqueued_at),
+                        );
+                        let status = if age >= self.spool_limits.max_age {
+                            Some(ProducerStatus::ExpiredAge)
+                        } else if entries >= self.spool_limits.max_entries {
+                            Some(ProducerStatus::ExpiredEntries)
+                        } else if bytes.saturating_add(entry.encoded_len)
+                            > self.spool_limits.max_bytes
+                        {
+                            Some(ProducerStatus::ExpiredBytes)
+                        } else {
+                            None
+                        };
+                        status.map(|status| {
+                            (digest, position, height, old_bytes, age, status)
+                        })
+                    },
+                )
+            };
+            let Some((digest, position, height, encoded_len, age, status)) = next else {
+                break;
+            };
+
+            // Advancing the floor invalidates positions held by upload tasks. Cancel all of them
+            // and replay the still-live suffix so a stale completion cannot be applied twice.
+            self.active.cancel_all();
+            self.reader
+                .ack_up_to(position.saturating_add(1))
+                .await
+                .unwrap_or_else(|error| panic!("failed to expire indexer spool floor: {error:?}"));
+            let sync_started = Instant::now();
+            self.writer.sync().await.unwrap_or_else(|error| {
+                panic!("failed to durably sync expired indexer spool floor: {error:?}")
+            });
+            self.metrics
+                .queue_synced(QueueStatus::Success, sync_started.elapsed());
+            self.reader.reset().await;
+            let expired = self.uploads.lock().expire_through(position);
+            for (_, _, _) in &expired {
+                self.metrics.producer_recorded(status, Duration::ZERO);
+            }
+            warn!(
+                height,
+                ?digest,
+                encoded_len,
+                ?age,
+                ?status,
+                expired_entries = expired.len(),
+                "terminally expired oldest finalized indexer payload before admission"
+            );
+        }
+
+        self.metrics.queue_entry(entry.height());
+        let position = self.writer.enqueue(entry.clone()).await.unwrap_or_else(|error| {
+            self.metrics.queue_enqueued(QueueStatus::Failure);
+            panic!("failed to enqueue finalized indexer payload: {error:?}")
+        });
+        self.uploads.lock().mark_queued(position, &entry);
+        self.metrics.queue_enqueued(QueueStatus::Success);
+        response
+            .send(())
+            .expect("indexer spool producer stopped before admission completed");
     }
 
     async fn fill_slots(&mut self) {
@@ -177,7 +244,7 @@ impl<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> Consumer<
         match reader.recv().await {
             Ok(Some((position, entry))) => {
                 metrics.queue_read(QueueReadSource::Recv, QueueStatus::Success);
-                metrics.queue_entry(entry.height);
+                metrics.queue_entry(entry.height());
                 Some((position, entry))
             }
             Ok(None) => {
@@ -198,7 +265,7 @@ impl<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> Consumer<
         match reader.try_recv().await {
             Ok(Some((position, entry))) => {
                 metrics.queue_read(QueueReadSource::TryRecv, QueueStatus::Success);
-                metrics.queue_entry(entry.height);
+                metrics.queue_entry(entry.height());
                 Some((position, entry))
             }
             Ok(None) => {
@@ -213,7 +280,26 @@ impl<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> Consumer<
     }
 
     async fn start_upload(&mut self, position: u64, entry: Entry) {
-        let Entry { height, digest } = entry;
+        let height = entry.height();
+        let digest = entry.digest();
+        let enqueued_at_millis = entry.enqueued_at_millis;
+        let finalized = entry.finalized;
+        if self.payload_age(enqueued_at_millis) >= self.spool_limits.max_age {
+            self.metrics
+                .producer_recorded(ProducerStatus::ExpiredAge, Duration::ZERO);
+            warn!(
+                height,
+                ?digest,
+                "terminally expiring finalized indexer payload at configured age bound"
+            );
+            self.complete(Completion::Skipped {
+                position,
+                height,
+                digest,
+            })
+            .await;
+            return;
+        }
         let decision = self.uploads.lock().should_upload(&digest);
         self.metrics
             .backfill_decision((&decision).into(), BackfillPhase::Start);
@@ -222,7 +308,11 @@ impl<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> Consumer<
                 let mut upload = self.metrics.start_backfill_upload();
                 upload.skipped();
             }
-            self.complete(Completion::Skipped { position, height })
+            self.complete(Completion::Skipped {
+                position,
+                height,
+                digest,
+            })
                 .await;
             debug!(?digest, "consumer skipping already-uploaded block");
             return;
@@ -235,82 +325,35 @@ impl<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> Consumer<
                 .with_attribute("digest", digest)
                 .with_attribute("height", height);
             let client = self.client.clone();
-            let marshal = self.marshal.clone();
             let metrics = self.metrics.clone();
             let upload_results = self.upload_results.clone();
             let uploads = self.uploads.clone();
             let retry = self.retry;
-            let missing_finalization_grace = self.missing_finalization_grace;
-            let mismatched_finalization_grace = self.mismatched_finalization_grace;
+            let max_age = self.spool_limits.max_age;
             async move {
                 let mut upload = metrics.start_backfill_upload();
-                let Some(block) =
-                    Self::wait_for_uploadable_block(
-                        &context, &marshal, &metrics, &uploads, &mut upload, digest, retry,
-                    )
-                    .await
-                else {
-                    upload.skipped();
-                    debug!(?digest, "skipping previously uploaded block");
-                    return Completion::Skipped { position, height };
-                };
-
-                let mut proof_failure = ProofFailure::default();
-                let finalized = loop {
-                    let Some(proof) = marshal.get_finalization(Height::new(height)).await else {
-                        if let Some(stale) = proof_failure.observe(
-                            &context,
-                            BackfillResetReason::MissingFinalization,
-                            missing_finalization_grace,
-                            height,
-                            digest,
-                        ) {
-                            upload.abandoned();
-                            return stale;
-                        }
-                        warn!(
-                            height,
-                            ?digest,
-                            "consumer could not find finalization, retrying"
-                        );
-                        Self::wait(
-                            &context,
-                            &metrics,
-                            BackfillWaitReason::MissingFinalization,
-                            retry,
-                        )
-                        .await;
-                        continue;
-                    };
-                    if proof.proposal.payload != digest {
-                        if let Some(stale) = proof_failure.observe(
-                            &context,
-                            BackfillResetReason::MismatchedFinalization,
-                            mismatched_finalization_grace,
-                            height,
-                            digest,
-                        ) {
-                            upload.abandoned();
-                            return stale;
-                        }
-                        warn!(
-                            height,
-                            ?digest,
-                            "consumer found mismatched finalization, retrying"
-                        );
-                        Self::wait(
-                            &context,
-                            &metrics,
-                            BackfillWaitReason::MismatchedFinalization,
-                            retry,
-                        )
-                        .await;
-                        continue;
-                    }
-                    break Finalized::new(proof, block.clone());
-                };
+                metrics.observe_block(BlockMetricSource::ConsumerCached, &finalized.block);
+                upload.hold_block(&finalized.block);
 
                 loop {
+                    let now_millis: u64 = context
+                        .current()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis()
+                        .try_into()
+                        .unwrap_or(u64::MAX);
+                    // Backward wall-clock movement produces age zero until the clock catches up.
+                    let age = Duration::from_millis(now_millis.saturating_sub(enqueued_at_millis));
+                    if age >= max_age {
+                        metrics.producer_recorded(ProducerStatus::ExpiredAge, Duration::ZERO);
+                        warn!(height, ?digest, ?age, "terminally expiring active finalized indexer upload at configured age bound");
+                        return Completion::Skipped {
+                            position,
+                            height,
+                            digest,
+                        };
+                    }
                     let decision = {
                         let uploads = uploads.lock();
                         uploads.should_upload(&digest)
@@ -320,7 +363,11 @@ impl<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> Consumer<
                         Decision::Skip => {
                             upload.skipped();
                             debug!(?digest, "skipping previously uploaded block");
-                            return Completion::Skipped { position, height };
+                            return Completion::Skipped {
+                                position,
+                                height,
+                                digest,
+                            };
                         }
                         Decision::Wait => {
                             Self::wait(
@@ -363,86 +410,17 @@ impl<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> Consumer<
         });
     }
 
-    async fn wait_for_uploadable_block(
-        context: &E,
-        marshal: &MarshalMailbox<Scheme, Standard<Block>>,
-        metrics: &IndexerMetrics,
-        uploads: &SharedState,
-        upload: &mut BackfillUploadGuard,
-        digest: Digest,
-        retry: Duration,
-    ) -> Option<Block> {
-        enum NextBlock {
-            AlreadyUploaded,
-            WaitForCertificate,
-            Ready(Box<Block>),
-            FetchFromMarshal,
-        }
-
-        loop {
-            let next = {
-                let uploads = uploads.lock();
-                match uploads.should_upload(&digest) {
-                    Decision::Skip => {
-                        metrics.backfill_decision(
-                            BackfillDecision::Skip,
-                            BackfillPhase::BeforeBlock,
-                        );
-                        NextBlock::AlreadyUploaded
-                    }
-                    Decision::Wait => {
-                        metrics.backfill_decision(
-                            BackfillDecision::Wait,
-                            BackfillPhase::BeforeBlock,
-                        );
-                        NextBlock::WaitForCertificate
-                    }
-                    Decision::Proceed => {
-                        metrics.backfill_decision(
-                            BackfillDecision::Proceed,
-                            BackfillPhase::BeforeBlock,
-                        );
-                        uploads
-                            .cached_block(&digest)
-                            .map(|block| NextBlock::Ready(Box::new(block)))
-                            .unwrap_or(NextBlock::FetchFromMarshal)
-                    }
-                }
-            };
-
-            match next {
-                NextBlock::AlreadyUploaded => return None,
-                NextBlock::WaitForCertificate => {
-                    Self::wait(
-                        context,
-                        metrics,
-                        BackfillWaitReason::CertificateUpload,
-                        retry,
-                    )
-                    .await;
-                }
-                NextBlock::Ready(block) => {
-                    metrics.observe_block(BlockMetricSource::ConsumerCached, &block);
-                    upload.hold_block(&block);
-                    return Some(*block);
-                }
-                NextBlock::FetchFromMarshal => {
-                    if let Some(block) = marshal.get_block(Identifier::Digest(digest)).await {
-                        metrics.observe_block(BlockMetricSource::ConsumerMarshal, &block);
-                        uploads
-                            .lock()
-                            .cache_block(block.clone(), SharedCacheSource::ConsumerMarshal);
-                        upload.hold_block(&block);
-                        return Some(block);
-                    }
-                    warn!(
-                        ?digest,
-                        "consumer could not find block in marshal, retrying"
-                    );
-                    Self::wait(context, metrics, BackfillWaitReason::MissingBlock, retry).await;
-                }
-            }
-        }
+    fn payload_age(&self, enqueued_at_millis: u64) -> Duration {
+        let now_millis: u64 = self
+            .context
+            .current()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        // Backward wall-clock movement produces age zero until the clock catches up.
+        Duration::from_millis(now_millis.saturating_sub(enqueued_at_millis))
     }
 
     async fn wait(
@@ -462,28 +440,22 @@ impl<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> Consumer<
     }
 
     async fn complete(&mut self, completion: Completion) {
-        let (position, height) = match completion {
+        let (position, height, digest) = match completion {
             Completion::Uploaded {
                 position,
                 height,
                 digest,
             } => {
                 self.uploads.lock().mark_uploaded(digest, height);
-                (position, height)
+                (position, height, digest)
             }
-            Completion::Skipped { position, height } => (position, height),
-            Completion::Stale {
-                reason,
-                first_height,
-                first_digest,
-                attempts,
-                elapsed,
-            } => {
-                self.reset_stale_queue(reason, first_height, first_digest, attempts, elapsed)
-                    .await;
-                return;
-            }
+            Completion::Skipped {
+                position,
+                height,
+                digest,
+            } => (position, height, digest),
         };
+        self.uploads.lock().finish_queued(&digest);
 
         let floor = self.reader.ack_floor().await;
         match self.reader.ack(position).await {
@@ -511,109 +483,4 @@ impl<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> Consumer<
         }
     }
 
-    async fn reset_stale_queue(
-        &mut self,
-        reason: BackfillResetReason,
-        first_height: u64,
-        first_digest: Digest,
-        attempts: u64,
-        elapsed: Duration,
-    ) {
-        let queue_size = self.writer.size().await;
-        let ack_floor = self.reader.ack_floor().await;
-        let abandoned_entries = queue_size.saturating_sub(ack_floor);
-        let tip = Self::latest_proof_bearing_tip(self.marshal.clone()).await;
-        let (tip_height, tip_digest) = tip.unwrap_or((0, first_digest));
-        let abandoned_height_span = tip_height.saturating_sub(first_height);
-
-        warn!(
-            ?reason,
-            first_height,
-            ?first_digest,
-            tip_height,
-            ?tip_digest,
-            attempts,
-            ?elapsed,
-            abandoned_entries,
-            abandoned_height_span,
-            "resetting stale durable backfill queue"
-        );
-
-        self.active.cancel_all();
-        match self.reader.ack_up_to(queue_size).await {
-            Ok(()) => self.metrics.queue_acked(QueueStatus::Success),
-            Err(err) => {
-                self.metrics.queue_acked(QueueStatus::Failure);
-                panic!("failed to ack stale finalized queue: {err:?}");
-            }
-        }
-        let sync_started = Instant::now();
-        match self.writer.sync().await {
-            Ok(()) => self
-                .metrics
-                .queue_synced(QueueStatus::Success, sync_started.elapsed()),
-            Err(err) => {
-                self.metrics
-                    .queue_synced(QueueStatus::Failure, sync_started.elapsed());
-                panic!("failed to sync stale finalized queue reset: {err:?}");
-            }
-        }
-        self.reader.reset().await;
-        self.metrics.queue_ack_floor(tip_height);
-        self.metrics.backfill_queue_reset(
-            reason,
-            abandoned_entries,
-            abandoned_height_span,
-        );
-        self.uploads.lock().advance_queue_floor(tip_height);
-        self.uploads.lock().restart_above(tip_height);
-    }
-
-    async fn latest_proof_bearing_tip(
-        marshal: MarshalMailbox<Scheme, Standard<Block>>,
-    ) -> Option<(u64, Digest)> {
-        let (height, _) = marshal.get_info(Identifier::Latest).await?;
-        for height in (0..=height.get()).rev() {
-            if let Some(proof) = marshal.get_finalization(Height::new(height)).await {
-                return Some((height, proof.proposal.payload));
-            }
-        }
-        None
-    }
-}
-
-#[derive(Default)]
-struct ProofFailure {
-    reason: Option<BackfillResetReason>,
-    first_seen: Option<std::time::SystemTime>,
-    attempts: u64,
-}
-
-impl ProofFailure {
-    fn observe<E: Clock>(
-        &mut self,
-        context: &E,
-        reason: BackfillResetReason,
-        grace: Duration,
-        height: u64,
-        digest: Digest,
-    ) -> Option<Completion> {
-        if self.reason != Some(reason) {
-            self.reason = Some(reason);
-            self.first_seen = Some(context.current());
-            self.attempts = 0;
-        }
-        self.attempts = self.attempts.saturating_add(1);
-        let elapsed = context
-            .current()
-            .duration_since(self.first_seen.expect("proof failure start"))
-            .unwrap_or_default();
-        (elapsed >= grace).then_some(Completion::Stale {
-            reason,
-            first_height: height,
-            first_digest: digest,
-            attempts: self.attempts,
-            elapsed,
-        })
-    }
 }

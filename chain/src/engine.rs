@@ -35,7 +35,7 @@ pub const WRITE_BUFFER: NonZero<usize> = NZUsize!(1024 * 1024); // 1MB
 pub const PAGE_CACHE_PAGE_SIZE: NonZeroU16 = NZU16!(4_096); // 4KB
 pub const PAGE_CACHE_CAPACITY: NonZero<usize> = NZUsize!(8_192); // 32MB
 pub const MAX_REPAIR: NonZero<usize> = NZUsize!(50);
-pub const MAX_PENDING_ACKS: NonZero<usize> = NZUsize!(16);
+pub const DEFAULT_MAX_PENDING_ACKS: NonZero<usize> = NZUsize!(16);
 pub const STATE_SYNC_FETCH_BATCH_SIZE: NonZero<u64> = NZU64!(1_024);
 pub const STATE_SYNC_APPLY_BATCH_SIZE: usize = 4_096;
 pub const STATE_SYNC_MAX_OUTSTANDING_REQUESTS: usize = 8;
@@ -46,11 +46,11 @@ pub const STATE_SYNC_RESOLVER_INITIAL: Duration = Duration::from_secs(1);
 pub const STATE_SYNC_RESOLVER_TIMEOUT: Duration = Duration::from_secs(2);
 pub const STATE_SYNC_RESOLVER_RETRY: Duration = Duration::from_millis(100);
 /// Prune cadence in finalized heights (retention floors are independent of this).
-pub const PRUNE_MAINTENANCE_INTERVAL: NonZero<usize> = NZUsize!(32);
+pub const DEFAULT_PRUNE_MAINTENANCE_INTERVAL: NonZero<usize> = NZUsize!(32);
 /// Finalized blocks retained in marshal beyond `max_pending_acks + 1` (~1 epoch buffer).
-pub const PRUNE_RETAINED_MARSHAL_BLOCKS: usize = 200;
+pub const DEFAULT_PRUNE_RETAINED_MARSHAL_BLOCKS: usize = 200;
 /// Extra QMDB history beyond the ack window for serving lagging state-sync peers.
-pub const PRUNE_RETAINED_QMDB_BLOCKS: usize = 200;
+pub const DEFAULT_PRUNE_RETAINED_QMDB_BLOCKS: usize = 200;
 
 /// Heap-boxes an automaton so large consensus application state does not inflate task futures.
 pub struct BoxedAutomaton<A> {
@@ -307,22 +307,70 @@ pub fn state_sync_config() -> SyncEngineConfig {
     }
 }
 
-/// Periodic marshal + QMDB pruning; `max_pending_acks` must match marshal's config.
-pub fn state_prune_config() -> PruneConfig {
+/// Standard periodic marshal and QMDB pruning settings for generated configurations and tests.
+pub fn default_state_prune_config() -> PruneConfig {
     PruneConfig {
-        max_pending_acks: MAX_PENDING_ACKS,
-        maintenance_interval: PRUNE_MAINTENANCE_INTERVAL,
-        retained_marshal_blocks: PRUNE_RETAINED_MARSHAL_BLOCKS,
-        retained_qmdb_blocks: PRUNE_RETAINED_QMDB_BLOCKS,
+        max_pending_acks: DEFAULT_MAX_PENDING_ACKS,
+        maintenance_interval: DEFAULT_PRUNE_MAINTENANCE_INTERVAL,
+        retained_marshal_blocks: DEFAULT_PRUNE_RETAINED_MARSHAL_BLOCKS,
+        retained_qmdb_blocks: DEFAULT_PRUNE_RETAINED_QMDB_BLOCKS,
     }
+}
+
+#[derive(Debug, thiserror::Error, Eq, PartialEq)]
+pub enum PruneConfigError {
+    #[error("retained QMDB blocks ({retained_qmdb_blocks}) exceed retained marshal blocks ({retained_marshal_blocks})")]
+    RetentionOrder {
+        retained_marshal_blocks: usize,
+        retained_qmdb_blocks: usize,
+    },
+    #[error("max_pending_acks + 1 overflows usize")]
+    BaseWindowOverflow,
+    #[error("marshal retention window overflows usize")]
+    MarshalWindowOverflow,
+    #[error("QMDB retention window overflows usize")]
+    QmdbWindowOverflow,
+}
+
+/// Validates the pruning arithmetic before Commonware constructs its pruning processor.
+pub fn validate_state_prune_config(
+    config: PruneConfig,
+) -> Result<PruneConfig, PruneConfigError> {
+    if config.retained_qmdb_blocks > config.retained_marshal_blocks {
+        return Err(PruneConfigError::RetentionOrder {
+            retained_marshal_blocks: config.retained_marshal_blocks,
+            retained_qmdb_blocks: config.retained_qmdb_blocks,
+        });
+    }
+
+    let base = config
+        .max_pending_acks
+        .get()
+        .checked_add(1)
+        .ok_or(PruneConfigError::BaseWindowOverflow)?;
+    base.checked_add(config.retained_marshal_blocks)
+        .ok_or(PruneConfigError::MarshalWindowOverflow)?;
+    base.checked_add(config.retained_qmdb_blocks)
+        .ok_or(PruneConfigError::QmdbWindowOverflow)?;
+    Ok(config)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_consensus::{
+        marshal::ancestry::{self, Ancestry},
+        types::{Epoch, Round, View},
+    };
+    use commonware_cryptography::{ed25519, sha256, Digest as _, Signer as _};
+    use commonware_runtime::{Runner as _, Supervisor as _};
     use commonware_runtime::telemetry::metrics::{raw, Registered, Registration};
     use futures::{pin_mut, task::noop_waker};
-    use std::task::{Context, Poll};
+    use nunchi_dkg::{Context as ConsensusContext, Scheme};
+    use std::{
+        sync::atomic::{AtomicBool, Ordering},
+        task::{Context, Poll},
+    };
 
     fn metrics() -> VerifyLimiterMetrics {
         VerifyLimiterMetrics {
@@ -336,6 +384,47 @@ mod tests {
                 raw::Counter::default(),
                 Registration::from(()),
             ),
+        }
+    }
+
+    #[derive(Clone)]
+    struct PendingApplication {
+        pending_once: Arc<AtomicBool>,
+    }
+
+    impl<E> commonware_consensus::Application<E> for PendingApplication
+    where
+        E: Rng + Spawner + Metrics + Clock,
+    {
+        type SigningScheme = Scheme;
+        type Context = ConsensusContext;
+        type Block = crate::Block<()>;
+
+        async fn propose(
+            &mut self,
+            _context: (E, Self::Context),
+            _ancestry: impl Ancestry<Self::Block>,
+        ) -> Option<Self::Block> {
+            None
+        }
+
+        async fn verify(
+            &mut self,
+            _context: (E, Self::Context),
+            _ancestry: impl Ancestry<Self::Block>,
+        ) -> bool {
+            if self.pending_once.swap(false, Ordering::SeqCst) {
+                futures::future::pending().await
+            }
+            true
+        }
+    }
+
+    fn consensus_context() -> ConsensusContext {
+        ConsensusContext {
+            round: Round::new(Epoch::zero(), View::new(1)),
+            leader: ed25519::PrivateKey::from_seed(1).public_key(),
+            parent: (View::zero(), sha256::Digest::EMPTY),
         }
     }
 
@@ -361,5 +450,129 @@ mod tests {
 
         drop(first);
         assert!(matches!(second.as_mut().poll(&mut context), Poll::Ready(_)));
+    }
+
+    #[test]
+    fn verify_limiter_restores_permit_after_cancellation() {
+        commonware_runtime::deterministic::Runner::default().start(|context| async move {
+            let application = PendingApplication {
+                pending_once: Arc::new(AtomicBool::new(true)),
+            };
+            let mut limiter = VerifyLimiter::new(&context, application, NZUsize!(1));
+            let limiter_state = limiter.limiter.clone();
+
+            {
+                let verification = commonware_consensus::Application::verify(
+                    &mut limiter,
+                    (context.child("first"), consensus_context()),
+                    ancestry::from_iter(Vec::<Arc<crate::Block<()>>>::new()),
+                );
+                pin_mut!(verification);
+                let waker = noop_waker();
+                let mut task_context = Context::from_waker(&waker);
+                assert!(matches!(
+                    verification.as_mut().poll(&mut task_context),
+                    Poll::Pending
+                ));
+                let state = limiter_state
+                    .state
+                    .lock()
+                    .expect("verify limiter mutex poisoned");
+                assert_eq!(state.in_flight, 1);
+                assert_eq!(state.waiting, 0);
+            }
+
+            {
+                let state = limiter_state
+                    .state
+                    .lock()
+                    .expect("verify limiter mutex poisoned");
+                assert_eq!(state.in_flight, 0);
+                assert_eq!(state.waiting, 0);
+                assert_eq!(state.available, 1);
+            }
+            assert_eq!(limiter.metrics.complete_total.get(), 1);
+
+            assert!(
+                commonware_consensus::Application::verify(
+                    &mut limiter,
+                    (context.child("second"), consensus_context()),
+                    ancestry::from_iter(Vec::<Arc<crate::Block<()>>>::new()),
+                )
+                .await
+            );
+        });
+    }
+
+    #[test]
+    fn standard_prune_config_values() {
+        assert_eq!(
+            default_state_prune_config(),
+            PruneConfig {
+                max_pending_acks: NZUsize!(16),
+                maintenance_interval: NZUsize!(32),
+                retained_marshal_blocks: 200,
+                retained_qmdb_blocks: 200,
+            }
+        );
+    }
+
+    #[test]
+    fn validates_prune_config() {
+        let distinct = PruneConfig {
+            max_pending_acks: NZUsize!(3),
+            maintenance_interval: NZUsize!(7),
+            retained_marshal_blocks: 11,
+            retained_qmdb_blocks: 5,
+        };
+        assert_eq!(validate_state_prune_config(distinct), Ok(distinct));
+
+        for retained in [0, 9] {
+            let equal = PruneConfig {
+                retained_marshal_blocks: retained,
+                retained_qmdb_blocks: retained,
+                ..distinct
+            };
+            assert_eq!(validate_state_prune_config(equal), Ok(equal));
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_prune_config() {
+        let unordered = PruneConfig {
+            max_pending_acks: NZUsize!(1),
+            maintenance_interval: NZUsize!(1),
+            retained_marshal_blocks: 2,
+            retained_qmdb_blocks: 3,
+        };
+        assert_eq!(
+            validate_state_prune_config(unordered),
+            Err(PruneConfigError::RetentionOrder {
+                retained_marshal_blocks: 2,
+                retained_qmdb_blocks: 3,
+            })
+        );
+
+        let base_overflow = PruneConfig {
+            max_pending_acks: NonZeroUsize::new(usize::MAX).unwrap(),
+            retained_marshal_blocks: 0,
+            retained_qmdb_blocks: 0,
+            ..unordered
+        };
+        assert_eq!(
+            validate_state_prune_config(base_overflow),
+            Err(PruneConfigError::BaseWindowOverflow)
+        );
+
+        let window_overflow = PruneConfig {
+            max_pending_acks: NZUsize!(1),
+            retained_marshal_blocks: usize::MAX - 1,
+            retained_qmdb_blocks: 0,
+            ..unordered
+        };
+        assert_eq!(
+            validate_state_prune_config(window_overflow),
+            Err(PruneConfigError::MarshalWindowOverflow)
+        );
     }
 }

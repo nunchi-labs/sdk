@@ -1,6 +1,6 @@
 use crate::{
     indexer::{
-        BackfillDecision, BackfillPhase, BackfillResetReason, BackfillWaitReason,
+        BackfillDecision, BackfillPhase, BackfillWaitReason,
         BlockMetricSource, DkgUploadStatus, HttpArtifact, IndexerMetrics, LiveUploadArtifact,
         ProducerActivity, ProducerStatus, QueueReadSource, QueueStatus, SharedCacheSource,
         SharedRetentionReason,
@@ -346,10 +346,13 @@ fn shared_state_metrics_use_expected_labels() {
             uploaded_digests: 4,
             latest_finalized_height: 8,
             acked_through_height: 6,
+            spool_entries: 5,
+            spool_logical_bytes: 512,
+            spool_oldest_height: 2,
+            spool_oldest_enqueued_at_millis: 1_000,
         });
         metrics.shared_cache_inserted(SharedCacheSource::ProducerRecord);
         metrics.shared_cache_inserted(SharedCacheSource::LiveCertificate);
-        metrics.shared_cache_inserted(SharedCacheSource::ConsumerMarshal);
         metrics.shared_cache_removed(SharedRetentionReason::Uploaded);
         metrics.shared_cache_removed(SharedRetentionReason::CertificateFinished);
         metrics.shared_cache_removed(SharedRetentionReason::Pruned);
@@ -372,9 +375,6 @@ fn shared_state_metrics_use_expected_labels() {
         ));
         assert!(encoded.contains(
             "indexer_shared_cache_insert_total{source=\"live_certificate\"} 1",
-        ));
-        assert!(encoded.contains(
-            "indexer_shared_cache_insert_total{source=\"consumer_marshal\"} 1",
         ));
         assert!(encoded.contains(
             "indexer_shared_cache_remove_total{reason=\"uploaded\"} 1",
@@ -402,7 +402,6 @@ fn block_metrics_use_expected_sources() {
         metrics.observe_block(BlockMetricSource::ProducerRecord, &block);
         metrics.observe_block(BlockMetricSource::LiveCertificate, &block);
         metrics.observe_block(BlockMetricSource::ConsumerCached, &block);
-        metrics.observe_block(BlockMetricSource::ConsumerMarshal, &block);
 
         let encoded = context.encode();
         assert!(encoded.contains("indexer_block_estimated_bytes_bucket"));
@@ -410,7 +409,6 @@ fn block_metrics_use_expected_sources() {
         assert!(encoded.contains("source=\"producer_record\""));
         assert!(encoded.contains("source=\"live_certificate\""));
         assert!(encoded.contains("source=\"consumer_cached\""));
-        assert!(encoded.contains("source=\"consumer_marshal\""));
     });
 }
 
@@ -433,20 +431,11 @@ fn backfill_metrics_use_expected_labels() {
             upload.skipped();
         }
         metrics.backfill_decision(BackfillDecision::Skip, BackfillPhase::Start);
-        metrics.backfill_decision(BackfillDecision::Wait, BackfillPhase::BeforeBlock);
         metrics.backfill_decision(BackfillDecision::Proceed, BackfillPhase::BeforeAttempt);
         metrics.backfill_retry(BackfillWaitReason::CertificateUpload);
-        metrics.backfill_retry(BackfillWaitReason::MissingBlock);
-        metrics.backfill_retry(BackfillWaitReason::MissingFinalization);
-        metrics.backfill_retry(BackfillWaitReason::MismatchedFinalization);
         metrics.backfill_retry(BackfillWaitReason::HttpError);
         metrics.backfill_waited(BackfillWaitReason::CertificateUpload, Duration::from_millis(1));
-        metrics.backfill_waited(BackfillWaitReason::MissingBlock, Duration::from_millis(1));
-        metrics.backfill_waited(BackfillWaitReason::MissingFinalization, Duration::from_millis(1));
-        metrics.backfill_waited(BackfillWaitReason::MismatchedFinalization, Duration::from_millis(1));
         metrics.backfill_waited(BackfillWaitReason::HttpError, Duration::from_millis(1));
-        metrics.backfill_queue_reset(BackfillResetReason::MissingFinalization, 32, 31);
-        metrics.backfill_queue_reset(BackfillResetReason::MismatchedFinalization, 2, 1);
         metrics.queue_enqueued(QueueStatus::Success);
         metrics.queue_enqueued(QueueStatus::Failure);
         metrics.queue_acked(QueueStatus::Success);
@@ -487,29 +476,13 @@ fn backfill_metrics_use_expected_labels() {
             "indexer_backfill_decision_total{decision=\"skip\",phase=\"start\"} 1",
         ));
         assert!(encoded.contains(
-            "indexer_backfill_decision_total{decision=\"wait\",phase=\"before_block\"} 1",
-        ));
-        assert!(encoded.contains(
             "indexer_backfill_decision_total{decision=\"proceed\",phase=\"before_attempt\"} 1",
         ));
         assert!(encoded.contains("indexer_backfill_wait_duration_seconds_bucket"));
         assert!(encoded.contains(
             "indexer_backfill_retry_total{reason=\"certificate_upload\"} 1",
         ));
-        assert!(encoded.contains("indexer_backfill_retry_total{reason=\"missing_block\"} 1"));
-        assert!(encoded
-            .contains("indexer_backfill_retry_total{reason=\"missing_finalization\"} 1"));
-        assert!(encoded
-            .contains("indexer_backfill_retry_total{reason=\"mismatched_finalization\"} 1"));
         assert!(encoded.contains("indexer_backfill_retry_total{reason=\"http_error\"} 1"));
-        assert!(encoded.contains(
-            "indexer_backfill_queue_reset_total{reason=\"missing_finalization\"} 1",
-        ));
-        assert!(encoded.contains(
-            "indexer_backfill_queue_reset_total{reason=\"mismatched_finalization\"} 1",
-        ));
-        assert!(encoded.contains("indexer_backfill_queue_reset_abandoned_entries_bucket"));
-        assert!(encoded.contains("indexer_backfill_queue_reset_abandoned_height_span_bucket"));
         assert!(encoded.contains("indexer_backfill_active_block_estimated_bytes 0"));
         assert!(encoded.contains("indexer_backfill_active_body_estimated_bytes 0"));
         assert!(encoded.contains("indexer_queue_enqueue_total{status=\"success\"} 1"));

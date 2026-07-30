@@ -83,10 +83,12 @@ pub fn application(
     applied_height: SharedAppliedHeight,
     genesis_state: StateCommitment,
     genesis_payload: Digest,
+    min_block_interval_ms: NonZeroU64,
 ) -> Application {
     nunchi_chain::Application::with_consensus(
         submitter,
         0,
+        min_block_interval_ms,
         bridge,
         None,
         applied_height,
