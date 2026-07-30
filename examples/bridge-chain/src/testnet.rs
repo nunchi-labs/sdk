@@ -24,7 +24,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{tokio, Handle, Runner as _, Supervisor as _};
 use commonware_utils::{
     ordered::{Map, Set},
-    union, N3f1, NZUsize, NZU32,
+    union, Hostname, N3f1, NZUsize, NZU32,
 };
 use governor::Quota;
 use nunchi_bridge::BridgeActor;
@@ -42,6 +42,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::{NonZeroU32, NonZeroU64, NonZeroUsize, TryFromIntError},
     path::{Path, PathBuf},
+    str::FromStr,
     time::Duration,
 };
 use tracing::info;
@@ -116,7 +117,12 @@ pub struct NodeConfig {
     pub share: String,
     pub peer_config: PeerConfig<PublicKey>,
     pub listen_address: SocketAddr,
-    pub dialable_address: SocketAddr,
+    /// Address advertised to peers. IP literals use socket syntax (with brackets around IPv6),
+    /// while DNS names use `hostname:port` without a URL scheme or path. DNS is resolved again
+    /// whenever a disconnected peer retries this node, so operators should use a stable hostname
+    /// and an appropriate TTL.
+    #[serde(with = "ingress_serde")]
+    pub dialable_address: Ingress,
     pub rpc_address: SocketAddr,
     pub bootstrappers: Vec<BootstrapperConfig>,
     pub storage_dir: PathBuf,
@@ -168,7 +174,64 @@ fn default_min_block_interval_ms() -> NonZeroU64 {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BootstrapperConfig {
     pub public_key: String,
-    pub address: SocketAddr,
+    /// Address used to dial the bootstrapper. IP literals use socket syntax (with brackets around
+    /// IPv6), while DNS names use `hostname:port` without a URL scheme or path. DNS is resolved on
+    /// each reconnect attempt rather than continuously while a connection is healthy.
+    #[serde(with = "ingress_serde")]
+    pub address: Ingress,
+}
+
+mod ingress_serde {
+    use super::*;
+    use serde::{de::Error as _, Deserializer, Serializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Ingress, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if let Ok(address) = SocketAddr::from_str(&value) {
+            return Ok(Ingress::Socket(address));
+        }
+        if value.contains("://") {
+            return Err(D::Error::custom(
+                "peer address must not contain a URL scheme or path",
+            ));
+        }
+
+        let (host, port) = value
+            .rsplit_once(':')
+            .ok_or_else(|| D::Error::custom("peer address is missing a port"))?;
+        if host.is_empty() {
+            return Err(D::Error::custom("peer address is missing a host"));
+        }
+        if port.is_empty() {
+            return Err(D::Error::custom("peer address is missing a port"));
+        }
+        if host.contains(':') {
+            return Err(D::Error::custom(
+                "IPv6 peer addresses must use bracketed socket syntax",
+            ));
+        }
+        let port = port
+            .parse::<u16>()
+            .map_err(|error| D::Error::custom(format!("invalid peer address port: {error}")))?;
+        let host = Hostname::new(host)
+            .map_err(|error| D::Error::custom(format!("invalid peer address hostname: {error}")))?;
+        Ok(Ingress::Dns { host, port })
+    }
+
+    pub fn serialize<S>(ingress: &Ingress, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match ingress {
+            Ingress::Socket(address) => serializer.serialize_str(&address.to_string()),
+            Ingress::Dns { host, port } => {
+                serializer.serialize_str(&format!("{host}:{port}"))
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -380,10 +443,10 @@ fn write_chain(
             .map(|(candidate, public_key)| {
                 Ok(BootstrapperConfig {
                     public_key: encode(public_key),
-                    address: SocketAddr::new(
+                    address: Ingress::Socket(SocketAddr::new(
                         IpAddr::V4(Ipv4Addr::LOCALHOST),
                         local.base_port + u16::try_from(candidate)?,
-                    ),
+                    )),
                 })
             })
             .collect::<Result<Vec<_>, Error>>()?;
@@ -403,7 +466,7 @@ fn write_chain(
             share: encode(share),
             peer_config: material.peer_config.clone(),
             listen_address,
-            dialable_address: listen_address,
+            dialable_address: Ingress::Socket(listen_address),
             rpc_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), rpc_port),
             bootstrappers,
             storage_dir: storage_dir.clone(),
@@ -544,7 +607,7 @@ async fn start_node(
         .map(|bootstrapper| {
             Ok((
                 decode_unit::<PublicKey>(&bootstrapper.public_key, "bootstrapper.public_key")?,
-                Ingress::from(bootstrapper.address),
+                bootstrapper.address.clone(),
             ))
         })
         .collect::<Result<Vec<_>, Error>>()?;
@@ -554,6 +617,7 @@ async fn start_node(
         chain = %config.chain,
         public_key = %public_key,
         listen = %config.listen_address,
+        dialable = ?config.dialable_address,
         rpc = %config.rpc_address,
         "starting bridge-chain validator"
     );
@@ -562,7 +626,7 @@ async fn start_node(
         private_key.clone(),
         config.namespace.as_bytes(),
         config.listen_address,
-        config.dialable_address,
+        config.dialable_address.clone(),
         bootstrappers,
         config.networking.max_message_size,
     );

@@ -40,6 +40,34 @@ The chain A and chain B validators are separate binaries. A chain A config is
 rejected by `bridge-chain-b-node`, and a chain B config is rejected by
 `bridge-chain-a-node`.
 
+## Peer addresses
+
+Validator configs accept either IP socket addresses or DNS hostnames with ports
+for advertised and bootstrapper P2P addresses:
+
+```toml
+dialable_address = "validator-0.bridge.example.com:30000"
+
+[[bootstrappers]]
+public_key = "..."
+address = "validator-1.bridge.example.com:30001"
+```
+
+IPv4 uses normal socket syntax, while IPv6 literals must be bracketed, for
+example `[2001:db8::10]:30000`. URLs and paths are not valid peer addresses.
+`listen_address` and `rpc_address` remain IP socket addresses because the node
+binds them locally.
+
+DNS is resolved on each new connection attempt. If a connection closes and the
+same hostname now resolves to a different IP, the running node can reconnect
+without restarting. DNS changes do not replace a healthy connection. Changing
+the configured hostname or port requires updating the TOML and restarting the
+node.
+
+DNS TTL, propagation, resolver caching, firewall rules, NAT, and exposed ports
+remain deployment concerns. DNS selects an endpoint; the configured public key
+and authenticated P2P handshake still determine the peer identity.
+
 Start the relayer after both chains are producing finalizations:
 
 ```bash
