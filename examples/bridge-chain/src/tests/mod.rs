@@ -1,3 +1,5 @@
+mod testnet;
+
 use commonware_codec::Encode;
 use commonware_consensus::{
     simplex::{
