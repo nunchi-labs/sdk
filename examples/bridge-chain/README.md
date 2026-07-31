@@ -48,15 +48,18 @@ for advertised and bootstrapper P2P addresses:
 ```toml
 dialable_address = "validator-0.bridge.example.com:30000"
 
-[[bootstrappers]]
-public_key = "..."
-address = "validator-1.bridge.example.com:30001"
+bootstrappers = [
+    "478b8e507e0bb2b18c0f9e0824769e8562d10df9abe2e774896f82b4b4405266@validator-1.bridge.example.com:30001",
+]
 ```
 
+Each bootstrapper is `<public-key>@<address>`. Public keys must be exactly 64
+lowercase hexadecimal characters. DNS names are canonicalized to lowercase.
 IPv4 uses normal socket syntax, while IPv6 literals must be bracketed, for
-example `[2001:db8::10]:30000`. URLs and paths are not valid peer addresses.
-`listen_address` and `rpc_address` remain IP socket addresses because the node
-binds them locally.
+example
+`478b8e507e0bb2b18c0f9e0824769e8562d10df9abe2e774896f82b4b4405266@[2001:db8::10]:30000`.
+URLs and paths are not valid peer addresses. `listen_address` and `rpc_address`
+remain IP socket addresses because the node binds them locally.
 
 DNS is resolved on each new connection attempt. If a connection closes and the
 same hostname now resolves to a different IP, the running node can reconnect
