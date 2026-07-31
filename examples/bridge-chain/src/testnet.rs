@@ -38,6 +38,7 @@ use nunchi_chain::engine::{
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use std::{
+    fmt::{self, Display},
     fs,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::{NonZeroU32, NonZeroU64, NonZeroUsize, TryFromIntError},
@@ -171,14 +172,154 @@ fn default_min_block_interval_ms() -> NonZeroU64 {
     nunchi_chain::DEFAULT_MIN_BLOCK_INTERVAL_MS
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BootstrapperConfig {
-    pub public_key: String,
+    pub public_key: PublicKey,
     /// Address used to dial the bootstrapper. IP literals use socket syntax (with brackets around
     /// IPv6), while DNS names use `hostname:port` without a URL scheme or path. DNS is resolved on
     /// each reconnect attempt rather than continuously while a connection is healthy.
-    #[serde(with = "ingress_serde")]
     pub address: Ingress,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum BootstrapperConfigError {
+    #[error("bootstrapper is missing the '@' separator")]
+    MissingSeparator,
+    #[error("bootstrapper contains multiple '@' separators")]
+    MultipleSeparators,
+    #[error("bootstrapper is missing a public key")]
+    MissingPublicKey,
+    #[error("bootstrapper public key must be exactly 64 lowercase hexadecimal characters")]
+    InvalidPublicKeyHex,
+    #[error("invalid bootstrapper public key: {0}")]
+    InvalidPublicKey(#[source] commonware_codec::Error),
+    #[error("bootstrapper is missing an address")]
+    MissingAddress,
+    #[error("invalid bootstrapper address: {0}")]
+    InvalidAddress(String),
+}
+
+impl FromStr for BootstrapperConfig {
+    type Err = BootstrapperConfigError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (public_key, address) = value
+            .split_once('@')
+            .ok_or(BootstrapperConfigError::MissingSeparator)?;
+        if address.contains('@') {
+            return Err(BootstrapperConfigError::MultipleSeparators);
+        }
+        if public_key.is_empty() {
+            return Err(BootstrapperConfigError::MissingPublicKey);
+        }
+        if address.is_empty() {
+            return Err(BootstrapperConfigError::MissingAddress);
+        }
+
+        Ok(Self {
+            public_key: parse_bootstrapper_public_key(public_key)?,
+            address: parse_ingress(address)
+                .map_err(|error| BootstrapperConfigError::InvalidAddress(error.to_string()))?,
+        })
+    }
+}
+
+impl Display for BootstrapperConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{}@{}",
+            self.public_key,
+            format_ingress(&self.address)
+        )
+    }
+}
+
+impl Serialize for BootstrapperConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for BootstrapperConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(D::Error::custom)
+    }
+}
+
+fn parse_bootstrapper_public_key(
+    value: &str,
+) -> Result<PublicKey, BootstrapperConfigError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(BootstrapperConfigError::InvalidPublicKeyHex);
+    }
+    let bytes = from_hex(value).ok_or(BootstrapperConfigError::InvalidPublicKeyHex)?;
+    PublicKey::decode(bytes.as_slice()).map_err(BootstrapperConfigError::InvalidPublicKey)
+}
+
+#[derive(Debug, thiserror::Error)]
+enum PeerAddressError {
+    #[error("peer address must not contain a URL scheme or path")]
+    SchemeOrPath,
+    #[error("peer address is missing a port")]
+    MissingPort,
+    #[error("peer address is missing a host")]
+    MissingHost,
+    #[error("IPv6 peer addresses must use bracketed socket syntax")]
+    UnbracketedIpv6,
+    #[error("invalid peer address port: {0}")]
+    InvalidPort(String),
+    #[error("invalid peer address hostname: {0}")]
+    InvalidHostname(String),
+}
+
+fn parse_ingress(value: &str) -> Result<Ingress, PeerAddressError> {
+    if let Ok(address) = SocketAddr::from_str(value) {
+        return Ok(Ingress::Socket(address));
+    }
+    if value.contains("://") {
+        return Err(PeerAddressError::SchemeOrPath);
+    }
+
+    let (host, port) = value
+        .rsplit_once(':')
+        .ok_or(PeerAddressError::MissingPort)?;
+    if host.is_empty() {
+        return Err(PeerAddressError::MissingHost);
+    }
+    if port.is_empty() {
+        return Err(PeerAddressError::MissingPort);
+    }
+    if host.contains(':') {
+        return Err(PeerAddressError::UnbracketedIpv6);
+    }
+    let port = port
+        .parse::<u16>()
+        .map_err(|error| PeerAddressError::InvalidPort(error.to_string()))?;
+    let host = Hostname::new(host.to_ascii_lowercase())
+        .map_err(|error| PeerAddressError::InvalidHostname(error.to_string()))?;
+    Ok(Ingress::Dns { host, port })
+}
+
+fn format_ingress(ingress: &Ingress) -> String {
+    match ingress {
+        Ingress::Socket(address) => address.to_string(),
+        Ingress::Dns { host, port } => format!("{host}:{port}"),
+    }
 }
 
 mod ingress_serde {
@@ -190,47 +331,14 @@ mod ingress_serde {
         D: Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        if let Ok(address) = SocketAddr::from_str(&value) {
-            return Ok(Ingress::Socket(address));
-        }
-        if value.contains("://") {
-            return Err(D::Error::custom(
-                "peer address must not contain a URL scheme or path",
-            ));
-        }
-
-        let (host, port) = value
-            .rsplit_once(':')
-            .ok_or_else(|| D::Error::custom("peer address is missing a port"))?;
-        if host.is_empty() {
-            return Err(D::Error::custom("peer address is missing a host"));
-        }
-        if port.is_empty() {
-            return Err(D::Error::custom("peer address is missing a port"));
-        }
-        if host.contains(':') {
-            return Err(D::Error::custom(
-                "IPv6 peer addresses must use bracketed socket syntax",
-            ));
-        }
-        let port = port
-            .parse::<u16>()
-            .map_err(|error| D::Error::custom(format!("invalid peer address port: {error}")))?;
-        let host = Hostname::new(host)
-            .map_err(|error| D::Error::custom(format!("invalid peer address hostname: {error}")))?;
-        Ok(Ingress::Dns { host, port })
+        parse_ingress(&value).map_err(D::Error::custom)
     }
 
     pub fn serialize<S>(ingress: &Ingress, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        match ingress {
-            Ingress::Socket(address) => serializer.serialize_str(&address.to_string()),
-            Ingress::Dns { host, port } => {
-                serializer.serialize_str(&format!("{host}:{port}"))
-            }
-        }
+        serializer.serialize_str(&format_ingress(ingress))
     }
 }
 
@@ -442,7 +550,7 @@ fn write_chain(
             .filter(|(candidate, _)| *candidate != index)
             .map(|(candidate, public_key)| {
                 Ok(BootstrapperConfig {
-                    public_key: encode(public_key),
+                    public_key: public_key.clone(),
                     address: Ingress::Socket(SocketAddr::new(
                         IpAddr::V4(Ipv4Addr::LOCALHOST),
                         local.base_port + u16::try_from(candidate)?,
@@ -605,12 +713,12 @@ async fn start_node(
         .bootstrappers
         .iter()
         .map(|bootstrapper| {
-            Ok((
-                decode_unit::<PublicKey>(&bootstrapper.public_key, "bootstrapper.public_key")?,
+            (
+                bootstrapper.public_key.clone(),
                 bootstrapper.address.clone(),
-            ))
+            )
         })
-        .collect::<Result<Vec<_>, Error>>()?;
+        .collect();
 
     info!(
         node = %config.name,

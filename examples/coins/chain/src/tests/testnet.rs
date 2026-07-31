@@ -24,6 +24,20 @@ use std::{
 
 use crate::{testnet::*, BLOCKS_PER_EPOCH, NAMESPACE};
 
+fn replace_bootstrapper_array(raw: &str, replacement: &str) -> String {
+    let start = raw
+        .find("bootstrappers = [")
+        .expect("bootstrapper array missing");
+    let mut end = start;
+    for line in raw[start..].split_inclusive('\n') {
+        end += line.len();
+        if line.trim_end().ends_with(']') {
+            break;
+        }
+    }
+    format!("{}{replacement}\n{}", &raw[..start], &raw[end..])
+}
+
 #[test]
 fn generated_testnet_has_unique_ports_dirs_and_complete_peer_sets() {
     let dir = std::env::temp_dir().join(format!("coins-chain-testnet-{}", std::process::id()));
@@ -75,8 +89,16 @@ fn generated_testnet_has_unique_ports_dirs_and_complete_peer_sets() {
 
     for node in &manifest.nodes {
         let config = NodeConfig::read(&node.config_path).expect("read node config");
+        let raw = fs::read_to_string(&node.config_path).expect("read generated config");
         assert_eq!(config.peer_config.participants.len(), 4);
         assert_eq!(config.bootstrappers.len(), 3);
+        assert!(raw.contains("bootstrappers = ["));
+        assert!(!raw.contains("[[bootstrappers]]"));
+        assert!(!raw.lines().any(|line| line.starts_with("public_key =")));
+        assert!(!raw.lines().any(|line| line.starts_with("address =")));
+        for bootstrapper in &config.bootstrappers {
+            assert!(raw.contains(&format!("\"{bootstrapper}\"")));
+        }
         assert!(!config
             .bootstrappers
             .iter()
@@ -133,6 +155,7 @@ fn prune_config_is_required_and_validated() {
     .expect("generate testnet");
     let generated_path = &manifest.nodes[0].config_path;
     let raw = fs::read_to_string(generated_path).expect("read generated config");
+    assert!(raw.contains("bootstrappers = []"));
 
     for field in [
         "max_pending_acks",
@@ -286,7 +309,8 @@ fn generated_testnet_can_advertise_remote_hosts() {
     assert_eq!(first.dialable_address.ip(), Some(public_ips[0]));
     assert_eq!(first.bootstrappers[0].address.ip(), Some(public_ips[1]));
     assert!(first_raw.contains("dialable_address = \"192.0.2.10:30000\""));
-    assert!(first_raw.contains("address = \"192.0.2.11:30001\""));
+    assert!(first_raw.contains(&format!("\"{}\"", first.bootstrappers[0])));
+    assert!(!first_raw.contains("[[bootstrappers]]"));
     assert_eq!(first.storage_dir, storage_dir);
     assert_eq!(
         first.indexer_url.as_deref(),
@@ -337,7 +361,7 @@ fn peer_addresses_round_trip_dns_and_ipv6_as_strings() {
 
     let raw = fs::read_to_string(path).expect("read DNS config");
     assert!(raw.contains("dialable_address = \"validator-0.example.com:30000\""));
-    assert!(raw.contains("address = \"validator-1.example.com:30001\""));
+    assert!(raw.contains(&format!("\"{}\"", config.bootstrappers[0])));
     let decoded = NodeConfig::read(path).expect("read DNS config");
     assert_eq!(decoded.dialable_address, config.dialable_address);
     assert_eq!(
@@ -349,9 +373,14 @@ fn peer_addresses_round_trip_dns_and_ipv6_as_strings() {
         IpAddr::V6("2001:db8::10".parse::<Ipv6Addr>().unwrap()),
         30_000,
     ));
+    config.bootstrappers[0].address = Ingress::Socket(SocketAddr::new(
+        IpAddr::V6("2001:db8::11".parse::<Ipv6Addr>().unwrap()),
+        30_001,
+    ));
     config.write(path).expect("write IPv6 config");
     let raw = fs::read_to_string(path).expect("read IPv6 config");
     assert!(raw.contains("dialable_address = \"[2001:db8::10]:30000\""));
+    assert!(raw.contains(&format!("\"{}\"", config.bootstrappers[0])));
     assert_eq!(
         NodeConfig::read(path)
             .expect("read IPv6 config")
@@ -359,7 +388,140 @@ fn peer_addresses_round_trip_dns_and_ipv6_as_strings() {
         config.dialable_address
     );
 
+    let malformed_path = dir.join("malformed-bootstrapper.toml");
+    let malformed = raw.replace(&config.bootstrappers[0].to_string(), "not-a-bootstrapper");
+    fs::write(&malformed_path, malformed).expect("write malformed bootstrapper config");
+    let error = NodeConfig::read(&malformed_path).expect_err("malformed bootstrapper should fail");
+    assert!(error.to_string().contains("missing the '@' separator"));
+
+    let legacy_path = dir.join("legacy-bootstrapper.toml");
+    let legacy = replace_bootstrapper_array(
+        &raw,
+        &format!(
+            "[[bootstrappers]]\npublic_key = \"{}\"\naddress = \"127.0.0.1:30001\"",
+            config.bootstrappers[0].public_key
+        ),
+    );
+    fs::write(&legacy_path, legacy).expect("write legacy bootstrapper config");
+    assert!(matches!(
+        NodeConfig::read(&legacy_path),
+        Err(Error::TomlDeserialize(_))
+    ));
+
     let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn bootstrapper_config_parses_and_formats_canonical_addresses() {
+    let public_key = ed25519::PrivateKey::from_seed(77).public_key();
+    let key = public_key.to_string();
+
+    let ipv4: BootstrapperConfig = format!("{key}@192.0.2.1:30001").parse().unwrap();
+    assert_eq!(ipv4.public_key, public_key);
+    assert_eq!(
+        ipv4.address,
+        Ingress::Socket("192.0.2.1:30001".parse().unwrap())
+    );
+    assert_eq!(ipv4.to_string(), format!("{key}@192.0.2.1:30001"));
+
+    let ipv6: BootstrapperConfig = format!("{key}@[2001:db8::1]:30002").parse().unwrap();
+    assert_eq!(
+        ipv6.address,
+        Ingress::Socket("[2001:db8::1]:30002".parse().unwrap())
+    );
+    assert_eq!(ipv6.to_string(), format!("{key}@[2001:db8::1]:30002"));
+
+    let dns: BootstrapperConfig = format!("{key}@Bootstrap.Example.COM:30003").parse().unwrap();
+    assert_eq!(
+        dns.address,
+        Ingress::Dns {
+            host: Hostname::new("bootstrap.example.com").unwrap(),
+            port: 30_003,
+        }
+    );
+    assert_eq!(
+        dns.to_string(),
+        format!("{key}@bootstrap.example.com:30003")
+    );
+    assert_eq!(dns.to_string().parse::<BootstrapperConfig>().unwrap(), dns);
+}
+
+#[test]
+fn bootstrapper_config_rejects_invalid_keys_separators_and_addresses() {
+    let key = ed25519::PrivateKey::from_seed(78).public_key().to_string();
+
+    assert!(matches!(
+        "missing-separator".parse::<BootstrapperConfig>(),
+        Err(BootstrapperConfigError::MissingSeparator)
+    ));
+    assert!(matches!(
+        "@127.0.0.1:30001".parse::<BootstrapperConfig>(),
+        Err(BootstrapperConfigError::MissingPublicKey)
+    ));
+    assert!(matches!(
+        format!("{key}@").parse::<BootstrapperConfig>(),
+        Err(BootstrapperConfigError::MissingAddress)
+    ));
+    assert!(matches!(
+        format!("{key}@@127.0.0.1:30001").parse::<BootstrapperConfig>(),
+        Err(BootstrapperConfigError::MultipleSeparators)
+    ));
+
+    let invalid_keys = [
+        key.to_uppercase(),
+        format!("0x{key}"),
+        format!("0X{key}"),
+        key[..63].to_string(),
+        format!("{key}0"),
+        format!(" {}", &key[..63]),
+        format!("{}\t", &key[..63]),
+        format!("{}\r", &key[..63]),
+        format!("{}\n", &key[..63]),
+        format!("{}g", &key[..63]),
+    ];
+    for invalid_key in invalid_keys {
+        assert!(
+            matches!(
+                format!("{invalid_key}@127.0.0.1:30001").parse::<BootstrapperConfig>(),
+                Err(BootstrapperConfigError::InvalidPublicKeyHex)
+            ),
+            "unexpected result for {invalid_key:?}"
+        );
+    }
+    assert!(matches!(
+        format!("02{}@127.0.0.1:30001", "00".repeat(31)).parse::<BootstrapperConfig>(),
+        Err(BootstrapperConfigError::InvalidPublicKey(_))
+    ));
+
+    let invalid_addresses = [
+        "validator.example.com",
+        ":30001",
+        "validator.example.com:",
+        "validator.example.com:not-a-port",
+        "https://validator.example.com:30001",
+        "validator.example.com/path:30001",
+        "2001:db8::1:30001",
+    ];
+    for address in invalid_addresses {
+        assert!(
+            matches!(
+                format!("{key}@{address}").parse::<BootstrapperConfig>(),
+                Err(BootstrapperConfigError::InvalidAddress(_))
+            ),
+            "unexpected result for {address}"
+        );
+    }
+}
+
+#[test]
+fn node_config_lowercases_dns_addresses() {
+    assert_eq!(
+        parse_dns_address_through_node_config("Validator-B.Example.COM:39000", 13),
+        Ingress::Dns {
+            host: Hostname::new("validator-b.example.com").unwrap(),
+            port: 39_000,
+        }
+    );
 }
 
 #[test]
