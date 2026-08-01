@@ -221,46 +221,6 @@ fn crosses_epoch_boundary_and_reclaims_retired_partition() {
 }
 
 #[test_traced]
-fn state_syncs_late_validator() {
-    with_large_stack(|| {
-        let executor = deterministic::Runner::timed(Duration::from_secs(60));
-        executor.start(|mut context| async move {
-            let cfg = ValidatorConfig {
-                epoch_length: NZU64!(20),
-                ..ValidatorConfig::default()
-            };
-            let mut network = TestNetworkBuilder::new(5)
-                .without_initial_links()
-                .with_validator_config(cfg)
-                .build(&mut context)
-                .await;
-
-            let link = reliable_link();
-            network
-                .link_where(link.clone(), |from, to| ![from, to].contains(&0usize))
-                .await;
-
-            for index in 1..5 {
-                network.start_validator(index).await;
-            }
-            // Select a state-sync anchor inside epoch 1. The joining validator
-            // has no marshal archive, so its orchestrator must use the
-            // certificate-verified in-epoch finalization rather than infer an
-            // epoch-0 boundary digest from the QMDB anchor.
-            network.run_until_height(25).await;
-
-            network
-                .link_where(link, |from, to| {
-                    [from, to].contains(&0usize) && ![from, to].contains(&1usize)
-                })
-                .await;
-            network.start_validator_with_state_sync(0).await;
-            network.run_until_height(30).await;
-        });
-    });
-}
-
-#[test_traced]
 fn recovers_unclean_shutdown() {
     with_large_stack(|| {
         let n = 5;

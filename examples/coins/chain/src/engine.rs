@@ -3,6 +3,7 @@ use crate::execution::NodeHandle;
 use crate::genesis::{authenticated_genesis_target, state_commitment, ChainGenesis};
 use crate::history::{self, BlocksArchive, FinalizationsArchive};
 use crate::indexer;
+use crate::dkg_recovery::{FileRecoveryError, FileRecoverySink, FileRecoveryWorker};
 use crate::{Block, EpochProvider, Provider, PublicKey, Scheme, Transaction, NAMESPACE};
 use commonware_broadcast::buffered;
 use commonware_consensus::{
@@ -24,8 +25,8 @@ use commonware_cryptography::{
         primitives::{group, sharing::Mode, variant::MinSig},
     },
     ed25519::{self, Batch},
-    sha256::Digest,
-    BatchVerifier, Digestible, Signer,
+    sha256::{Digest, Sha256},
+    BatchVerifier, Digestible, Hasher, Signer,
 };
 use commonware_glue::stateful::{
     Application as StatefulApplication,
@@ -57,6 +58,7 @@ use std::{
     collections::BTreeSet,
     marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -72,6 +74,10 @@ pub enum EngineError {
     ShutdownSignalClosed,
     #[error("{0} stopped unexpectedly")]
     UnexpectedExit(&'static str),
+    #[error("DKG authenticated preparation failed: {0}")]
+    DkgStartup(#[from] dkg::StartupError),
+    #[error("DKG recovery worker failed: {0}")]
+    DkgRecovery(#[from] FileRecoveryError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -80,6 +86,14 @@ pub enum StartupError {
     PruneConfig(#[from] PruneConfigError),
     #[error("invalid finalized-history retention policy: {0}")]
     RetentionPolicy(#[from] history::RetentionPolicyError),
+    #[error("DKG recovery worker startup failed: {0}")]
+    DkgRecovery(#[from] FileRecoveryError),
+}
+
+pub struct RecoveryExportConfig {
+    pub directory: PathBuf,
+    pub bundle_protector: dkg::BundleProtector,
+    pub manifest_protector: dkg::ManifestProtector,
 }
 
 /// Configuration for the [Engine].
@@ -89,7 +103,9 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
     pub manager: P,
     pub partition_prefix: String,
     pub signer: ed25519::PrivateKey,
-    pub dkg_storage_key: dkg::StorageKey,
+    pub storage_dir: PathBuf,
+    pub dkg_storage_protector: dkg::StorageProtector,
+    pub recovery_export: Option<RecoveryExportConfig>,
     pub output: Output<MinSig, PublicKey>,
     pub share: Option<group::Share>,
     pub peer_config: PeerConfig<PublicKey>,
@@ -178,6 +194,13 @@ where
     indexer_producer: Option<indexer::Producer>,
     indexer_producer_handle: Option<Handle<()>>,
     indexer_consumer: Option<IndexerConsumer<E>>,
+    recovery: Option<RecoveryRuntime>,
+}
+
+struct RecoveryRuntime {
+    bundle_protector: dkg::BundleProtector,
+    sink: FileRecoverySink,
+    worker: FileRecoveryWorker,
 }
 
 impl<E, B, P, S> Engine<E, B, P, S>
@@ -247,6 +270,34 @@ where
         let dkg_state = nunchi_chain::DkgState::new(protocol_config)
             .expect("invalid authenticated DKG protocol configuration");
 
+        let recovery = if let Some(recovery) = config.recovery_export.as_ref() {
+            let associated_data = dkg::RecoveryAssociatedData {
+                domain: dkg::recovery::MANIFEST_AD_DOMAIN.to_owned(),
+                domain_version: dkg::recovery::RECOVERY_ENVELOPE_VERSION,
+                protocol_config_digest: dkg_state
+                    .config()
+                    .digest()
+                    .expect("validated DKG configuration has a digest"),
+                namespace_digest: Sha256::hash(NAMESPACE),
+                validator: config.signer.public_key(),
+                partition_prefix: config.partition_prefix.clone(),
+            };
+            let (worker, sink) = FileRecoveryWorker::start(
+                recovery.directory.clone(),
+                config.storage_dir.clone(),
+                recovery.manifest_protector.clone(),
+                associated_data,
+            )
+            .await?;
+            Some(RecoveryRuntime {
+                bundle_protector: recovery.bundle_protector.clone(),
+                sink,
+                worker,
+            })
+        } else {
+            None
+        };
+
         let (dkg, dkg_mailbox) = dkg::Actor::new(
             context.child("dkg"),
             dkg::Config {
@@ -258,7 +309,7 @@ where
                 peer_config: config.peer_config.clone(),
                 max_supported_mode: MAX_SUPPORTED_MODE,
                 namespace: NAMESPACE.to_vec(),
-                storage_protector: dkg::StorageProtector::new(config.dkg_storage_key),
+                storage_protector: config.dkg_storage_protector.clone(),
                 epoch_length: config.epoch_length,
             },
         );
@@ -722,6 +773,7 @@ where
             indexer_producer,
             indexer_producer_handle,
             indexer_consumer,
+            recovery,
         };
         Ok((engine, node_handle))
     }
@@ -816,6 +868,9 @@ where
         ),
         callback: Box<dyn UpdateCallBack<MinSig, PublicKey>>,
     ) -> Result<(), EngineError> {
+        // Stateful authenticates its startup database against marshal's finalized floor, so
+        // these two bootstrap actors must run before DKG preparation. The DKG mailbox remains
+        // unopened and buffers at most the configured startup capacity until preparation ends.
         let buffer_handle = self.buffer.start(broadcast);
         let reporters: Reporters<_, _, indexer::Producer> = Reporters::from((
             Reporters::from((
@@ -833,10 +888,6 @@ where
         let probe_handle = self.probe_handle;
         let state_sync_handle = self.state_sync_handle;
         let stateful_handle = self.stateful.start();
-        // Marshal may queue one finalized block for the not-yet-started DKG
-        // mailbox while stateful attaches or reconstructs QMDB. Once the
-        // database subscription resolves, reconcile protected DKG storage
-        // against the authenticated checkpoint before acknowledging that block.
         let databases = self.stateful_mailbox.subscribe_databases().await;
         let attached_target = databases.committed_targets().await;
         let artifact = self
@@ -878,14 +929,34 @@ where
             .load_logs(&reader)
             .await
             .expect("attached QMDB has invalid authenticated DKG logs");
-        let orchestrator_handle = self.orchestrator.start(votes, certificates, resolver);
-        let dkg_handle = self.dkg.start_authenticated(
+        let recovery_config = if let Some(recovery) = self.recovery.as_ref() {
+            dkg::RecoveryConfig::enabled(
+                self.config.state_sync,
+                recovery.bundle_protector.clone(),
+                Box::new(recovery.sink.clone()),
+            )
+        } else {
+            dkg::RecoveryConfig::disabled(self.config.state_sync)
+        };
+        let prepared_dkg = match self.dkg.prepare_authenticated(
             dkg::AuthenticatedBootstrap {
                 config: self.dkg_state.config().clone(),
                 checkpoint,
                 logs,
                 initial_share: self.config.share,
             },
+            recovery_config,
+        ).await {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                if let Some(recovery) = self.recovery.take() {
+                    recovery.worker.shutdown().await?;
+                }
+                return Err(error.into());
+            }
+        };
+        let orchestrator_handle = self.orchestrator.start(votes, certificates, resolver);
+        let dkg_handle = prepared_dkg.start(
             self.orchestrator_mailbox,
             dkg,
             callback,
@@ -898,10 +969,18 @@ where
         let clob_handle = self.clob.start_p2p(self.context.child("clob"), clob);
 
         let mut shutdown = self.context.stopped();
-        if let (Some(indexer_producer_handle), Some(indexer_consumer_handle)) =
-            (indexer_producer_handle, indexer_consumer_handle)
-        {
-            commonware_macros::select! {
+        let result = {
+            let recovery_completion = async {
+                match self.recovery.as_mut() {
+                    Some(recovery) => recovery.worker.completed().await,
+                    None => futures::future::pending().await,
+                }
+            };
+            futures::pin_mut!(recovery_completion);
+            if let (Some(indexer_producer_handle), Some(indexer_consumer_handle)) =
+                (indexer_producer_handle, indexer_consumer_handle)
+            {
+                commonware_macros::select! {
                 stopped = &mut shutdown => match stopped {
                     Ok(0) => {
                         warn!("engine stopped");
@@ -921,9 +1000,10 @@ where
                 result = clob_handle => unexpected_exit("clob", result),
                 result = indexer_producer_handle => unexpected_exit("indexer_producer", result),
                 result = indexer_consumer_handle => unexpected_exit("indexer_consumer", result),
+                result = &mut recovery_completion => recovery_exit(result),
             }
-        } else {
-            commonware_macros::select! {
+            } else {
+                commonware_macros::select! {
                 stopped = &mut shutdown => match stopped {
                     Ok(0) => {
                         warn!("engine stopped");
@@ -941,8 +1021,21 @@ where
                 result = orchestrator_handle => unexpected_exit("orchestrator", result),
                 result = mempool_handle => unexpected_exit("mempool", result),
                 result = clob_handle => unexpected_exit("clob", result),
+                result = &mut recovery_completion => recovery_exit(result),
+                }
             }
+        };
+        if let Some(recovery) = self.recovery.take() {
+            recovery.worker.shutdown().await?;
         }
+        result
+    }
+}
+
+fn recovery_exit(result: Result<(), FileRecoveryError>) -> Result<(), EngineError> {
+    match result {
+        Ok(()) => Err(EngineError::UnexpectedExit("DKG recovery worker")),
+        Err(error) => Err(error.into()),
     }
 }
 

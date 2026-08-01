@@ -23,6 +23,7 @@ use commonware_runtime::{deterministic, Clock, Runner, Supervisor as _};
 use commonware_utils::{channel::mpsc, N3f1, NZUsize, TryCollect, NZU32, NZU64};
 use core::marker::PhantomData;
 use std::collections::BTreeMap;
+use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 
 const TEST_STORAGE_KEY: [u8; 32] = [7u8; 32];
 
@@ -181,6 +182,112 @@ fn finalized_dkg_log(
         .check(&round)
         .expect("finalized log should check")
         .1
+}
+
+struct RecordingRecoverySink {
+    publications: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl crate::RecoverySink for RecordingRecoverySink {
+    async fn load_candidates(
+        &mut self,
+    ) -> Result<Vec<crate::RecoveryCandidate>, crate::RecoveryError> {
+        Ok(Vec::new())
+    }
+
+    async fn publish(
+        &mut self,
+        _operation: crate::RecoveryPublication,
+        bundle: crate::EncryptedRecoveryBundle,
+        metadata: crate::RecoveryMetadata,
+    ) -> Result<crate::DurableReceipt, crate::RecoveryError> {
+        self.publications.fetch_add(1, Ordering::SeqCst);
+        Ok(crate::DurableReceipt {
+            manifest_generation: 1,
+            checkpoint_epoch: metadata.checkpoint_epoch,
+            created_at_ms: metadata.created_at_ms,
+            checkpoint_digest: metadata.checkpoint_digest,
+            bundle_digest: bundle.digest(),
+        })
+    }
+}
+
+#[test_traced]
+fn authenticated_preparation_gates_all_protocol_startup_modes() {
+    deterministic::Runner::seeded(21).start(|context| async move {
+        let (peer_config, participants) = peer_config(4, vec![4]);
+        let signer = participants.values().next().unwrap().clone();
+        let (output, shares) = deal::<MinSig, _, N3f1>(
+            commonware_utils::test_rng(),
+            Mode::NonZeroCounter,
+            peer_config.participants.clone(),
+        )
+        .unwrap();
+        let protocol = crate::DkgProtocolConfig {
+            state_format_version: crate::STATE_FORMAT_VERSION,
+            namespace: b"test_dkg".to_vec(),
+            epoch_length: NZU64!(200),
+            participants: peer_config.participants.clone(),
+            num_participants_per_round: vec![4],
+            mode: Mode::NonZeroCounter,
+            mode_version: 0,
+            fault_model: crate::public::N3F1_FAULT_MODEL,
+            trusted_initial_identity: *output.public().public(),
+        };
+        let checkpoint = crate::PublicCheckpoint::genesis(&protocol, output).unwrap();
+        let bootstrap = |share| AuthenticatedBootstrap {
+            config: protocol.clone(),
+            checkpoint: checkpoint.clone(),
+            logs: Vec::new(),
+            initial_share: share,
+        };
+        let config = |partition_prefix: &str| Config {
+            manager: NoopManager::<Ed25519PublicKey>::default(),
+            signer: signer.clone(),
+            mailbox_size: NZUsize!(8),
+            execution: Execution::Shared,
+            partition_prefix: partition_prefix.to_owned(),
+            peer_config: peer_config.clone(),
+            max_supported_mode: crate::MAX_SUPPORTED_MODE,
+            namespace: b"test_dkg".to_vec(),
+            storage_protector: StorageProtector::new(TEST_STORAGE_KEY),
+            epoch_length: NZU64!(200),
+        };
+        let share = shares.get_value(&signer.public_key()).cloned();
+
+        let (actor, _) = Actor::<_, _, TestBlock>::new(context.child("genesis"), config("prepared_genesis"));
+        let prepared = actor
+            .prepare_authenticated(bootstrap(share.clone()), RecoveryConfig::disabled(false))
+            .await
+            .unwrap_or_else(|error| panic!("genesis preparation failed: {error}"));
+        assert_eq!(prepared.mode(), StartupMode::GenesisInitialize);
+
+        let publications = Arc::new(AtomicUsize::new(0));
+        let (actor, _) = Actor::<_, _, TestBlock>::new(context.child("enabled"), config("prepared_enabled"));
+        let protectors = crate::RecoveryProtectors::new(TEST_STORAGE_KEY);
+        let prepared = actor
+            .prepare_authenticated(
+                bootstrap(share.clone()),
+                RecoveryConfig::enabled(
+                    false,
+                    protectors.bundle,
+                    Box::new(RecordingRecoverySink { publications: publications.clone() }),
+                ),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("enabled preparation failed: {error}"));
+        assert_eq!(prepared.mode(), StartupMode::GenesisInitialize);
+        assert_eq!(publications.load(Ordering::SeqCst), 1);
+
+        let (actor, _) = Actor::<_, _, TestBlock>::new(context.child("disabled_restore"), config("prepared_restore"));
+        let error = actor
+            .prepare_authenticated(bootstrap(share), RecoveryConfig::disabled(true))
+            .await
+            .err()
+            .expect("disabled disaster restore must fail");
+        assert!(matches!(error, StartupError::RecoveryDisabled));
+    });
 }
 
 fn assert_recovered_storage_controls_dkg_mode_on_restart(execution: Execution, suffix: &str) {

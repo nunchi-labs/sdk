@@ -133,6 +133,57 @@ fn generated_testnet_has_unique_ports_dirs_and_complete_peer_sets() {
 }
 
 #[test]
+fn dkg_recovery_toml_and_path_validation_are_fail_closed() {
+    let root = tempfile::tempdir().unwrap();
+    let manifest = generate_local_testnet(LocalTestnetConfig {
+        validators: 1,
+        base_port: 47_000,
+        base_rpc_port: 47_100,
+        base_metrics_port: 47_200,
+        base_data_dir: root.path().join("nodes"),
+        bind_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        public_ips: None,
+        storage_dir: None,
+        genesis_path: None,
+        indexer_url: None,
+        seed: 31,
+    })
+    .unwrap();
+    let config_path = &manifest.nodes[0].config_path;
+    let mut config = NodeConfig::read(config_path).unwrap();
+    assert!(!config.dkg_recovery_export.enabled);
+
+    let recovery = root.path().join("recovery");
+    fs::create_dir(&recovery).unwrap();
+    config.dkg_recovery_export = DkgRecoveryExportConfig {
+        enabled: true,
+        directory: recovery.clone(),
+    };
+    config.write(config_path).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(config_path, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(&recovery, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    assert!(NodeConfig::read(config_path).unwrap().dkg_recovery_export.enabled);
+
+    config.dkg_recovery_export.directory = config.storage_dir.clone();
+    config.write(config_path).unwrap();
+    assert!(matches!(NodeConfig::read(config_path), Err(Error::InvalidRecoveryDirectory)));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        config.dkg_recovery_export.directory = recovery.clone();
+        config.write(config_path).unwrap();
+        fs::set_permissions(config_path, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(&recovery, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(NodeConfig::read(config_path), Err(Error::UnsafeRecoveryPermissions)));
+    }
+}
+
+#[test]
 fn prune_config_is_required_and_validated() {
     let dir = std::env::temp_dir().join(format!(
         "coins-chain-prune-config-{}",

@@ -221,7 +221,13 @@ fn storage_recovers_sealed_metadata_and_journal_records() {
             .await
             .expect("set epoch should succeed");
         storage
-            .append_dealing(epoch, dealer.clone(), pub_msg.clone(), priv_msg.clone())
+            .append_dealing(
+                epoch,
+                dealer.clone(),
+                pub_msg.clone(),
+                priv_msg.clone(),
+                Bytes::from_static(b"ack"),
+            )
             .await
             .expect("append dealing should succeed");
         drop(storage);
@@ -415,7 +421,13 @@ fn storage_prune_removes_old_sealed_records_after_restart() {
                 .await
                 .expect("set epoch should succeed");
             storage
-                .append_dealing(epoch, dealer.clone(), pub_msg.clone(), priv_msg.clone())
+                .append_dealing(
+                    epoch,
+                    dealer.clone(),
+                    pub_msg.clone(),
+                    priv_msg.clone(),
+                    Bytes::from_static(b"ack"),
+                )
                 .await
                 .expect("append dealing should succeed");
         }
@@ -726,6 +738,16 @@ fn test_dealer_handle_returns_true_for_valid_ack() {
             .expect("valid dealer");
 
         let unsent: BTreeMap<_, _> = priv_msgs.into_iter().collect();
+        storage
+            .initialize_local_dealer(
+                Epoch::zero(),
+                pub_msg.clone(),
+                unsent
+                    .iter()
+                    .map(|(player, private)| (player.clone(), private.clone())),
+            )
+            .await
+            .expect("local dealer initialization should succeed");
         let mut dealer = Dealer::new(Some(crypto_dealer), pub_msg.clone(), unsent);
 
         let player_signer = signers[1].clone();
@@ -786,6 +808,16 @@ fn test_dealer_handle_returns_false_for_duplicate_ack() {
             .expect("valid dealer");
 
         let unsent: BTreeMap<_, _> = priv_msgs.into_iter().collect();
+        storage
+            .initialize_local_dealer(
+                Epoch::zero(),
+                pub_msg.clone(),
+                unsent
+                    .iter()
+                    .map(|(player, private)| (player.clone(), private.clone())),
+            )
+            .await
+            .expect("local dealer initialization should succeed");
         let mut dealer = Dealer::new(Some(crypto_dealer), pub_msg.clone(), unsent);
 
         let player_signer = signers[1].clone();

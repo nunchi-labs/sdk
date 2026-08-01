@@ -8,7 +8,7 @@
 use crate::indexer::Client as _;
 use crate::{
     channels,
-    engine::{Config as EngineConfig, Engine},
+    engine::{Config as EngineConfig, Engine, RecoveryExportConfig},
     genesis::{ChainGenesis, GenesisError},
     indexer, rpc, PublicKey, BLOCKS_PER_EPOCH, NAMESPACE,
 };
@@ -33,8 +33,8 @@ use commonware_runtime::{
 use commonware_utils::{ordered::Set, Hostname, N3f1, NZUsize, NZU32};
 use governor::Quota;
 use nunchi_dkg::{
-    ContinueOnUpdate, PeerConfig, Storage as DkgStorage, StorageKey, StorageProtector,
-    UpdateCallBack, MAX_SUPPORTED_MODE,
+    ContinueOnUpdate, PeerConfig, RecoveryProtectors, Storage as DkgStorage, StorageKey,
+    StorageProtector, UpdateCallBack, MAX_SUPPORTED_MODE,
 };
 use nunchi_mempool::PoolConfig;
 use nunchi_chain::engine::{
@@ -115,6 +115,14 @@ pub struct IndexerManifest {
     pub participants: u32,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct DkgRecoveryExportConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub directory: PathBuf,
+}
+
 /// One validator's standalone configuration.
 ///
 /// Key material is hex-encoded commonware-codec bytes. The threshold `output` and `share` come
@@ -138,6 +146,8 @@ pub struct NodeConfig {
     pub metrics_address: SocketAddr,
     pub bootstrappers: Vec<BootstrapperConfig>,
     pub storage_dir: PathBuf,
+    #[serde(default)]
+    pub dkg_recovery_export: DkgRecoveryExportConfig,
     pub genesis_path: Option<PathBuf>,
     #[serde(default)]
     pub indexer_url: Option<String>,
@@ -177,10 +187,12 @@ pub struct NodeConfig {
 
 impl NodeConfig {
     pub fn read(path: impl AsRef<Path>) -> Result<Self, Error> {
+        let path = path.as_ref();
         let raw = fs::read_to_string(path).map_err(Error::Io)?;
         let config: Self = toml::from_str(&raw).map_err(Error::TomlDeserialize)?;
         let prune_config = config.prune_config()?;
         crate::history::RetentionPolicy::new(prune_config)?;
+        config.validate_recovery_paths(path)?;
         Ok(config)
     }
 
@@ -196,6 +208,40 @@ impl NodeConfig {
             retained_marshal_blocks: self.retained_marshal_blocks,
             retained_qmdb_blocks: self.retained_qmdb_blocks,
         })
+    }
+
+    fn validate_recovery_paths(&self, config_path: &Path) -> Result<(), Error> {
+        if !self.dkg_recovery_export.enabled {
+            return Ok(());
+        }
+        if self.dkg_recovery_export.directory.as_os_str().is_empty() {
+            return Err(Error::InvalidRecoveryDirectory);
+        }
+        let recovery = self.dkg_recovery_export.directory.canonicalize()?;
+        let storage = self.storage_dir.canonicalize()?;
+        if !recovery.is_dir()
+            || recovery.starts_with(&storage)
+            || storage.starts_with(&recovery)
+        {
+            return Err(Error::InvalidRecoveryDirectory);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let config_mode = fs::metadata(config_path)?.permissions().mode();
+            let directory_mode = fs::metadata(&recovery)?.permissions().mode();
+            if config_mode & 0o077 != 0 || directory_mode & 0o077 != 0 {
+                return Err(Error::UnsafeRecoveryPermissions);
+            }
+        }
+        let probe = recovery.join(format!(".nunchi-write-probe-{}", std::process::id()));
+        let file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&probe)?;
+        drop(file);
+        fs::remove_file(probe)?;
+        Ok(())
     }
 }
 
@@ -461,6 +507,10 @@ pub enum Error {
     PruneConfig(#[from] PruneConfigError),
     #[error("invalid finalized-history retention policy: {0}")]
     RetentionPolicy(#[from] crate::history::RetentionPolicyError),
+    #[error("DKG recovery export directory must be an existing independent directory")]
+    InvalidRecoveryDirectory,
+    #[error("DKG recovery config and directory must not be group/world readable")]
+    UnsafeRecoveryPermissions,
     #[error("engine startup failed: {0}")]
     EngineStartup(#[from] crate::engine::StartupError),
     #[error("engine stopped unexpectedly: {0}")]
@@ -567,6 +617,7 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
             metrics_address: SocketAddr::new(config.bind_ip, metrics_port),
             bootstrappers,
             storage_dir: storage_dir.clone(),
+            dkg_recovery_export: DkgRecoveryExportConfig::default(),
             genesis_path: config.genesis_path.clone(),
             indexer_url: config.indexer_url.clone(),
             epoch_length: default_epoch_length(),
@@ -718,7 +769,13 @@ async fn start_node(
     let prune_config = config.prune_config()?;
     crate::history::RetentionPolicy::new(prune_config)?;
     let private_key = decode_unit::<ed25519::PrivateKey>(&config.private_key, "private_key")?;
-    let dkg_storage_key = decode_storage_key(&config.dkg_storage_key)?;
+    let mut dkg_storage_key = decode_storage_key(&config.dkg_storage_key)?;
+    let dkg_storage_protector = StorageProtector::new(dkg_storage_key);
+    let recovery_protectors = config
+        .dkg_recovery_export
+        .enabled
+        .then(|| RecoveryProtectors::new(dkg_storage_key));
+    dkg_storage_key.fill(0);
     let public_key = private_key.public_key();
     let max_participants = NonZeroU32::new(config.peer_config.max_participants_per_round())
         .ok_or(Error::EmptyValidatorSet)?;
@@ -784,7 +841,7 @@ async fn start_node(
         spawn_current_dkg_output_uploader(
             context,
             config.name.clone(),
-            dkg_storage_key,
+            dkg_storage_protector.clone(),
             public_key.clone(),
             max_participants,
             client,
@@ -796,7 +853,13 @@ async fn start_node(
         manager: oracle.clone(),
         partition_prefix: config.name.clone(),
         signer: private_key,
-        dkg_storage_key,
+        storage_dir: config.storage_dir.clone(),
+        dkg_storage_protector,
+        recovery_export: recovery_protectors.map(|protectors| RecoveryExportConfig {
+            directory: config.dkg_recovery_export.directory.clone(),
+            bundle_protector: protectors.bundle,
+            manifest_protector: protectors.manifest,
+        }),
         output,
         share: Some(share),
         peer_config: config.peer_config.clone(),
@@ -871,7 +934,7 @@ async fn start_node(
 async fn upload_current_dkg_output(
     context: &tokio::Context,
     node_name: &str,
-    dkg_storage_key: StorageKey,
+    storage_protector: StorageProtector,
     public_key: PublicKey,
     max_participants: NonZeroU32,
     client: indexer::HttpClient,
@@ -881,7 +944,7 @@ async fn upload_current_dkg_output(
     let storage = match DkgStorage::<_, MinSig, PublicKey>::init(
         context.child("dkg_output_seed"),
         node_name,
-        StorageProtector::new(dkg_storage_key),
+        storage_protector,
         NAMESPACE.to_vec(),
         public_key,
         max_participants,
@@ -922,7 +985,7 @@ async fn upload_current_dkg_output(
 fn spawn_current_dkg_output_uploader(
     context: &tokio::Context,
     node_name: String,
-    dkg_storage_key: StorageKey,
+    storage_protector: StorageProtector,
     public_key: PublicKey,
     max_participants: NonZeroU32,
     client: indexer::HttpClient,
@@ -935,7 +998,7 @@ fn spawn_current_dkg_output_uploader(
                 upload_current_dkg_output(
                     &context,
                     &node_name,
-                    dkg_storage_key,
+                    storage_protector.clone(),
                     public_key.clone(),
                     max_participants,
                     client.clone(),

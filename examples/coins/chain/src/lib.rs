@@ -18,6 +18,7 @@ use std::num::NonZeroU64;
 pub mod application;
 pub mod engine;
 pub mod execution;
+mod dkg_recovery;
 pub mod genesis;
 pub(crate) mod history;
 pub mod indexer;

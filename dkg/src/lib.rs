@@ -11,13 +11,17 @@ mod egress;
 mod ingress;
 pub mod public;
 pub mod protector;
+pub mod recovery;
 pub mod orchestrator;
 mod setup;
 mod state;
 #[cfg(test)]
 mod tests;
 
-pub use actor::{Actor, AuthenticatedBootstrap, Config, Execution};
+pub use actor::{
+    Actor, AuthenticatedBootstrap, Config, Execution, PreparedDkg, RecoveryConfig, StartupError,
+    StartupMode,
+};
 pub use consensus::{
     Activity, Context, EdScheme, EpochProvider, Finalization, Identity, Notarization, Provider,
     PublicKey, Scheme, Seed, Seedable, Signature, ThresholdScheme,
@@ -25,6 +29,15 @@ pub use consensus::{
 pub use egress::{ContinueOnUpdate, PostUpdate, Update, UpdateCallBack};
 pub use ingress::{Mailbox, Message};
 pub use protector::{StorageKey, StorageProtector};
+pub use recovery::{
+    BundleProtector, DkgRecoveryBundle, DurableReceipt, EncryptedRecoveryBundle,
+    EncryptedRecoveryManifest, ManifestProtector, RecipientState, RecoveryAssociatedData,
+    RecoveryCandidate,
+    RecoveryDealer, RecoveryDealing, RecoveryEpoch, RecoveryEpochState, RecoveryError, RecoveryImportPhase,
+    RecoveryImportTransaction, RecoveryManifest, RecoveryManifestEntry, RecoveryMetadata,
+    RecoveryProtectors, RecoveryPublication, RecoveryReadCfg, RecoverySink, PublicationStage,
+    MAX_RETAINED_BUNDLES,
+};
 pub use public::{
     checked_threshold_scheme, transition as public_transition, transition_logs, validate_anchor,
     validate_share, DkgProtocolConfig, PublicCheckpoint, PublicTransition,
@@ -32,7 +45,8 @@ pub use public::{
 };
 pub use setup::PeerConfig;
 pub use state::{
-    Epoch as StoredEpoch, Reconciliation, ReconciliationPhase, Storage,
+    Epoch as StoredEpoch, ExactInsert, Reconciliation, ReconciliationPhase, Storage,
+    StorageInspection,
 };
 
 pub type DealerLog = SignedDealerLog<MinSig, ed25519::PrivateKey>;

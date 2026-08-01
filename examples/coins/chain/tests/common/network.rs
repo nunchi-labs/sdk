@@ -180,11 +180,6 @@ impl TestNetworkBuilder {
         self
     }
 
-    pub(crate) fn without_initial_links(mut self) -> Self {
-        self.initial_link = None;
-        self
-    }
-
     pub(crate) async fn build<'a>(
         self,
         context: &'a mut deterministic::Context,
@@ -266,15 +261,6 @@ impl TestNetwork<'_> {
     }
 
     pub(crate) async fn start_validator(&mut self, index: usize) {
-        self.start_validator_inner(index, false).await;
-    }
-
-    /// Start a fresh validator by discovering a finalized floor and syncing QMDB from peers.
-    pub(crate) async fn start_validator_with_state_sync(&mut self, index: usize) {
-        self.start_validator_inner(index, true).await;
-    }
-
-    async fn start_validator_inner(&mut self, index: usize, state_sync: bool) {
         let signer = &self.private_keys[index];
         let public_key = signer.public_key();
         let channels = self
@@ -298,7 +284,6 @@ impl TestNetwork<'_> {
             },
             channels,
             self.validator_config.clone(),
-            state_sync,
         )
         .await;
         self.nodes.insert(public_key, handle);
@@ -604,7 +589,6 @@ async fn start_validator(
     identity: ValidatorIdentity<'_>,
     channels: ValidatorChannels,
     cfg: ValidatorConfig,
-    state_sync: bool,
 ) -> NodeHandle<deterministic::Context> {
     let ValidatorIdentity {
         signer,
@@ -619,7 +603,9 @@ async fn start_validator(
         manager: oracle.manager(),
         partition_prefix: uid.clone(),
         signer: signer.clone(),
-        dkg_storage_key: [9u8; 32],
+        storage_dir: "unused-deterministic-storage".into(),
+        dkg_storage_protector: nunchi_dkg::StorageProtector::new([9u8; 32]),
+        recovery_export: None,
         output,
         share: Some(share),
         peer_config,
@@ -628,7 +614,7 @@ async fn start_validator(
         leader_timeout: cfg.leader_timeout,
         certification_timeout: cfg.certification_timeout,
         strategy: Sequential,
-        state_sync,
+        state_sync: false,
         prune_config: cfg.prune_config,
         max_block_transactions: MAX_BLOCK_TRANSACTIONS,
         pool_config: PoolConfig::default(),

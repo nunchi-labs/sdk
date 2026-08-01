@@ -9,6 +9,7 @@ description = "A demo blockchain that executes the Nunchi coins module, used for
 workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
 nunchi-coins = { workspace = true, features = ["mempool"] }
 nunchi-authority = { workspace = true }
 nunchi-bridge = { workspace = true }
@@ -39,6 +40,7 @@ rand = { workspace = true }
 rand_core = { workspace = true }
 thiserror = { workspace = true }
 futures = { workspace = true }
+fs2 = { workspace = true }
 tracing = { workspace = true }
 governor = { workspace = true }
 jsonrpsee = { workspace = true }
@@ -50,6 +52,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "syn
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 
 [dev-dependencies]
+tempfile = "3.27.0"
 commonware-math = { workspace = true }
 jsonrpsee = { workspace = true, features = ["http-client"] }
 tracing-subscriber = { workspace = true, features = ["fmt", "json"] }

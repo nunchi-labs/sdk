@@ -1,7 +1,7 @@
 use super::{
     state::{
-        CreatePlayerError, Dealer, Epoch as EpochState, Player, Reconciliation,
-        ReconciliationPhase, Storage,
+        CreateDealerError, CreatePlayerError, Dealer, Epoch as EpochState, ExactInsert, Player,
+        Reconciliation, ReconciliationPhase, Storage,
     },
     Mailbox, Message as MailboxMessage, PostUpdate, Update, UpdateCallBack,
 };
@@ -9,6 +9,11 @@ use crate::{
     orchestrator::{self, EpochTransition},
     protector::StorageProtector,
     public::{transition_logs, DkgProtocolConfig, PublicCheckpoint, N3F1_FAULT_MODEL},
+    recovery::{
+        BundleProtector, DurableReceipt, RecoveryAssociatedData,
+        RecoveryError, RecoveryMetadata, RecoveryPublication, RecoveryReadCfg, RecoverySink,
+        BUNDLE_AD_DOMAIN, RECOVERY_ENVELOPE_VERSION,
+    },
     setup::PeerConfig,
     validate_share, ReshareBlock, STATE_FORMAT_VERSION,
 };
@@ -18,7 +23,8 @@ use commonware_consensus::types::{Epoch, EpochPhase, Epocher, FixedEpocher, Heig
 use commonware_cryptography::{
     bls12381::{
         dkg::feldman_desmedt::{
-            observe, DealerPrivMsg, DealerPubMsg, Info, Logs, Output, PlayerAck,
+            observe, Dealer as CryptoDealer, DealerPrivMsg, DealerPubMsg, Info, Logs, Output,
+            Player as CryptoPlayer, PlayerAck,
         },
         primitives::{
             group::Share,
@@ -28,7 +34,7 @@ use commonware_cryptography::{
     },
     ed25519::{self, Batch},
     sha256::Sha256,
-    transcript::Summary,
+    transcript::{Summary, Transcript},
     BatchVerifier, Hasher, PublicKey, Signer,
 };
 use commonware_macros::select_loop;
@@ -46,6 +52,7 @@ use rand::CryptoRng;
 use std::{
     collections::BTreeMap,
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
+    time::UNIX_EPOCH,
 };
 use tracing::{debug, error, info, warn};
 
@@ -135,7 +142,121 @@ enum Bootstrap {
         output: Option<Output<MinSig, ed25519::PublicKey>>,
         share: Option<Share>,
     },
-    Authenticated(Box<AuthenticatedBootstrap>),
+    Prepared,
+}
+
+/// Authenticated DKG startup mode selected from pre-mutation storage state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StartupMode {
+    GenesisInitialize,
+    NormalReplay,
+    DisasterRestore,
+}
+
+enum RecoveryPreparation {
+    Disabled,
+    Enabled {
+        protector: BundleProtector,
+        sink: Box<dyn RecoverySink>,
+    },
+}
+
+/// Recovery startup configuration. Constructors prevent disabled startup from
+/// carrying a sink or claiming recovery durability.
+pub struct RecoveryConfig {
+    state_sync: bool,
+    preparation: RecoveryPreparation,
+}
+
+impl RecoveryConfig {
+    pub const fn disabled(state_sync: bool) -> Self {
+        Self {
+            state_sync,
+            preparation: RecoveryPreparation::Disabled,
+        }
+    }
+
+    pub fn enabled(
+        state_sync: bool,
+        protector: BundleProtector,
+        sink: Box<dyn RecoverySink>,
+    ) -> Self {
+        Self {
+            state_sync,
+            preparation: RecoveryPreparation::Enabled {
+                protector,
+                sink,
+            },
+        }
+    }
+}
+
+enum RecoveryPolicy {
+    DisabledOrdinary,
+    Enabled {
+        protector: BundleProtector,
+        sink: Box<dyn RecoverySink>,
+        associated_data: Box<RecoveryAssociatedData<ed25519::PublicKey>>,
+        last_receipt: DurableReceipt,
+    },
+}
+
+/// Typed, secret-free authenticated startup failure.
+#[derive(Debug, thiserror::Error)]
+pub enum StartupError {
+    #[error("protected DKG storage initialization failed")]
+    Storage,
+    #[error("authenticated DKG state reconciliation failed")]
+    Reconciliation,
+    #[error("partial or corrupt protected DKG storage")]
+    InvalidPrimaryStorage,
+    #[error("disaster restore requires recovery to be enabled")]
+    RecoveryDisabled,
+    #[error("no valid recovery candidate")]
+    NoValidRecoveryCandidate,
+    #[error("recovery operation failed: {0}")]
+    Recovery(#[from] RecoveryError),
+    #[error("system clock is before the Unix epoch")]
+    ClockBeforeEpoch,
+    #[error("system clock cannot be represented as Unix milliseconds")]
+    ClockOverflow,
+}
+
+/// Fully initialized DKG state. This value is non-cloneable and consumed by
+/// `start`, so no protocol endpoint can run before preparation succeeds.
+pub struct PreparedDkg<E, P, B>
+where
+    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + RuntimeStorage,
+    P: Manager<PublicKey = ed25519::PublicKey>,
+    B: ReshareBlock,
+{
+    actor: Actor<E, P, B>,
+    mode: StartupMode,
+}
+
+impl<E, P, B> PreparedDkg<E, P, B>
+where
+    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + RuntimeStorage,
+    P: Manager<PublicKey = ed25519::PublicKey>,
+    B: ReshareBlock,
+    Batch: BatchVerifier<PublicKey = ed25519::PublicKey>,
+{
+    pub const fn mode(&self) -> StartupMode {
+        self.mode
+    }
+
+    pub fn start(
+        self,
+        orchestrator: orchestrator::Mailbox<MinSig, ed25519::PublicKey>,
+        dkg: (
+            impl Sender<PublicKey = ed25519::PublicKey>,
+            impl Receiver<PublicKey = ed25519::PublicKey>,
+        ),
+        callback: Box<dyn UpdateCallBack<MinSig, ed25519::PublicKey>>,
+    ) -> Handle<()> {
+        self.actor
+            .start_inner(Bootstrap::Prepared, orchestrator, dkg, callback)
+    }
 }
 
 /// Execution mode for the DKG actor.
@@ -165,6 +286,9 @@ where
     namespace: Vec<u8>,
     storage_protector: StorageProtector,
     epoch_length: NonZeroU64,
+    prepared_storage: Option<Storage<E, MinSig, ed25519::PublicKey>>,
+    authoritative_checkpoint: Option<PublicCheckpoint>,
+    recovery_policy: RecoveryPolicy,
 
     successful_epochs: Counter,
     failed_epochs: Counter,
@@ -213,6 +337,9 @@ where
                 namespace: config.namespace,
                 storage_protector: config.storage_protector,
                 epoch_length: config.epoch_length,
+                prepared_storage: None,
+                authoritative_checkpoint: None,
+                recovery_policy: RecoveryPolicy::DisabledOrdinary,
 
                 successful_epochs,
                 failed_epochs,
@@ -223,6 +350,360 @@ where
             },
             Mailbox::new(sender),
         )
+    }
+
+    /// Prepare authenticated DKG state without starting any protocol actor.
+    pub async fn prepare_authenticated(
+        mut self,
+        bootstrap: AuthenticatedBootstrap,
+        recovery: RecoveryConfig,
+    ) -> Result<PreparedDkg<E, P, B>, StartupError> {
+        bootstrap
+            .config
+            .validate_checkpoint(&bootstrap.checkpoint)
+            .map_err(|_| StartupError::Reconciliation)?;
+        if bootstrap.config.namespace != self.namespace
+            || bootstrap.config.epoch_length != self.epoch_length
+            || bootstrap.config.participants != self.peer_config.participants
+            || bootstrap.config.num_participants_per_round
+                != self.peer_config.num_participants_per_round
+        {
+            return Err(StartupError::Reconciliation);
+        }
+
+        let self_pk = self.signer.public_key();
+        let max_read_size = NZU32!(self.peer_config.max_participants_per_round());
+        let mut storage = Storage::init(
+            self.context.child("storage"),
+            &self.partition_prefix,
+            self.storage_protector.clone(),
+            self.namespace.clone(),
+            self_pk.clone(),
+            max_read_size,
+            self.max_supported_mode,
+        )
+        .await
+        .map_err(|_| StartupError::Storage)?;
+
+        let mode = match storage.inspect() {
+            crate::StorageInspection::Empty if recovery.state_sync => StartupMode::DisasterRestore,
+            crate::StorageInspection::Empty => StartupMode::GenesisInitialize,
+            crate::StorageInspection::Coherent => StartupMode::NormalReplay,
+            crate::StorageInspection::Partial | crate::StorageInspection::Importing => {
+                return Err(StartupError::InvalidPrimaryStorage);
+            }
+        };
+        if mode == StartupMode::DisasterRestore
+            && matches!(recovery.preparation, RecoveryPreparation::Disabled)
+        {
+            return Err(StartupError::RecoveryDisabled);
+        }
+
+        let checkpoint = bootstrap.checkpoint.clone();
+        if mode == StartupMode::NormalReplay {
+            storage.validate_complete_import(&checkpoint)?;
+        }
+        let associated_data = RecoveryAssociatedData {
+            domain: BUNDLE_AD_DOMAIN.to_owned(),
+            domain_version: RECOVERY_ENVELOPE_VERSION,
+            protocol_config_digest: checkpoint.protocol_config_digest,
+            namespace_digest: Sha256::hash(&self.namespace),
+            validator: self_pk.clone(),
+            partition_prefix: self.partition_prefix.clone(),
+        };
+
+        let mut enabled = match recovery.preparation {
+            RecoveryPreparation::Disabled => None,
+            RecoveryPreparation::Enabled {
+                protector,
+                sink,
+            } => Some((protector, sink)),
+        };
+
+        if mode == StartupMode::DisasterRestore {
+            let (protector, sink) = enabled.as_mut().expect("checked enabled policy");
+            let candidates = sink.load_candidates().await?;
+            let read_cfg = RecoveryReadCfg::new(max_read_size, self.max_supported_mode);
+            let checkpoint_digest = Sha256::hash(&checkpoint.encode());
+            let mut restored = false;
+            for candidate in candidates.iter() {
+                if candidate.metadata.checkpoint_epoch != checkpoint.epoch
+                    || candidate.metadata.checkpoint_digest != checkpoint_digest
+                {
+                    continue;
+                }
+                let Ok(bundle) = protector.decrypt(&candidate.bundle, &associated_data, &read_cfg)
+                else {
+                    continue;
+                };
+                if self
+                    .validate_recovery_candidate(&bundle, &bootstrap, &self_pk)
+                    .is_err()
+                {
+                    continue;
+                }
+                match storage
+                    .import_recovery_bundle(bundle, &checkpoint, candidate.bundle.digest())
+                    .await
+                {
+                    Ok(()) => {
+                        restored = true;
+                        break;
+                    }
+                    Err(RecoveryError::Authentication
+                    | RecoveryError::Codec(_)
+                    | RecoveryError::TrailingBytes
+                    | RecoveryError::UnsupportedFormat(_)
+                    | RecoveryError::UnsupportedEnvelope(_)
+                    | RecoveryError::InvalidMagic
+                    | RecoveryError::Bound(_)
+                    | RecoveryError::Identity(_)
+                    | RecoveryError::Epoch
+                    | RecoveryError::Checkpoint
+                    | RecoveryError::Share
+                    | RecoveryError::Log) => continue,
+                    Err(error) => return Err(StartupError::Recovery(error)),
+                }
+            }
+            if !restored {
+                return Err(StartupError::NoValidRecoveryCandidate);
+            }
+        }
+
+        self.reconcile_authenticated(&mut storage, bootstrap, &self_pk)
+            .await
+            .map_err(|_| StartupError::Reconciliation)?;
+
+        self.recovery_policy = if let Some((protector, mut sink)) = enabled {
+            let receipt = Self::publish_snapshot(
+                self.context.as_present_mut(),
+                &storage,
+                &checkpoint,
+                &protector,
+                sink.as_mut(),
+                &associated_data,
+                match mode {
+                    StartupMode::GenesisInitialize => RecoveryPublication::GenesisFirst,
+                    StartupMode::NormalReplay => RecoveryPublication::NormalReplay,
+                    StartupMode::DisasterRestore => RecoveryPublication::DisasterRestore,
+                },
+            )
+            .await?;
+            RecoveryPolicy::Enabled {
+                protector,
+                sink,
+                associated_data: Box::new(associated_data),
+                last_receipt: receipt,
+            }
+        } else {
+            RecoveryPolicy::DisabledOrdinary
+        };
+        self.authoritative_checkpoint = Some(checkpoint);
+        self.prepared_storage = Some(storage);
+        Ok(PreparedDkg { actor: self, mode })
+    }
+
+    fn validate_recovery_candidate(
+        &self,
+        bundle: &crate::DkgRecoveryBundle<MinSig, ed25519::PublicKey>,
+        bootstrap: &AuthenticatedBootstrap,
+        self_pk: &ed25519::PublicKey,
+    ) -> Result<(), RecoveryError> {
+        let info = bootstrap
+            .config
+            .round_info(&bootstrap.checkpoint)
+            .map_err(|_| RecoveryError::Checkpoint)?;
+        let mut authenticated_logs = BTreeMap::new();
+        for signed in &bootstrap.logs {
+            let (dealer, log) = signed
+                .clone()
+                .check(&info)
+                .ok_or(RecoveryError::Log)?;
+            if authenticated_logs
+                .insert(dealer, log.clone())
+                .is_some_and(|existing| existing != log)
+            {
+                return Err(RecoveryError::Log);
+            }
+        }
+        let current = bundle
+            .epochs
+            .iter()
+            .find(|epoch| epoch.epoch == bootstrap.checkpoint.epoch);
+        let recovered_logs = current
+            .map(|epoch| epoch.logs.iter().cloned().collect::<BTreeMap<_, _>>())
+            .unwrap_or_default();
+        if recovered_logs != authenticated_logs {
+            return Err(RecoveryError::Log);
+        }
+
+        if let Some(epoch) = current {
+            if !epoch.dealings.is_empty() {
+                let dealings = epoch.dealings.iter().map(|dealing| {
+                    (
+                        dealing.dealer.clone(),
+                        dealing.public_message.clone(),
+                        dealing.private_message.clone(),
+                    )
+                });
+                let (_, generated) = CryptoPlayer::resume::<N3f1>(
+                    info.clone(),
+                    self.signer.clone(),
+                    &authenticated_logs,
+                    dealings,
+                )
+                .map_err(|_| RecoveryError::Share)?;
+                if generated.len() != epoch.dealings.len() {
+                    return Err(RecoveryError::Share);
+                }
+                for dealing in &epoch.dealings {
+                    let mut bytes = dealing.acknowledgement.as_ref();
+                    let persisted = PlayerAck::read(&mut bytes).map_err(|_| RecoveryError::Share)?;
+                    if bytes.has_remaining()
+                        || generated.get(&dealing.dealer) != Some(&persisted)
+                    {
+                        return Err(RecoveryError::Share);
+                    }
+                }
+            }
+
+            if let Some(local) = epoch.local_dealer.as_ref() {
+                let (mut dealer, public, private) = CryptoDealer::start::<N3f1>(
+                    Transcript::resume(bundle.epoch_state.rng_seed).noise(b"dealer-rng"),
+                    info.clone(),
+                    self.signer.clone(),
+                    bundle.epoch_state.share.clone(),
+                )
+                .map_err(|_| RecoveryError::Share)?;
+                let generated = private.into_iter().collect::<BTreeMap<_, _>>();
+                let (persisted_public, recipients, signed_log) = match local {
+                    crate::RecoveryDealer::Active {
+                        public_message,
+                        recipients,
+                    } => (public_message, recipients, None),
+                    crate::RecoveryDealer::Finalized {
+                        public_message,
+                        recipients,
+                        signed_log,
+                    } => (public_message, recipients, Some(signed_log)),
+                };
+                if &public != persisted_public || generated.len() != recipients.len() {
+                    return Err(RecoveryError::Share);
+                }
+                for recipient in recipients {
+                    match recipient {
+                        crate::RecipientState::Unacknowledged {
+                            player,
+                            private_message,
+                        } => {
+                            if generated.get(player) != Some(private_message) {
+                                return Err(RecoveryError::Share);
+                            }
+                        }
+                        crate::RecipientState::Acknowledged {
+                            player,
+                            private_message,
+                            ack,
+                        } => {
+                            if generated.get(player) != Some(private_message)
+                                || dealer
+                                    .receive_player_ack(player.clone(), ack.clone())
+                                    .is_err()
+                            {
+                                return Err(RecoveryError::Share);
+                            }
+                        }
+                    }
+                }
+                if let Some(signed_log) = signed_log {
+                    let mut bytes = signed_log.as_ref();
+                    let signed = crate::DealerLog::read_cfg(&mut bytes, &bootstrap.config.max_participants_per_round().try_into().map_err(|_| RecoveryError::Log)?)
+                        .map_err(|_| RecoveryError::Log)?;
+                    if bytes.has_remaining()
+                        || signed.clone().check(&info).map(|(dealer, _)| dealer) != Some(self_pk.clone())
+                    {
+                        return Err(RecoveryError::Log);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn publish_snapshot(
+        context: &mut E,
+        storage: &Storage<E, MinSig, ed25519::PublicKey>,
+        checkpoint: &PublicCheckpoint,
+        protector: &BundleProtector,
+        sink: &mut dyn RecoverySink,
+        associated_data: &RecoveryAssociatedData<ed25519::PublicKey>,
+        operation: RecoveryPublication,
+    ) -> Result<DurableReceipt, StartupError> {
+        let current = context.current();
+        let elapsed = current
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| StartupError::ClockBeforeEpoch)?;
+        let created_at_ms = u64::try_from(elapsed.as_millis())
+            .map_err(|_| StartupError::ClockOverflow)?;
+        let bundle = storage.recovery_bundle(checkpoint.clone(), created_at_ms)?;
+        let checkpoint_digest = bundle.checkpoint_digest;
+        let checkpoint_epoch = bundle.checkpoint.epoch;
+        let encrypted = protector.encrypt(&bundle, associated_data, context)?;
+        let bundle_digest = encrypted.digest();
+        let metadata = RecoveryMetadata {
+            checkpoint_epoch,
+            created_at_ms,
+            checkpoint_digest,
+        };
+        let receipt = sink.publish(operation, encrypted, metadata).await?;
+        if receipt.manifest_generation == 0 {
+            return Err(RecoveryError::Receipt("manifest generation").into());
+        }
+        if receipt.checkpoint_epoch != checkpoint_epoch {
+            return Err(RecoveryError::Receipt("checkpoint epoch").into());
+        }
+        if receipt.created_at_ms != created_at_ms {
+            return Err(RecoveryError::Receipt("creation time").into());
+        }
+        if receipt.checkpoint_digest != checkpoint_digest {
+            return Err(RecoveryError::Receipt("checkpoint digest").into());
+        }
+        if receipt.bundle_digest != bundle_digest {
+            return Err(RecoveryError::Receipt("bundle digest").into());
+        }
+        Ok(receipt)
+    }
+
+    async fn export_authoritative(
+        &mut self,
+        storage: &Storage<E, MinSig, ed25519::PublicKey>,
+    ) -> Result<(), StartupError> {
+        let RecoveryPolicy::Enabled {
+            protector,
+            sink,
+            associated_data,
+            last_receipt,
+        } = &mut self.recovery_policy
+        else {
+            return Ok(());
+        };
+        let checkpoint = self
+            .authoritative_checkpoint
+            .as_ref()
+            .ok_or(RecoveryError::Checkpoint)?
+            .clone();
+        let receipt = Self::publish_snapshot(
+            self.context.as_present_mut(),
+            storage,
+            &checkpoint,
+            protector,
+            sink.as_mut(),
+            associated_data,
+            RecoveryPublication::Runtime,
+        )
+        .await?;
+        *last_receipt = receipt;
+        Ok(())
     }
 
     /// Start the DKG actor.
@@ -239,26 +720,6 @@ where
     ) -> Handle<()> {
         self.start_inner(
             Bootstrap::Legacy { output, share },
-            orchestrator,
-            dkg,
-            callback,
-        )
-    }
-
-    /// Start after reconciling protected storage with authenticated QMDB
-    /// checkpoint and log state.
-    pub fn start_authenticated(
-        self,
-        bootstrap: AuthenticatedBootstrap,
-        orchestrator: orchestrator::Mailbox<MinSig, ed25519::PublicKey>,
-        dkg: (
-            impl Sender<PublicKey = ed25519::PublicKey>,
-            impl Receiver<PublicKey = ed25519::PublicKey>,
-        ),
-        callback: Box<dyn UpdateCallBack<MinSig, ed25519::PublicKey>>,
-    ) -> Handle<()> {
-        self.start_inner(
-            Bootstrap::Authenticated(Box::new(bootstrap)),
             orchestrator,
             dkg,
             callback,
@@ -303,24 +764,32 @@ where
         let max_read_size = NZU32!(self.peer_config.max_participants_per_round());
         let epocher = FixedEpocher::new(self.epoch_length);
         let self_pk = self.signer.public_key();
-        let authenticated_bootstrap = matches!(bootstrap, Bootstrap::Authenticated(_));
+        let authenticated_bootstrap = matches!(
+            &bootstrap,
+            Bootstrap::Prepared
+        );
 
-        // Initialize persistent state
-        let mut storage = match Storage::init(
-            self.context.child("storage"),
-            &self.partition_prefix,
-            self.storage_protector.clone(),
-            self.namespace.clone(),
-            self_pk.clone(),
-            max_read_size,
-            self.max_supported_mode,
-        )
-        .await
-        {
-            Ok(storage) => storage,
-            Err(err) => {
-                error!(%err, "failed to initialize DKG storage");
-                return;
+        let mut storage = if matches!(&bootstrap, Bootstrap::Prepared) {
+            self.prepared_storage
+                .take()
+                .expect("PreparedDkg must carry initialized storage")
+        } else {
+            match Storage::init(
+                self.context.child("storage"),
+                &self.partition_prefix,
+                self.storage_protector.clone(),
+                self.namespace.clone(),
+                self_pk.clone(),
+                max_read_size,
+                self.max_supported_mode,
+            )
+            .await
+            {
+                Ok(storage) => storage,
+                Err(err) => {
+                    error!(%err, "failed to initialize DKG storage");
+                    return;
+                }
             }
         };
         match bootstrap {
@@ -338,15 +807,7 @@ where
                     }
                 }
             }
-            Bootstrap::Authenticated(bootstrap) => {
-                if let Err(err) = self
-                    .reconcile_authenticated(&mut storage, *bootstrap, &self_pk)
-                    .await
-                {
-                    error!(%err, "failed to reconcile authenticated DKG state");
-                    return;
-                }
-            }
+            Bootstrap::Prepared => {}
         }
 
         // Start a muxer for the physical channel used by DKG/reshare
@@ -442,18 +903,34 @@ where
             .expect("round info configuration should be correct");
 
             // Initialize dealer state if we are a dealer (factory handles log submission check)
-            let mut dealer_state: Option<Dealer<MinSig, ed25519::PrivateKey>> = (am_dealer
-                && (is_dkg || epoch_state.share.is_some()))
-                .then(|| {
-                    storage.create_dealer::<ed25519::PrivateKey, N3f1>(
+            let mut dealer_state: Option<Dealer<MinSig, ed25519::PrivateKey>> =
+                if am_dealer && (is_dkg || epoch_state.share.is_some()) {
+                    match storage.create_dealer::<ed25519::PrivateKey, N3f1>(
                         epoch,
                         self.signer.clone(),
                         round.clone(),
                         epoch_state.share.clone(),
                         epoch_state.rng_seed,
-                    )
-                })
-                .flatten();
+                    ).await {
+                        Ok(dealer) => dealer,
+                        Err(CreateDealerError::StateMismatch | CreateDealerError::InvalidSignedLog) => {
+                            error!(%epoch, "persisted local dealer state is invalid");
+                            break 'actor;
+                        }
+                        Err(err) => {
+                            error!(%epoch, %err, "failed to initialize local dealer state");
+                            break 'actor;
+                        }
+                    }
+                } else {
+                    None
+                };
+            if dealer_state.is_some() {
+                if let Err(err) = self.export_authoritative(&storage).await {
+                    error!(%epoch, %err, "failed to durably export local dealer initialization");
+                    break 'actor;
+                }
+            }
 
             // Initialize player state if we are a player.
             let mut player_state: Option<Player<MinSig, ed25519::PrivateKey>> = if am_player {
@@ -523,6 +1000,10 @@ where
                                             )
                                             .await;
                                         if let Some(ack) = response {
+                                            if let Err(err) = self.export_authoritative(&storage).await {
+                                                error!(%epoch, %err, "failed to durably export player acknowledgement");
+                                                break 'actor;
+                                            }
                                             let _ = self
                                                 .latest_share
                                                 .get_or_create_by(&sender_pk)
@@ -551,6 +1032,10 @@ where
                                             .handle(&mut storage, epoch, sender_pk.clone(), ack)
                                             .await;
                                         if added {
+                                            if let Err(err) = self.export_authoritative(&storage).await {
+                                                error!(%epoch, %err, "failed to durably export recipient acknowledgement");
+                                                break 'actor;
+                                            }
                                             let _ = self
                                                 .latest_ack
                                                 .get_or_create_by(&sender_pk)
@@ -574,6 +1059,10 @@ where
                     MailboxMessage::Act { response } => {
                         let outcome = dealer_state.as_ref().and_then(|ds| ds.finalized());
                         if outcome.is_some() {
+                            if let Err(err) = self.export_authoritative(&storage).await {
+                                error!(%epoch, %err, "failed to durably export dealer log response");
+                                break 'actor;
+                            }
                             info!("including reshare outcome in proposed block");
                         }
                         if response.send(outcome).is_err() {
@@ -603,14 +1092,36 @@ where
                                 // make sure to take it, so that we don't post
                                 // it in subsequent blocks
                                 if dealer == self_pk {
-                                    if let Some(ref mut ds) = dealer_state {
-                                        ds.take_finalized();
+                                    let local_matches = storage
+                                        .local_dealer(epoch)
+                                        .is_some_and(|local| matches!(
+                                            local,
+                                            crate::RecoveryDealer::Finalized { signed_log, .. }
+                                                if signed_log == log.encode()
+                                        ));
+                                    if !local_matches {
+                                        error!(%epoch, "finalized local dealer log conflicts with retained signed bytes");
+                                        break 'actor;
+                                    }
+                                    // The exact signed log is durable in the local-dealer
+                                    // record and now also committed by the finalized block.
+                                    // Drop the in-memory dealer so later midpoint blocks do
+                                    // not attempt to finalize the already-consumed dealer.
+                                    dealer_state = None;
+                                }
+                                match storage.append_log(epoch, dealer, dealer_log).await {
+                                    Ok(ExactInsert::Inserted | ExactInsert::Identical) => {}
+                                    Ok(ExactInsert::Conflict) => {
+                                        error!(%epoch, "conflicting finalized DKG log");
+                                        break 'actor;
+                                    }
+                                    Err(err) => {
+                                        error!(%epoch, %err, "failed to persist DKG log");
+                                        break 'actor;
                                     }
                                 }
-                                if let Err(err) =
-                                    storage.append_log(epoch, dealer, dealer_log).await
-                                {
-                                    error!(%epoch, %err, "failed to persist DKG log");
+                                if let Err(err) = self.export_authoritative(&storage).await {
+                                    error!(%epoch, %err, "failed to durably export finalized dealer log");
                                     break 'actor;
                                 }
                             }
@@ -619,6 +1130,10 @@ where
                         // In the first half of the epoch, continuously distribute shares
                         if phase == EpochPhase::Early {
                             if let Some(ref mut ds) = dealer_state {
+                                if let Err(err) = self.export_authoritative(&storage).await {
+                                    error!(%epoch, %err, "failed to durably export dealer distribution");
+                                    break 'actor;
+                                }
                                 Self::distribute_shares(
                                     &self_pk,
                                     &mut storage,
@@ -628,18 +1143,33 @@ where
                                     &mut round_sender,
                                 )
                                 .await;
+                                if let Err(err) = self.export_authoritative(&storage).await {
+                                    error!(%epoch, %err, "failed to durably export distribution updates");
+                                    break 'actor;
+                                }
                             }
                         }
 
                         // At or past the midpoint, finalize dealer if not already done.
                         if matches!(phase, EpochPhase::Midpoint | EpochPhase::Late) {
                             if let Some(ref mut ds) = dealer_state {
-                                ds.finalize::<N3f1>();
+                                if !ds.finalize::<_, N3f1>(&mut storage, epoch).await {
+                                    error!(%epoch, "failed to persist finalized local dealer log");
+                                    break 'actor;
+                                }
+                                if let Err(err) = self.export_authoritative(&storage).await {
+                                    error!(%epoch, %err, "failed to durably export finalized local dealer");
+                                    break 'actor;
+                                }
                             }
                         }
 
                         // Continue if not the last block in the epoch
                         if block.height() != bounds.last() {
+                            if let Err(err) = self.export_authoritative(&storage).await {
+                                error!(%epoch, %err, "failed to durably export before block acknowledgement");
+                                break 'actor;
+                            }
                             // Acknowledge block processing
                             response.acknowledge();
                             continue;
@@ -649,7 +1179,7 @@ where
                         //
                         // TODO(#3453): Minimize end-of-epoch processing via pre-verify
                         let checked_logs = storage.logs(epoch);
-                        let (success, next_round, next_output, next_share) =
+                        let (success, next_round, next_output, next_share, next_checkpoint) =
                             if let Some(previous_output) = epoch_state.output.as_ref() {
                                 let protocol_config = DkgProtocolConfig {
                                     state_format_version: STATE_FORMAT_VERSION,
@@ -665,7 +1195,7 @@ where
                                     fault_model: N3F1_FAULT_MODEL,
                                     trusted_initial_identity: *previous_output.public().public(),
                                 };
-                                let checkpoint = PublicCheckpoint {
+                                let checkpoint = self.authoritative_checkpoint.clone().unwrap_or_else(|| PublicCheckpoint {
                                     format_version: STATE_FORMAT_VERSION,
                                     protocol_config_digest: protocol_config
                                         .digest()
@@ -677,7 +1207,14 @@ where
                                         .and_then(|previous| epocher.last(previous))
                                         .unwrap_or(Height::zero()),
                                     output: previous_output.clone(),
-                                };
+                                });
+                                if checkpoint.epoch != epoch
+                                    || checkpoint.successful_round != epoch_state.round
+                                    || &checkpoint.output != previous_output
+                                {
+                                    error!(%epoch, "authoritative checkpoint conflicts with active epoch state");
+                                    break 'actor;
+                                }
                                 let public = match transition_logs::<_, _, Batch>(
                                     &protocol_config,
                                     &checkpoint,
@@ -692,12 +1229,14 @@ where
                                         break 'actor;
                                     }
                                 };
+                                let next_checkpoint = public.checkpoint.clone();
                                 if !public.succeeded {
                                     (
                                         false,
                                         epoch_state.round,
                                         epoch_state.output.clone(),
                                         epoch_state.share.clone(),
+                                        Some(next_checkpoint),
                                     )
                                 } else if let Some(ps) = player_state.take() {
                                     let mut player_logs = Logs::<_, _, N3f1>::new(round.clone());
@@ -725,6 +1264,7 @@ where
                                                 public.checkpoint.successful_round,
                                                 Some(player_output),
                                                 Some(player_share),
+                                                Some(next_checkpoint),
                                             )
                                         }
                                         Err(
@@ -734,6 +1274,7 @@ where
                                             public.checkpoint.successful_round,
                                             Some(public.checkpoint.output),
                                             None,
+                                            Some(next_checkpoint),
                                         ),
                                         Ok(_) | Err(_) => {
                                             error!(%epoch, "player result conflicts with public DKG transition");
@@ -746,6 +1287,7 @@ where
                                         public.checkpoint.successful_round,
                                         Some(public.checkpoint.output),
                                         None,
+                                        Some(next_checkpoint),
                                     )
                                 }
                             } else {
@@ -764,12 +1306,14 @@ where
                                             epoch_state.round + 1,
                                             Some(new_output),
                                             Some(new_share),
+                                            None,
                                         ),
                                         Err(_) => (
                                             false,
                                             epoch_state.round,
                                             epoch_state.output.clone(),
                                             epoch_state.share.clone(),
+                                            None,
                                         ),
                                     }
                                 } else {
@@ -783,12 +1327,14 @@ where
                                             epoch_state.round + 1,
                                             Some(output),
                                             None,
+                                            None,
                                         ),
                                         Err(_) => (
                                             false,
                                             epoch_state.round,
                                             epoch_state.output.clone(),
                                             epoch_state.share.clone(),
+                                            None,
                                         ),
                                     }
                                 }
@@ -821,6 +1367,21 @@ where
                             .await
                         {
                             error!(%epoch, %err, "failed to persist next DKG epoch");
+                            break 'actor;
+                        }
+
+                        if let Some(next_checkpoint) = next_checkpoint {
+                            if next_checkpoint.epoch != epoch.next()
+                                || next_checkpoint.successful_round != next_round
+                                || Some(&next_checkpoint.output) != next_output.as_ref()
+                            {
+                                error!(%epoch, "next checkpoint conflicts with persisted boundary state");
+                                break 'actor;
+                            }
+                            self.authoritative_checkpoint = Some(next_checkpoint);
+                        }
+                        if let Err(err) = self.export_authoritative(&storage).await {
+                            error!(%epoch, %err, "failed to durably export next epoch state");
                             break 'actor;
                         }
 

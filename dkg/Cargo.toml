@@ -9,6 +9,7 @@ description = "Reusable DKG and resharing support for Nunchi examples."
 workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
 commonware-actor = { workspace = true }
 commonware-codec = { workspace = true }
 commonware-consensus = { workspace = true, features = ["mocks"] }
