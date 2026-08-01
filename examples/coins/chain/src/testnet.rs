@@ -218,7 +218,7 @@ impl NodeConfig {
             return Err(Error::InvalidRecoveryDirectory);
         }
         let recovery = self.dkg_recovery_export.directory.canonicalize()?;
-        let storage = self.storage_dir.canonicalize()?;
+        let storage = canonicalize_storage_path(&self.storage_dir)?;
         if !recovery.is_dir()
             || recovery.starts_with(&storage)
             || storage.starts_with(&recovery)
@@ -242,6 +242,32 @@ impl NodeConfig {
         drop(file);
         fs::remove_file(probe)?;
         Ok(())
+    }
+}
+
+fn canonicalize_storage_path(path: &Path) -> Result<PathBuf, std::io::Error> {
+    let mut missing = Vec::new();
+    let mut existing = path;
+    loop {
+        match existing.canonicalize() {
+            Ok(mut canonical) => {
+                for component in missing.iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(canonical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let component = existing.file_name().ok_or(error)?;
+                missing.push(component.to_os_string());
+                existing = existing.parent().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "storage directory has no existing ancestor",
+                    )
+                })?;
+            }
+            Err(error) => return Err(error),
+        }
     }
 }
 

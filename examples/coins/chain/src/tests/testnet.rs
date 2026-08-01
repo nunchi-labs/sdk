@@ -168,6 +168,10 @@ fn dkg_recovery_toml_and_path_validation_are_fail_closed() {
     }
     assert!(NodeConfig::read(config_path).unwrap().dkg_recovery_export.enabled);
 
+    fs::remove_dir_all(&config.storage_dir).unwrap();
+    assert!(NodeConfig::read(config_path).unwrap().dkg_recovery_export.enabled);
+    fs::create_dir(&config.storage_dir).unwrap();
+
     config.dkg_recovery_export.directory = config.storage_dir.clone();
     config.write(config_path).unwrap();
     assert!(matches!(NodeConfig::read(config_path), Err(Error::InvalidRecoveryDirectory)));
