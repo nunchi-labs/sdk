@@ -250,8 +250,7 @@ impl Worker {
         let directory = directory
             .canonicalize()
             .map_err(|_| FileRecoveryError::stage(PublicationStage::Lock))?;
-        let storage_directory = storage_directory
-            .canonicalize()
+        let storage_directory = canonicalize_storage_path(&storage_directory)
             .map_err(|_| FileRecoveryError::stage(PublicationStage::Lock))?;
         if !directory.is_dir()
             || directory.starts_with(&storage_directory)
@@ -594,6 +593,32 @@ impl Worker {
             sync_dir(&destination)?;
         }
         Ok(())
+    }
+}
+
+fn canonicalize_storage_path(path: &Path) -> Result<PathBuf, std::io::Error> {
+    let mut missing = Vec::new();
+    let mut existing = path;
+    loop {
+        match existing.canonicalize() {
+            Ok(mut canonical) => {
+                for component in missing.iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(canonical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let component = existing.file_name().ok_or(error)?;
+                missing.push(component.to_os_string());
+                existing = existing.parent().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "storage directory has no existing ancestor",
+                    )
+                })?;
+            }
+            Err(error) => return Err(error),
+        }
     }
 }
 

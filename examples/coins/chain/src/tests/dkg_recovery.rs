@@ -53,6 +53,7 @@ async fn file_worker_is_fifo_exclusive_supervised_and_idempotent() {
     let recovery = root.path().join("recovery");
     secure_directory(&storage);
     secure_directory(&recovery);
+    fs::remove_dir(&storage).unwrap();
     let protectors = RecoveryProtectors::new([7u8; 32]);
     let (worker, mut sink) = FileRecoveryWorker::start(
         recovery.clone(),
