@@ -1056,13 +1056,9 @@ where
                     warn!("dkg actor mailbox closed");
                     break 'actor;
                 } => match mailbox_msg {
-                    MailboxMessage::Act { response } => {
-                        let outcome = dealer_state.as_ref().and_then(|ds| ds.finalized());
-                        if outcome.is_some() {
-                            if let Err(err) = self.export_authoritative(&storage).await {
-                                error!(%epoch, %err, "failed to durably export dealer log response");
-                                break 'actor;
-                            }
+                MailboxMessage::Act { response } => {
+                    let outcome = dealer_state.as_ref().and_then(|ds| ds.finalized());
+                    if outcome.is_some() {
                             info!("including reshare outcome in proposed block");
                         }
                         if response.send(outcome).is_err() {
@@ -1109,8 +1105,9 @@ where
                                     // not attempt to finalize the already-consumed dealer.
                                     dealer_state = None;
                                 }
-                                match storage.append_log(epoch, dealer, dealer_log).await {
-                                    Ok(ExactInsert::Inserted | ExactInsert::Identical) => {}
+                                let inserted = match storage.append_log(epoch, dealer, dealer_log).await {
+                                    Ok(ExactInsert::Inserted) => true,
+                                    Ok(ExactInsert::Identical) => false,
                                     Ok(ExactInsert::Conflict) => {
                                         error!(%epoch, "conflicting finalized DKG log");
                                         break 'actor;
@@ -1119,10 +1116,12 @@ where
                                         error!(%epoch, %err, "failed to persist DKG log");
                                         break 'actor;
                                     }
-                                }
-                                if let Err(err) = self.export_authoritative(&storage).await {
-                                    error!(%epoch, %err, "failed to durably export finalized dealer log");
-                                    break 'actor;
+                                };
+                                if inserted {
+                                    if let Err(err) = self.export_authoritative(&storage).await {
+                                        error!(%epoch, %err, "failed to durably export finalized dealer log");
+                                        break 'actor;
+                                    }
                                 }
                             }
                         }
@@ -1130,11 +1129,7 @@ where
                         // In the first half of the epoch, continuously distribute shares
                         if phase == EpochPhase::Early {
                             if let Some(ref mut ds) = dealer_state {
-                                if let Err(err) = self.export_authoritative(&storage).await {
-                                    error!(%epoch, %err, "failed to durably export dealer distribution");
-                                    break 'actor;
-                                }
-                                Self::distribute_shares(
+                                let changed = Self::distribute_shares(
                                     &self_pk,
                                     &mut storage,
                                     epoch,
@@ -1143,9 +1138,11 @@ where
                                     &mut round_sender,
                                 )
                                 .await;
-                                if let Err(err) = self.export_authoritative(&storage).await {
-                                    error!(%epoch, %err, "failed to durably export distribution updates");
-                                    break 'actor;
+                                if changed {
+                                    if let Err(err) = self.export_authoritative(&storage).await {
+                                        error!(%epoch, %err, "failed to durably export distribution updates");
+                                        break 'actor;
+                                    }
                                 }
                             }
                         }
@@ -1153,23 +1150,22 @@ where
                         // At or past the midpoint, finalize dealer if not already done.
                         if matches!(phase, EpochPhase::Midpoint | EpochPhase::Late) {
                             if let Some(ref mut ds) = dealer_state {
+                                let changed = ds.finalized().is_none();
                                 if !ds.finalize::<_, N3f1>(&mut storage, epoch).await {
                                     error!(%epoch, "failed to persist finalized local dealer log");
                                     break 'actor;
                                 }
-                                if let Err(err) = self.export_authoritative(&storage).await {
-                                    error!(%epoch, %err, "failed to durably export finalized local dealer");
-                                    break 'actor;
+                                if changed {
+                                    if let Err(err) = self.export_authoritative(&storage).await {
+                                        error!(%epoch, %err, "failed to durably export finalized local dealer");
+                                        break 'actor;
+                                    }
                                 }
                             }
                         }
 
                         // Continue if not the last block in the epoch
                         if block.height() != bounds.last() {
-                            if let Err(err) = self.export_authoritative(&storage).await {
-                                error!(%epoch, %err, "failed to durably export before block acknowledgement");
-                                break 'actor;
-                            }
                             // Acknowledge block processing
                             response.acknowledge();
                             continue;
@@ -1547,7 +1543,8 @@ where
         dealer_state: &mut Dealer<MinSig, ed25519::PrivateKey>,
         mut player_state: Option<&mut Player<MinSig, ed25519::PrivateKey>>,
         sender: &mut S,
-    ) {
+    ) -> bool {
+        let mut changed = false;
         for (player, pub_msg, priv_msg) in dealer_state.shares_to_distribute().collect::<Vec<_>>() {
             // Handle self-dealing if we are both dealer and player
             if player == *self_pk {
@@ -1560,6 +1557,7 @@ where
                         Some(ack) => ack,
                         _ => continue,
                     };
+                    changed = true;
 
                     // Handle our own ack as dealer
                     dealer_state
@@ -1578,6 +1576,7 @@ where
                 debug!(?epoch, ?player, "sent share");
             }
         }
+        changed
     }
 }
 
