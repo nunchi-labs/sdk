@@ -1,4 +1,11 @@
-use std::{panic::AssertUnwindSafe, sync::Arc};
+use std::{
+    future::Future as _,
+    num::NonZeroU64,
+    panic::AssertUnwindSafe,
+    sync::Arc,
+    task::{Context as TaskContext, Poll},
+    time::Duration,
+};
 
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
@@ -8,9 +15,10 @@ use commonware_glue::stateful::{
     db::{DatabaseSet as _, Merkleized as _},
     Application as StatefulApplication,
 };
-use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
+use commonware_runtime::{deterministic, Clock as _, Runner as _, Supervisor as _};
 use commonware_storage::mmr::Location;
-use commonware_utils::{non_empty_range, sync::AsyncRwLock};
+use commonware_utils::{non_empty_range, SystemTimeExt as _, NZU64};
+use nunchi_common::shared_database;
 use futures::{lock::Mutex as AsyncMutex, FutureExt};
 use nunchi_common::{
     Event, EventSink, NoopEventSink, QmdbBackend, QmdbBatch, QmdbDatabaseSet, QmdbMerkleized,
@@ -91,6 +99,11 @@ impl PoolTransaction for TestTx {
     }
 
     fn verify(&self) -> Result<(), Self::VerifyError> {
+        assert_ne!(
+            self.id,
+            u64::MAX,
+            "timestamp-invalid transaction reached signature verification"
+        );
         Ok(())
     }
 }
@@ -132,6 +145,11 @@ impl Runtime for TestRuntime {
         S: StateStore + Send + Sync,
         Events: EventSink + Send,
     {
+        assert_ne!(
+            transaction.id,
+            u64::MAX,
+            "timestamp-invalid transaction reached state execution"
+        );
         if transaction.value == 7 {
             assert_eq!(
                 std::any::type_name::<Events>(),
@@ -234,6 +252,24 @@ fn block(
     )
 }
 
+fn block_at(
+    parent: &Block<TestTx>,
+    timestamp: u64,
+    transactions: Vec<TestTx>,
+    state: StateCommitment,
+) -> Block<TestTx> {
+    Block::new(
+        test_context(parent.height.get() + 1, parent),
+        parent.digest(),
+        parent.height.next(),
+        timestamp,
+        transactions,
+        None,
+        (),
+        state,
+    )
+}
+
 async fn application(
     context: deterministic::Context,
 ) -> (
@@ -241,7 +277,18 @@ async fn application(
     QmdbDatabaseSet<deterministic::Context>,
     Block<TestTx>,
 ) {
-    application_with_events(context, NoopEventConsumer).await
+    application_with_interval(context, NZU64!(1)).await
+}
+
+async fn application_with_interval(
+    context: deterministic::Context,
+    min_block_interval_ms: NonZeroU64,
+) -> (
+    Application<TestRuntime>,
+    QmdbDatabaseSet<deterministic::Context>,
+    Block<TestTx>,
+) {
+    application_with_events_and_interval(context, NoopEventConsumer, min_block_interval_ms).await
 }
 
 async fn application_with_events<Events>(
@@ -255,12 +302,27 @@ async fn application_with_events<Events>(
 where
     Events: EventConsumer,
 {
+    application_with_events_and_interval(context, events, NZU64!(1)).await
+}
+
+async fn application_with_events_and_interval<Events>(
+    context: deterministic::Context,
+    events: Events,
+    min_block_interval_ms: NonZeroU64,
+) -> (
+    Application<TestRuntime, NoConsensusExtension, Events>,
+    QmdbDatabaseSet<deterministic::Context>,
+    Block<TestTx>,
+)
+where
+    Events: EventConsumer,
+{
     let (_mempool, submitter) = Mempool::new(PoolConfig::default());
     let config = QmdbState::<deterministic::Context>::config(&context, "event-sink-test");
     let db = QmdbBackend::init(context, config)
         .await
         .expect("init state db");
-    let databases: QmdbDatabaseSet<deterministic::Context> = Arc::new(AsyncRwLock::new(db));
+    let databases: QmdbDatabaseSet<deterministic::Context> = shared_database(db);
     let genesis_target = databases.committed_targets().await;
     let genesis_state = StateCommitment {
         root: genesis_target.root,
@@ -269,6 +331,7 @@ where
     let app = Application::new_with_events(
         submitter,
         16,
+        min_block_interval_ms,
         events,
         Arc::new(AsyncMutex::new(Height::zero())),
         genesis_state,
@@ -276,6 +339,266 @@ where
     );
     let parent = app.genesis_block();
     (app, databases, parent)
+}
+
+async fn propose(
+    app: &mut Application<TestRuntime>,
+    databases: &QmdbDatabaseSet<deterministic::Context>,
+    context: deterministic::Context,
+    parent: Block<TestTx>,
+) -> Option<commonware_glue::stateful::Proposed<Application<TestRuntime>, deterministic::Context>> {
+    let (mempool, mut input) = Mempool::new(PoolConfig::default());
+    mempool.start(context.child("proposal_mempool"));
+    <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::propose(
+        app,
+        (context, test_context(parent.height.get() + 1, &parent)),
+        futures::stream::iter([Arc::new(parent)]),
+        databases.new_batches().await,
+        &mut input,
+    )
+    .await
+}
+
+async fn verify(
+    app: &mut Application<TestRuntime>,
+    databases: &QmdbDatabaseSet<deterministic::Context>,
+    context: deterministic::Context,
+    block: Block<TestTx>,
+    parent: Block<TestTx>,
+) -> bool {
+    <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::verify(
+        app,
+        (context, block.context.clone()),
+        futures::stream::iter([Arc::new(block), Arc::new(parent)]),
+        databases.new_batches().await,
+    )
+    .await
+    .is_some()
+}
+
+fn state_of(block: &Block<TestTx>) -> StateCommitment {
+    StateCommitment {
+        root: block.state_root,
+        range: block.state_range.clone(),
+    }
+}
+
+fn with_timestamp(block: &Block<TestTx>, timestamp: u64) -> Block<TestTx> {
+    Block::new(
+        block.context.clone(),
+        block.parent,
+        block.height,
+        timestamp,
+        block.transactions.clone(),
+        block.reshare_log.clone(),
+        (),
+        state_of(block),
+    )
+}
+
+#[test]
+fn enforces_configured_minimum_block_interval() {
+    deterministic::Runner::default().start(|context| async move {
+        let (mut app, databases, parent) =
+            application_with_interval(context.child("app"), NZU64!(500)).await;
+        let state = merkleized_state(&databases, &[]).await.0;
+
+        let too_early = block_at(&parent, parent.timestamp + 499, Vec::new(), state.clone());
+        assert!(
+            !verify(
+                &mut app,
+                &databases,
+                context.child("reject_499"),
+                too_early,
+                parent.clone(),
+            )
+            .await
+        );
+
+        let exact = block_at(&parent, parent.timestamp + 500, Vec::new(), state.clone());
+        assert!(
+            verify(
+                &mut app,
+                &databases,
+                context.child("accept_500"),
+                exact,
+                parent.clone(),
+            )
+            .await
+        );
+
+        let later = block_at(&parent, parent.timestamp + 750, Vec::new(), state);
+        assert!(
+            verify(
+                &mut app,
+                &databases,
+                context.child("accept_later"),
+                later,
+                parent,
+            )
+            .await
+        );
+    });
+}
+
+#[test]
+fn timestamp_rejection_precedes_transaction_work() {
+    deterministic::Runner::default().start(|context| async move {
+        let (mut app, databases, parent) =
+            application_with_interval(context.child("app"), NZU64!(500)).await;
+        let block = block_at(
+            &parent,
+            parent.timestamp + 499,
+            vec![TestTx {
+                account: 1,
+                nonce: 0,
+                id: u64::MAX,
+                value: 1,
+            }],
+            state_of(&parent),
+        );
+
+        assert!(
+            !verify(
+                &mut app,
+                &databases,
+                context.child("verify"),
+                block,
+                parent,
+            )
+            .await
+        );
+    });
+}
+
+#[test]
+fn proposes_at_minimum_or_runtime_clock() {
+    deterministic::Runner::default().start(|context| async move {
+        let (mut app, databases, genesis) =
+            application_with_interval(context.child("app"), NZU64!(500)).await;
+        let current = context.current().epoch_millis();
+        let parent = with_timestamp(&genesis, current + 10_000);
+        let proposed = propose(
+            &mut app,
+            &databases,
+            context.child("clock_behind"),
+            parent.clone(),
+        )
+        .await
+        .expect("proposal at minimum");
+        assert_eq!(proposed.block.timestamp, parent.timestamp + 500);
+
+        context.sleep(Duration::from_secs(1)).await;
+        let current = context.current().epoch_millis();
+        let proposed = propose(
+            &mut app,
+            &databases,
+            context.child("clock_ahead"),
+            genesis,
+        )
+        .await
+        .expect("proposal at runtime clock");
+        assert_eq!(proposed.block.timestamp, current);
+    });
+}
+
+#[test]
+fn handles_timestamp_overflow_and_cutoff_without_panicking() {
+    deterministic::Runner::default().start(|context| async move {
+        let (mut app, databases, genesis) =
+            application_with_interval(context.child("app"), NZU64!(500)).await;
+        let parent = with_timestamp(&genesis, u64::MAX - 499);
+
+        assert!(
+            propose(
+                &mut app,
+                &databases,
+                context.child("propose_overflow"),
+                parent.clone(),
+            )
+            .await
+            .is_none()
+        );
+
+        let overflow_child = block_at(&parent, u64::MAX, Vec::new(), state_of(&parent));
+        assert!(
+            !verify(
+                &mut app,
+                &databases,
+                context.child("verify_overflow"),
+                overflow_child,
+                parent,
+            )
+            .await
+        );
+
+        let parent = genesis;
+        let above_cutoff = block_at(&parent, u64::MAX, Vec::new(), state_of(&parent));
+        assert!(
+            !verify(
+                &mut app,
+                &databases,
+                context.child("above_cutoff"),
+                above_cutoff,
+                parent,
+            )
+            .await
+        );
+    });
+}
+
+#[test]
+fn one_millisecond_interval_remains_available_for_focused_tests() {
+    deterministic::Runner::default().start(|context| async move {
+        let (mut app, databases, genesis) =
+            application_with_interval(context.child("app"), NZU64!(1)).await;
+        let current = context.current().epoch_millis();
+        let parent = with_timestamp(&genesis, current + 10_000);
+        let state = merkleized_state(&databases, &[]).await.0;
+        let exact = block_at(&parent, parent.timestamp + 1, Vec::new(), state);
+        assert!(
+            verify(
+                &mut app,
+                &databases,
+                context.child("verify"),
+                exact,
+                parent.clone(),
+            )
+            .await
+        );
+
+        let proposed = propose(&mut app, &databases, context.child("propose"), parent)
+            .await
+            .expect("proposal at one millisecond minimum");
+        assert_eq!(proposed.block.timestamp, current + 10_001);
+    });
+}
+
+#[test]
+fn timestamp_wait_is_cancellation_safe() {
+    deterministic::Runner::default().start(|context| async move {
+        let (mut app, databases, parent) =
+            application_with_interval(context.child("app"), NZU64!(500)).await;
+        let timestamp = context.current().epoch_millis() + 60_000;
+        let block = block_at(&parent, timestamp, Vec::new(), state_of(&parent));
+        let batches = databases.new_batches().await;
+        {
+            let verify =
+                <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::verify(
+                    &mut app,
+                    (context.child("verify"), block.context.clone()),
+                    futures::stream::iter([Arc::new(block), Arc::new(parent)]),
+                    batches,
+                );
+            futures::pin_mut!(verify);
+            let waker = futures::task::noop_waker();
+            let mut task_context = TaskContext::from_waker(&waker);
+            assert!(matches!(
+                verify.as_mut().poll(&mut task_context),
+                Poll::Pending
+            ));
+        }
+    });
 }
 
 #[test]
@@ -295,7 +618,7 @@ fn verification_uses_noop_event_sink() {
             <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::verify(
                 &mut app,
                 (context.child("verify"), block.context.clone()),
-                futures::stream::iter([block, parent]),
+                futures::stream::iter([Arc::new(block), Arc::new(parent)]),
                 databases.new_batches().await,
             )
             .await;

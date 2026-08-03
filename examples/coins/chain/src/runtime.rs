@@ -3,6 +3,7 @@
 use commonware_codec::EncodeSize;
 use nunchi_authority::{AuthorityError, AuthorityLedger};
 use nunchi_bridge::{escrow_address, BridgeError, BridgeLedger, BridgeOperation};
+use nunchi_clob::{ClobError, ClobLedger};
 use nunchi_coins::{CoinId, Ledger, LedgerError};
 use nunchi_common::{ChainId, EventSink, NoopEventSink, Overlay, Runtime, RuntimeContext, StateStore};
 use nunchi_oracle::{OracleError, OracleLedger};
@@ -32,6 +33,8 @@ pub enum RuntimeError {
     Oracle(#[from] OracleError),
     #[error("bridge module error: {0}")]
     Bridge(#[from] BridgeError),
+    #[error("clob module error: {0}")]
+    Clob(#[from] ClobError),
 }
 
 impl RuntimeError {
@@ -42,6 +45,7 @@ impl RuntimeError {
                 | Self::Authority(AuthorityError::Storage(_))
                 | Self::Oracle(OracleError::Storage(_))
                 | Self::Bridge(BridgeError::Storage(_))
+                | Self::Clob(ClobError::Storage(_))
         )
     }
 }
@@ -149,6 +153,26 @@ where
             ledger.apply_transaction(transaction, events).await?;
             overlay.commit();
         }
+        Transaction::Clob(transaction) => {
+            let mut ledger = ClobLedger::new(state);
+            ledger.apply_transaction(transaction, context).await?;
+        }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_error_classifies_storage_errors() {
+        assert!(RuntimeError::Coins(LedgerError::Storage("disk".into())).is_storage());
+        assert!(RuntimeError::Authority(AuthorityError::Storage("disk".into())).is_storage());
+        assert!(RuntimeError::Oracle(OracleError::Storage("disk".into())).is_storage());
+
+        assert!(!RuntimeError::Authority(AuthorityError::NotConfigured).is_storage());
+        assert!(!RuntimeError::Coins(LedgerError::InvalidTokenSpec("bad")).is_storage());
+        assert!(!RuntimeError::Oracle(OracleError::PayloadTooLarge).is_storage());
+    }
 }

@@ -1,0 +1,329 @@
+use std::collections::BTreeMap;
+
+use crate::{
+    ClobError, ClobOperation, Fill, FillId, Market, MarketId, Order, OrderId, OrderStatus, Side,
+    TimeInForce, Transaction, CLOB_NAMESPACE,
+};
+use commonware_codec::Encode;
+use commonware_cryptography::{Hasher, Sha256};
+use nunchi_common::RuntimeContext;
+
+/// Deterministic in-memory matcher used by proposers and validator replay.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MatchEngine {
+    books: BTreeMap<MarketId, Book>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct Book {
+    bids: Vec<Order>,
+    asks: Vec<Order>,
+}
+
+/// Output from replaying signed order intents through the matcher.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ReplayResult {
+    pub fills: Vec<Fill>,
+    pub orders: BTreeMap<OrderId, Order>,
+    pub sequences: BTreeMap<MarketId, u64>,
+}
+
+impl MatchEngine {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Replay signed `PlaceOrder` intents in order, starting each market at the supplied sequence.
+    pub fn replay(
+        orders: &[Transaction],
+        markets: &BTreeMap<MarketId, Market>,
+        sequences: BTreeMap<MarketId, u64>,
+        context: RuntimeContext,
+    ) -> Result<ReplayResult, ClobError> {
+        Self::replay_with_resting(&[], orders, markets, sequences, context)
+    }
+
+    /// Replay signed order intents after seeding already-active resting orders.
+    pub fn replay_with_resting(
+        resting_orders: &[Order],
+        orders: &[Transaction],
+        markets: &BTreeMap<MarketId, Market>,
+        sequences: BTreeMap<MarketId, u64>,
+        context: RuntimeContext,
+    ) -> Result<ReplayResult, ClobError> {
+        let mut engine = Self::new();
+        let mut sequences = sequences;
+        let mut fills = Vec::new();
+        let mut order_updates = BTreeMap::new();
+
+        engine.seed_resting_orders(resting_orders, markets)?;
+
+        for tx in orders {
+            engine.apply_order_tx(
+                tx,
+                markets,
+                context,
+                &mut sequences,
+                &mut fills,
+                &mut order_updates,
+            )?;
+        }
+
+        Ok(ReplayResult {
+            fills,
+            orders: order_updates,
+            sequences,
+        })
+    }
+
+    fn seed_resting_orders(
+        &mut self,
+        resting_orders: &[Order],
+        markets: &BTreeMap<MarketId, Market>,
+    ) -> Result<(), ClobError> {
+        for order in resting_orders {
+            let market = markets.get(&order.market).ok_or(ClobError::MarketNotFound)?;
+            validate_order(market, order.price, order.original_base)?;
+            if order.status.is_open() && order.remaining_base > 0 {
+                let book = self.books.entry(order.market).or_default();
+                insert_resting(book.side_mut(order.side), order.clone());
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_order_tx(
+        &mut self,
+        tx: &Transaction,
+        markets: &BTreeMap<MarketId, Market>,
+        context: RuntimeContext,
+        sequences: &mut BTreeMap<MarketId, u64>,
+        fills: &mut Vec<Fill>,
+        order_updates: &mut BTreeMap<OrderId, Order>,
+    ) -> Result<(), ClobError> {
+        tx.verify()?;
+        let order_id = OrderId(tx.digest());
+        let ClobOperation::PlaceOrder {
+            market,
+            side,
+            price,
+            base_quantity,
+            time_in_force,
+        } = &tx.payload.operation
+        else {
+            return Err(ClobError::InvalidOrder(
+                "match batches may only carry signed place-order intents",
+            ));
+        };
+        let market_info = markets.get(market).ok_or(ClobError::MarketNotFound)?;
+        validate_order(market_info, *price, *base_quantity)?;
+        let sequence = next_sequence(sequences, market)?;
+        let order = Order {
+            id: order_id,
+            owner: tx.account_id.clone(),
+            market: *market,
+            side: *side,
+            price: *price,
+            original_base: *base_quantity,
+            remaining_base: *base_quantity,
+            filled_base: 0,
+            status: OrderStatus::Open,
+            sequence,
+            created_at_height: context.height,
+            created_at_ms: context.timestamp_ms,
+        };
+        self.place_order(
+            order,
+            *time_in_force,
+            context,
+            sequences,
+            fills,
+            order_updates,
+        )
+    }
+
+    fn place_order(
+        &mut self,
+        mut taker: Order,
+        time_in_force: TimeInForce,
+        context: RuntimeContext,
+        sequences: &mut BTreeMap<MarketId, u64>,
+        fills: &mut Vec<Fill>,
+        order_updates: &mut BTreeMap<OrderId, Order>,
+    ) -> Result<(), ClobError> {
+        let book = self.books.entry(taker.market).or_default();
+        let opposite = book.side_mut(taker.side.opposite());
+        let mut remaining_makers = Vec::with_capacity(opposite.len());
+        let makers = std::mem::take(opposite);
+
+        for idx in 0..makers.len() {
+            if taker.remaining_base == 0 {
+                append_open_orders(&mut remaining_makers, &makers[idx..]);
+                break;
+            }
+            let mut maker = makers[idx].clone();
+            if !maker.status.is_open() || maker.remaining_base == 0 {
+                continue;
+            }
+            if !taker.side.crosses(taker.price, maker.price) {
+                append_open_orders(&mut remaining_makers, &makers[idx..]);
+                break;
+            }
+
+            let base = taker.remaining_base.min(maker.remaining_base);
+            let quote = maker
+                .price
+                .checked_mul(base)
+                .ok_or(ClobError::QuoteOverflow)?;
+            let fill_sequence = next_sequence(sequences, &taker.market)?;
+            let fill = Fill {
+                id: fill_id(&taker.id, &maker.id, fill_sequence),
+                market: taker.market,
+                maker_order: maker.id,
+                taker_order: taker.id,
+                maker: maker.owner.clone(),
+                taker: taker.owner.clone(),
+                taker_side: taker.side,
+                price: maker.price,
+                base_quantity: base,
+                quote_quantity: quote,
+                sequence: fill_sequence,
+                written_at_height: context.height,
+                written_at_ms: context.timestamp_ms,
+            };
+
+            taker.remaining_base -= base;
+            taker.filled_base += base;
+            maker.remaining_base -= base;
+            maker.filled_base += base;
+            maker.status = if maker.remaining_base == 0 {
+                OrderStatus::Filled
+            } else {
+                OrderStatus::PartiallyFilled
+            };
+            fills.push(fill);
+            order_updates.insert(maker.id, maker.clone());
+
+            if maker.status.is_open() && maker.remaining_base > 0 {
+                remaining_makers.push(maker);
+            }
+        }
+
+        *opposite = remaining_makers;
+        taker.status = if taker.remaining_base == 0 {
+            OrderStatus::Filled
+        } else if time_in_force == TimeInForce::ImmediateOrCancel {
+            OrderStatus::Expired
+        } else if taker.filled_base == 0 {
+            OrderStatus::Open
+        } else {
+            OrderStatus::PartiallyFilled
+        };
+        if taker.status.is_open() && taker.remaining_base > 0 {
+            let same_side = book.side_mut(taker.side);
+            insert_resting(same_side, taker.clone());
+        } else {
+            order_updates.insert(taker.id, taker);
+            return Ok(());
+        }
+        order_updates.insert(taker.id, taker);
+        Ok(())
+    }
+}
+
+impl Book {
+    fn side_mut(&mut self, side: Side) -> &mut Vec<Order> {
+        match side {
+            Side::Bid => &mut self.bids,
+            Side::Ask => &mut self.asks,
+        }
+    }
+}
+
+fn append_open_orders(book: &mut Vec<Order>, orders: &[Order]) {
+    for order in orders {
+        if order.status.is_open() && order.remaining_base > 0 {
+            book.push(order.clone());
+        }
+    }
+}
+
+fn insert_resting(book: &mut Vec<Order>, order: Order) {
+    let insert_at = book
+        .iter()
+        .position(|resting| has_better_priority(&order, resting))
+        .unwrap_or(book.len());
+    book.insert(insert_at, order);
+}
+
+fn has_better_priority(candidate: &Order, resting: &Order) -> bool {
+    match candidate.side {
+        Side::Bid => {
+            candidate.price > resting.price
+                || (candidate.price == resting.price && candidate.sequence < resting.sequence)
+        }
+        Side::Ask => {
+            candidate.price < resting.price
+                || (candidate.price == resting.price && candidate.sequence < resting.sequence)
+        }
+    }
+}
+
+fn next_sequence(
+    sequences: &mut BTreeMap<MarketId, u64>,
+    market: &MarketId,
+) -> Result<u64, ClobError> {
+    let current = *sequences.get(market).unwrap_or(&0);
+    let next = current.checked_add(1).ok_or(ClobError::SequenceOverflow)?;
+    sequences.insert(*market, next);
+    Ok(current)
+}
+
+pub(crate) fn fill_id(taker: &OrderId, maker: &OrderId, sequence: u64) -> FillId {
+    let mut bytes = CLOB_NAMESPACE.to_vec();
+    bytes.extend_from_slice(taker.encode().as_ref());
+    bytes.extend_from_slice(maker.encode().as_ref());
+    bytes.extend_from_slice(sequence.encode().as_ref());
+    FillId(Sha256::hash(&bytes))
+}
+
+pub(crate) fn validate_order(
+    market: &Market,
+    price: u128,
+    base_quantity: u128,
+) -> Result<(), ClobError> {
+    if price == 0 {
+        return Err(ClobError::InvalidOrder("price must be non-zero"));
+    }
+    if base_quantity == 0 {
+        return Err(ClobError::InvalidOrder("quantity must be non-zero"));
+    }
+    if !price.is_multiple_of(market.tick_size) {
+        return Err(ClobError::InvalidOrder("price is not on the market tick"));
+    }
+    if !base_quantity.is_multiple_of(market.lot_size) {
+        return Err(ClobError::InvalidOrder(
+            "quantity is not on the market lot",
+        ));
+    }
+    if price.checked_mul(base_quantity).is_none() {
+        return Err(ClobError::InvalidOrder(
+            "price times quantity overflows u128",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn fills_equivalent(expected: &Fill, actual: &Fill) -> bool {
+    expected.id == actual.id
+        && expected.market == actual.market
+        && expected.maker_order == actual.maker_order
+        && expected.taker_order == actual.taker_order
+        && expected.maker == actual.maker
+        && expected.taker == actual.taker
+        && expected.taker_side == actual.taker_side
+        && expected.price == actual.price
+        && expected.base_quantity == actual.base_quantity
+        && expected.quote_quantity == actual.quote_quantity
+        && expected.sequence == actual.sequence
+}

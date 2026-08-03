@@ -1,14 +1,22 @@
 use commonware_consensus::types::Height;
+use commonware_cryptography::{Hasher, Sha256};
 use commonware_glue::stateful::db::DatabaseSet as _;
-use commonware_runtime::{deterministic, Runner as _};
-use commonware_utils::sync::AsyncRwLock;
+use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
+use commonware_utils::NZU64;
 use futures::lock::Mutex as AsyncMutex;
-use nunchi_chain::StateCommitment;
+use nunchi_chain::{ConsensusExtension, StateCommitment};
+use nunchi_clob::{
+    market_id, AssetId, ClobActor, ClobConfig, ClobExtension, ClobLedger, ClobOperation, OrderId,
+    Side, TimeInForce, Transaction as ClobTransaction,
+};
 use nunchi_coins::{
     multisig_account_id, AccountPolicy, CoinOperation, CoinSpec, Ledger, MultisigPolicy,
     PrivateKey, TokenName, TokenSymbol, Transaction as CoinTransaction,
 };
-use nunchi_common::{QmdbBackend, QmdbBatch, QmdbDatabaseSet, QmdbState};
+use nunchi_common::{
+    shared_database, NoopEventSink, QmdbBackend, QmdbBatch, QmdbDatabaseSet, QmdbState,
+    RuntimeContext,
+};
 use nunchi_mempool::{Mempool, PoolConfig};
 use std::sync::Arc;
 
@@ -24,6 +32,23 @@ fn spec() -> CoinSpec {
     )
 }
 
+fn clob_asset(seed: &'static [u8]) -> AssetId {
+    AssetId(Sha256::hash(seed))
+}
+
+fn clob_market() -> nunchi_clob::MarketId {
+    market_id(&clob_asset(b"base"), &clob_asset(b"quote"), 5, 2)
+}
+
+fn committed_context(height: u64) -> RuntimeContext {
+    RuntimeContext {
+        epoch: 0,
+        height,
+        timestamp_ms: height * 1_000,
+        block_digest: Some(Sha256::hash(&height.to_be_bytes())),
+    }
+}
+
 #[test]
 fn proposal_skips_unregistered_multisig() {
     let runner = deterministic::Runner::default();
@@ -33,7 +58,7 @@ fn proposal_skips_unregistered_multisig() {
         let db = QmdbBackend::init(context, config)
             .await
             .expect("init state db");
-        let databases: QmdbDatabaseSet<deterministic::Context> = Arc::new(AsyncRwLock::new(db));
+        let databases: QmdbDatabaseSet<deterministic::Context> = shared_database(db);
         let genesis_target = databases.committed_targets().await;
         let genesis_state = StateCommitment {
             root: genesis_target.root,
@@ -43,6 +68,7 @@ fn proposal_skips_unregistered_multisig() {
         let app = BasicApplication::new(
             submitter,
             16,
+            NZU64!(1),
             applied_height,
             genesis_state,
             genesis_payload(),
@@ -88,5 +114,241 @@ fn proposal_skips_unregistered_multisig() {
             .await
             .expect("build_valid_transactions should succeed");
         assert_eq!(included, vec![tx.into()]);
+    });
+}
+
+/// Profiling probe for the block execution hot path: measures
+/// `build_valid_transactions` (the proposal-validate path) over a full
+/// 4096-transfer block against QMDB-backed state. Run explicitly:
+/// `cargo test --release -p nunchi-coins-chain profile_block -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn profile_block_execution() {
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let (_mempool, submitter) = Mempool::new(PoolConfig::default());
+        let config = QmdbState::<deterministic::Context>::config(&context, "profile-test");
+        let db = QmdbBackend::init(context, config)
+            .await
+            .expect("init state db");
+        let databases: QmdbDatabaseSet<deterministic::Context> = shared_database(db);
+        let genesis_target = databases.committed_targets().await;
+        let genesis_state = StateCommitment {
+            root: genesis_target.root,
+            range: genesis_target.range,
+        };
+        let applied_height = Arc::new(AsyncMutex::new(Height::zero()));
+        let app = BasicApplication::new(
+            submitter,
+            4096,
+            NZU64!(1),
+            applied_height,
+            genesis_state,
+            genesis_payload(),
+        );
+
+        const ACCOUNTS: usize = 256;
+        const TXS_PER_ACCOUNT: usize = 16;
+
+        // Seed: issuer creates the token, then mints a balance to every account.
+        let issuer = PrivateKey::ed25519_from_seed(0);
+        let keys: Vec<PrivateKey> = (1..=ACCOUNTS as u64)
+            .map(PrivateKey::ed25519_from_seed)
+            .collect();
+        let accounts: Vec<_> = keys
+            .iter()
+            .map(|key| nunchi_coins::Address::external(&key.public_key()))
+            .collect();
+
+        let batches = databases.new_batches().await;
+        let mut ledger = Ledger::new(QmdbBatch::new(batches));
+        let coin = ledger
+            .create_token(
+                nunchi_coins::Address::external(&issuer.public_key()),
+                CoinSpec::new(
+                    TokenSymbol::new("NCH").expect("symbol"),
+                    TokenName::new("Nunchi").expect("name"),
+                    9,
+                    0,
+                    None,
+                ),
+            )
+            .await
+            .expect("create token");
+        for (index, account) in accounts.iter().enumerate() {
+            let mint = CoinTransaction::sign(
+                &issuer,
+                nunchi_common::DEFAULT_CHAIN_ID,
+                index as u64,
+                CoinOperation::Mint {
+                    coin,
+                    to: account.clone(),
+                    amount: 1_000_000,
+                },
+            );
+            ledger
+                .apply_transaction(&mint, NoopEventSink)
+                .await
+                .expect("mint");
+        }
+        let merkleized = ledger.into_inner().merkleize().await.expect("merkleize");
+        databases.finalize(merkleized).await;
+
+        // A full block: 256 accounts x 16 sequential-nonce transfers.
+        let mut candidates = Vec::with_capacity(ACCOUNTS * TXS_PER_ACCOUNT);
+        for nonce in 0..TXS_PER_ACCOUNT as u64 {
+            for (index, key) in keys.iter().enumerate() {
+                let to = accounts[(index + 1) % ACCOUNTS].clone();
+                candidates.push(
+                    CoinTransaction::sign(
+                        key,
+                        nunchi_common::DEFAULT_CHAIN_ID,
+                        nonce,
+                        CoinOperation::Transfer {
+                            coin,
+                            from: accounts[index].clone(),
+                            to,
+                            amount: 1,
+                        },
+                    )
+                    .into(),
+                );
+            }
+        }
+        println!("candidates: {}", candidates.len());
+
+        for round in 0..3 {
+            let batches = databases.new_batches().await;
+            let started = std::time::Instant::now();
+            let (included, _merkleized) = app
+                .build_valid_transactions(batches, Default::default(), candidates.clone())
+                .await
+                .expect("build");
+            let elapsed = started.elapsed();
+            println!(
+                "round {round}: build_valid_transactions({}) took {:?} ({:.1}us/tx), included {}",
+                candidates.len(),
+                elapsed,
+                elapsed.as_secs_f64() * 1e6 / candidates.len() as f64,
+                included.len(),
+            );
+        }
+    });
+}
+
+#[test]
+fn clob_mailbox_extension_records_verified_fill() {
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let mut state = QmdbState::init(context.child("state"), "clob-extension-state")
+            .await
+            .unwrap();
+        let creator = nunchi_crypto::PrivateKey::ed25519_from_seed(10);
+        let maker = nunchi_crypto::PrivateKey::ed25519_from_seed(11);
+        let taker = nunchi_crypto::PrivateKey::ed25519_from_seed(12);
+        let second_taker = nunchi_crypto::PrivateKey::ed25519_from_seed(13);
+
+        let market_tx = ClobTransaction::sign(
+            &creator,
+            nunchi_common::DEFAULT_CHAIN_ID,
+            0,
+            ClobOperation::CreateMarket {
+                base_asset: clob_asset(b"base"),
+                quote_asset: clob_asset(b"quote"),
+                tick_size: 5,
+                lot_size: 2,
+            },
+        );
+        let market = {
+            let mut ledger = ClobLedger::new(&mut state);
+            ledger
+                .apply_transaction(&market_tx, Default::default())
+                .await
+                .unwrap();
+            ledger.market(&clob_market()).await.unwrap().unwrap()
+        };
+
+        let (actor, mailbox) = ClobActor::new(ClobConfig::default());
+        let _actor_handle = actor.start(context.child("clob"));
+        mailbox.upsert_market(market);
+        let ask = ClobTransaction::sign(
+            &maker,
+            nunchi_common::DEFAULT_CHAIN_ID,
+            0,
+            ClobOperation::PlaceOrder {
+                market: clob_market(),
+                side: Side::Ask,
+                price: 100,
+                base_quantity: 6,
+                time_in_force: TimeInForce::GoodTilCancelled,
+            },
+        );
+        let bid = ClobTransaction::sign(
+            &taker,
+            nunchi_common::DEFAULT_CHAIN_ID,
+            0,
+            ClobOperation::PlaceOrder {
+                market: clob_market(),
+                side: Side::Bid,
+                price: 100,
+                base_quantity: 4,
+                time_in_force: TimeInForce::ImmediateOrCancel,
+            },
+        );
+        mailbox.submit_order(ask.clone()).await.unwrap();
+        mailbox.submit_order(bid.clone()).await.unwrap();
+
+        let mut extension = ClobExtension::new(mailbox);
+        let payload = extension.propose().await;
+        assert_eq!(payload.fills.len(), 1);
+        let first_context = committed_context(2);
+        assert!(extension
+            .apply_payload(&mut state, first_context, &payload)
+            .await);
+        extension
+            .commit_payload(&mut state, first_context, &payload)
+            .await;
+
+        {
+            let ledger = ClobLedger::new(&mut state);
+            let fills = ledger.market_fills(&clob_market()).await.unwrap();
+            assert_eq!(fills.len(), 1);
+            assert_eq!(fills[0].maker_order, OrderId(ask.digest()));
+            assert_eq!(fills[0].taker_order, OrderId(bid.digest()));
+        }
+
+        let second_bid = ClobTransaction::sign(
+            &second_taker,
+            nunchi_common::DEFAULT_CHAIN_ID,
+            0,
+            ClobOperation::PlaceOrder {
+                market: clob_market(),
+                side: Side::Bid,
+                price: 100,
+                base_quantity: 2,
+                time_in_force: TimeInForce::ImmediateOrCancel,
+            },
+        );
+        extension
+            .mailbox()
+            .submit_order(second_bid.clone())
+            .await
+            .unwrap();
+        let second_payload = extension.propose().await;
+        assert_eq!(second_payload.orders, vec![second_bid.clone()]);
+        assert_eq!(second_payload.fills.len(), 1);
+        let second_context = committed_context(3);
+        assert!(extension
+            .apply_payload(&mut state, second_context, &second_payload)
+            .await);
+        extension
+            .commit_payload(&mut state, second_context, &second_payload)
+            .await;
+
+        let ledger = ClobLedger::new(&mut state);
+        let fills = ledger.market_fills(&clob_market()).await.unwrap();
+        assert_eq!(fills.len(), 2);
+        assert_eq!(fills[1].maker_order, OrderId(ask.digest()));
+        assert_eq!(fills[1].taker_order, OrderId(second_bid.digest()));
     });
 }

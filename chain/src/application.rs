@@ -10,7 +10,7 @@ use commonware_glue::stateful::{
 use commonware_parallel::{Rayon, Strategy as _};
 use commonware_runtime::{
     telemetry::metrics::{histogram::Buckets, Histogram, HistogramExt as _, MetricsExt as _},
-    Clock, Metrics, Spawner, Storage,
+    BufferPooler, Clock, Metrics, Spawner, Storage,
 };
 use commonware_storage::{mmr::Location, qmdb::sync::Target};
 use commonware_utils::{non_empty_range, range::NonEmptyRange, SystemTimeExt};
@@ -18,19 +18,19 @@ use futures::{lock::Mutex as AsyncMutex, StreamExt};
 use nunchi_common::{Overlay, QmdbBatch, QmdbDatabaseSet, QmdbMerkleized, Runtime, RuntimeContext};
 use nunchi_dkg::{Context, Scheme};
 use nunchi_mempool::{MempoolHandle, PoolTransaction};
-use rand::Rng;
+use rand::{CryptoRng, Rng};
 use std::{
     collections::HashMap,
     marker::PhantomData,
-    num::NonZeroUsize,
+    num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, error};
 
 use crate::{
-    Block, ConsensusExtension, DkgMailbox, EventConsumer, NoConsensusExtension, NoopEventConsumer,
-    StateCommitment, TransactionEventContext,
+    Block, ConsensusExtension, DkgMailbox, DkgState, EventConsumer, NoConsensusExtension,
+    NoopEventConsumer, StateCommitment, TransactionEventContext,
 };
 
 /// The height of the last finalized block applied to a node's ledger.
@@ -48,6 +48,7 @@ where
 {
     pub submitter: MempoolHandle<Tx>,
     pub max_block_transactions: usize,
+    pub min_block_interval_ms: NonZeroU64,
     pub consensus: Ext,
     pub events: Events,
     pub applied_height: SharedAppliedHeight,
@@ -66,7 +67,9 @@ where
 {
     submitter: MempoolHandle<R::Transaction>,
     max_block_transactions: usize,
+    min_block_interval_ms: NonZeroU64,
     dkg: Option<DkgMailbox<R::Transaction, Ext>>,
+    dkg_state: Option<DkgState>,
     consensus: Ext,
     events: Events,
     applied_height: SharedAppliedHeight,
@@ -83,6 +86,7 @@ struct ApplicationMetrics {
     proposal_validate_duration: Histogram,
     proposal_merkleize_duration: Histogram,
     apply_transactions_duration: Histogram,
+    dkg_state_duration: Histogram,
     apply_merkleize_duration: Histogram,
 }
 
@@ -107,6 +111,11 @@ impl ApplicationMetrics {
             apply_transactions_duration: context.histogram(
                 "apply_transactions_duration_seconds",
                 "duration spent applying block transactions",
+                Buckets::LOCAL,
+            ),
+            dkg_state_duration: context.histogram(
+                "dkg_public_state_duration_seconds",
+                "duration spent validating and transitioning authenticated public DKG state",
                 Buckets::LOCAL,
             ),
             apply_merkleize_duration: context.histogram(
@@ -151,6 +160,7 @@ where
         let ApplicationConfig {
             submitter,
             max_block_transactions,
+            min_block_interval_ms,
             consensus,
             events,
             applied_height,
@@ -161,7 +171,9 @@ where
         Self {
             submitter,
             max_block_transactions,
+            min_block_interval_ms,
             dkg,
+            dkg_state: None,
             consensus,
             events,
             applied_height,
@@ -198,20 +210,25 @@ where
             .expect("application strategy initialized")
     }
 
+    fn minimum_timestamp(&self, parent: &Block<R::Transaction, Ext>) -> Option<u64> {
+        parent
+            .timestamp
+            .checked_add(self.min_block_interval_ms.get())
+    }
+
     fn timestamp<E: Clock>(
+        &self,
         runtime_context: &E,
         parent: &Block<R::Transaction, Ext>,
     ) -> Option<u64> {
-        let mut current = runtime_context.current().epoch_millis();
-        if current <= parent.timestamp {
-            current = parent.timestamp.checked_add(1)?;
-        }
-        (current <= MAX_BLOCK_TIMESTAMP_MS).then_some(current)
+        let minimum = self.minimum_timestamp(parent)?;
+        let timestamp = runtime_context.current().epoch_millis().max(minimum);
+        (timestamp <= MAX_BLOCK_TIMESTAMP_MS).then_some(timestamp)
     }
 
     /// Execute txpool candidates in order, including the first `max_block_transactions` that
     /// apply cleanly against the parent state.
-    pub async fn build_valid_transactions<E: Storage + Clock + Metrics>(
+    pub async fn build_valid_transactions<E: BufferPooler + Storage + Clock + Metrics>(
         &self,
         batches: <QmdbDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
         context: RuntimeContext,
@@ -221,7 +238,7 @@ where
             .await
     }
 
-    async fn build_valid_transactions_inner<E: Storage + Clock + Metrics>(
+    async fn build_valid_transactions_inner<E: BufferPooler + Storage + Clock + Metrics>(
         &self,
         timing: Option<(&E, &ApplicationMetrics)>,
         batches: <QmdbDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
@@ -273,16 +290,106 @@ where
         Some((included, merkleized))
     }
 
+    async fn build_proposal_state<
+        E: BufferPooler + Storage + Clock + Metrics + CryptoRng,
+    >(
+        &mut self,
+        timing: Option<&ApplicationMetrics>,
+        batches: <QmdbDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
+        context: RuntimeContext,
+        candidates: Vec<R::Transaction>,
+        reshare_log: Option<&nunchi_dkg::DealerLog>,
+        rng: &mut E,
+    ) -> Option<(Vec<R::Transaction>, Ext::Payload, QmdbMerkleized<E>)> {
+        let mut batch = QmdbBatch::new(batches);
+        let mut included = Vec::new();
+
+        let validate_start = timing.map(|_| rng.current());
+        for transaction in candidates {
+            if included.len() == self.max_block_transactions {
+                break;
+            }
+            let mut overlay = Overlay::new(&mut batch);
+            match R::validate(&mut overlay, context, &transaction).await {
+                Ok(()) => {
+                    overlay.commit();
+                    included.push(transaction);
+                }
+                Err(error) if R::is_storage_error(&error) => {
+                    error!(?error, "storage failure while building block");
+                    return None;
+                }
+                Err(error) => {
+                    debug!(?error, "skipping non-executable txpool transaction");
+                }
+            }
+        }
+        if let Some((metrics, validate_start)) = timing.zip(validate_start) {
+            metrics
+                .proposal_validate_duration
+                .observe_between(validate_start, rng.current());
+        }
+
+        let extension = self.consensus.propose().await;
+        if !self
+            .consensus
+            .apply_payload(&mut batch, context, &extension)
+            .await
+        {
+            return None;
+        }
+        let dkg_start = timing.map(|_| rng.current());
+        if let Some(dkg_state) = &self.dkg_state {
+            if let Err(error) = dkg_state
+                .apply_block(
+                    &mut batch,
+                    Height::new(context.height),
+                    reshare_log,
+                    rng,
+                )
+                .await
+            {
+                debug!(?error, "invalid authenticated DKG public-state update");
+                return None;
+            }
+        }
+        if let Some((metrics, dkg_start)) = timing.zip(dkg_start) {
+            metrics
+                .dkg_state_duration
+                .observe_between(dkg_start, rng.current());
+        }
+
+        let merkleize_start = timing.map(|_| rng.current());
+        let merkleized = match batch.merkleize().await {
+            Ok(merkleized) => merkleized,
+            Err(error) => {
+                error!(?error, "merkleization failed while building block");
+                return None;
+            }
+        };
+        if let Some((metrics, merkleize_start)) = timing.zip(merkleize_start) {
+            metrics
+                .proposal_merkleize_duration
+                .observe_between(merkleize_start, rng.current());
+        }
+        Some((included, extension, merkleized))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn execute_block<E, EventHandler>(
-        runtime_context: &E,
+        &mut self,
+        runtime_context: &mut E,
         metrics: &ApplicationMetrics,
         batches: <QmdbDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
         context: RuntimeContext,
         transactions: &[R::Transaction],
+        extension: &Ext::Payload,
+        reshare_log: Option<&nunchi_dkg::DealerLog>,
         events: &EventHandler,
+        commit_extension: bool,
     ) -> Option<QmdbMerkleized<E>>
     where
-        E: Storage + Clock + Metrics,
+        E: BufferPooler + Storage + Clock + Metrics + CryptoRng,
         EventHandler: EventConsumer,
     {
         events.begin_block(context).await;
@@ -309,6 +416,42 @@ where
                 }
             }
         }
+        if !self
+            .consensus
+            .apply_payload(&mut batch, context, extension)
+            .await
+        {
+            if let Some(digest) = context.block_digest {
+                events.discard_block(digest).await;
+            }
+            return None;
+        }
+        if commit_extension {
+            self.consensus
+                .commit_payload(&mut batch, context, extension)
+                .await;
+        }
+        let dkg_start = runtime_context.current();
+        if let Some(dkg_state) = &self.dkg_state {
+            if let Err(error) = dkg_state
+                .apply_block(
+                    &mut batch,
+                    Height::new(context.height),
+                    reshare_log,
+                    runtime_context,
+                )
+                .await
+            {
+                debug!(?error, "invalid authenticated DKG public-state update");
+                if let Some(digest) = context.block_digest {
+                    events.discard_block(digest).await;
+                }
+                return None;
+            }
+        }
+        metrics
+            .dkg_state_duration
+            .observe_between(dkg_start, runtime_context.current());
         metrics
             .apply_transactions_duration
             .observe_between(apply_start, runtime_context.current());
@@ -344,7 +487,7 @@ where
         }
     }
 
-    fn state_range<E: Storage + Clock + Metrics>(
+    fn state_range<E: BufferPooler + Storage + Clock + Metrics>(
         merkleized: &QmdbMerkleized<E>,
     ) -> NonEmptyRange<Location> {
         let bounds = merkleized.bounds();
@@ -352,11 +495,15 @@ where
     }
 
     async fn verify_timestamp<E: Clock>(
+        &self,
         runtime_context: &E,
         block: &Block<R::Transaction, Ext>,
         parent: &Block<R::Transaction, Ext>,
     ) -> bool {
-        if block.timestamp <= parent.timestamp || block.timestamp > MAX_BLOCK_TIMESTAMP_MS {
+        let Some(minimum) = self.minimum_timestamp(parent) else {
+            return false;
+        };
+        if block.timestamp < minimum || block.timestamp > MAX_BLOCK_TIMESTAMP_MS {
             return false;
         }
 
@@ -374,9 +521,11 @@ where
     R::Transaction: PoolTransaction,
     Ext: ConsensusExtension + Sync,
 {
+    #[allow(clippy::too_many_arguments)]
     pub fn with_consensus(
         submitter: MempoolHandle<R::Transaction>,
         max_block_transactions: usize,
+        min_block_interval_ms: NonZeroU64,
         consensus: Ext,
         dkg: Option<DkgMailbox<R::Transaction, Ext>>,
         applied_height: SharedAppliedHeight,
@@ -387,6 +536,7 @@ where
             ApplicationConfig {
                 submitter,
                 max_block_transactions,
+                min_block_interval_ms,
                 consensus,
                 events: NoopEventConsumer,
                 applied_height,
@@ -395,6 +545,33 @@ where
             },
             dkg,
         )
+    }
+
+    /// Construct an application whose DKG progress is authenticated by QMDB.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_authenticated_dkg(
+        submitter: MempoolHandle<R::Transaction>,
+        max_block_transactions: usize,
+        min_block_interval_ms: NonZeroU64,
+        consensus: Ext,
+        dkg: DkgMailbox<R::Transaction, Ext>,
+        dkg_state: DkgState,
+        applied_height: SharedAppliedHeight,
+        genesis_state: StateCommitment,
+        genesis_payload: sha256::Digest,
+    ) -> Self {
+        let mut application = Self::with_consensus(
+            submitter,
+            max_block_transactions,
+            min_block_interval_ms,
+            consensus,
+            Some(dkg),
+            applied_height,
+            genesis_state,
+            genesis_payload,
+        );
+        application.dkg_state = Some(dkg_state);
+        application
     }
 }
 
@@ -406,6 +583,7 @@ where
     pub fn new(
         submitter: MempoolHandle<R::Transaction>,
         max_block_transactions: usize,
+        min_block_interval_ms: NonZeroU64,
         applied_height: SharedAppliedHeight,
         genesis_state: StateCommitment,
         genesis_payload: sha256::Digest,
@@ -413,6 +591,7 @@ where
         Self::with_consensus(
             submitter,
             max_block_transactions,
+            min_block_interval_ms,
             NoConsensusExtension,
             None,
             applied_height,
@@ -431,6 +610,7 @@ where
     pub fn new_with_events(
         submitter: MempoolHandle<R::Transaction>,
         max_block_transactions: usize,
+        min_block_interval_ms: NonZeroU64,
         events: Events,
         applied_height: SharedAppliedHeight,
         genesis_state: StateCommitment,
@@ -440,6 +620,7 @@ where
             ApplicationConfig {
                 submitter,
                 max_block_transactions,
+                min_block_interval_ms,
                 consensus: NoConsensusExtension,
                 events,
                 applied_height,
@@ -460,6 +641,7 @@ where
     pub fn with_dkg(
         submitter: MempoolHandle<R::Transaction>,
         max_block_transactions: usize,
+        min_block_interval_ms: NonZeroU64,
         dkg: DkgMailbox<R::Transaction>,
         applied_height: SharedAppliedHeight,
         genesis_state: StateCommitment,
@@ -468,6 +650,7 @@ where
         Self::with_consensus(
             submitter,
             max_block_transactions,
+            min_block_interval_ms,
             NoConsensusExtension,
             Some(dkg),
             applied_height,
@@ -484,9 +667,11 @@ where
     Block<R::Transaction>: nunchi_dkg::ReshareBlock,
     Events: EventConsumer,
 {
+    #[allow(clippy::too_many_arguments)]
     pub fn with_dkg_and_events(
         submitter: MempoolHandle<R::Transaction>,
         max_block_transactions: usize,
+        min_block_interval_ms: NonZeroU64,
         dkg: DkgMailbox<R::Transaction>,
         events: Events,
         applied_height: SharedAppliedHeight,
@@ -497,6 +682,7 @@ where
             ApplicationConfig {
                 submitter,
                 max_block_transactions,
+                min_block_interval_ms,
                 consensus: NoConsensusExtension,
                 events,
                 applied_height,
@@ -510,7 +696,7 @@ where
 
 impl<E, R, Ext, Events> StatefulApplication<E> for Application<R, Ext, Events>
 where
-    E: Rng + Spawner + Metrics + Clock + Storage,
+    E: Rng + CryptoRng + Spawner + Metrics + Clock + Storage + BufferPooler,
     R: Runtime + Clone + Send + Sync + 'static,
     R::Transaction: PoolTransaction + Sync,
     Ext: ConsensusExtension + Sync,
@@ -532,15 +718,15 @@ where
 
     async fn propose(
         &mut self,
-        (runtime_context, context): (E, Self::Context),
-        ancestry: impl futures::Stream<Item = Self::Block> + Send,
+        (mut runtime_context, context): (E, Self::Context),
+        ancestry: impl futures::Stream<Item = std::sync::Arc<Self::Block>> + Send,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: &mut Self::InputProvider,
     ) -> Option<Proposed<Self, E>> {
         let metrics = self.metrics(&runtime_context);
         let mut ancestry = Box::pin(ancestry);
         let parent = ancestry.next().await?;
-        let timestamp = Self::timestamp(&runtime_context, &parent)?;
+        let timestamp = self.timestamp(&runtime_context, &parent)?;
         let selection_start = runtime_context.current();
         let candidates = input.pending(self.max_block_transactions).await;
         metrics
@@ -551,20 +737,23 @@ where
             parent.height.next(),
             timestamp,
         );
-        let (transactions, merkleized) = self
-            .build_valid_transactions_inner(
-                Some((&runtime_context, &metrics)),
-                batches,
-                execution_context,
-                candidates,
-            )
-            .await?;
-        let state_range = Self::state_range(&merkleized);
+        // Obtain the optional dealer log before executing the speculative
+        // state batch so that it is committed by the resulting state root.
         let reshare_log = match &mut self.dkg {
             Some(dkg) => dkg.act().await,
             None => None,
         };
-        let extension = self.consensus.propose().await;
+        let (transactions, extension, merkleized) = self
+            .build_proposal_state(
+                Some(&metrics),
+                batches,
+                execution_context,
+                candidates,
+                reshare_log.as_ref(),
+                &mut runtime_context,
+            )
+            .await?;
+        let state_range = Self::state_range(&merkleized);
         let block = Block::new(
             context,
             parent.digest(),
@@ -583,8 +772,8 @@ where
 
     async fn verify(
         &mut self,
-        (runtime_context, _): (E, Self::Context),
-        ancestry: impl futures::Stream<Item = Self::Block> + Send,
+        (mut runtime_context, _): (E, Self::Context),
+        ancestry: impl futures::Stream<Item = std::sync::Arc<Self::Block>> + Send,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         let metrics = self.metrics(&runtime_context);
@@ -592,7 +781,10 @@ where
         let block = ancestry.next().await?;
         let parent = ancestry.next().await?;
 
-        if !Self::verify_timestamp(&runtime_context, &block, &parent).await {
+        if !self
+            .verify_timestamp(&runtime_context, &block, &parent)
+            .await
+        {
             return None;
         }
 
@@ -619,15 +811,19 @@ where
         }
 
         let execution_context = Self::block_runtime_context(&block);
-        let merkleized = Self::execute_block(
-            &runtime_context,
-            &metrics,
-            batches,
-            execution_context,
-            &block.transactions,
-            &NoopEventConsumer,
-        )
-        .await?;
+        let merkleized = self
+            .execute_block(
+                &mut runtime_context,
+                &metrics,
+                batches,
+                execution_context,
+                &block.transactions,
+                &block.extension,
+                block.reshare_log.as_ref(),
+                &NoopEventConsumer,
+                false,
+            )
+            .await?;
         let state_range = Self::state_range(&merkleized);
         if merkleized.root() != block.state_root || state_range != block.state_range {
             return None;
@@ -637,22 +833,27 @@ where
 
     async fn apply(
         &mut self,
-        (runtime_context, _): (E, Self::Context),
+        (mut runtime_context, _): (E, Self::Context),
         block: &Self::Block,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
         let metrics = self.metrics(&runtime_context);
         let execution_context = Self::block_runtime_context(block);
-        let merkleized = Self::execute_block(
-            &runtime_context,
-            &metrics,
-            batches,
-            execution_context,
-            &block.transactions,
-            &self.events,
-        )
-        .await
-        .expect("certified block failed deterministic execution");
+        let events = self.events.clone();
+        let merkleized = self
+            .execute_block(
+                &mut runtime_context,
+                &metrics,
+                batches,
+                execution_context,
+                &block.transactions,
+                &block.extension,
+                block.reshare_log.as_ref(),
+                &events,
+                true,
+            )
+            .await
+            .expect("certified block failed deterministic execution");
         let state_range = Self::state_range(&merkleized);
         assert_eq!(
             merkleized.root(),

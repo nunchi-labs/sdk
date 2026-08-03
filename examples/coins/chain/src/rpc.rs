@@ -64,6 +64,15 @@ impl MempoolIngress for ChainMempoolIngress {
         self.mempool.submit(transaction.into()).await
     }
 
+    async fn submit_many(
+        &self,
+        transactions: Vec<CoinTransaction>,
+    ) -> Vec<Result<Digest, AdmissionError>> {
+        self.mempool
+            .submit_many(transactions.into_iter().map(Into::into).collect())
+            .await
+    }
+
     async fn status(&self, digest: Digest) -> Option<TxStatus> {
         self.mempool.status(digest).await
     }

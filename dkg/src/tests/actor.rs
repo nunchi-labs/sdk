@@ -7,7 +7,10 @@ use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::types::Epoch;
 use commonware_consensus::{types::Height, Heightable};
 use commonware_cryptography::{
-    bls12381::{dkg::feldman_desmedt::deal, primitives::variant::MinSig},
+    bls12381::{
+        dkg::feldman_desmedt::{deal, Dealer, DealerLog, Player, Verdict},
+        primitives::{sharing::Mode, variant::MinSig},
+    },
     ed25519::{PrivateKey, PublicKey as Ed25519PublicKey},
     sha256,
     transcript::Summary,
@@ -16,7 +19,7 @@ use commonware_cryptography::{
 use commonware_macros::test_traced;
 use commonware_math::algebra::Random;
 use commonware_p2p::{utils::mocks::inert_channel, PeerSetSubscription, Provider};
-use commonware_runtime::{deterministic, Runner, Supervisor as _};
+use commonware_runtime::{deterministic, Clock, Runner, Supervisor as _};
 use commonware_utils::{channel::mpsc, N3f1, NZUsize, TryCollect, NZU32, NZU64};
 use core::marker::PhantomData;
 use std::collections::BTreeMap;
@@ -130,6 +133,56 @@ fn peer_config(
     (peer_config, participants)
 }
 
+fn finalized_dkg_log(
+    namespace: &[u8],
+    epoch: Epoch,
+    dealers: commonware_utils::ordered::Set<Ed25519PublicKey>,
+    players: commonware_utils::ordered::Set<Ed25519PublicKey>,
+    participants: &BTreeMap<Ed25519PublicKey, PrivateKey>,
+    dealer_pk: &Ed25519PublicKey,
+) -> DealerLog<MinSig, Ed25519PublicKey> {
+    let round = commonware_cryptography::bls12381::dkg::feldman_desmedt::Info::new::<N3f1>(
+        namespace,
+        epoch.get(),
+        None,
+        Mode::NonZeroCounter,
+        dealers,
+        players,
+    )
+    .expect("round info should be valid");
+    let dealer_signer = participants
+        .get(dealer_pk)
+        .cloned()
+        .expect("dealer signer should exist");
+    let (mut dealer, public, private) = Dealer::<MinSig, _>::start::<N3f1>(
+        commonware_utils::test_rng(),
+        round.clone(),
+        dealer_signer,
+        None,
+    )
+    .expect("dealer should start");
+
+    for (player_pk, private) in private {
+        let player_signer = participants
+            .get(&player_pk)
+            .cloned()
+            .expect("player signer should exist");
+        let mut player = Player::new(round.clone(), player_signer).expect("player should start");
+        let Verdict::Valid(ack) =
+            player.dealer_message::<N3f1>(dealer_pk.clone(), public.clone(), private)
+        else {
+            panic!("valid dealing should be acknowledged");
+        };
+        dealer.receive_player_ack(player_pk, ack).unwrap();
+    }
+
+    dealer
+        .finalize::<N3f1>()
+        .check(&round)
+        .expect("finalized log should check")
+        .1
+}
+
 fn assert_recovered_storage_controls_dkg_mode_on_restart(execution: Execution, suffix: &str) {
     let executor = deterministic::Runner::seeded(8);
     executor.start(|mut context| async move {
@@ -226,4 +279,106 @@ fn default_execution_recovered_storage_controls_dkg_mode_on_restart() {
 #[test_traced]
 fn dedicated_execution_recovered_storage_controls_dkg_mode_on_restart() {
     assert_recovered_storage_controls_dkg_mode_on_restart(Execution::Dedicated, "dedicated");
+}
+
+#[test_traced]
+fn legacy_missing_player_dealing_exits_actor() {
+    let executor = deterministic::Runner::seeded(9);
+    executor.start(|mut context| async move {
+        let namespace = b"test_dkg".to_vec();
+        let epoch = Epoch::zero();
+        let (peer_config, participants) = peer_config(4, vec![4]);
+        let self_pk = peer_config
+            .participants
+            .iter()
+            .next()
+            .cloned()
+            .expect("participant exists");
+        let signer = participants
+            .get(&self_pk)
+            .cloned()
+            .expect("signer should exist");
+        let dealer_pk = peer_config
+            .participants
+            .iter()
+            .find(|candidate| **candidate != self_pk)
+            .cloned()
+            .expect("dealer exists");
+        let log = finalized_dkg_log(
+            &namespace,
+            epoch,
+            peer_config.participants.clone(),
+            peer_config.dealers(0),
+            &participants,
+            &dealer_pk,
+        );
+        let partition_prefix = format!("legacy_missing_player_dealing_{self_pk}");
+
+        let mut storage = Storage::<_, MinSig, Ed25519PublicKey>::init(
+            context.child("seed_storage"),
+            &partition_prefix,
+            StorageProtector::new(TEST_STORAGE_KEY),
+            namespace.clone(),
+            self_pk.clone(),
+            NZU32!(peer_config.max_participants_per_round()),
+            crate::MAX_SUPPORTED_MODE,
+        )
+        .await
+        .expect("storage init should succeed");
+        storage
+            .set_epoch(
+                epoch,
+                EpochState {
+                    round: 0,
+                    rng_seed: Summary::random(&mut context),
+                    output: None,
+                    share: None,
+                },
+            )
+            .await
+            .expect("set epoch should succeed");
+        storage
+            .append_log(epoch, dealer_pk, log)
+            .await
+            .expect("append log should succeed");
+        drop(storage);
+
+        let (actor, _mailbox) = Actor::<_, _, TestBlock>::new(
+            context.child("actor"),
+            Config {
+                manager: NoopManager::<Ed25519PublicKey>::default(),
+                signer,
+                mailbox_size: NZUsize!(8),
+                execution: Execution::default(),
+                partition_prefix,
+                peer_config: peer_config.clone(),
+                max_supported_mode: crate::MAX_SUPPORTED_MODE,
+                namespace,
+                storage_protector: StorageProtector::new(TEST_STORAGE_KEY),
+                epoch_length: NZU64!(200),
+            },
+        );
+        let (sender, receiver) = inert_channel(&peer_config.participants);
+        let (orchestrator_sender, mut orchestrator_receiver) =
+            mailbox::new(context.child("orchestrator_mailbox"), NZUsize!(4));
+        let handle = actor.start(
+            None,
+            None,
+            crate::orchestrator::Mailbox::new(orchestrator_sender),
+            (sender, receiver),
+            ContinueOnUpdate::boxed(),
+        );
+
+        let Some(Message::Enter(transition)) = orchestrator_receiver.recv().await else {
+            panic!("actor should emit an epoch transition before detecting bad player state");
+        };
+        assert_eq!(transition.epoch, epoch);
+
+        commonware_macros::select! {
+            _ = handle => {},
+            _ = context.sleep(std::time::Duration::from_secs(1)) => {
+                panic!("legacy actor should fail closed instead of continuing shareless");
+            },
+        }
+    });
 }

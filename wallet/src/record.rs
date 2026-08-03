@@ -322,15 +322,17 @@ pub(crate) fn decode_private_key(hex_value: &str) -> Result<PrivateKey, WalletEr
 fn generate_ed25519_key() -> Result<PrivateKey, WalletError> {
     use commonware_cryptography::ed25519;
     use commonware_math::algebra::Random;
-    use rand::rngs::OsRng;
-    Ok(PrivateKey::Ed25519(ed25519::PrivateKey::random(OsRng)))
+    let mut rng = rand::rng();
+    Ok(PrivateKey::Ed25519(ed25519::PrivateKey::random(&mut rng)))
 }
 
 #[cfg(not(feature = "cli"))]
 fn generate_ed25519_key() -> Result<PrivateKey, WalletError> {
-    Ok(PrivateKey::ed25519_from_seed(rand_core::RngCore::next_u64(
-        &mut rand_core::OsRng,
-    )))
+    let mut seed = [0u8; 8];
+    getrandom::fill(&mut seed).map_err(|source| WalletError::InvalidRecord {
+        reason: format!("system random failed: {source}"),
+    })?;
+    Ok(PrivateKey::ed25519_from_seed(u64::from_le_bytes(seed)))
 }
 
 pub(crate) fn encode_hex(bytes: &[u8]) -> String {

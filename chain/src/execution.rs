@@ -18,7 +18,7 @@ use crate::{
 #[derive(Clone)]
 pub struct NodeHandle<E, R, Ext = NoConsensusExtension, Events = NoopEventConsumer>
 where
-    E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
+    E: StorageContext + Spawner + Metrics + Clock + rand::Rng + rand::CryptoRng,
     R: Runtime + Clone + Send + Sync + 'static,
     R::Transaction: PoolTransaction + Sync,
     Ext: ConsensusExtension + Sync,
@@ -31,7 +31,7 @@ where
 
 impl<E, R, Ext, Events> NodeHandle<E, R, Ext, Events>
 where
-    E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
+    E: StorageContext + Spawner + Metrics + Clock + rand::Rng + rand::CryptoRng,
     R: Runtime + Clone + Send + Sync + 'static,
     R::Transaction: PoolTransaction + Sync,
     Ext: ConsensusExtension + Sync,
@@ -58,7 +58,7 @@ where
 /// Read-only queries answered from the stateful actor's committed databases.
 pub struct StatefulQuery<E, R, Ext = NoConsensusExtension, Events = NoopEventConsumer>
 where
-    E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
+    E: StorageContext + Spawner + Metrics + Clock + rand::Rng + rand::CryptoRng,
     R: Runtime + Clone + Send + Sync + 'static,
     R::Transaction: PoolTransaction + Sync,
     Ext: ConsensusExtension + Sync,
@@ -69,7 +69,7 @@ where
 
 impl<E, R, Ext, Events> Clone for StatefulQuery<E, R, Ext, Events>
 where
-    E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
+    E: StorageContext + Spawner + Metrics + Clock + rand::Rng + rand::CryptoRng,
     R: Runtime + Clone + Send + Sync + 'static,
     R::Transaction: PoolTransaction + Sync,
     Ext: ConsensusExtension + Sync,
@@ -84,7 +84,7 @@ where
 
 impl<E, R, Ext, Events> StatefulQuery<E, R, Ext, Events>
 where
-    E: StorageContext + Spawner + Metrics + Clock + rand::Rng,
+    E: StorageContext + Spawner + Metrics + Clock + rand::Rng + rand::CryptoRng,
     R: Runtime + Clone + Send + Sync + 'static,
     R::Transaction: PoolTransaction + Sync,
     Ext: ConsensusExtension + Sync,

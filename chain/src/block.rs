@@ -8,7 +8,7 @@ use commonware_parallel::Strategy;
 use commonware_storage::mmr::Location;
 use commonware_utils::range::NonEmptyRange;
 use nunchi_dkg::{Context, DealerLog, Finalization, Notarization, ReshareBlock, Scheme};
-use rand::rngs::OsRng;
+use commonware_utils::sys_rng;
 
 use crate::{BlockExtension, NoConsensusExtension};
 
@@ -321,7 +321,7 @@ where
     }
 
     pub fn verify(&self, scheme: &Scheme, strategy: &impl Strategy) -> bool {
-        self.proof.verify(&mut OsRng, scheme, strategy)
+        self.proof.verify(&mut sys_rng(), scheme, strategy)
     }
 }
 
@@ -385,7 +385,7 @@ where
     }
 
     pub fn verify(&self, scheme: &Scheme, strategy: &impl Strategy) -> bool {
-        self.proof.verify(&mut OsRng, scheme, strategy)
+        self.proof.verify(&mut sys_rng(), scheme, strategy)
     }
 }
 

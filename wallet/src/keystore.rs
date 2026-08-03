@@ -4,7 +4,6 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305, Nonce,
 };
-use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
 use thiserror::Error;
@@ -21,6 +20,8 @@ pub enum KeystoreError {
     DecryptFailed,
     #[error("invalid keystore envelope: {reason}")]
     InvalidEnvelope { reason: String },
+    #[error("system random failed: {reason}")]
+    Random { reason: String },
     #[error("io error at {path}: {source}")]
     Io {
         path: std::path::PathBuf,
@@ -130,8 +131,12 @@ fn encrypt_record(
 ) -> Result<EncryptedEnvelope, KeystoreError> {
     let mut salt = [0u8; SALT_LEN];
     let mut nonce_bytes = [0u8; NONCE_LEN];
-    OsRng.fill_bytes(&mut salt);
-    OsRng.fill_bytes(&mut nonce_bytes);
+    getrandom::fill(&mut salt).map_err(|source| KeystoreError::Random {
+        reason: source.to_string(),
+    })?;
+    getrandom::fill(&mut nonce_bytes).map_err(|source| KeystoreError::Random {
+        reason: source.to_string(),
+    })?;
 
     let key = derive_key(password, &salt)?;
     let cipher =

@@ -45,6 +45,10 @@ pub mod channels {
     pub const BROADCAST: u64 = 3;
     pub const DKG: u64 = 4;
     pub const BACKFILL: u64 = 5;
+    /// Floor-probe channel (finalization discovery / service for state-sync floors).
+    pub const PROBE: u64 = 6;
+    /// QMDB operation/proof transfer for peer state sync.
+    pub const STATE_SYNC: u64 = 7;
 }
 
 /// The consensus epoch. The example chain uses one validator set at startup.
@@ -79,10 +83,12 @@ pub fn application(
     applied_height: SharedAppliedHeight,
     genesis_state: StateCommitment,
     genesis_payload: Digest,
+    min_block_interval_ms: NonZeroU64,
 ) -> Application {
     nunchi_chain::Application::with_consensus(
         submitter,
         0,
+        min_block_interval_ms,
         bridge,
         None,
         applied_height,
