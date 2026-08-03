@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "access-control",
     "authority",
     "bridge",
     "common",
@@ -37,6 +38,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
 ] }
 
 [workspace.dependencies]
+nunchi-access-control = { version = "2026.7.0-alpha.1", path = "access-control" }
 nunchi-coins = { version = "2026.7.0-alpha.1", path = "coins" }
 nunchi-authority = { version = "2026.7.0-alpha.1", path = "authority" }
 nunchi-bridge = { version = "2026.7.0-alpha.1", path = "bridge" }
