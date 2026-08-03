@@ -119,3 +119,143 @@ fn invalid_import_plan_performs_no_logical_writes() {
         assert_eq!(storage.inspect(), StorageInspection::Empty);
     });
 }
+
+#[test]
+fn import_rejects_authenticated_identity_state_and_transaction_conflicts() {
+    deterministic::Runner::seeded(26).start(|context| async move {
+        let init = |context, partition: &'static str, validator| async move {
+            Storage::<_, MinSig, ed25519::PublicKey>::init(
+                context,
+                partition,
+                StorageProtector::new([7u8; 32]),
+                b"import-test".to_vec(),
+                validator,
+                NZU32!(4),
+                crate::MAX_SUPPORTED_MODE,
+            )
+            .await
+            .unwrap()
+        };
+
+        let (validator, mut bundle, checkpoint) = fixture();
+        bundle.partition_prefix = "checkpoint_conflict".to_owned();
+        let mut authenticated = checkpoint.clone();
+        authenticated.successful_round = authenticated.successful_round.wrapping_add(1);
+        let mut storage = init(
+            context.child("checkpoint_conflict"),
+            "checkpoint_conflict",
+            validator.clone(),
+        )
+        .await;
+        assert!(matches!(
+            storage
+                .import_recovery_bundle(bundle, &authenticated, Sha256::hash(b"bundle"))
+                .await,
+            Err(crate::RecoveryError::Checkpoint)
+        ));
+
+        let (validator, mut bundle, checkpoint) = fixture();
+        bundle.partition_prefix = "identity_conflict".to_owned();
+        bundle.validator = ed25519::PrivateKey::from_seed(99).public_key();
+        let mut storage = init(
+            context.child("identity_conflict"),
+            "identity_conflict",
+            validator.clone(),
+        )
+        .await;
+        assert!(matches!(
+            storage
+                .import_recovery_bundle(bundle, &checkpoint, Sha256::hash(b"bundle"))
+                .await,
+            Err(crate::RecoveryError::Identity(_))
+        ));
+
+        let (validator, mut bundle, checkpoint) = fixture();
+        bundle.partition_prefix = "output_conflict".to_owned();
+        bundle.epoch_state.output = None;
+        let mut storage = init(
+            context.child("output_conflict"),
+            "output_conflict",
+            validator.clone(),
+        )
+        .await;
+        assert!(matches!(
+            storage
+                .import_recovery_bundle(bundle, &checkpoint, Sha256::hash(b"bundle"))
+                .await,
+            Err(crate::RecoveryError::Checkpoint)
+        ));
+
+        let (validator, mut bundle, checkpoint) = fixture();
+        bundle.partition_prefix = "share_conflict".to_owned();
+        bundle.epoch_state.share = None;
+        let mut storage = init(
+            context.child("share_conflict"),
+            "share_conflict",
+            validator.clone(),
+        )
+        .await;
+        assert!(matches!(
+            storage
+                .import_recovery_bundle(bundle, &checkpoint, Sha256::hash(b"bundle"))
+                .await,
+            Err(crate::RecoveryError::Share)
+        ));
+
+        let (validator, mut bundle, checkpoint) = fixture();
+        bundle.partition_prefix = "nonempty_conflict".to_owned();
+        let mut storage = init(
+            context.child("nonempty_conflict"),
+            "nonempty_conflict",
+            validator.clone(),
+        )
+        .await;
+        storage
+            .set_epoch(
+                checkpoint.epoch,
+                crate::StoredEpoch {
+                    round: checkpoint.successful_round,
+                    rng_seed: Summary::random(test_rng()),
+                    output: Some(checkpoint.output.clone()),
+                    share: bundle.epoch_state.share.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            storage
+                .import_recovery_bundle(bundle, &checkpoint, Sha256::hash(b"bundle"))
+                .await,
+            Err(crate::RecoveryError::ImportConflict)
+        ));
+
+        let (validator, mut bundle, checkpoint) = fixture();
+        bundle.partition_prefix = "transaction_conflict".to_owned();
+        let mut storage = init(
+            context.child("transaction_conflict"),
+            "transaction_conflict",
+            validator,
+        )
+        .await;
+        storage
+            .import_recovery_bundle(
+                bundle.clone(),
+                &checkpoint,
+                Sha256::hash(b"first bundle"),
+            )
+            .await
+            .unwrap();
+        bundle.reconciliation = Some(crate::Reconciliation {
+            format_version: crate::STATE_FORMAT_VERSION,
+            checkpoint_digest: Sha256::hash(&checkpoint.encode()),
+            target_epoch: checkpoint.epoch,
+            phase: crate::ReconciliationPhase::Complete,
+        });
+        assert!(matches!(
+            storage
+                .import_recovery_bundle(bundle, &checkpoint, Sha256::hash(b"second bundle"))
+                .await,
+            Err(crate::RecoveryError::ImportConflict)
+        ));
+    });
+}

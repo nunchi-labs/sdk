@@ -1,18 +1,23 @@
 use crate::{
     public::N3F1_FAULT_MODEL,
     recovery::{
-        derive_recovery_keys, BUNDLE_AD_DOMAIN, MANIFEST_AD_DOMAIN, RECOVERY_FORMAT_VERSION,
-        RECOVERY_ENVELOPE_VERSION,
+        derive_recovery_keys, BUNDLE_AD_DOMAIN, BUNDLE_MAGIC, MANIFEST_AD_DOMAIN,
+        RECOVERY_FORMAT_VERSION, RECOVERY_IMPORT_VERSION, RECOVERY_ENVELOPE_VERSION,
     },
-    DkgProtocolConfig, DkgRecoveryBundle, EncryptedRecoveryBundle, PublicCheckpoint,
-    RecoveryAssociatedData, RecoveryEpochState, RecoveryManifest, RecoveryManifestEntry,
+    DkgProtocolConfig, DkgRecoveryBundle, DurableReceipt, EncryptedRecoveryBundle,
+    PublicCheckpoint, RecipientState, RecoveryAssociatedData, RecoveryDealing, RecoveryDealer,
+    RecoveryEpoch, RecoveryEpochState, RecoveryError, RecoveryImportPhase,
+    RecoveryImportTransaction, RecoveryManifest, RecoveryManifestEntry, RecoveryMetadata,
     RecoveryProtectors, RecoveryReadCfg, STATE_FORMAT_VERSION,
 };
-use commonware_codec::{Encode, ReadExt};
+use bytes::Bytes;
+use commonware_codec::{Encode, Read, ReadExt};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
     bls12381::{
-        dkg::feldman_desmedt::deal,
+        dkg::feldman_desmedt::{
+            deal, Dealer as CryptoDealer, Info, Player as CryptoPlayer, Verdict,
+        },
         primitives::{sharing::Mode, variant::MinSig},
     },
     ed25519,
@@ -83,6 +88,97 @@ fn fixture() -> (
     (bundle, ad)
 }
 
+fn rich_bundle() -> DkgRecoveryBundle<MinSig, ed25519::PublicKey> {
+    let (mut bundle, _) = fixture();
+    let signers = (0..4)
+        .map(ed25519::PrivateKey::from_seed)
+        .collect::<Vec<_>>();
+    let participants = Set::from_iter_dedup(signers.iter().map(Signer::public_key));
+    let info = Info::new::<N3f1>(
+        b"recovery-test",
+        0,
+        None,
+        Mode::NonZeroCounter,
+        participants.clone(),
+        participants,
+    )
+    .unwrap();
+    let dealer_signer = signers[0].clone();
+    let dealer_pk = dealer_signer.public_key();
+    let (mut dealer, public_message, private_messages) =
+        CryptoDealer::<MinSig, _>::start::<N3f1>(
+            test_rng(),
+            info.clone(),
+            dealer_signer,
+            None,
+        )
+        .unwrap();
+    let mut dealings = Vec::new();
+    let mut recipients = Vec::new();
+    for (index, (player_pk, private_message)) in private_messages.into_iter().enumerate() {
+        let player_signer = signers
+            .iter()
+            .find(|signer| signer.public_key() == player_pk)
+            .unwrap()
+            .clone();
+        let mut player = CryptoPlayer::new(info.clone(), player_signer).unwrap();
+        let Verdict::Valid(ack) = player.dealer_message::<N3f1>(
+            dealer_pk.clone(),
+            public_message.clone(),
+            private_message.clone(),
+        ) else {
+            panic!("valid dealing should be acknowledged");
+        };
+        dealer
+            .receive_player_ack(player_pk.clone(), ack.clone())
+            .unwrap();
+        if index == 0 {
+            dealings.push(RecoveryDealing {
+                dealer: dealer_pk.clone(),
+                public_message: public_message.clone(),
+                private_message: private_message.clone(),
+                acknowledgement: ack.encode(),
+            });
+        }
+        recipients.push(if index % 2 == 0 {
+            RecipientState::Acknowledged {
+                player: player_pk,
+                private_message,
+                ack,
+            }
+        } else {
+            RecipientState::Unacknowledged {
+                player: player_pk,
+                private_message,
+            }
+        });
+    }
+    let signed = dealer.finalize::<N3f1>();
+    let signed_log = signed.encode();
+    let (_, log) = signed.check(&info).unwrap();
+    let active = RecoveryEpoch {
+        epoch: Epoch::zero(),
+        dealings,
+        logs: vec![(dealer_pk, log)],
+        local_dealer: Some(RecoveryDealer::Active {
+            public_message: public_message.clone(),
+            recipients: recipients.clone(),
+        }),
+    };
+    let finalized = RecoveryEpoch {
+        epoch: Epoch::new(1),
+        dealings: Vec::new(),
+        logs: Vec::new(),
+        local_dealer: Some(RecoveryDealer::Finalized {
+            public_message,
+            recipients,
+            signed_log,
+        }),
+    };
+    bundle.epochs = vec![active, finalized];
+    bundle
+}
+
 #[test]
 fn recovery_codecs_and_aead_reject_noncanonical_or_tampered_inputs() {
     let (bundle, ad) = fixture();
@@ -127,6 +223,198 @@ fn recovery_codecs_and_aead_reject_noncanonical_or_tampered_inputs() {
     };
     let sealed = protectors.manifest.encrypt(&manifest, &manifest_ad, &mut TestRng::new(8)).unwrap();
     assert_eq!(protectors.manifest.decrypt(&sealed, &manifest_ad).unwrap(), manifest);
+}
+
+#[test]
+fn recovery_bundle_round_trips_complete_epoch_state() {
+    let bundle = rich_bundle();
+    bundle.validate_canonical().unwrap();
+    let encoded = bundle.encode();
+    let decoded = DkgRecoveryBundle::<MinSig, ed25519::PublicKey>::read_cfg(
+        &mut encoded.as_ref(),
+        &RecoveryReadCfg::new(NZU32!(4), crate::MAX_SUPPORTED_MODE),
+    )
+    .unwrap();
+    assert!(decoded == bundle);
+}
+
+#[test]
+fn recovery_bundle_codec_rejects_every_truncated_prefix() {
+    let encoded = rich_bundle().encode();
+    let cfg = RecoveryReadCfg::new(NZU32!(4), crate::MAX_SUPPORTED_MODE);
+    for length in 0..encoded.len() {
+        let mut input = &encoded[..length];
+        assert!(
+            DkgRecoveryBundle::<MinSig, ed25519::PublicKey>::read_cfg(&mut input, &cfg).is_err(),
+            "truncated recovery bundle of length {length} was accepted"
+        );
+    }
+
+    let mut invalid_version = encoded.to_vec();
+    invalid_version[0] = RECOVERY_FORMAT_VERSION + 1;
+    assert!(DkgRecoveryBundle::<MinSig, ed25519::PublicKey>::read_cfg(
+        &mut invalid_version.as_slice(),
+        &cfg,
+    )
+    .is_err());
+}
+
+#[test]
+fn recovery_bundle_rejects_noncanonical_identity_and_ordering() {
+    let (bundle, _) = fixture();
+
+    let mut changed = bundle.clone();
+    changed.format_version = RECOVERY_FORMAT_VERSION + 1;
+    assert!(matches!(changed.validate_canonical(), Err(RecoveryError::UnsupportedFormat(_))));
+
+    let mut changed = bundle.clone();
+    changed.checkpoint.format_version = STATE_FORMAT_VERSION + 1;
+    assert!(matches!(changed.validate_canonical(), Err(RecoveryError::Checkpoint)));
+
+    let mut changed = bundle.clone();
+    changed.checkpoint_digest = Sha256::hash(b"wrong checkpoint");
+    assert!(matches!(changed.validate_canonical(), Err(RecoveryError::Checkpoint)));
+
+    let mut changed = bundle.clone();
+    changed.epoch_state.epoch = Epoch::new(1);
+    assert!(matches!(changed.validate_canonical(), Err(RecoveryError::Epoch)));
+
+    let mut changed = bundle.clone();
+    changed.protocol_config_digest = Sha256::hash(b"wrong protocol");
+    assert!(matches!(changed.validate_canonical(), Err(RecoveryError::Identity(_))));
+
+    for prefix in [String::new(), "x".repeat(crate::recovery::MAX_PARTITION_PREFIX_LEN + 1)] {
+        let mut changed = bundle.clone();
+        changed.partition_prefix = prefix;
+        assert!(matches!(changed.validate_canonical(), Err(RecoveryError::Bound(_))));
+    }
+
+    let mut changed = bundle.clone();
+    let epoch = RecoveryEpoch {
+        epoch: Epoch::zero(),
+        dealings: Vec::new(),
+        logs: Vec::new(),
+        local_dealer: None,
+    };
+    changed.epochs = vec![epoch; crate::recovery::MAX_RECOVERY_EPOCHS + 1];
+    assert!(matches!(changed.validate_canonical(), Err(RecoveryError::Bound(_))));
+
+    let mut changed = rich_bundle();
+    changed.epochs.reverse();
+    assert!(matches!(changed.validate_canonical(), Err(RecoveryError::Identity(_))));
+
+    let mut changed = rich_bundle();
+    let duplicate = changed.epochs[0].dealings[0].clone();
+    changed.epochs[0].dealings.push(duplicate);
+    assert!(matches!(changed.validate_canonical(), Err(RecoveryError::Identity(_))));
+
+    let mut changed = rich_bundle();
+    let duplicate = changed.epochs[0].logs[0].clone();
+    changed.epochs[0].logs.push(duplicate);
+    assert!(matches!(changed.validate_canonical(), Err(RecoveryError::Identity(_))));
+
+    let mut changed = rich_bundle();
+    let Some(RecoveryDealer::Active { recipients, .. }) = changed.epochs[0].local_dealer.as_mut()
+    else {
+        panic!("active dealer should exist");
+    };
+    recipients.swap(0, 1);
+    assert!(matches!(changed.validate_canonical(), Err(RecoveryError::Identity(_))));
+}
+
+#[test]
+fn recovery_operational_codecs_round_trip_and_reject_invalid_variants() {
+    let (_, ad) = fixture();
+    let encoded = ad.encode();
+    assert_eq!(
+        RecoveryAssociatedData::<ed25519::PublicKey>::read_cfg(
+            &mut encoded.as_ref(),
+            &(crate::recovery::MAX_RECOVERY_DOMAIN_LEN, crate::recovery::MAX_PARTITION_PREFIX_LEN),
+        )
+        .unwrap(),
+        ad
+    );
+
+    let metadata = RecoveryMetadata {
+        checkpoint_epoch: Epoch::new(3),
+        created_at_ms: 9,
+        checkpoint_digest: Sha256::hash(b"checkpoint"),
+    };
+    let encoded = metadata.encode();
+    assert_eq!(RecoveryMetadata::read(&mut encoded.as_ref()).unwrap(), metadata);
+    let receipt = DurableReceipt {
+        manifest_generation: 4,
+        checkpoint_epoch: metadata.checkpoint_epoch,
+        created_at_ms: metadata.created_at_ms,
+        checkpoint_digest: metadata.checkpoint_digest,
+        bundle_digest: Sha256::hash(b"bundle"),
+    };
+    let encoded = receipt.encode();
+    assert_eq!(DurableReceipt::read(&mut encoded.as_ref()).unwrap(), receipt);
+    let transaction = RecoveryImportTransaction {
+        format_version: RECOVERY_IMPORT_VERSION,
+        bundle_digest: receipt.bundle_digest,
+        logical_state_digest: Sha256::hash(b"state"),
+        checkpoint_digest: receipt.checkpoint_digest,
+        target_epoch: receipt.checkpoint_epoch,
+        phase: RecoveryImportPhase::Complete,
+    };
+    let encoded = transaction.encode();
+    assert!(RecoveryImportTransaction::read(&mut encoded.as_ref()).unwrap() == transaction);
+
+    assert!(RecoveryImportPhase::read(&mut &[2u8][..]).is_err());
+    assert!(RecipientState::<ed25519::PublicKey>::read(&mut &[2u8][..]).is_err());
+    assert!(RecoveryDealer::<MinSig, ed25519::PublicKey>::read_cfg(
+        &mut &[2u8][..],
+        &(NZU32!(4), crate::recovery::MAX_SIGNED_LOG_LEN),
+    )
+    .is_err());
+
+    let mut invalid_transaction = transaction.encode().to_vec();
+    invalid_transaction[0] = RECOVERY_IMPORT_VERSION + 1;
+    assert!(RecoveryImportTransaction::read(&mut invalid_transaction.as_slice()).is_err());
+
+    let envelope = EncryptedRecoveryBundle {
+        magic: BUNDLE_MAGIC,
+        envelope_version: RECOVERY_ENVELOPE_VERSION,
+        nonce: [0; 12],
+        ciphertext: Bytes::new(),
+    };
+    let mut invalid_magic = envelope.encode().to_vec();
+    invalid_magic[0] ^= 1;
+    assert!(EncryptedRecoveryBundle::read(&mut invalid_magic.as_slice()).is_err());
+    let mut invalid_version = envelope.encode().to_vec();
+    invalid_version[BUNDLE_MAGIC.len()] = RECOVERY_ENVELOPE_VERSION + 1;
+    assert!(EncryptedRecoveryBundle::read(&mut invalid_version.as_slice()).is_err());
+
+    let codec_error: RecoveryError =
+        commonware_codec::Error::Invalid("recovery", "test").into();
+    assert!(matches!(codec_error, RecoveryError::Codec(_)));
+}
+
+#[test]
+fn recovery_manifest_rejects_invalid_version_generation_and_duplicates() {
+    let entry = RecoveryManifestEntry {
+        bundle_digest: Sha256::hash(b"bundle"),
+        created_at_ms: 1,
+        checkpoint_epoch: Epoch::zero(),
+        checkpoint_digest: Sha256::hash(b"checkpoint"),
+    };
+    let manifest = RecoveryManifest {
+        format_version: RECOVERY_FORMAT_VERSION,
+        generation: 1,
+        entries: vec![entry],
+    };
+
+    let mut invalid_version = manifest.encode().to_vec();
+    invalid_version[0] = RECOVERY_FORMAT_VERSION + 1;
+    assert!(RecoveryManifest::read(&mut invalid_version.as_slice()).is_err());
+
+    let zero_generation = RecoveryManifest { generation: 0, ..manifest.clone() };
+    assert!(RecoveryManifest::read(&mut zero_generation.encode().as_ref()).is_err());
+
+    let duplicates = RecoveryManifest { entries: vec![entry, entry], ..manifest };
+    assert!(RecoveryManifest::read(&mut duplicates.encode().as_ref()).is_err());
 }
 
 #[test]

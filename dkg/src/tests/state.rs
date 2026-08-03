@@ -18,9 +18,9 @@ use commonware_cryptography::{
         },
     },
     ed25519::{self},
-    sha256::Digest,
+    sha256::{Digest, Sha256},
     transcript::Summary,
-    Signer,
+    Hasher, Signer,
 };
 use commonware_macros::test_traced;
 use commonware_math::algebra::{Random, Ring};
@@ -31,7 +31,7 @@ use commonware_storage::{
     metadata::{Config as MetadataConfig, Metadata},
     Context as StorageContext,
 };
-use commonware_utils::{ordered::Set, test_rng, TestRng, N3f1, Participant, NZU32};
+use commonware_utils::{ordered::Set, test_rng, TestRng, N3f1, Participant, NZU32, NZU64};
 use rand::CryptoRng;
 use std::collections::BTreeMap;
 
@@ -570,6 +570,294 @@ fn storage_recovers_reconciliation_phase_from_separate_partition() {
         )
         .await;
         assert_eq!(recovered.reconciliation(), Some(complete));
+    });
+}
+
+#[test_traced]
+fn rich_recovery_snapshot_round_trips_local_dealer_and_epoch_history() {
+    deterministic::Runner::seeded(24).start(|mut context| async move {
+        let signers = create_test_signers(4);
+        let participants = Set::from_iter_dedup(signers.iter().map(Signer::public_key));
+        let validator = signers[0].public_key();
+        let (output, shares) =
+            commonware_cryptography::bls12381::dkg::feldman_desmedt::deal::<MinPk, _, N3f1>(
+                &mut context,
+                Mode::NonZeroCounter,
+                participants.clone(),
+            )
+            .unwrap();
+        let protocol = crate::DkgProtocolConfig {
+            state_format_version: crate::STATE_FORMAT_VERSION,
+            namespace: TEST_NAMESPACE.to_vec(),
+            epoch_length: NZU64!(10),
+            participants,
+            num_participants_per_round: vec![4],
+            mode: Mode::NonZeroCounter,
+            mode_version: 0,
+            fault_model: crate::public::N3F1_FAULT_MODEL,
+            trusted_initial_identity: *output.public().public(),
+        };
+        let checkpoint = crate::PublicCheckpoint::genesis(&protocol, output.clone()).unwrap();
+        let info = create_round_info(&signers);
+        let (mut crypto_dealer, public_message, private_messages) =
+            commonware_cryptography::bls12381::dkg::feldman_desmedt::Dealer::<MinPk, _>::start::<
+                N3f1,
+            >(
+                test_rng(), info.clone(), signers[0].clone(), None
+            )
+            .unwrap();
+        let private_messages = private_messages.into_iter().collect::<BTreeMap<_, _>>();
+        let mut acknowledgements = BTreeMap::new();
+        for (player_pk, private_message) in &private_messages {
+            let player_signer = signers
+                .iter()
+                .find(|signer| signer.public_key() == *player_pk)
+                .unwrap()
+                .clone();
+            let mut player = Player::new(info.clone(), player_signer).unwrap();
+            let Verdict::Valid(ack) = player.dealer_message::<N3f1>(
+                validator.clone(),
+                public_message.clone(),
+                private_message.clone(),
+            ) else {
+                panic!("valid dealing should be acknowledged");
+            };
+            crypto_dealer
+                .receive_player_ack(player_pk.clone(), ack.clone())
+                .unwrap();
+            acknowledgements.insert(player_pk.clone(), ack);
+        }
+        let signed = crypto_dealer.finalize::<N3f1>();
+        let signed_bytes = signed.encode();
+        let (dealer_pk, log) = signed.check(&info).unwrap();
+        let (player_pk, private_message) = private_messages.iter().next().unwrap();
+        let ack = acknowledgements.get(player_pk).unwrap().clone();
+        let other_ack = acknowledgements
+            .iter()
+            .find(|(candidate, _)| *candidate != player_pk)
+            .unwrap()
+            .1
+            .clone();
+
+        let partition = "rich_recovery_snapshot";
+        let mut storage = init_storage(
+            context.child("storage"),
+            partition,
+            TEST_STORAGE_KEY,
+            TEST_NAMESPACE.to_vec(),
+            validator.clone(),
+        )
+        .await;
+        storage
+            .set_epoch(
+                Epoch::zero(),
+                EpochState {
+                    round: 0,
+                    rng_seed: Summary::random(&mut context),
+                    output: Some(output),
+                    share: shares.get_value(&validator).cloned(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            storage
+                .initialize_local_dealer(
+                    Epoch::zero(),
+                    public_message.clone(),
+                    private_messages
+                        .iter()
+                        .map(|(player, private)| (player.clone(), private.clone())),
+                )
+                .await
+                .unwrap(),
+            crate::ExactInsert::Inserted
+        );
+        assert_eq!(
+            storage
+                .initialize_local_dealer(
+                    Epoch::zero(),
+                    public_message.clone(),
+                    private_messages
+                        .iter()
+                        .map(|(player, private)| (player.clone(), private.clone())),
+                )
+                .await
+                .unwrap(),
+            crate::ExactInsert::Identical
+        );
+        assert_eq!(
+            storage
+                .initialize_local_dealer(
+                    Epoch::zero(),
+                    public_message.clone(),
+                    private_messages
+                        .iter()
+                        .skip(1)
+                        .map(|(player, private)| (player.clone(), private.clone())),
+                )
+                .await
+                .unwrap(),
+            crate::ExactInsert::Conflict
+        );
+        assert_eq!(
+            storage
+                .initialize_local_dealer(
+                    Epoch::new(1),
+                    public_message.clone(),
+                    [
+                        (player_pk.clone(), private_message.clone()),
+                        (player_pk.clone(), private_message.clone()),
+                    ],
+                )
+                .await
+                .unwrap(),
+            crate::ExactInsert::Conflict
+        );
+        assert_eq!(
+            storage
+                .acknowledge_local_recipient(Epoch::new(2), player_pk.clone(), ack.clone())
+                .await
+                .unwrap(),
+            crate::ExactInsert::Conflict
+        );
+        assert_eq!(
+            storage
+                .acknowledge_local_recipient(
+                    Epoch::zero(),
+                    ed25519::PrivateKey::from_seed(99).public_key(),
+                    ack.clone(),
+                )
+                .await
+                .unwrap(),
+            crate::ExactInsert::Conflict
+        );
+        assert_eq!(
+            storage
+                .acknowledge_local_recipient(Epoch::zero(), player_pk.clone(), ack.clone())
+                .await
+                .unwrap(),
+            crate::ExactInsert::Inserted
+        );
+        assert_eq!(
+            storage
+                .acknowledge_local_recipient(Epoch::zero(), player_pk.clone(), ack.clone())
+                .await
+                .unwrap(),
+            crate::ExactInsert::Identical
+        );
+        assert_eq!(
+            storage
+                .acknowledge_local_recipient(Epoch::zero(), player_pk.clone(), other_ack)
+                .await
+                .unwrap(),
+            crate::ExactInsert::Conflict
+        );
+        assert_eq!(
+            storage
+                .append_dealing(
+                    Epoch::zero(),
+                    dealer_pk.clone(),
+                    public_message.clone(),
+                    private_message.clone(),
+                    ack.encode(),
+                )
+                .await
+                .unwrap(),
+            crate::ExactInsert::Inserted
+        );
+        storage
+            .append_log(Epoch::zero(), dealer_pk, log)
+            .await
+            .unwrap();
+        let reconciliation = Reconciliation {
+            format_version: crate::STATE_FORMAT_VERSION,
+            checkpoint_digest: Sha256::hash(&checkpoint.encode()),
+            target_epoch: checkpoint.epoch,
+            phase: ReconciliationPhase::Complete,
+        };
+        storage
+            .set_reconciliation(reconciliation.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            storage
+                .finalize_local_dealer(Epoch::new(2), signed_bytes.clone())
+                .await
+                .unwrap(),
+            crate::ExactInsert::Conflict
+        );
+        assert_eq!(
+            storage
+                .finalize_local_dealer(Epoch::zero(), signed_bytes.clone())
+                .await
+                .unwrap(),
+            crate::ExactInsert::Inserted
+        );
+        assert_eq!(
+            storage
+                .finalize_local_dealer(Epoch::zero(), signed_bytes.clone())
+                .await
+                .unwrap(),
+            crate::ExactInsert::Identical
+        );
+        assert_eq!(
+            storage
+                .finalize_local_dealer(Epoch::zero(), Bytes::from_static(b"different"))
+                .await
+                .unwrap(),
+            crate::ExactInsert::Conflict
+        );
+        assert_eq!(
+            storage
+                .acknowledge_local_recipient(Epoch::zero(), player_pk.clone(), ack)
+                .await
+                .unwrap(),
+            crate::ExactInsert::Conflict
+        );
+
+        let mut bundle = storage.recovery_bundle(checkpoint.clone(), 24).unwrap();
+        assert_eq!(bundle.epochs.len(), 1);
+        assert_eq!(bundle.epochs[0].dealings.len(), 1);
+        assert_eq!(bundle.epochs[0].logs.len(), 1);
+        assert!(matches!(
+            bundle.epochs[0].local_dealer,
+            Some(crate::RecoveryDealer::Finalized { .. })
+        ));
+        assert_eq!(bundle.reconciliation, Some(reconciliation));
+
+        bundle.partition_prefix = "rich_recovery_import".to_owned();
+        let mut imported = init_storage(
+            context.child("imported"),
+            "rich_recovery_import",
+            TEST_STORAGE_KEY,
+            TEST_NAMESPACE.to_vec(),
+            validator,
+        )
+        .await;
+        imported
+            .import_recovery_bundle(bundle, &checkpoint, Sha256::hash(b"bundle"))
+            .await
+            .unwrap();
+        assert_eq!(imported.inspect(), crate::StorageInspection::Coherent);
+        imported.validate_complete_import(&checkpoint).unwrap();
+        assert_eq!(imported.recovery_bundle(checkpoint, 24).unwrap().epochs.len(), 1);
+        drop(imported);
+
+        let recovered = init_storage(
+            context.child("restarted_import"),
+            "rich_recovery_import",
+            TEST_STORAGE_KEY,
+            TEST_NAMESPACE.to_vec(),
+            signers[0].public_key(),
+        )
+        .await;
+        assert_eq!(recovered.inspect(), crate::StorageInspection::Coherent);
+        assert!(matches!(
+            recovered.local_dealer(Epoch::zero()),
+            Some(crate::RecoveryDealer::Finalized { .. })
+        ));
     });
 }
 
