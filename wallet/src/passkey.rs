@@ -73,4 +73,34 @@ mod tests {
         assert_eq!(encoded[0], SECP256R1_SCHEME);
         assert!(encoded.len() > 70);
     }
+
+    #[test]
+    fn rejects_oversized_authenticator_data() {
+        let assertion = PasskeyAssertion {
+            raw_signature: [7u8; 64],
+            authenticator_data: vec![1; WEBAUTHN_AUTHENTICATOR_DATA_BYTES + 1],
+            client_data_json: Vec::new(),
+        };
+
+        assert_eq!(
+            assertion
+                .encode()
+                .expect_err("oversized authenticator data"),
+            PasskeyEncodeError::AuthenticatorDataTooLarge
+        );
+    }
+
+    #[test]
+    fn rejects_oversized_client_data_json() {
+        let assertion = PasskeyAssertion {
+            raw_signature: [7u8; 64],
+            authenticator_data: Vec::new(),
+            client_data_json: vec![1; WEBAUTHN_CLIENT_DATA_JSON_BYTES + 1],
+        };
+
+        assert_eq!(
+            assertion.encode().expect_err("oversized client data"),
+            PasskeyEncodeError::ClientDataJsonTooLarge
+        );
+    }
 }

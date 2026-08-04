@@ -230,3 +230,164 @@ fn hex_decode(value: &str) -> Result<Vec<u8>, ()> {
         .map(|index| u8::from_str_radix(&value[index..index + 2], 16).map_err(|_| ()))
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use commonware_codec::Encode;
+    use nunchi_crypto::PrivateKey;
+
+    use super::*;
+    use crate::record::{address_from_public_key, encode_hex, WalletError};
+
+    fn sample_record(name: &str) -> WalletRecord {
+        let private_key = PrivateKey::from_seed(17);
+        let public_key = private_key.public_key();
+        WalletRecord {
+            schema_version: 1,
+            name: name.to_string(),
+            chain_id: 42,
+            curve: "ed25519".to_string(),
+            address: address_from_public_key(&public_key).to_bech32(),
+            public_key_hex: encode_hex(&public_key.encode()),
+            private_key_hex: encode_hex(&private_key.encode()),
+            created_at_ms: 123,
+        }
+    }
+
+    fn assert_invalid_envelope(error: WalletError, expected: &str) {
+        match error {
+            WalletError::Keystore(KeystoreError::InvalidEnvelope { reason }) => {
+                assert_eq!(reason, expected);
+            }
+            other => panic!("expected invalid envelope, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn encrypted_wallet_round_trips_and_rejects_wrong_password() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("wallets/default/wallet.json");
+        let record = sample_record("default");
+
+        write_wallet(&path, &record, Some("correct horse"), false).expect("write encrypted wallet");
+        let raw = fs::read_to_string(&path).expect("read envelope");
+        assert!(raw.contains("\"kdf\": \"argon2id\""));
+        assert!(!raw.contains(&record.private_key_hex));
+
+        let loaded = read_wallet(&path, Some("correct horse")).expect("read encrypted wallet");
+        assert_eq!(loaded, record);
+
+        let error = read_wallet(&path, Some("wrong horse")).expect_err("wrong password fails");
+        assert!(matches!(
+            error,
+            WalletError::Keystore(KeystoreError::DecryptFailed)
+        ));
+    }
+
+    #[test]
+    fn encrypted_wallet_requires_password_on_write_and_read() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("wallets/default/wallet.json");
+        let record = sample_record("default");
+
+        let error = write_wallet(&path, &record, None, false).expect_err("password required");
+        assert!(matches!(
+            error,
+            WalletError::Keystore(KeystoreError::PasswordRequired)
+        ));
+
+        write_wallet(&path, &record, Some("secret"), false).expect("write encrypted wallet");
+        let error = read_wallet(&path, None).expect_err("password required");
+        assert!(matches!(
+            error,
+            WalletError::Keystore(KeystoreError::PasswordRequired)
+        ));
+    }
+
+    #[test]
+    fn insecure_wallet_round_trips_without_password() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("wallets/dev/wallet.json");
+        let record = sample_record("dev");
+
+        write_wallet(&path, &record, None, true).expect("write insecure wallet");
+        let raw = fs::read_to_string(&path).expect("read envelope");
+        assert!(raw.contains("\"insecure\": true"));
+        assert!(raw.contains(&record.private_key_hex));
+
+        let loaded = read_wallet(&path, None).expect("read insecure wallet");
+        assert_eq!(loaded, record);
+    }
+
+    #[test]
+    fn invalid_envelopes_are_rejected_before_decryption() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("wallet.json");
+
+        fs::write(&path, "not json").expect("write invalid json");
+        let error = read_wallet(&path, Some("secret")).expect_err("invalid json");
+        assert!(matches!(error, WalletError::Json { .. }));
+
+        fs::write(
+            &path,
+            serde_json::json!({
+                "version": 2,
+                "kdf": "argon2id",
+                "salt": "00",
+                "nonce": "00",
+                "ciphertext": "00"
+            })
+            .to_string(),
+        )
+        .expect("write unsupported envelope");
+        let error = read_wallet(&path, Some("secret")).expect_err("unsupported version");
+        assert_invalid_envelope(error, "unsupported keystore version");
+
+        fs::write(
+            &path,
+            serde_json::json!({
+                "version": 1,
+                "kdf": "argon2id",
+                "salt": "zz",
+                "nonce": "00",
+                "ciphertext": "00"
+            })
+            .to_string(),
+        )
+        .expect("write invalid salt");
+        let error = read_wallet(&path, Some("secret")).expect_err("invalid salt");
+        assert_invalid_envelope(error, "invalid salt");
+
+        fs::write(
+            &path,
+            serde_json::json!({
+                "version": 1,
+                "kdf": "argon2id",
+                "salt": "00",
+                "nonce": "00",
+                "ciphertext": "00"
+            })
+            .to_string(),
+        )
+        .expect("write invalid lengths");
+        let error = read_wallet(&path, Some("secret")).expect_err("invalid length");
+        assert_invalid_envelope(error, "invalid salt or nonce length");
+    }
+
+    #[test]
+    fn decrypt_record_rejects_tampered_ciphertext() {
+        let record = sample_record("tampered");
+        let mut envelope = encrypt_record(&record, "secret").expect("encrypt");
+        envelope.ciphertext = "00".repeat(envelope.ciphertext.len() / 2);
+
+        let error = decrypt_record(&envelope, "secret").expect_err("tampered ciphertext");
+        assert!(matches!(error, KeystoreError::DecryptFailed));
+    }
+
+    #[test]
+    fn hex_decode_rejects_malformed_values() {
+        assert_eq!(hex_decode("00ff").expect("hex"), vec![0, 255]);
+        assert!(hex_decode("0").is_err());
+        assert!(hex_decode("zz").is_err());
+    }
+}

@@ -103,9 +103,16 @@ pub fn transaction_digest_hex(transaction: &Transaction) -> String {
 
 #[cfg(test)]
 mod tests {
+    use commonware_cryptography::sha256::Digest;
     use jsonrpsee::core::traits::ToRpcParams;
+    use nunchi_coins::{CoinId, CoinOperation};
+    use nunchi_common::Address;
+    use nunchi_crypto::PrivateKey;
 
-    use super::submit_transaction_params;
+    use super::{
+        parse_coin_id_hex, submit_transaction_params, transaction_digest_hex, ClientError,
+        WalletRpcClient,
+    };
 
     #[test]
     fn submit_transaction_uses_named_rpc_parameters() {
@@ -116,5 +123,49 @@ mod tests {
             .expect("non-empty params");
 
         assert_eq!(raw.get(), r#"{"transaction":"deadbeef"}"#);
+    }
+
+    #[test]
+    fn parses_coin_id_and_builds_chain_bound_transfer() {
+        let signer = PrivateKey::from_seed(41);
+        let from = Address::external(&signer.public_key());
+        let to = Address::external(&PrivateKey::from_seed(42).public_key());
+        let coin_hex = "11".repeat(32);
+        let coin = parse_coin_id_hex(&coin_hex).expect("coin id");
+        assert_eq!(coin, CoinId(Digest([0x11; 32])));
+
+        let tx =
+            WalletRpcClient::build_transfer(&signer, 17, 3, coin, from.clone(), to.clone(), 250);
+        assert_eq!(tx.account_id, from);
+        assert_eq!(tx.payload.chain_id, 17);
+        assert_eq!(tx.payload.nonce, 3);
+        match &tx.payload.operation {
+            CoinOperation::Transfer {
+                coin: actual_coin,
+                from: actual_from,
+                to: actual_to,
+                amount,
+            } => {
+                assert_eq!(*actual_coin, coin);
+                assert_eq!(*actual_from, from);
+                assert_eq!(*actual_to, to);
+                assert_eq!(*amount, 250);
+            }
+            other => panic!("expected transfer, got {other:?}"),
+        }
+        tx.verify().expect("transaction verifies");
+
+        let digest = transaction_digest_hex(&tx);
+        assert_eq!(digest.len(), 64);
+        assert!(digest.chars().all(|ch| ch.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn client_helpers_report_invalid_inputs() {
+        let error = WalletRpcClient::new("not a url").expect_err("invalid URL");
+        assert!(matches!(error, ClientError::Rpc(_)));
+
+        let error = parse_coin_id_hex("not hex").expect_err("invalid coin id");
+        assert!(matches!(error, ClientError::CoinId(_)));
     }
 }

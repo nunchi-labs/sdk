@@ -368,7 +368,54 @@ fn unix_now_ms() -> u128 {
 
 #[cfg(test)]
 mod tests {
+    use commonware_codec::Encode;
+    use nunchi_crypto::PrivateKey;
+
     use super::*;
+
+    fn deterministic_record() -> WalletRecord {
+        let private_key = PrivateKey::from_seed(29);
+        let public_key = private_key.public_key();
+        WalletRecord {
+            schema_version: WALLET_SCHEMA_VERSION,
+            name: "default".to_string(),
+            chain_id: 7,
+            curve: "ed25519".to_string(),
+            address: address_from_public_key(&public_key).to_bech32(),
+            public_key_hex: encode_hex(&public_key.encode()),
+            private_key_hex: encode_hex(&private_key.encode()),
+            created_at_ms: 99,
+        }
+    }
+
+    fn lookup(
+        wallet_root: impl Into<PathBuf>,
+        name: impl Into<String>,
+        password: Option<String>,
+    ) -> WalletLookupOptions {
+        WalletLookupOptions {
+            wallet_root: wallet_root.into(),
+            name: name.into(),
+            password,
+        }
+    }
+
+    fn list_options(
+        wallet_root: impl Into<PathBuf>,
+        password: Option<String>,
+    ) -> ListWalletsOptions {
+        ListWalletsOptions {
+            wallet_root: wallet_root.into(),
+            password,
+        }
+    }
+
+    fn assert_invalid_record(error: WalletError, expected: &str) {
+        match error {
+            WalletError::InvalidRecord { reason } => assert_eq!(reason, expected),
+            other => panic!("expected invalid record, got {other:?}"),
+        }
+    }
 
     #[test]
     fn create_wallet_writes_bech32_address() {
@@ -379,5 +426,148 @@ mod tests {
         .expect("create wallet");
         assert!(created.summary.address.starts_with("nch1"));
         assert_eq!(created.summary.chain_id, 1);
+    }
+
+    #[test]
+    fn encrypted_wallet_lifecycle_lists_loads_and_signs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let password = Some("open sesame".to_string());
+        let created = create_wallet(
+            &CreateWalletOptions::new(temp.path(), "default", 99).password(password.clone()),
+        )
+        .expect("create encrypted wallet");
+        assert_eq!(created.summary.name, "default");
+        assert_eq!(created.summary.chain_id, 99);
+        assert_eq!(address_hrp(), ADDRESS_HRP);
+
+        let lookup = lookup(temp.path(), "default", password.clone());
+        let shown = show_wallet(&lookup).expect("show wallet");
+        assert_eq!(shown, created.summary);
+        assert_eq!(
+            parse_address(&shown.address).expect("address").to_bech32(),
+            shown.address
+        );
+
+        let listed = list_wallets(&list_options(temp.path(), password.clone())).expect("list");
+        assert_eq!(listed, vec![shown.clone()]);
+
+        let private_key = load_private_key(&lookup).expect("load private key");
+        assert_eq!(
+            address_from_public_key(&private_key.public_key()).to_bech32(),
+            shown.address
+        );
+
+        let signature = sign_message(&lookup, b"wallet-test", b"hello").expect("sign");
+        assert!(!decode_hex(&signature).expect("signature hex").is_empty());
+    }
+
+    #[test]
+    fn wallet_lookup_and_creation_report_expected_errors() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let missing = show_wallet(&lookup(temp.path(), "missing", None)).expect_err("missing");
+        assert!(matches!(missing, WalletError::NotFound { name } if name == "missing"));
+
+        let invalid = create_wallet(&CreateWalletOptions::new(temp.path(), "BadName", 0))
+            .expect_err("invalid name");
+        assert!(matches!(invalid, WalletError::InvalidName { .. }));
+
+        let created = create_wallet(
+            &CreateWalletOptions::new(temp.path(), "default", 0).insecure_store(true),
+        )
+        .expect("create wallet");
+        assert_eq!(created.summary.name, "default");
+
+        let duplicate = create_wallet(
+            &CreateWalletOptions::new(temp.path(), "default", 0).insecure_store(true),
+        )
+        .expect_err("duplicate wallet");
+        assert!(matches!(
+            duplicate,
+            WalletError::AlreadyExists { name } if name == "default"
+        ));
+
+        assert!(parse_address("not an address").is_err());
+    }
+
+    #[test]
+    fn validate_wallet_record_rejects_tampering() {
+        let base = deterministic_record();
+        validate_wallet_record(&base).expect("valid record");
+
+        let mut bad = base.clone();
+        bad.schema_version = 2;
+        assert_invalid_record(
+            validate_wallet_record(&bad).expect_err("schema version"),
+            "unsupported schema version 2",
+        );
+
+        let mut bad = base.clone();
+        bad.curve = "secp256r1".to_string();
+        assert_invalid_record(
+            validate_wallet_record(&bad).expect_err("curve"),
+            "unsupported curve secp256r1",
+        );
+
+        let mut bad = base.clone();
+        bad.address = address_from_public_key(&PrivateKey::from_seed(30).public_key()).to_bech32();
+        assert_invalid_record(
+            validate_wallet_record(&bad).expect_err("address mismatch"),
+            "address does not match derived public key",
+        );
+
+        let mut bad = base.clone();
+        bad.public_key_hex = encode_hex(&PrivateKey::from_seed(31).public_key().encode());
+        assert_invalid_record(
+            validate_wallet_record(&bad).expect_err("public key mismatch"),
+            "public_key_hex does not match private key",
+        );
+
+        let secp_key = PrivateKey::secp256r1_from_seed(32);
+        let secp_public = secp_key.public_key();
+        let mut bad = base.clone();
+        bad.address = address_from_public_key(&secp_public).to_bech32();
+        bad.public_key_hex = encode_hex(&secp_public.encode());
+        bad.private_key_hex = encode_hex(&secp_key.encode());
+        assert_invalid_record(
+            validate_wallet_record(&bad).expect_err("private key curve"),
+            "private key must be ed25519",
+        );
+
+        let mut bad = base;
+        bad.private_key_hex = "00".to_string();
+        assert!(matches!(
+            validate_wallet_record(&bad).expect_err("private key decode"),
+            WalletError::InvalidRecord { .. }
+        ));
+    }
+
+    #[test]
+    fn decode_hex_reports_input_errors() {
+        assert_eq!(encode_hex(&[0, 15, 255]), "000fff");
+        assert_eq!(decode_hex(" 0a ").expect("trimmed hex"), vec![10]);
+        assert_eq!(
+            decode_hex("").expect_err("empty"),
+            "hex value must not be empty"
+        );
+        assert_eq!(
+            decode_hex("abc").expect_err("odd"),
+            "hex value must have even length"
+        );
+        assert_eq!(
+            decode_hex("zz").expect_err("invalid"),
+            "hex value contains invalid characters"
+        );
+    }
+
+    #[test]
+    fn list_wallets_ignores_non_wallet_entries() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let wallets = wallets_root(temp.path());
+        fs::create_dir_all(wallets.join("empty")).expect("empty dir");
+        fs::write(wallets.join("loose-file"), "ignored").expect("loose file");
+
+        let listed = list_wallets(&list_options(temp.path(), None)).expect("list");
+        assert!(listed.is_empty());
     }
 }
