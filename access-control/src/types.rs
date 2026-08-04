@@ -1,5 +1,3 @@
-//! Scope and role identifiers used by the access-control state machine.
-
 use commonware_codec::{DecodeExt, Encode, EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_formatting::{from_hex, hex};
@@ -79,12 +77,10 @@ impl FixedSize for ScopeId {
 pub struct RoleId(u16);
 
 impl RoleId {
-    /// Construct a role identifier.
     pub const fn new(value: u16) -> Self {
         Self(value)
     }
 
-    /// Return the numeric role identifier.
     pub const fn get(self) -> u16 {
         self.0
     }
@@ -108,7 +104,6 @@ impl FixedSize for RoleId {
     const SIZE: usize = u16::SIZE;
 }
 
-/// An access-control scope and the account that manages its memberships.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Scope {
     pub id: ScopeId,
@@ -116,7 +111,6 @@ pub struct Scope {
 }
 
 impl Scope {
-    /// Construct a scope record.
     pub fn new(id: ScopeId, owner: Address) -> Self {
         Self { id, owner }
     }

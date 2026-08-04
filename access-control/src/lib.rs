@@ -1,19 +1,3 @@
-//! Optional access-control state for permissioned Nunchi modules.
-//!
-//! # Status
-//!
-//! This crate stores scope controllers and role memberships. Consuming modules remain responsible
-//! for deciding which role an operation requires and for checking that role before mutation.
-//!
-//! # Examples
-//!
-//! ```
-//! use nunchi_access_control::{RoleId, ScopeId};
-//!
-//! const WRITER: RoleId = RoleId::new(1);
-//! let scope = ScopeId::module(b"example/module");
-//! ```
-
 commonware_macros::stability_scope!(ALPHA {
 mod db;
 mod events;
@@ -41,6 +25,5 @@ pub use transaction::{
 };
 pub use types::{RoleId, Scope, ScopeId};
 
-/// Domain separator used for access-control transactions and state keys.
 pub const ACCESS_CONTROL_NAMESPACE: &[u8] = b"_NUNCHI_ACCESS_CONTROL";
 });

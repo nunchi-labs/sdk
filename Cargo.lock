@@ -2591,6 +2591,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "nunchi-access-control-example"
+version = "2026.7.0-alpha.1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-runtime",
+ "nunchi-access-control",
+ "nunchi-chain",
+ "nunchi-common",
+ "nunchi-crypto",
+ "nunchi-mempool",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "nunchi-authority"
 version = "2026.7.0-alpha.1"
 dependencies = [

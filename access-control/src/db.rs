@@ -1,5 +1,3 @@
-//! Persistence for access-control scopes and role memberships.
-
 use crate::{AccessControlError, RoleId, Scope, ScopeId, ACCESS_CONTROL_NAMESPACE};
 use async_trait::async_trait;
 use commonware_codec::{Encode, Read, ReadExt};
@@ -39,7 +37,6 @@ fn role_grant_key(scope: &ScopeId, role: RoleId, account: &Address) -> Digest {
     NS.key(Table::RoleGrant, &logical)
 }
 
-/// Typed access to access-control state.
 #[async_trait]
 pub trait AccessControlDB {
     async fn nonce(&self, account: &Address) -> Result<u64, AccessControlError>;
@@ -50,10 +47,7 @@ pub trait AccessControlDB {
 
     fn set_scope_owner(&mut self, id: &ScopeId, owner: &Address);
 
-    async fn pending_owner(
-        &self,
-        id: &ScopeId,
-    ) -> Result<Option<Address>, AccessControlError>;
+    async fn pending_owner(&self, id: &ScopeId) -> Result<Option<Address>, AccessControlError>;
 
     fn set_pending_owner(&mut self, id: &ScopeId, owner: &Address);
 
@@ -105,10 +99,7 @@ impl<S: StateStore + Send + Sync> AccessControlDB for S {
         StateStore::set(self, key, encoded(owner));
     }
 
-    async fn pending_owner(
-        &self,
-        id: &ScopeId,
-    ) -> Result<Option<Address>, AccessControlError> {
+    async fn pending_owner(&self, id: &ScopeId) -> Result<Option<Address>, AccessControlError> {
         let key = NS.key(Table::PendingOwner, id.encode().as_ref());
         match StateStore::get(self, &key)
             .await

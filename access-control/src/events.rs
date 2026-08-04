@@ -1,5 +1,3 @@
-//! Events emitted by access-control state changes.
-
 use crate::{RoleId, ScopeId};
 use commonware_codec::{Encode, EncodeSize, Error, Read, ReadExt, Write};
 use nunchi_common::{Address, Event};
@@ -227,15 +225,24 @@ impl EncodeSize for ScopeOwnerChanged {
 }
 
 pub fn scope_registered_event(value: ScopeRegistered) -> Event {
-    Event::new(bytes::Bytes::from_static(SCOPE_REGISTERED_EVENT), value.encode())
+    Event::new(
+        bytes::Bytes::from_static(SCOPE_REGISTERED_EVENT),
+        value.encode(),
+    )
 }
 
 pub fn role_granted_event(value: RoleGranted) -> Event {
-    Event::new(bytes::Bytes::from_static(ROLE_GRANTED_EVENT), value.encode())
+    Event::new(
+        bytes::Bytes::from_static(ROLE_GRANTED_EVENT),
+        value.encode(),
+    )
 }
 
 pub fn role_revoked_event(value: RoleRevoked) -> Event {
-    Event::new(bytes::Bytes::from_static(ROLE_REVOKED_EVENT), value.encode())
+    Event::new(
+        bytes::Bytes::from_static(ROLE_REVOKED_EVENT),
+        value.encode(),
+    )
 }
 
 pub fn ownership_transfer_proposed_event(value: OwnershipTransferProposed) -> Event {

@@ -1,25 +1,17 @@
-//! Trusted bootstrap configuration for access-control scopes and memberships.
-
-use crate::{
-    AccessControlDB, AccessControlError, AccessControlLedger, RoleId, ScopeId,
-};
+use crate::{AccessControlDB, AccessControlError, AccessControlLedger, RoleId, ScopeId};
 use nunchi_common::Address;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// JSON-facing access-control genesis state.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AccessControlGenesis {
-    /// Initial scopes and their controllers.
     #[serde(default)]
     pub scopes: Vec<ScopeGenesis>,
-    /// Initial exact role memberships.
     #[serde(default)]
     pub grants: Vec<RoleGrantGenesis>,
 }
 
-/// One scope registered at genesis.
 #[serde_as]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ScopeGenesis {
@@ -31,14 +23,12 @@ pub struct ScopeGenesis {
     pub owner: Address,
 }
 
-/// One role membership registered at genesis.
 #[serde_as]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RoleGrantGenesis {
     /// Hex-encoded [`ScopeId`].
     #[serde_as(as = "DisplayFromStr")]
     pub scope: ScopeId,
-    /// Module-defined numeric role.
     pub role: u16,
     /// Bech32-encoded member [`Address`].
     #[serde_as(as = "DisplayFromStr")]
@@ -46,7 +36,6 @@ pub struct RoleGrantGenesis {
 }
 
 impl<D: AccessControlDB> AccessControlLedger<D> {
-    /// Seed scope controllers and role memberships from trusted genesis state.
     pub async fn apply_genesis(
         &mut self,
         genesis: &AccessControlGenesis,
@@ -62,11 +51,7 @@ impl<D: AccessControlDB> AccessControlLedger<D> {
 
         let mut grants = BTreeSet::new();
         for entry in &genesis.grants {
-            let grant = (
-                entry.scope,
-                RoleId::new(entry.role),
-                entry.account.clone(),
-            );
+            let grant = (entry.scope, RoleId::new(entry.role), entry.account.clone());
             if !grants.insert(grant) {
                 return Err(AccessControlError::InvalidGenesis(
                     "duplicate role grant".to_string(),

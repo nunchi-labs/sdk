@@ -1,5 +1,3 @@
-//! Signed access-control management operations.
-
 use crate::{RoleId, ScopeId, ACCESS_CONTROL_NAMESPACE};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use nunchi_common::{Address, Operation};
@@ -14,7 +12,6 @@ pub enum OperationID {
     AcceptOwnership = 4,
 }
 
-/// An invalid access-control operation identifier.
 #[derive(Debug, thiserror::Error)]
 #[error("invalid access-control operation id: {0}")]
 pub struct InvalidAccessControlOperationId(u8);
@@ -53,30 +50,28 @@ impl Read for OperationID {
     }
 }
 
-/// Signed changes to access-control state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AccessControlOperation {
-    /// Grant one module-defined role to an account.
     GrantRole {
         scope: ScopeId,
         role: RoleId,
         account: Address,
     },
-    /// Revoke one module-defined role from an account.
     RevokeRole {
         scope: ScopeId,
         role: RoleId,
         account: Address,
     },
-    /// Propose a new controller for a scope.
     ProposeOwnershipTransfer {
         scope: ScopeId,
         proposed_owner: Address,
     },
-    /// Cancel the pending ownership transfer for a scope.
-    CancelOwnershipTransfer { scope: ScopeId },
-    /// Accept control of a scope after being proposed by its current owner.
-    AcceptOwnership { scope: ScopeId },
+    CancelOwnershipTransfer {
+        scope: ScopeId,
+    },
+    AcceptOwnership {
+        scope: ScopeId,
+    },
 }
 
 impl Write for AccessControlOperation {
@@ -179,7 +174,5 @@ impl Operation for AccessControlOperation {
     const NAMESPACE: &'static [u8] = ACCESS_CONTROL_NAMESPACE;
 }
 
-/// Signed access-control transaction payload.
 pub type TransactionPayload = nunchi_common::TransactionPayload<AccessControlOperation>;
-/// Signed access-control transaction.
 pub type Transaction = nunchi_common::Transaction<AccessControlOperation>;
