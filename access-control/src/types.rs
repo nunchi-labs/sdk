@@ -1,8 +1,10 @@
 //! Scope and role identifiers used by the access-control state machine.
 
-use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{DecodeExt, Encode, EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+use commonware_formatting::{from_hex, hex};
 use nunchi_common::Address;
+use std::{fmt, str::FromStr};
 
 const SCOPE_DOMAIN: &[u8] = b"nunchi/access-control/scope/v1";
 const MODULE_SCOPE: u8 = 0;
@@ -37,6 +39,21 @@ impl ScopeId {
 impl From<Digest> for ScopeId {
     fn from(value: Digest) -> Self {
         Self(value)
+    }
+}
+
+impl fmt::Display for ScopeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&hex(&self.encode()))
+    }
+}
+
+impl FromStr for ScopeId {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let bytes = from_hex(value).ok_or(Error::Invalid("ScopeId", "invalid hex"))?;
+        Self::decode(bytes.as_ref())
     }
 }
 

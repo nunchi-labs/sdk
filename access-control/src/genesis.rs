@@ -3,10 +3,9 @@
 use crate::{
     AccessControlDB, AccessControlError, AccessControlLedger, RoleId, ScopeId,
 };
-use commonware_codec::DecodeExt;
-use commonware_formatting::from_hex;
 use nunchi_common::Address;
 use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DisplayFromStr};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// JSON-facing access-control genesis state.
@@ -21,23 +20,29 @@ pub struct AccessControlGenesis {
 }
 
 /// One scope registered at genesis.
+#[serde_as]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ScopeGenesis {
     /// Hex-encoded [`ScopeId`].
-    pub scope: String,
-    /// Hex-encoded controller [`Address`].
-    pub owner: String,
+    #[serde_as(as = "DisplayFromStr")]
+    pub scope: ScopeId,
+    /// Bech32-encoded controller [`Address`].
+    #[serde_as(as = "DisplayFromStr")]
+    pub owner: Address,
 }
 
 /// One role membership registered at genesis.
+#[serde_as]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RoleGrantGenesis {
     /// Hex-encoded [`ScopeId`].
-    pub scope: String,
+    #[serde_as(as = "DisplayFromStr")]
+    pub scope: ScopeId,
     /// Module-defined numeric role.
     pub role: u16,
-    /// Hex-encoded member [`Address`].
-    pub account: String,
+    /// Bech32-encoded member [`Address`].
+    #[serde_as(as = "DisplayFromStr")]
+    pub account: Address,
 }
 
 impl<D: AccessControlDB> AccessControlLedger<D> {
@@ -48,9 +53,7 @@ impl<D: AccessControlDB> AccessControlLedger<D> {
     ) -> Result<(), AccessControlError> {
         let mut scopes = BTreeMap::new();
         for entry in &genesis.scopes {
-            let scope = decode_hex::<ScopeId>(&entry.scope, "scope")?;
-            let owner = decode_hex::<Address>(&entry.owner, "scope owner")?;
-            if scopes.insert(scope, owner).is_some() {
+            if scopes.insert(entry.scope, entry.owner.clone()).is_some() {
                 return Err(AccessControlError::InvalidGenesis(
                     "duplicate scope".to_string(),
                 ));
@@ -59,9 +62,11 @@ impl<D: AccessControlDB> AccessControlLedger<D> {
 
         let mut grants = BTreeSet::new();
         for entry in &genesis.grants {
-            let scope = decode_hex::<ScopeId>(&entry.scope, "grant scope")?;
-            let account = decode_hex::<Address>(&entry.account, "grant account")?;
-            let grant = (scope, RoleId::new(entry.role), account);
+            let grant = (
+                entry.scope,
+                RoleId::new(entry.role),
+                entry.account.clone(),
+            );
             if !grants.insert(grant) {
                 return Err(AccessControlError::InvalidGenesis(
                     "duplicate role grant".to_string(),
@@ -94,15 +99,4 @@ impl<D: AccessControlDB> AccessControlLedger<D> {
         }
         Ok(())
     }
-}
-
-fn decode_hex<T>(value: &str, what: &'static str) -> Result<T, AccessControlError>
-where
-    T: DecodeExt<()>,
-{
-    let bytes = from_hex(value).ok_or_else(|| {
-        AccessControlError::InvalidGenesis(format!("invalid hex-encoded {what}"))
-    })?;
-    T::decode(bytes.as_ref())
-        .map_err(|err| AccessControlError::InvalidGenesis(format!("invalid {what}: {err}")))
 }

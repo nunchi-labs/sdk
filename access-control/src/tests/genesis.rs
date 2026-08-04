@@ -2,8 +2,6 @@ use super::{address, ledger};
 use crate::{
     AccessControlError, AccessControlGenesis, RoleGrantGenesis, RoleId, ScopeGenesis, ScopeId,
 };
-use commonware_codec::Encode;
-use commonware_formatting::hex;
 use commonware_runtime::{deterministic, Runner as _};
 use nunchi_crypto::PrivateKey;
 
@@ -17,13 +15,13 @@ fn genesis_registers_scopes_and_roles() {
         let role = RoleId::new(9);
         let genesis = AccessControlGenesis {
             scopes: vec![ScopeGenesis {
-                scope: hex(&scope.encode()),
-                owner: hex(&owner.encode()),
+                scope,
+                owner: owner.clone(),
             }],
             grants: vec![RoleGrantGenesis {
-                scope: hex(&scope.encode()),
+                scope,
                 role: role.get(),
-                account: hex(&member.encode()),
+                account: member.clone(),
             }],
         };
 
@@ -43,13 +41,13 @@ fn invalid_genesis_is_rejected_before_writes() {
         let unknown = ScopeId::module(b"unknown");
         let genesis = AccessControlGenesis {
             scopes: vec![ScopeGenesis {
-                scope: hex(&known.encode()),
-                owner: hex(&owner.encode()),
+                scope: known,
+                owner: owner.clone(),
             }],
             grants: vec![RoleGrantGenesis {
-                scope: hex(&unknown.encode()),
+                scope: unknown,
                 role: 1,
-                account: hex(&owner.encode()),
+                account: owner,
             }],
         };
 

@@ -24,5 +24,6 @@ fn public_types_roundtrip() {
 
     assert_eq!(Scope::decode(scope.encode()).unwrap(), scope);
     assert_eq!(RoleId::decode(role.encode()).unwrap(), role);
+    assert_eq!(scope.id.to_string().parse::<ScopeId>().unwrap(), scope.id);
     assert_eq!(role.get(), 42);
 }
