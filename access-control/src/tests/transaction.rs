@@ -21,12 +21,6 @@ fn operation_codec_uses_stable_tags() {
             role: RoleId::new(1),
             account: account(1),
         },
-        AccessControlOperation::ProposeOwnershipTransfer {
-            scope,
-            proposed_owner: account(2),
-        },
-        AccessControlOperation::CancelOwnershipTransfer { scope },
-        AccessControlOperation::AcceptOwnership { scope },
     ];
 
     for (tag, operation) in operations.into_iter().enumerate() {

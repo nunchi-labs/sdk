@@ -1,11 +1,6 @@
-use crate::{
-    ownership_transfer_cancelled_event, ownership_transfer_proposed_event, role_granted_event,
-    role_revoked_event, scope_owner_changed_event, scope_registered_event, AccessControlDB,
-    AccessControlOperation, OwnershipTransferCancelled, OwnershipTransferProposed, RoleGranted,
-    RoleId, RoleRevoked, Scope, ScopeId, ScopeOwnerChanged, ScopeRegistered, Transaction,
-};
+use crate::{AccessControlDB, AccessControlOperation, RoleId, Scope, ScopeId, Transaction};
 use commonware_cryptography::sha256::Digest;
-use nunchi_common::{Address, Authorization, CommitState, Event, EventSink};
+use nunchi_common::{Address, Authorization, CommitState};
 use nunchi_crypto::SignatureError;
 use thiserror::Error;
 
@@ -44,15 +39,6 @@ pub enum AccessControlError {
         role: RoleId,
         account: Box<Address>,
     },
-    #[error("scope owner cannot transfer ownership to itself")]
-    OwnershipUnchanged,
-    #[error("scope {0:?} has no pending ownership transfer")]
-    NoPendingOwnershipTransfer(ScopeId),
-    #[error("account {account:?} is not the pending owner of scope {scope:?}")]
-    NotPendingOwner {
-        scope: ScopeId,
-        account: Box<Address>,
-    },
     #[error("invalid access-control genesis: {0}")]
     InvalidGenesis(String),
     #[error("state storage error: {0}")]
@@ -85,10 +71,6 @@ impl<D: AccessControlDB> AccessControlLedger<D> {
         self.db.scope(id).await
     }
 
-    pub async fn pending_owner(&self, id: &ScopeId) -> Result<Option<Address>, AccessControlError> {
-        self.db.pending_owner(id).await
-    }
-
     pub async fn has_role(
         &self,
         account: &Address,
@@ -110,15 +92,11 @@ impl<D: AccessControlDB> AccessControlLedger<D> {
             .is_some_and(|registered| registered.owner == *account))
     }
 
-    pub async fn register_scope<Events>(
+    pub async fn register_scope(
         &mut self,
         id: ScopeId,
         owner: Address,
-        mut events: Events,
-    ) -> Result<(), AccessControlError>
-    where
-        Events: EventSink + Send,
-    {
+    ) -> Result<(), AccessControlError> {
         match self.db.scope(&id).await? {
             Some(existing) if existing.owner == owner => return Ok(()),
             Some(_) => return Err(AccessControlError::ScopeAlreadyRegistered(id)),
@@ -126,18 +104,10 @@ impl<D: AccessControlDB> AccessControlLedger<D> {
         }
 
         self.db.set_scope_owner(&id, &owner);
-        events.emit(scope_registered_event(ScopeRegistered { scope: id, owner }));
         Ok(())
     }
 
-    pub async fn apply_transaction<Events>(
-        &mut self,
-        tx: &Transaction,
-        mut events: Events,
-    ) -> Result<(), AccessControlError>
-    where
-        Events: EventSink + Send,
-    {
+    pub async fn apply_transaction(&mut self, tx: &Transaction) -> Result<(), AccessControlError> {
         tx.verify()?;
         if !matches!(tx.authorization, Authorization::Single { .. }) {
             return Err(AccessControlError::UnsupportedAuthorization);
@@ -155,11 +125,9 @@ impl<D: AccessControlDB> AccessControlLedger<D> {
             .checked_add(1)
             .ok_or(AccessControlError::NonceOverflow)?;
 
-        let event = self
-            .apply_operation(&tx.account_id, &tx.payload.operation)
+        self.apply_operation(&tx.account_id, &tx.payload.operation)
             .await?;
         self.db.set_nonce(&tx.account_id, next_nonce);
-        events.emit(event);
         Ok(())
     }
 
@@ -167,7 +135,7 @@ impl<D: AccessControlDB> AccessControlLedger<D> {
         &mut self,
         actor: &Address,
         operation: &AccessControlOperation,
-    ) -> Result<Event, AccessControlError> {
+    ) -> Result<(), AccessControlError> {
         match operation {
             AccessControlOperation::GrantRole {
                 scope,
@@ -183,12 +151,7 @@ impl<D: AccessControlDB> AccessControlLedger<D> {
                     });
                 }
                 self.db.set_role(account, scope, *role);
-                Ok(role_granted_event(RoleGranted {
-                    scope: *scope,
-                    role: *role,
-                    account: account.clone(),
-                    granted_by: actor.clone(),
-                }))
+                Ok(())
             }
             AccessControlOperation::RevokeRole {
                 scope,
@@ -204,71 +167,7 @@ impl<D: AccessControlDB> AccessControlLedger<D> {
                     });
                 }
                 self.db.remove_role(account, scope, *role);
-                Ok(role_revoked_event(RoleRevoked {
-                    scope: *scope,
-                    role: *role,
-                    account: account.clone(),
-                    revoked_by: actor.clone(),
-                }))
-            }
-            AccessControlOperation::ProposeOwnershipTransfer {
-                scope,
-                proposed_owner,
-            } => {
-                self.require_owner(actor, scope).await?;
-                if actor == proposed_owner {
-                    return Err(AccessControlError::OwnershipUnchanged);
-                }
-                self.db.set_pending_owner(scope, proposed_owner);
-                Ok(ownership_transfer_proposed_event(
-                    OwnershipTransferProposed {
-                        scope: *scope,
-                        owner: actor.clone(),
-                        proposed_owner: proposed_owner.clone(),
-                    },
-                ))
-            }
-            AccessControlOperation::CancelOwnershipTransfer { scope } => {
-                self.require_owner(actor, scope).await?;
-                let proposed_owner = self
-                    .db
-                    .pending_owner(scope)
-                    .await?
-                    .ok_or(AccessControlError::NoPendingOwnershipTransfer(*scope))?;
-                self.db.remove_pending_owner(scope);
-                Ok(ownership_transfer_cancelled_event(
-                    OwnershipTransferCancelled {
-                        scope: *scope,
-                        owner: actor.clone(),
-                        proposed_owner,
-                    },
-                ))
-            }
-            AccessControlOperation::AcceptOwnership { scope } => {
-                let previous_owner = self
-                    .db
-                    .scope(scope)
-                    .await?
-                    .ok_or(AccessControlError::UnknownScope(*scope))?
-                    .owner;
-                let pending = self
-                    .db
-                    .pending_owner(scope)
-                    .await?
-                    .ok_or(AccessControlError::NoPendingOwnershipTransfer(*scope))?;
-                if &pending != actor {
-                    return Err(AccessControlError::NotPendingOwner {
-                        scope: *scope,
-                        account: Box::new(actor.clone()),
-                    });
-                }
-                self.db.set_scope_owner(scope, actor);
-                self.db.remove_pending_owner(scope);
-                Ok(scope_owner_changed_event(ScopeOwnerChanged {
-                    scope: *scope,
-                    previous_owner,
-                    new_owner: actor.clone(),
-                }))
+                Ok(())
             }
         }
     }

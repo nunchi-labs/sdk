@@ -11,8 +11,7 @@ const NS: Namespace = Namespace::new(ACCESS_CONTROL_NAMESPACE);
 enum Table {
     Nonce = 0,
     ScopeOwner = 1,
-    PendingOwner = 2,
-    RoleGrant = 3,
+    RoleGrant = 2,
 }
 
 impl From<Table> for u8 {
@@ -46,12 +45,6 @@ pub trait AccessControlDB {
     async fn scope(&self, id: &ScopeId) -> Result<Option<Scope>, AccessControlError>;
 
     fn set_scope_owner(&mut self, id: &ScopeId, owner: &Address);
-
-    async fn pending_owner(&self, id: &ScopeId) -> Result<Option<Address>, AccessControlError>;
-
-    fn set_pending_owner(&mut self, id: &ScopeId, owner: &Address);
-
-    fn remove_pending_owner(&mut self, id: &ScopeId);
 
     async fn has_role(
         &self,
@@ -97,27 +90,6 @@ impl<S: StateStore + Send + Sync> AccessControlDB for S {
     fn set_scope_owner(&mut self, id: &ScopeId, owner: &Address) {
         let key = NS.key(Table::ScopeOwner, id.encode().as_ref());
         StateStore::set(self, key, encoded(owner));
-    }
-
-    async fn pending_owner(&self, id: &ScopeId) -> Result<Option<Address>, AccessControlError> {
-        let key = NS.key(Table::PendingOwner, id.encode().as_ref());
-        match StateStore::get(self, &key)
-            .await
-            .map_err(|err| AccessControlError::Storage(err.to_string()))?
-        {
-            Some(bytes) => Ok(Some(decoded(&bytes)?)),
-            None => Ok(None),
-        }
-    }
-
-    fn set_pending_owner(&mut self, id: &ScopeId, owner: &Address) {
-        let key = NS.key(Table::PendingOwner, id.encode().as_ref());
-        StateStore::set(self, key, encoded(owner));
-    }
-
-    fn remove_pending_owner(&mut self, id: &ScopeId) {
-        let key = NS.key(Table::PendingOwner, id.encode().as_ref());
-        StateStore::remove(self, key);
     }
 
     async fn has_role(

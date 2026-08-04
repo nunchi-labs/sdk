@@ -3,7 +3,6 @@ use commonware_runtime::deterministic;
 use nunchi_common::{Address, QmdbState};
 use nunchi_crypto::PrivateKey;
 
-mod events;
 mod genesis;
 mod ledger;
 mod transaction;

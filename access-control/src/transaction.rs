@@ -7,9 +7,6 @@ use nunchi_common::{Address, Operation};
 pub enum OperationID {
     GrantRole = 0,
     RevokeRole = 1,
-    ProposeOwnershipTransfer = 2,
-    CancelOwnershipTransfer = 3,
-    AcceptOwnership = 4,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -23,9 +20,6 @@ impl TryFrom<u8> for OperationID {
         match value {
             0 => Ok(Self::GrantRole),
             1 => Ok(Self::RevokeRole),
-            2 => Ok(Self::ProposeOwnershipTransfer),
-            3 => Ok(Self::CancelOwnershipTransfer),
-            4 => Ok(Self::AcceptOwnership),
             _ => Err(InvalidAccessControlOperationId(value)),
         }
     }
@@ -62,16 +56,6 @@ pub enum AccessControlOperation {
         role: RoleId,
         account: Address,
     },
-    ProposeOwnershipTransfer {
-        scope: ScopeId,
-        proposed_owner: Address,
-    },
-    CancelOwnershipTransfer {
-        scope: ScopeId,
-    },
-    AcceptOwnership {
-        scope: ScopeId,
-    },
 }
 
 impl Write for AccessControlOperation {
@@ -97,22 +81,6 @@ impl Write for AccessControlOperation {
                 role.write(buf);
                 account.write(buf);
             }
-            Self::ProposeOwnershipTransfer {
-                scope,
-                proposed_owner,
-            } => {
-                OperationID::ProposeOwnershipTransfer.write(buf);
-                scope.write(buf);
-                proposed_owner.write(buf);
-            }
-            Self::CancelOwnershipTransfer { scope } => {
-                OperationID::CancelOwnershipTransfer.write(buf);
-                scope.write(buf);
-            }
-            Self::AcceptOwnership { scope } => {
-                OperationID::AcceptOwnership.write(buf);
-                scope.write(buf);
-            }
         }
     }
 }
@@ -132,16 +100,6 @@ impl Read for AccessControlOperation {
                 role: RoleId::read(buf)?,
                 account: Address::read(buf)?,
             }),
-            OperationID::ProposeOwnershipTransfer => Ok(Self::ProposeOwnershipTransfer {
-                scope: ScopeId::read(buf)?,
-                proposed_owner: Address::read(buf)?,
-            }),
-            OperationID::CancelOwnershipTransfer => Ok(Self::CancelOwnershipTransfer {
-                scope: ScopeId::read(buf)?,
-            }),
-            OperationID::AcceptOwnership => Ok(Self::AcceptOwnership {
-                scope: ScopeId::read(buf)?,
-            }),
         }
     }
 }
@@ -159,13 +117,6 @@ impl EncodeSize for AccessControlOperation {
                 role,
                 account,
             } => scope.encode_size() + role.encode_size() + account.encode_size(),
-            Self::ProposeOwnershipTransfer {
-                scope,
-                proposed_owner,
-            } => scope.encode_size() + proposed_owner.encode_size(),
-            Self::CancelOwnershipTransfer { scope } | Self::AcceptOwnership { scope } => {
-                scope.encode_size()
-            }
         }
     }
 }
