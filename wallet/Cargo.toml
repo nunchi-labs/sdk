@@ -11,7 +11,7 @@ workspace = true
 [features]
 default = ["cli", "client"]
 cli = ["dep:clap", "dep:anyhow", "dep:rand", "dep:commonware-math", "dep:commonware-cryptography"]
-client = ["dep:jsonrpsee", "dep:reqwest"]
+client = ["dep:jsonrpsee"]
 passkey = []
 
 [[bin]]
@@ -37,7 +37,6 @@ thiserror = { workspace = true }
 clap = { workspace = true, optional = true, features = ["derive"] }
 anyhow = { version = "1", optional = true }
 jsonrpsee = { workspace = true, optional = true, features = ["http-client", "macros"] }
-reqwest = { version = "0.12", optional = true, features = ["json"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [dev-dependencies]

@@ -3019,7 +3019,6 @@ dependencies = [
  "nunchi-crypto",
  "nunchi-rpc",
  "rand 0.10.2",
- "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tempfile",
