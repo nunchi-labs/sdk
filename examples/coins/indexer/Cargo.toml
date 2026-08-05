@@ -2,7 +2,8 @@
 name = "nunchi-coins-indexer"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "BUSL-1.1 AND MIT"
+license-file.workspace = true
 description = "Serve indexed coins-chain consensus activity."
 
 [lints]

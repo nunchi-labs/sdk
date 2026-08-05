@@ -77,3 +77,16 @@ When upgrading nodes:
 * Do not run mixed commonware versions in the same peer set (marshal coding / ZODA shards and other wire formats are not interchangeable).
 * Mid-sync glue metadata from v2026.5.0 cannot resume after upgrading to v2026.7.0; clear or re-sync any node that crashed mid state-sync before the bump.
 * Fresh joining nodes can enable peer QMDB state sync with `state_sync = true`. Nunchi's resolver preserves Commonware's standard wire layout while decoding variable-value operations with the chain-wide 512 KiB value bound.
+
+## License
+
+Source available under Business Source License 1.1. Copying, modification,
+redistribution and non-production use are permitted. Production use of
+Nunchi-owned SDK code requires a commercial license until the applicable
+version converts to MPL 2.0. Third-party components remain under their stated
+licenses. See [LICENSE.MD](LICENSE.MD) for the exact release-specific terms.
+
+This licensing change applies prospectively to version `2026.7.0-alpha.2`.
+Earlier releases and commits remain governed by the terms distributed with
+them. Third-party materials remain under their own licenses, as identified in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

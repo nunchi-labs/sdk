@@ -3,6 +3,7 @@ name = "nunchi-mcp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+license-file.workspace = true
 description = "MCP server exposing the Nunchi SDK's JSON-RPC surface as AI-readable tools."
 
 [lints]
