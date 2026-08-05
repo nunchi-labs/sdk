@@ -3,6 +3,7 @@ name = "nunchi-custom-module"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+license-file.workspace = true
 description = "A compiled custom module skeleton for downstream Nunchi SDK modules."
 
 [lints]

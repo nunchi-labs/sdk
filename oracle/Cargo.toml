@@ -3,6 +3,7 @@ name = "nunchi-oracle"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+license-file.workspace = true
 
 [dependencies]
 async-trait = { workspace = true }

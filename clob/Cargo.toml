@@ -3,6 +3,7 @@ name = "nunchi-clob"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+license-file.workspace = true
 description = "Central limit order book module for Nunchi spot and derivatives execution."
 
 [lints]

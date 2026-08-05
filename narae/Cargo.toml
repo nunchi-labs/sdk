@@ -3,6 +3,7 @@ name = "narae"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+license-file.workspace = true
 description = "A local testnet process runner with a ratatui log dashboard."
 
 [lints]

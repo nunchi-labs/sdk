@@ -1,21 +1,31 @@
-Business Source License
-=======================
-
-License text copyright (c) 2020 MariaDB Corporation Ab, All Rights Reserved.
-“Business Source License” is a trademark of MariaDB Corporation Ab.
+License text copyright (c) 2023 MariaDB plc, All Rights Reserved.
+“Business Source License” is a trademark of MariaDB plc.
 
 Parameters
 
 Licensor:             Nunchi Ltd
-Licensed Works:       The Nunchi SDK source code in this repository. The Licensed Work is (c) 2026 Nunchi Ltd
-Additional Use Grant: You may make use of the Licensed Work strictly for evaluation and/or non-production use only. Your use does not include offering the Licensed Work to third parties on a hosted or embedded basis.
-Change Date:          Four years from the date the Licensed Work is published
-Change License:       MPL 2.0
+Licensed Work:        The portions of Nunchi SDK version 2026.7.0-alpha.2 for
+                      which Nunchi Ltd owns or controls copyright, excluding
+                      the Third-Party Materials identified below.
+                      Copyright (c) 2026 Nunchi Ltd.
+Additional Use Grant: None
+Change Date:          2030-08-04
+Change License:       Mozilla Public License 2.0
 
 For information about commercial licensing arrangements for the Licensed Work,
 please contact info@nunchi.trade.
 
 Notice
+
+The Business Source License (this document, or the "License") is not an Open
+Source license. However, the Licensed Work will eventually be made available
+under an Open Source License, as stated in this License.
+
+For more information on the use of the Business Source License generally,
+please visit the Adopting and Developing Business Source License FAQ at
+https://mariadb.com/bsl-faq-adopting/.
+
+-------------------------------------------------------------------------------
 
 Business Source License 1.1
 
@@ -23,7 +33,8 @@ Terms
 
 The Licensor hereby grants you the right to copy, modify, create derivative
 works, redistribute, and make non-production use of the Licensed Work. The
-Licensor may make an Additional Use Grant, above, permitting limited production use.
+Licensor may make an Additional Use Grant, above, permitting limited
+production use.
 
 Effective on the Change Date, or the fourth anniversary of the first publicly
 available distribution of a specific version of the Licensed Work under this
@@ -55,7 +66,88 @@ Licensor or its affiliates (provided that you may use a trademark or logo of
 Licensor as expressly required by this License).
 
 TO THE EXTENT PERMITTED BY APPLICABLE LAW, THE LICENSED WORK IS PROVIDED ON
-AN "AS IS" BASIS. LICENSOR HEREBY DISCLAIMS ALL WARRANTIES AND CONDITIONS,
+AN “AS IS” BASIS. LICENSOR HEREBY DISCLAIMS ALL WARRANTIES AND CONDITIONS,
 EXPRESS OR IMPLIED, INCLUDING (WITHOUT LIMITATION) WARRANTIES OF
 MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT, AND
 TITLE.
+
+MariaDB hereby grants you permission to use this License’s text to license
+your works, and to refer to it using the trademark “Business Source License”,
+as long as you comply with the Covenants of Licensor below.
+
+Covenants of Licensor
+
+In consideration of the right to use this License’s text and the “Business
+Source License” name and trademark, Licensor covenants to MariaDB, and to all
+other recipients of the licensed work to be provided by Licensor:
+
+1. To specify as the Change License the GPL Version 2.0 or any later version,
+   or a license that is compatible with GPL Version 2.0 or a later version,
+   where “compatible” means that software provided under the Change License can
+   be included in a program with software provided under GPL Version 2.0 or a
+   later version. Licensor may specify additional Change Licenses without
+   limitation.
+
+2. To either: (a) specify an additional grant of rights to use that does not
+   impose any additional restriction on the right granted in this License, as
+   the Additional Use Grant; or (b) insert the text “None”.
+
+3. To specify a Change Date.
+
+4. Not to modify this License in any other way.
+
+-------------------------------------------------------------------------------
+
+Third-Party Materials
+=====================
+
+The Licensed Work above does not include third-party materials. Alto-derived
+portions of the following current files remain under the MIT License below:
+
+- `chain/src/application.rs`
+- `chain/src/block.rs`
+- `chain/src/engine.rs`
+- `dkg/src/consensus.rs`
+- `examples/bridge-chain/src/engine.rs`
+- `examples/bridge-chain/src/testnet.rs`
+- `examples/coins/chain/src/application.rs`
+- `examples/coins/chain/src/engine.rs`
+- `examples/coins/chain/src/indexer/backfiller/consumer.rs`
+- `examples/coins/chain/src/indexer/backfiller/mod.rs`
+- `examples/coins/chain/src/indexer/backfiller/producer.rs`
+- `examples/coins/chain/src/indexer/backfiller/state.rs`
+- `examples/coins/chain/src/indexer/mod.rs`
+- `examples/coins/chain/src/indexer/pusher.rs`
+- `examples/coins/chain/src/lib.rs`
+- `examples/coins/chain/src/testnet.rs`
+- `examples/coins/chain/tests/coins.rs`
+- `examples/coins/chain/tests/common/network.rs`
+- `examples/coins/indexer/src/lib.rs`
+- `examples/coins/indexer/src/main.rs`
+
+Modifications and other material in those files for which Nunchi Ltd owns or
+controls copyright are governed by the Business Source License above.
+
+Source: https://github.com/commonwarexyz/alto/tree/v2026.5.0
+
+MIT License
+
+Copyright (c) 2025 Commonware, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
