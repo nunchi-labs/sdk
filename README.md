@@ -42,6 +42,7 @@ This repository will contain modules for building public and private blockchains
 * [`nunchi-bridge`](bridge/) - bridges state roots from other chains, to verify against
 * [`nunchi-mempool`](mempool/) - simple p2p mempool
 * [`nunchi-oracle`](oracle/) - ingests namespaced, arbitrary data for interpretation by other modules 
+* [`nunchi-access-control`](access-control/) - optional scope ownership and role membership for permissioned modules
 * `nunchi-chat` - allows humans or agents to publish to permanent on-chain public conversations
 * `nunchi-factory` - wrapper of coins for mass issuance 
 
