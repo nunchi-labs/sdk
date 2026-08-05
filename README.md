@@ -80,12 +80,11 @@ When upgrading nodes:
 
 ## License
 
-The portions of version `2026.7.0-alpha.2` for which Nunchi Ltd owns or
-controls copyright are licensed under the Business Source License 1.1.
-Copying, modification, redistribution, and non-production use are permitted.
-Production use requires a separate commercial license until the Change Date,
-when the Mozilla Public License 2.0 applies. See [LICENSE.MD](LICENSE.MD) for
-the exact release-specific terms.
+Source available under Business Source License 1.1. Copying, modification,
+redistribution and non-production use are permitted. Production use of
+Nunchi-owned SDK code requires a commercial license until the applicable
+version converts to MPL 2.0. Third-party components remain under their stated
+licenses. See [LICENSE.MD](LICENSE.MD) for the exact release-specific terms.
 
 This licensing change applies prospectively to version `2026.7.0-alpha.2`.
 Earlier releases and commits remain governed by the terms distributed with
