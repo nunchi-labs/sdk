@@ -279,7 +279,7 @@ impl<E: BufferPooler + Clock + Storage + Metrics + Spawner> Actor<E> {
                 continue;
             };
             if proof.proposal.payload != candidate.digest
-                || proof.proposal.round.epoch() != block.context.round.epoch()
+                || proof.proposal.round.epoch() != block.header.context.round.epoch()
             {
                 let elapsed = self
                     .context
@@ -472,7 +472,7 @@ mod tests {
             );
 
             let latest = drain_to_latest(&mut receiver).expect("latest block");
-            assert_eq!(latest.block.height, Height::new(3));
+            assert_eq!(latest.block.header.height, Height::new(3));
             assert!(matches!((&mut waiter_1).now_or_never(), Some(Ok(()))));
             assert!(matches!((&mut waiter_2).now_or_never(), Some(Ok(()))));
             assert!((&mut waiter_3).now_or_never().is_none());

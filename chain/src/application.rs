@@ -212,6 +212,7 @@ where
 
     fn minimum_timestamp(&self, parent: &Block<R::Transaction, Ext>) -> Option<u64> {
         parent
+            .header
             .timestamp
             .checked_add(self.min_block_interval_ms.get())
     }
@@ -480,9 +481,9 @@ where
 
     fn block_runtime_context(block: &Block<R::Transaction, Ext>) -> RuntimeContext {
         RuntimeContext {
-            epoch: block.context.round.epoch().get(),
-            height: block.height.get(),
-            timestamp_ms: block.timestamp,
+            epoch: block.header.context.round.epoch().get(),
+            height: block.header.height.get(),
+            timestamp_ms: block.header.timestamp,
             block_digest: Some(block.digest()),
         }
     }
@@ -503,12 +504,12 @@ where
         let Some(minimum) = self.minimum_timestamp(parent) else {
             return false;
         };
-        if block.timestamp < minimum || block.timestamp > MAX_BLOCK_TIMESTAMP_MS {
+        if block.header.timestamp < minimum || block.header.timestamp > MAX_BLOCK_TIMESTAMP_MS {
             return false;
         }
 
         let deadline = SystemTime::UNIX_EPOCH
-            .checked_add(Duration::from_millis(block.timestamp))
+            .checked_add(Duration::from_millis(block.header.timestamp))
             .expect("block timestamp exceeded maximum");
         runtime_context.sleep_until(deadline).await;
         true
@@ -709,7 +710,7 @@ where
     type InputProvider = MempoolHandle<R::Transaction>;
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
-        Target::new(block.state_root, block.state_range.clone())
+        Target::new(block.header.state_root, block.header.state_range.clone())
     }
 
     async fn genesis(&mut self) -> Self::Block {
@@ -734,7 +735,7 @@ where
             .observe_between(selection_start, runtime_context.current());
         let execution_context = Self::proposal_runtime_context(
             context.round.epoch().get(),
-            parent.height.next(),
+            parent.header.height.next(),
             timestamp,
         );
         // Obtain the optional dealer log before executing the speculative
@@ -757,7 +758,7 @@ where
         let block = Block::new(
             context,
             parent.digest(),
-            parent.height.next(),
+            parent.header.height.next(),
             timestamp,
             transactions,
             reshare_log,
@@ -806,7 +807,7 @@ where
             return None;
         }
 
-        if !self.consensus.verify_payload(&block.extension).await {
+        if !self.consensus.verify_payload(&block.header.extension).await {
             return None;
         }
 
@@ -818,14 +819,14 @@ where
                 batches,
                 execution_context,
                 &block.transactions,
-                &block.extension,
-                block.reshare_log.as_ref(),
+                &block.header.extension,
+                block.header.reshare_log.as_ref(),
                 &NoopEventConsumer,
                 false,
             )
             .await?;
         let state_range = Self::state_range(&merkleized);
-        if merkleized.root() != block.state_root || state_range != block.state_range {
+        if merkleized.root() != block.header.state_root || state_range != block.header.state_range {
             return None;
         }
         Some(merkleized)
@@ -847,8 +848,8 @@ where
                 batches,
                 execution_context,
                 &block.transactions,
-                &block.extension,
-                block.reshare_log.as_ref(),
+                &block.header.extension,
+                block.header.reshare_log.as_ref(),
                 &events,
                 true,
             )
@@ -857,11 +858,11 @@ where
         let state_range = Self::state_range(&merkleized);
         assert_eq!(
             merkleized.root(),
-            block.state_root,
+            block.header.state_root,
             "certified block state root mismatch"
         );
         assert_eq!(
-            state_range, block.state_range,
+            state_range, block.header.state_range,
             "certified block state range mismatch"
         );
         merkleized

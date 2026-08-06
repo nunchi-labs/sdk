@@ -82,7 +82,7 @@ fn application_uses_configured_block_interval() {
         .expect("propose production bridge block");
 
         assert!(
-            proposed.block.timestamp - genesis.timestamp
+            proposed.block.header.timestamp - genesis.header.timestamp
                 >= 500
         );
     });
@@ -181,13 +181,13 @@ fn chain_application_proposes_and_verifies_bridge_payload() {
         .await
         .expect("propose bridge block");
 
-        let bridge_payload: BridgePayload = proposed.block.extension.clone();
+        let bridge_payload: BridgePayload = proposed.block.header.extension.clone();
         assert_eq!(bridge_payload, Some(foreign_finalization.clone()));
 
         let verified: Option<QmdbMerkleized<deterministic::Context>> =
             <Application as StatefulApplication<deterministic::Context>>::verify(
                 &mut app,
-                (context.child("verify"), proposed.block.context.clone()),
+                (context.child("verify"), proposed.block.header.context.clone()),
                 futures::stream::iter([Arc::new(proposed.block.clone()), Arc::new(genesis.clone())]),
                 databases.new_batches().await,
             )
@@ -195,14 +195,14 @@ fn chain_application_proposes_and_verifies_bridge_payload() {
         assert!(verified.is_some());
 
         let block_state = StateCommitment {
-            root: proposed.block.state_root,
-            range: proposed.block.state_range.clone(),
+            root: proposed.block.header.state_root,
+            range: proposed.block.header.state_range.clone(),
         };
         let empty = Block::new(
-            proposed.block.context.clone(),
+            proposed.block.header.context.clone(),
             genesis.digest(),
-            proposed.block.height,
-            proposed.block.timestamp,
+            proposed.block.header.height,
+            proposed.block.header.timestamp,
             Vec::new(),
             None,
             None,
@@ -213,22 +213,22 @@ fn chain_application_proposes_and_verifies_bridge_payload() {
 
         let wrong_finalization = finalization(&wrong, 8, b"wrong block digest");
         let rejected = Block::new(
-            proposed.block.context.clone(),
+            proposed.block.header.context.clone(),
             genesis.digest(),
-            proposed.block.height,
-            proposed.block.timestamp,
+            proposed.block.header.height,
+            proposed.block.header.timestamp,
             Vec::new(),
             None,
             Some(wrong_finalization),
             StateCommitment {
-                root: proposed.block.state_root,
-                range: proposed.block.state_range.clone(),
+                root: proposed.block.header.state_root,
+                range: proposed.block.header.state_range.clone(),
             },
         );
         let verified: Option<QmdbMerkleized<deterministic::Context>> =
             <Application as StatefulApplication<deterministic::Context>>::verify(
                 &mut app,
-                (context.child("verify_reject"), rejected.context.clone()),
+                (context.child("verify_reject"), rejected.header.context.clone()),
                 futures::stream::iter([Arc::new(rejected), Arc::new(genesis)]),
                 databases.new_batches().await,
             )
@@ -245,6 +245,6 @@ fn chain_application_proposes_and_verifies_bridge_payload() {
         )
         .await
         .expect("propose empty bridge block");
-        assert_eq!(proposed.block.extension, None);
+        assert_eq!(proposed.block.header.extension, None);
     });
 }

@@ -1,7 +1,6 @@
-//! Tests for the compact, digest-authenticated [`BlockHeader`] and the transaction-root
-//! commitment the block digest is now committed over (see `Block::header` / `BlockHeader::digest`).
+//! Tests for [`BlockHeader`] and the transaction-root commitment the block digest is built on.
 
-use commonware_codec::{Decode, Encode};
+use commonware_codec::{Decode, Encode, EncodeSize, Error};
 use commonware_consensus::types::{Epoch, Height, Round, View};
 use commonware_cryptography::{ed25519, sha256, Digest as _, Digestible as _, Signer};
 use commonware_storage::mmr::Location;
@@ -24,8 +23,6 @@ fn state() -> StateCommitment {
     }
 }
 
-/// Read config for `BlockHeader<NoConsensusExtension>`: a bound for the reshare log plus the unit
-/// extension config.
 fn header_cfg() -> (std::num::NonZeroU32, ()) {
     (NZU32!(1), ())
 }
@@ -47,8 +44,7 @@ fn block(transactions: Vec<u8>) -> Block<u8> {
 fn header_digest_matches_block_digest() {
     let block = block(vec![7, 8, 9]);
 
-    // The compact header reproduces the full block's digest without carrying the transactions.
-    assert_eq!(block.header().digest(), block.digest());
+    assert_eq!(block.header.digest(), block.digest());
 }
 
 #[test]
@@ -57,14 +53,12 @@ fn changing_a_transaction_changes_root_and_digest() {
     let changed = block(vec![7, 9]);
 
     assert_ne!(
-        base.header().transaction_root,
-        changed.header().transaction_root
+        base.header.transaction_root,
+        changed.header.transaction_root
     );
     assert_ne!(base.digest(), changed.digest());
-
-    // Each header still authenticates its own block.
-    assert_eq!(base.header().digest(), base.digest());
-    assert_eq!(changed.header().digest(), changed.digest());
+    assert_eq!(base.header.digest(), base.digest());
+    assert_eq!(changed.header.digest(), changed.digest());
 }
 
 #[test]
@@ -72,10 +66,9 @@ fn reordering_transactions_changes_root_and_digest() {
     let ordered = block(vec![7, 8]);
     let reordered = block(vec![8, 7]);
 
-    // The transaction root commits to order, not just the multiset of transactions.
     assert_ne!(
-        ordered.header().transaction_root,
-        reordered.header().transaction_root
+        ordered.header.transaction_root,
+        reordered.header.transaction_root
     );
     assert_ne!(ordered.digest(), reordered.digest());
 }
@@ -85,26 +78,22 @@ fn empty_and_nonempty_transaction_lists_differ() {
     let empty = block(vec![]);
     let nonempty = block(vec![7]);
 
-    // The count is committed, so an empty list is not the same commitment as any non-empty one.
     assert_ne!(
-        empty.header().transaction_root,
-        nonempty.header().transaction_root
+        empty.header.transaction_root,
+        nonempty.header.transaction_root
     );
-    // The header still authenticates a block with no transactions.
-    assert_eq!(empty.header().digest(), empty.digest());
+    assert_eq!(empty.header.digest(), empty.digest());
 }
 
 #[test]
 fn changing_state_commitment_changes_header_digest() {
-    let base = block(vec![7]).header();
+    let base = block(vec![7]).header;
 
-    // A different state root changes the authenticated digest.
     let mut changed_root = base.clone();
     changed_root.state_root = block(vec![9, 9]).digest();
     assert_ne!(changed_root.state_root, base.state_root);
     assert_ne!(changed_root.digest(), base.digest());
 
-    // A different state range changes the authenticated digest.
     let mut changed_range = base.clone();
     changed_range.state_range = non_empty_range!(Location::new(0), Location::new(2));
     assert_ne!(changed_range.digest(), base.digest());
@@ -113,13 +102,32 @@ fn changing_state_commitment_changes_header_digest() {
 #[test]
 fn header_codec_round_trips() {
     let block = block(vec![7, 8]);
-    let header = block.header();
+    let header = block.header.clone();
 
     let decoded =
         BlockHeader::<NoConsensusExtension>::decode_cfg(header.encode().as_ref(), &header_cfg())
             .unwrap();
 
     assert_eq!(decoded, header);
-    // A header recovered from the wire still authenticates the block.
     assert_eq!(decoded.digest(), block.digest());
+}
+
+#[test]
+fn decode_rejects_mismatched_transaction_root() {
+    let block = block(vec![7, 8]);
+    let mut bytes = block.encode().as_ref().to_vec();
+
+    // Tamper with the first transaction byte after the header and count varint, so the
+    // transaction list no longer matches the header's transaction root.
+    let first_transaction = block.header.encode_size() + 1;
+    bytes[first_transaction] = 9;
+
+    let result = Block::<u8>::decode_cfg(bytes.as_slice(), &header_cfg());
+    assert!(matches!(
+        result,
+        Err(Error::Invalid(
+            _,
+            "transaction root does not match transactions"
+        ))
+    ));
 }
