@@ -168,10 +168,15 @@ fn generated_testnet_includes_non_voting_secondaries() {
         .collect::<Vec<_>>();
     let validators = &configs[..2];
     let secondaries = &configs[2..];
-    for config in &configs {
+    for (index, config) in configs.iter().enumerate() {
         assert_eq!(config.peer_config.participants.len(), 2);
         assert_eq!(config.secondary_nodes.len(), 2);
-        assert_eq!(config.bootstrappers.len(), 3);
+        assert_eq!(config.bootstrappers.len(), if index < 2 { 1 } else { 2 });
+        assert!(config.bootstrappers.iter().all(|bootstrapper| config
+            .peer_config
+            .participants
+            .position(&bootstrapper.public_key)
+            .is_some()));
     }
     assert!(validators
         .iter()

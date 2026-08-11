@@ -719,8 +719,9 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
         .iter()
         .map(|signer| signer.public_key())
         .collect::<Vec<_>>();
-    let participants_set = Set::from_iter_dedup(public_keys[..validator_count].iter().cloned());
-    let secondary_nodes = Set::from_iter_dedup(public_keys[validator_count..].iter().cloned());
+    let (primary_public_keys, secondary_public_keys) = public_keys.split_at(validator_count);
+    let participants_set = Set::from_iter_dedup(primary_public_keys.iter().cloned());
+    let secondary_nodes = Set::from_iter_dedup(secondary_public_keys.iter().cloned());
 
     let mut rng = StdRng::seed_from_u64(config.seed);
     let (output, shares) =
@@ -761,7 +762,7 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
                 .unwrap_or(config.bind_ip),
             port,
         ));
-        let bootstrappers = public_keys
+        let bootstrappers = primary_public_keys
             .iter()
             .enumerate()
             .filter(|(candidate, _)| *candidate != index)
