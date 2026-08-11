@@ -186,7 +186,7 @@ impl NodeConfig {
         Ok(config)
     }
 
-    fn read_validated(path: impl AsRef<Path>) -> Result<ValidatedNodeConfig, Error> {
+    pub(crate) fn read_validated(path: impl AsRef<Path>) -> Result<ValidatedNodeConfig, Error> {
         let raw = fs::read_to_string(path).map_err(Error::Io)?;
         let config: Self = toml::from_str(&raw).map_err(Error::TomlDeserialize)?;
         config.into_validated()
@@ -277,9 +277,6 @@ impl NodeConfig {
             (false, false, _) => return Err(Error::UnknownLocalIdentity),
             (true, true, _) => unreachable!("overlapping local identity rejected above"),
         };
-        if matches!(role, NodeRole::Secondary) && self.indexer_url.is_some() {
-            return Err(Error::SecondaryIndexer);
-        }
         for bootstrapper in &self.bootstrappers {
             if self
                 .peer_config
@@ -333,7 +330,7 @@ impl NodeRole {
     }
 }
 
-struct ValidatedNodeConfig {
+pub(crate) struct ValidatedNodeConfig {
     config: NodeConfig,
     private_key: ed25519::PrivateKey,
     dkg_storage_key: StorageKey,
@@ -342,6 +339,14 @@ struct ValidatedNodeConfig {
     role: NodeRole,
     prune_config: PruneConfig,
     genesis: Option<ChainGenesis>,
+}
+
+impl ValidatedNodeConfig {
+    pub(crate) fn indexer_url(&self) -> Option<&str> {
+        matches!(&self.role, NodeRole::Secondary)
+            .then_some(self.config.indexer_url.as_deref())
+            .flatten()
+    }
 }
 
 fn default_epoch_length() -> NonZeroU64 {
@@ -651,8 +656,6 @@ pub enum Error {
     InvalidShare(nunchi_dkg::public::Error),
     #[error("failed to decode validator threshold share: {0}")]
     InvalidShareEncoding(String),
-    #[error("secondary nodes cannot configure an indexer URL")]
-    SecondaryIndexer,
     #[error("bootstrapper {0} is not in either node allowlist")]
     UnknownBootstrapper(String),
     #[error("failed to decode hex field {field}")]
@@ -803,11 +806,7 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
             bootstrappers,
             storage_dir: storage_dir.clone(),
             genesis_path: config.genesis_path.clone(),
-            indexer_url: if validator {
-                config.indexer_url.clone()
-            } else {
-                None
-            },
+            indexer_url: (!validator).then(|| config.indexer_url.clone()).flatten(),
             epoch_length: default_epoch_length(),
             min_block_interval_ms: default_min_block_interval_ms(),
             indexer_spool_max_entries: default_indexer_spool_max_entries(),
@@ -955,6 +954,7 @@ async fn start_node(
     ),
     Error,
 > {
+    let indexer_url = validated.indexer_url().map(str::to_owned);
     let ValidatedNodeConfig {
         config,
         private_key,
@@ -1023,7 +1023,7 @@ async fn start_node(
     let state_sync = register(channels::STATE_SYNC);
     network.start();
 
-    let indexer_client = config.indexer_url.as_deref().map(|url| {
+    let indexer_client = indexer_url.as_deref().map(|url| {
         let metrics = indexer::IndexerMetrics::register(&context.child("indexer"));
         (
             indexer::HttpClient::new(url).with_metrics(metrics.clone()),
