@@ -131,7 +131,7 @@ fn default_block_extension_is_empty_payload() {
         state(),
     );
 
-    assert_eq!(block.extension, ());
+    assert_eq!(block.header.extension, ());
     assert_eq!(
         Block::<u8>::decode_cfg(block.encode().as_ref(), &block_cfg()).unwrap(),
         block
@@ -275,7 +275,7 @@ fn dkg_reshare_log_is_core_block_field() {
         state(),
     );
 
-    assert!(block.reshare_log.is_none());
-    assert_eq!(block.extension, ());
+    assert!(block.header.reshare_log.is_none());
+    assert_eq!(block.header.extension, ());
     assert!(ReshareBlock::reshare_log(&block).is_none());
 }

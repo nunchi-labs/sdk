@@ -366,7 +366,7 @@ impl Indexer {
         }
         store
             .finalized_height_to_key
-            .insert(finalized.block.height.get(), key);
+            .insert(finalized.block.header.height.get(), key);
         let mut data = vec![0u8; u8::SIZE + finalized.encode_size()];
         data[0] = Kind::Finalization as u8;
         finalized.write(&mut data[1..].as_mut());
@@ -458,10 +458,10 @@ impl SummaryEvent {
         Self {
             kind,
             view: Some(notarized.proof.view().get()),
-            height: Some(notarized.block.height.get()),
+            height: Some(notarized.block.header.height.get()),
             digest: Some(hex(notarized.block.digest().as_ref())),
             transaction_count: Some(notarized.block.transactions.len()),
-            block_timestamp: Some(notarized.block.timestamp),
+            block_timestamp: Some(notarized.block.header.timestamp),
             observed_at: now_ms(),
         }
     }
@@ -470,10 +470,10 @@ impl SummaryEvent {
         Self {
             kind,
             view: Some(finalized.proof.view().get()),
-            height: Some(finalized.block.height.get()),
+            height: Some(finalized.block.header.height.get()),
             digest: Some(hex(finalized.block.digest().as_ref())),
             transaction_count: Some(finalized.block.transactions.len()),
-            block_timestamp: Some(finalized.block.timestamp),
+            block_timestamp: Some(finalized.block.header.timestamp),
             observed_at: now_ms(),
         }
     }
@@ -708,7 +708,7 @@ fn block_epoch(block: &Block) -> Option<Epoch> {
 }
 
 fn block_epoch_info(block: &Block) -> Option<EpochInfo> {
-    FixedEpocher::new(BLOCKS_PER_EPOCH).containing(block.height)
+    FixedEpocher::new(BLOCKS_PER_EPOCH).containing(block.header.height)
 }
 
 pub fn load_dkg_output(
