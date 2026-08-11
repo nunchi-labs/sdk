@@ -221,6 +221,57 @@ fn crosses_epoch_boundary_and_reclaims_retired_partition() {
 }
 
 #[test_traced]
+fn shareless_secondary_state_syncs_and_gossips_transactions() {
+    with_large_stack(|| {
+        let executor = deterministic::Runner::timed(Duration::from_secs(60));
+        executor.start(|mut context| async move {
+            let cfg = ValidatorConfig {
+                epoch_length: NZU64!(10),
+                ..ValidatorConfig::default()
+            };
+            let mut network = TestNetworkBuilder::new(4)
+                .with_secondaries(1)
+                .with_validator_config(cfg)
+                .build(&mut context)
+                .await;
+            for index in 0..4 {
+                network.start_validator(index).await;
+            }
+            network.run_until_height(12).await;
+
+            network.start_secondary_with_state_sync(0).await;
+            network.run_until_height(16).await;
+
+            let alice = key(9_001);
+            let alice_id = Address::from(alice.public_key());
+            network
+                .secondary_submitter(0)
+                .submit(
+                    Transaction::sign(
+                        &alice,
+                        0,
+                        CoinOperation::CreateToken {
+                            spec: CoinSpec::new(
+                                TokenSymbol::new("OBS").unwrap(),
+                                TokenName::new("Observer").unwrap(),
+                                6,
+                                1_000,
+                                None,
+                            ),
+                        },
+                    )
+                    .into(),
+                )
+                .await
+                .expect("secondary should admit transaction");
+            network.run_until_nonces(&[(alice_id, 1)]).await;
+            let roots = network.run_until_ledger_roots_converge().await;
+            assert_eq!(roots.len(), 5);
+        });
+    });
+}
+
+#[test_traced]
 fn state_syncs_late_validator() {
     with_large_stack(|| {
         let executor = deterministic::Runner::timed(Duration::from_secs(60));
@@ -286,6 +337,7 @@ fn recovers_unclean_shutdown() {
                     context.random_range(Duration::from_millis(250)..Duration::from_millis(1_000));
                 let mut network = TestNetworkBuilder::new(n)
                     .with_fixture(fixture)
+                    .with_secondaries(1)
                     .with_initial_link(reliable_link())
                     .with_validator_config(cfg)
                     .build(&mut context)

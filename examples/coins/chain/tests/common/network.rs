@@ -11,7 +11,7 @@ use commonware_cryptography::{
 use commonware_glue::stateful::PruneConfig;
 use commonware_p2p::{
     simulated::{self, Link, Network, Oracle, Receiver, Sender},
-    Manager,
+    Manager, TrackedPeers,
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
@@ -145,6 +145,7 @@ struct ValidatorChannels {
 
 pub(crate) struct TestNetworkBuilder {
     validators: u32,
+    secondaries: u32,
     fixture: Option<ThresholdFixture>,
     initial_link: Option<Link>,
     validator_config: ValidatorConfig,
@@ -154,6 +155,7 @@ impl TestNetworkBuilder {
     pub(crate) fn new(validators: u32) -> Self {
         Self {
             validators,
+            secondaries: 0,
             fixture: None,
             initial_link: Some(reliable_link()),
             validator_config: ValidatorConfig::default(),
@@ -172,6 +174,11 @@ impl TestNetworkBuilder {
 
     pub(crate) fn with_initial_link(mut self, link: Link) -> Self {
         self.initial_link = Some(link);
+        self
+    }
+
+    pub(crate) fn with_secondaries(mut self, secondaries: u32) -> Self {
+        self.secondaries = secondaries;
         self
     }
 
@@ -208,7 +215,23 @@ impl TestNetworkBuilder {
             private_keys,
             participants,
         } = fixture;
-        let registrations = register_validators(&mut oracle, &participants).await;
+        let secondary_private_keys = (0..self.secondaries)
+            .map(|index| ed25519::PrivateKey::from_seed(10_000 + index as u64))
+            .collect::<Vec<_>>();
+        let secondary_nodes =
+            Set::from_iter_dedup(secondary_private_keys.iter().map(Signer::public_key));
+        let all_nodes = participants
+            .iter()
+            .cloned()
+            .chain(secondary_nodes.iter().cloned())
+            .collect::<Vec<_>>();
+        let registrations = register_nodes(
+            &mut oracle,
+            &all_nodes,
+            Set::from_iter_dedup(participants.iter().cloned()),
+            secondary_nodes.clone(),
+        )
+        .await;
         let participants_set = Set::from_iter_dedup(participants.clone());
         let peer_config = PeerConfig {
             num_participants_per_round: vec![participants.len() as u32],
@@ -221,7 +244,9 @@ impl TestNetworkBuilder {
             output,
             shares,
             private_keys,
+            secondary_private_keys,
             participants,
+            secondary_nodes,
             peer_config,
             registrations,
             validator_config: self.validator_config,
@@ -242,7 +267,9 @@ pub(crate) struct TestNetwork<'a> {
     output: Output<MinSig, PublicKey>,
     shares: Map<PublicKey, group::Share>,
     private_keys: Vec<ed25519::PrivateKey>,
+    secondary_private_keys: Vec<ed25519::PrivateKey>,
     participants: Vec<PublicKey>,
+    secondary_nodes: Set<PublicKey>,
     peer_config: PeerConfig<PublicKey>,
     registrations: HashMap<PublicKey, ValidatorChannels>,
     validator_config: ValidatorConfig,
@@ -263,6 +290,9 @@ impl TestNetwork<'_> {
         for index in 0..self.private_keys.len() {
             self.start_validator(index).await;
         }
+        for index in 0..self.secondary_private_keys.len() {
+            self.start_secondary(index).await;
+        }
     }
 
     pub(crate) async fn start_validator(&mut self, index: usize) {
@@ -272,6 +302,14 @@ impl TestNetwork<'_> {
     /// Start a fresh validator by discovering a finalized floor and syncing QMDB from peers.
     pub(crate) async fn start_validator_with_state_sync(&mut self, index: usize) {
         self.start_validator_inner(index, true).await;
+    }
+
+    pub(crate) async fn start_secondary(&mut self, index: usize) {
+        self.start_secondary_inner(index, false).await;
+    }
+
+    pub(crate) async fn start_secondary_with_state_sync(&mut self, index: usize) {
+        self.start_secondary_inner(index, true).await;
     }
 
     async fn start_validator_inner(&mut self, index: usize, state_sync: bool) {
@@ -293,8 +331,34 @@ impl TestNetwork<'_> {
             ValidatorIdentity {
                 signer,
                 output: self.output.clone(),
-                share,
+                share: Some(share),
                 peer_config: self.peer_config.clone(),
+                secondary_nodes: self.secondary_nodes.clone(),
+            },
+            channels,
+            self.validator_config.clone(),
+            state_sync,
+        )
+        .await;
+        self.nodes.insert(public_key, handle);
+    }
+
+    async fn start_secondary_inner(&mut self, index: usize, state_sync: bool) {
+        let signer = &self.secondary_private_keys[index];
+        let public_key = signer.public_key();
+        let channels = self
+            .registrations
+            .remove(&public_key)
+            .expect("secondary was already started");
+        let handle = start_validator(
+            self.context,
+            &self.oracle,
+            ValidatorIdentity {
+                signer,
+                output: self.output.clone(),
+                share: None,
+                peer_config: self.peer_config.clone(),
+                secondary_nodes: self.secondary_nodes.clone(),
             },
             channels,
             self.validator_config.clone(),
@@ -309,8 +373,9 @@ impl TestNetwork<'_> {
     }
 
     pub(crate) async fn link_where(&mut self, link: Link, allow: impl Fn(usize, usize) -> bool) {
-        for (from_index, from) in self.participants.iter().enumerate() {
-            for (to_index, to) in self.participants.iter().enumerate() {
+        let nodes = self.all_node_keys();
+        for (from_index, from) in nodes.iter().enumerate() {
+            for (to_index, to) in nodes.iter().enumerate() {
                 if from == to || !allow(from_index, to_index) {
                     continue;
                 }
@@ -444,6 +509,7 @@ impl TestNetwork<'_> {
     fn started_validator_ids(&self) -> HashSet<String> {
         self.private_keys
             .iter()
+            .chain(self.secondary_private_keys.iter())
             .filter_map(|signer| {
                 let public_key = signer.public_key();
                 (!self.registrations.contains_key(&public_key))
@@ -459,6 +525,23 @@ impl TestNetwork<'_> {
             .expect("validator not started")
             .submitter
             .clone()
+    }
+
+    pub(crate) fn secondary_submitter(&self, index: usize) -> MempoolHandle<Transaction> {
+        let public_key = self.secondary_private_keys[index].public_key();
+        self.nodes
+            .get(&public_key)
+            .expect("secondary not started")
+            .submitter
+            .clone()
+    }
+
+    fn all_node_keys(&self) -> Vec<PublicKey> {
+        self.participants
+            .iter()
+            .cloned()
+            .chain(self.secondary_nodes.iter().cloned())
+            .collect()
     }
 
     pub(crate) async fn finalized_blocks(
@@ -485,8 +568,8 @@ impl TestNetwork<'_> {
     /// Snapshot, in registration order, every started validator's committed coin ledger.
     pub(crate) async fn ledgers(&self) -> Vec<ReadLedger> {
         let mut ledgers = Vec::new();
-        for participant in &self.participants {
-            let Some(node) = self.nodes.get(participant) else {
+        for participant in self.all_node_keys() {
+            let Some(node) = self.nodes.get(&participant) else {
                 continue;
             };
             let db = node.stateful.subscribe_databases().await;
@@ -539,7 +622,7 @@ impl TestNetwork<'_> {
     pub(crate) async fn run_until_ledger_roots_converge(&self) -> Vec<Digest> {
         loop {
             let ledgers = self.ledgers().await;
-            if ledgers.len() != self.participants.len() {
+            if ledgers.len() != self.nodes.len() {
                 self.context.sleep(Duration::from_millis(100)).await;
                 continue;
             }
@@ -556,7 +639,7 @@ impl TestNetwork<'_> {
 
     async fn all_nonces_reached(&self, expected: &[(Address, u64)]) -> bool {
         let ledgers = self.ledgers().await;
-        if ledgers.len() != self.participants.len() {
+        if ledgers.len() != self.nodes.len() {
             return false;
         }
         for ledger in ledgers {
@@ -594,8 +677,9 @@ pub(crate) fn deterministic_state(
 struct ValidatorIdentity<'a> {
     signer: &'a ed25519::PrivateKey,
     output: Output<MinSig, PublicKey>,
-    share: group::Share,
+    share: Option<group::Share>,
     peer_config: PeerConfig<PublicKey>,
+    secondary_nodes: Set<PublicKey>,
 }
 
 async fn start_validator(
@@ -611,6 +695,7 @@ async fn start_validator(
         output,
         share,
         peer_config,
+        secondary_nodes,
     } = identity;
     let public_key = signer.public_key();
     let uid = format!("validator_{public_key}");
@@ -621,8 +706,9 @@ async fn start_validator(
         signer: signer.clone(),
         dkg_storage_key: [9u8; 32],
         output,
-        share: Some(share),
+        share,
         peer_config,
+        secondary_nodes,
         epoch_length: cfg.epoch_length,
         min_block_interval_ms: cfg.min_block_interval_ms,
         leader_timeout: cfg.leader_timeout,
@@ -701,16 +787,18 @@ fn metric_label<'a>(labels: Option<&'a str>, name: &str) -> Option<&'a str> {
     })
 }
 
-async fn register_validators(
+async fn register_nodes(
     oracle: &mut Oracle<PublicKey, deterministic::Context>,
-    validators: &[PublicKey],
+    nodes: &[PublicKey],
+    validators: Set<PublicKey>,
+    secondaries: Set<PublicKey>,
 ) -> HashMap<PublicKey, ValidatorChannels> {
     oracle
         .manager()
-        .track(0, Set::from_iter_dedup(validators.iter().cloned()));
+        .track(0, TrackedPeers::new(validators, secondaries));
     let mut registrations = HashMap::new();
-    for validator in validators.iter() {
-        let oracle = oracle.control(validator.clone());
+    for node in nodes {
+        let oracle = oracle.control(node.clone());
         let pending = oracle.register(PENDING_CHANNEL, TEST_QUOTA).await.unwrap();
         let recovered = oracle
             .register(RECOVERED_CHANNEL, TEST_QUOTA)
@@ -731,7 +819,7 @@ async fn register_validators(
             .await
             .unwrap();
         registrations.insert(
-            validator.clone(),
+            node.clone(),
             ValidatorChannels {
                 pending,
                 recovered,

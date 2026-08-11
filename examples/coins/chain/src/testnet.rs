@@ -1,8 +1,8 @@
 //! Standalone local-testnet support: config generation and a real-network node runner.
 //!
 //! [`generate_local_testnet`] performs a trusted setup (key generation plus an initial threshold
-//! deal) and writes one TOML config per validator alongside a manifest that process runners such
-//! as `narae` consume. [`run_node`] boots a single validator from one of those configs on the
+//! deal) and writes one TOML config per node alongside a manifest that process runners such as
+//! `narae` consume. [`run_node`] boots a validator or secondary from one of those configs on the
 //! tokio runtime with authenticated peer discovery, and serves the aggregated JSON-RPC module.
 
 use crate::indexer::Client as _;
@@ -60,6 +60,7 @@ const DEFAULT_CHANNEL_BACKLOG: usize = 1024;
 #[derive(Clone, Debug)]
 pub struct LocalTestnetConfig {
     pub validators: u32,
+    pub secondaries: u32,
     pub base_port: u16,
     pub base_rpc_port: u16,
     pub base_metrics_port: u16,
@@ -115,18 +116,20 @@ pub struct IndexerManifest {
     pub participants: u32,
 }
 
-/// One validator's standalone configuration.
+/// One node's standalone configuration.
 ///
-/// Key material is hex-encoded commonware-codec bytes. The threshold `output` and `share` come
-/// from the trusted initial deal; subsequent epochs reshare on-chain via the DKG actor.
+/// Key material is hex-encoded commonware-codec bytes. The threshold `output` and optional
+/// validator `share` come from the trusted initial deal; subsequent epochs reshare on-chain.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NodeConfig {
     pub name: String,
     pub private_key: String,
     pub dkg_storage_key: String,
     pub output: String,
-    pub share: String,
+    pub share: Option<String>,
     pub peer_config: PeerConfig<PublicKey>,
+    #[serde(default, with = "secondary_serde")]
+    pub secondary_nodes: Set<PublicKey>,
     pub listen_address: SocketAddr,
     /// Address advertised to peers. IP literals use socket syntax (with brackets around IPv6),
     /// while DNS names use `hostname:port` without a URL scheme or path. DNS is resolved again
@@ -179,9 +182,14 @@ impl NodeConfig {
     pub fn read(path: impl AsRef<Path>) -> Result<Self, Error> {
         let raw = fs::read_to_string(path).map_err(Error::Io)?;
         let config: Self = toml::from_str(&raw).map_err(Error::TomlDeserialize)?;
-        let prune_config = config.prune_config()?;
-        crate::history::RetentionPolicy::new(prune_config)?;
+        config.validate()?;
         Ok(config)
+    }
+
+    fn read_validated(path: impl AsRef<Path>) -> Result<ValidatedNodeConfig, Error> {
+        let raw = fs::read_to_string(path).map_err(Error::Io)?;
+        let config: Self = toml::from_str(&raw).map_err(Error::TomlDeserialize)?;
+        config.into_validated()
     }
 
     pub fn write(&self, path: impl AsRef<Path>) -> Result<(), Error> {
@@ -197,6 +205,143 @@ impl NodeConfig {
             retained_qmdb_blocks: self.retained_qmdb_blocks,
         })
     }
+
+    fn validate(&self) -> Result<(), Error> {
+        self.clone().into_validated().map(|_| ())
+    }
+
+    fn into_validated(self) -> Result<ValidatedNodeConfig, Error> {
+        let prune_config = self.prune_config()?;
+        crate::history::RetentionPolicy::new(prune_config)?;
+        let private_key = decode_unit::<ed25519::PrivateKey>(&self.private_key, "private_key")?;
+        let dkg_storage_key = decode_storage_key(&self.dkg_storage_key)?;
+        let public_key = private_key.public_key();
+
+        if self.peer_config.participants.is_empty() {
+            return Err(Error::EmptyValidatorSet);
+        }
+        let schedule = &self.peer_config.num_participants_per_round;
+        if schedule.is_empty()
+            || schedule
+                .iter()
+                .any(|count| *count == 0 || *count as usize > self.peer_config.participants.len())
+        {
+            return Err(Error::InvalidParticipantSchedule);
+        }
+        let max_participants = NonZeroU32::new(
+            schedule.iter().copied().max().expect("schedule checked non-empty"),
+        )
+        .expect("schedule checked non-zero");
+        let output = decode_output(&self.output, max_participants)?;
+        let protocol_config = nunchi_dkg::DkgProtocolConfig::<MinSig, PublicKey> {
+            state_format_version: nunchi_dkg::STATE_FORMAT_VERSION,
+            namespace: NAMESPACE.to_vec(),
+            epoch_length: self.epoch_length,
+            participants: self.peer_config.participants.clone(),
+            num_participants_per_round: schedule.clone(),
+            mode: commonware_cryptography::bls12381::primitives::sharing::Mode::NonZeroCounter,
+            mode_version: 0,
+            fault_model: nunchi_dkg::public::N3F1_FAULT_MODEL,
+            trusted_initial_identity: *output.public().public(),
+        };
+        protocol_config.validate().map_err(Error::DkgConfig)?;
+
+        if output.players() != &self.peer_config.dealers(0) {
+            return Err(Error::InitialPlayersMismatch);
+        }
+        let validator = self.peer_config.participants.position(&public_key).is_some();
+        let secondary = self.secondary_nodes.position(&public_key).is_some();
+        if validator && secondary {
+            return Err(Error::AmbiguousLocalIdentity);
+        }
+        if self
+            .peer_config
+            .participants
+            .iter()
+            .any(|key| self.secondary_nodes.position(key).is_some())
+        {
+            return Err(Error::OverlappingNodeSets);
+        }
+
+        let role = match (validator, secondary, self.share.as_deref()) {
+            (true, false, Some(encoded)) => {
+                let share = decode_unit::<group::Share>(encoded, "share")
+                    .map_err(|error| Error::InvalidShareEncoding(error.to_string()))?;
+                nunchi_dkg::validate_share(&output, &public_key, &share)
+                    .map_err(Error::InvalidShare)?;
+                NodeRole::Validator { share }
+            }
+            (true, false, None) => return Err(Error::ValidatorMissingShare),
+            (false, true, None) => NodeRole::Secondary,
+            (false, true, Some(_)) => return Err(Error::SecondaryHasShare),
+            (false, false, _) => return Err(Error::UnknownLocalIdentity),
+            (true, true, _) => unreachable!("overlapping local identity rejected above"),
+        };
+        if matches!(role, NodeRole::Secondary) && self.indexer_url.is_some() {
+            return Err(Error::SecondaryIndexer);
+        }
+        for bootstrapper in &self.bootstrappers {
+            if self
+                .peer_config
+                .participants
+                .position(&bootstrapper.public_key)
+                .is_none()
+                && self
+                    .secondary_nodes
+                    .position(&bootstrapper.public_key)
+                    .is_none()
+            {
+                return Err(Error::UnknownBootstrapper(
+                    bootstrapper.public_key.to_string(),
+                ));
+            }
+        }
+        let genesis = read_genesis(self.genesis_path.as_ref())?;
+
+        Ok(ValidatedNodeConfig {
+            config: self,
+            private_key,
+            dkg_storage_key,
+            public_key,
+            output,
+            role,
+            prune_config,
+            genesis,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+enum NodeRole {
+    Validator { share: group::Share },
+    Secondary,
+}
+
+impl NodeRole {
+    fn share(&self) -> Option<group::Share> {
+        match self {
+            Self::Validator { share } => Some(share.clone()),
+            Self::Secondary => None,
+        }
+    }
+
+    fn node_type(&self) -> rpc::NodeType {
+        match self {
+            Self::Validator { .. } => rpc::NodeType::Validator,
+            Self::Secondary => rpc::NodeType::Secondary,
+        }
+    }
+}
+
+struct ValidatedNodeConfig {
+    config: NodeConfig,
+    private_key: ed25519::PrivateKey,
+    dkg_storage_key: StorageKey,
+    public_key: PublicKey,
+    output: Output<MinSig, PublicKey>,
+    role: NodeRole,
+    prune_config: PruneConfig,
+    genesis: Option<ChainGenesis>,
 }
 
 fn default_epoch_length() -> NonZeroU64 {
@@ -393,6 +538,50 @@ mod ingress_serde {
     }
 }
 
+mod secondary_serde {
+    use super::*;
+    use serde::{de::SeqAccess, de::Visitor, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &Set<PublicKey>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_seq(value.iter().map(|key| hex(&key.encode())))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Set<PublicKey>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct SetVisitor;
+
+        impl<'de> Visitor<'de> for SetVisitor {
+            type Value = Set<PublicKey>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("an array of unique hex public keys")
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut keys = Vec::new();
+                while let Some(value) = sequence.next_element::<String>()? {
+                    let bytes = from_hex(&value)
+                        .ok_or_else(|| serde::de::Error::custom("invalid hex public key"))?;
+                    let key = PublicKey::decode(bytes.as_slice())
+                        .map_err(serde::de::Error::custom)?;
+                    keys.push(key);
+                }
+                Set::try_from(keys).map_err(|_| serde::de::Error::custom("duplicate item"))
+            }
+        }
+
+        deserializer.deserialize_seq(SetVisitor)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConsensusConfig {
     pub leader_timeout_ms: u64,
@@ -430,16 +619,42 @@ impl Default for NetworkConfig {
 pub enum Error {
     #[error("validator count must be non-zero")]
     EmptyValidatorSet,
-    #[error("expected {validators} public hosts, got {hosts}")]
-    PublicHostCount { validators: u32, hosts: usize },
+    #[error("expected {nodes} public hosts, got {hosts}")]
+    PublicHostCount { nodes: u32, hosts: usize },
     #[error("validator count is too large for this platform: {0}")]
     ValidatorCountTooLarge(#[from] TryFromIntError),
-    #[error("port range starting at {base_port} cannot fit {validators} validators")]
-    PortRange { base_port: u16, validators: u32 },
+    #[error("total node count overflowed")]
+    NodeCountOverflow,
+    #[error("port range starting at {base_port} cannot fit {nodes} nodes")]
+    PortRange { base_port: u16, nodes: u32 },
     #[error("trusted setup failed: {0}")]
     Deal(commonware_cryptography::bls12381::dkg::feldman_desmedt::Error),
     #[error("missing threshold share for validator {0}")]
     MissingShare(usize),
+    #[error("invalid DKG participant schedule")]
+    InvalidParticipantSchedule,
+    #[error("invalid DKG protocol configuration: {0}")]
+    DkgConfig(nunchi_dkg::public::Error),
+    #[error("initial output players do not match the round-zero validator schedule")]
+    InitialPlayersMismatch,
+    #[error("validator and secondary sets overlap")]
+    OverlappingNodeSets,
+    #[error("local identity is not allowlisted as a validator or secondary")]
+    UnknownLocalIdentity,
+    #[error("local identity is allowlisted in both node sets")]
+    AmbiguousLocalIdentity,
+    #[error("validator configuration is missing its threshold share")]
+    ValidatorMissingShare,
+    #[error("secondary configuration unexpectedly contains a threshold share")]
+    SecondaryHasShare,
+    #[error("invalid validator threshold share: {0}")]
+    InvalidShare(nunchi_dkg::public::Error),
+    #[error("failed to decode validator threshold share: {0}")]
+    InvalidShareEncoding(String),
+    #[error("secondary nodes cannot configure an indexer URL")]
+    SecondaryIndexer,
+    #[error("bootstrapper {0} is not in either node allowlist")]
+    UnknownBootstrapper(String),
     #[error("failed to decode hex field {field}")]
     HexDecode { field: &'static str },
     #[error("failed to decode field {field}: {source}")]
@@ -479,27 +694,34 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
     }
 
     fs::create_dir_all(&config.base_data_dir)?;
-    let node_count = usize::try_from(config.validators)?;
-    check_port_range(config.base_port, config.validators)?;
-    check_port_range(config.base_rpc_port, config.validators)?;
-    check_port_range(config.base_metrics_port, config.validators)?;
+    let total_nodes = config
+        .validators
+        .checked_add(config.secondaries)
+        .ok_or(Error::NodeCountOverflow)?;
+    let node_count = usize::try_from(total_nodes)?;
+    let validator_count = usize::try_from(config.validators)?;
+    check_port_range(config.base_port, total_nodes)?;
+    check_port_range(config.base_rpc_port, total_nodes)?;
+    check_port_range(config.base_metrics_port, total_nodes)?;
     if let Some(public_ips) = &config.public_ips {
         if public_ips.len() != node_count {
             return Err(Error::PublicHostCount {
-                validators: config.validators,
+                nodes: total_nodes,
                 hosts: public_ips.len(),
             });
         }
     }
 
-    let private_keys = (0..config.validators)
+    let private_keys = (0..total_nodes)
         .map(|index| ed25519::PrivateKey::from_seed(config.seed.wrapping_add(index as u64)))
         .collect::<Vec<_>>();
-    let participants = private_keys
+    let public_keys = private_keys
         .iter()
         .map(|signer| signer.public_key())
         .collect::<Vec<_>>();
-    let participants_set = Set::from_iter_dedup(participants.clone());
+    let (primary_public_keys, secondary_public_keys) = public_keys.split_at(validator_count);
+    let participants_set = Set::from_iter_dedup(primary_public_keys.iter().cloned());
+    let secondary_nodes = Set::from_iter_dedup(secondary_public_keys.iter().cloned());
 
     let mut rng = StdRng::seed_from_u64(config.seed);
     let (output, shares) =
@@ -512,14 +734,21 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
 
     let mut nodes = Vec::with_capacity(node_count);
     for index in 0..node_count {
-        let name = format!("validator-{index}");
+        let validator = index < validator_count;
+        let role_index = if validator { index } else { index - validator_count };
+        let name = if validator {
+            format!("validator-{role_index}")
+        } else {
+            format!("secondary-{role_index}")
+        };
         let port = config.base_port + u16::try_from(index)?;
         let rpc_port = config.base_rpc_port + u16::try_from(index)?;
         let metrics_port = config.base_metrics_port + u16::try_from(index)?;
         let storage_dir = config
             .storage_dir
-            .clone()
-            .unwrap_or_else(|| config.base_data_dir.join(&name));
+            .as_ref()
+            .unwrap_or(&config.base_data_dir)
+            .join(&name);
         if config.storage_dir.is_none() {
             fs::create_dir_all(&storage_dir)?;
         }
@@ -533,7 +762,7 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
                 .unwrap_or(config.bind_ip),
             port,
         ));
-        let bootstrappers = participants
+        let bootstrappers = primary_public_keys
             .iter()
             .enumerate()
             .filter(|(candidate, _)| *candidate != index)
@@ -551,16 +780,22 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
                 })
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        let share = shares
-            .get_value(&participants[index])
-            .ok_or(Error::MissingShare(index))?;
+        let share = validator
+            .then(|| {
+                shares
+                    .get_value(&public_keys[index])
+                    .map(encode)
+                    .ok_or(Error::MissingShare(index))
+            })
+            .transpose()?;
         let node_config = NodeConfig {
             name: name.clone(),
             private_key: encode(&private_keys[index]),
             dkg_storage_key: encode_storage_key(&storage_key(config.seed, index)),
             output: encode(&output),
-            share: encode(share),
+            share,
             peer_config: peer_config.clone(),
+            secondary_nodes: secondary_nodes.clone(),
             listen_address,
             dialable_address,
             rpc_address: SocketAddr::new(config.bind_ip, rpc_port),
@@ -568,7 +803,11 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
             bootstrappers,
             storage_dir: storage_dir.clone(),
             genesis_path: config.genesis_path.clone(),
-            indexer_url: config.indexer_url.clone(),
+            indexer_url: if validator {
+                config.indexer_url.clone()
+            } else {
+                None
+            },
             epoch_length: default_epoch_length(),
             min_block_interval_ms: default_min_block_interval_ms(),
             indexer_spool_max_entries: default_indexer_spool_max_entries(),
@@ -607,28 +846,29 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
     })
 }
 
-fn check_port_range(base_port: u16, validators: u32) -> Result<(), Error> {
+fn check_port_range(base_port: u16, nodes: u32) -> Result<(), Error> {
     let out_of_range = || Error::PortRange {
         base_port,
-        validators,
+        nodes,
     };
-    let last_offset = u16::try_from(validators - 1).map_err(|_| out_of_range())?;
+    let last_offset = u16::try_from(nodes - 1).map_err(|_| out_of_range())?;
     base_port
         .checked_add(last_offset)
         .ok_or_else(out_of_range)?;
     Ok(())
 }
 
-/// Run a single validator from a generated config until it receives a shutdown signal or the
+/// Run a single node from a generated config until it receives a shutdown signal or the
 /// engine stops.
 ///
 /// On Unix the node exits cleanly on SIGINT or SIGTERM. On other platforms it responds to
 /// Ctrl-C. If the engine stops before a signal is received the function returns
 /// [`Error::Engine`].
 pub fn run_node(config_path: impl AsRef<Path>) -> Result<(), Error> {
-    let config = NodeConfig::read(config_path)?;
-    let runtime =
-        tokio::Runner::new(tokio::Config::new().with_storage_directory(config.storage_dir.clone()));
+    let validated = NodeConfig::read_validated(config_path)?;
+    let runtime = tokio::Runner::new(
+        tokio::Config::new().with_storage_directory(validated.config.storage_dir.clone()),
+    );
     runtime.start(|context| async move {
         tokio::telemetry::init(
             context.child("telemetry"),
@@ -636,10 +876,10 @@ pub fn run_node(config_path: impl AsRef<Path>) -> Result<(), Error> {
                 level: log_level_from_env(),
                 json: false,
             },
-            Some(config.metrics_address),
+            Some(validated.config.metrics_address),
             None,
         );
-        let (rpc_server, engine_handle) = start_node(&context, config).await?;
+        let (rpc_server, engine_handle) = start_node(&context, validated).await?;
         wait_for_shutdown(context, rpc_server, engine_handle).await
     })
 }
@@ -707,7 +947,7 @@ async fn shutdown(
 
 async fn start_node(
     context: &tokio::Context,
-    config: NodeConfig,
+    validated: ValidatedNodeConfig,
 ) -> Result<
     (
         nunchi_rpc::ServerHandle,
@@ -715,15 +955,18 @@ async fn start_node(
     ),
     Error,
 > {
-    let prune_config = config.prune_config()?;
-    crate::history::RetentionPolicy::new(prune_config)?;
-    let private_key = decode_unit::<ed25519::PrivateKey>(&config.private_key, "private_key")?;
-    let dkg_storage_key = decode_storage_key(&config.dkg_storage_key)?;
-    let public_key = private_key.public_key();
+    let ValidatedNodeConfig {
+        config,
+        private_key,
+        dkg_storage_key,
+        public_key,
+        output,
+        role,
+        prune_config,
+        genesis,
+    } = validated;
     let max_participants = NonZeroU32::new(config.peer_config.max_participants_per_round())
-        .ok_or(Error::EmptyValidatorSet)?;
-    let output = decode_output(&config.output, max_participants)?;
-    let share = decode_unit::<group::Share>(&config.share, "share")?;
+        .expect("validated participant schedule is non-empty");
     let bootstrappers = config
         .bootstrappers
         .iter()
@@ -742,7 +985,8 @@ async fn start_node(
         dialable = ?config.dialable_address,
         rpc = %config.rpc_address,
         metrics = %config.metrics_address,
-        "starting coins-chain validator"
+        role = ?role,
+        "starting coins-chain node"
     );
 
     let p2p_config = discovery::Config::local(
@@ -754,7 +998,13 @@ async fn start_node(
         config.networking.max_message_size,
     );
     let (mut network, mut oracle) = Network::new(context.child("network"), p2p_config);
-    oracle.track(0, config.peer_config.participants.clone());
+    oracle.track(
+        0,
+        commonware_p2p::TrackedPeers::new(
+            config.peer_config.participants.clone(),
+            config.secondary_nodes.clone(),
+        ),
+    );
 
     let channel_rate = Quota::per_second(
         NonZeroU32::new(config.networking.channel_rate_per_second).unwrap_or(NZU32!(u32::MAX)),
@@ -798,8 +1048,9 @@ async fn start_node(
         signer: private_key,
         dkg_storage_key,
         output,
-        share: Some(share),
+        share: role.share(),
         peer_config: config.peer_config.clone(),
+        secondary_nodes: config.secondary_nodes.clone(),
         epoch_length: config.epoch_length,
         min_block_interval_ms: config.min_block_interval_ms,
         leader_timeout: Duration::from_millis(config.consensus.leader_timeout_ms),
@@ -810,7 +1061,7 @@ async fn start_node(
         prune_config,
         max_block_transactions: config.max_block_transactions,
         pool_config: PoolConfig::default(),
-        genesis: read_genesis(config.genesis_path.as_ref())?,
+        genesis,
         indexer: indexer_client.map(|(client, _metrics)| client),
         indexer_spool_limits: indexer::SpoolLimits {
             max_entries: config.indexer_spool_max_entries,
@@ -858,13 +1109,14 @@ async fn start_node(
         node_handle.query(),
         node_handle.submitter.clone(),
         node_handle.applied_height.clone(),
+        role.node_type(),
     )?;
     let rpc_server = nunchi_rpc::ServerBuilder::default()
         .build(config.rpc_address)
         .await?
         .start(rpc_module);
 
-    info!(node = %config.name, "coins-chain validator started");
+    info!(node = %config.name, role = ?role, "coins-chain node started");
     Ok((rpc_server, engine_handle))
 }
 
