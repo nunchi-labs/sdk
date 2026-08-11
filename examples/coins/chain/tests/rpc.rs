@@ -15,7 +15,7 @@ use nunchi_coins::{
     Transaction as CoinTransaction,
 };
 use nunchi_coins_chain::rpc::{
-    self, StatusResponse, SubmitTransactionResponse, TransactionStatusResponse,
+    self, NodeType, StatusResponse, SubmitTransactionResponse, TransactionStatusResponse,
 };
 use nunchi_coins_chain::Transaction;
 use nunchi_common::QmdbState;
@@ -44,8 +44,13 @@ fn rpc_serves_status_and_filters_submissions_over_http() {
         let applied_height = Arc::new(AsyncMutex::new(Height::zero()));
         let expected_root = encode_hex(&ledger.lock().await.root());
 
-        let module = rpc::module(ledger.clone(), submitter.clone(), applied_height)
-            .expect("build RPC module");
+        let module = rpc::module(
+            ledger.clone(),
+            submitter.clone(),
+            applied_height.clone(),
+            NodeType::Validator,
+        )
+        .expect("build RPC module");
         let server = ServerBuilder::default()
             .build("127.0.0.1:0")
             .await
@@ -64,6 +69,40 @@ fn rpc_serves_status_and_filters_submissions_over_http() {
             .expect("chain.status");
         assert_eq!(status.applied_height, 0);
         assert_eq!(status.state_root, expected_root);
+        assert_eq!(status.node_type, NodeType::Validator);
+        assert_eq!(
+            serde_json::to_string(&status.node_type).unwrap(),
+            "\"validator\""
+        );
+
+        *applied_height.lock().await = Height::new(7);
+        let secondary_module = rpc::module(
+            ledger.clone(),
+            submitter.clone(),
+            applied_height,
+            NodeType::Secondary,
+        )
+        .expect("build secondary RPC module");
+        let secondary_server = ServerBuilder::default()
+            .build("127.0.0.1:0")
+            .await
+            .expect("bind secondary RPC server");
+        let secondary_address = secondary_server.local_addr().unwrap();
+        let secondary_server = secondary_server.start(secondary_module);
+        let secondary_client = HttpClient::builder()
+            .build(format!("http://{secondary_address}"))
+            .unwrap();
+        let secondary_status: StatusResponse = secondary_client
+            .request("chain.status", rpc_params![])
+            .await
+            .unwrap();
+        assert_eq!(secondary_status.applied_height, 7);
+        assert_eq!(secondary_status.node_type, NodeType::Secondary);
+        assert_eq!(
+            serde_json::to_string(&secondary_status.node_type).unwrap(),
+            "\"secondary\""
+        );
+        secondary_server.stop().expect("stop secondary RPC server");
 
         // A well-signed transaction is accepted and lands in the pool.
         let alice = PrivateKey::from_seed(100);

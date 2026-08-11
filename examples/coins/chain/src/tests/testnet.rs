@@ -5,7 +5,9 @@
 //! as `narae` consume. [`run_node`] boots a single validator from one of those configs on the
 //! tokio runtime with authenticated peer discovery, and serves the aggregated JSON-RPC module.
 
+use commonware_codec::Encode;
 use commonware_cryptography::{bls12381::primitives::group, ed25519, Signer as _};
+use commonware_formatting::hex;
 use commonware_macros::select;
 use commonware_p2p::{
     authenticated::discovery::{self, Network},
@@ -45,6 +47,7 @@ fn generated_testnet_has_unique_ports_dirs_and_complete_peer_sets() {
 
     let manifest = generate_local_testnet(LocalTestnetConfig {
         validators: 4,
+        secondaries: 0,
         base_port: 40_000,
         base_rpc_port: 41_000,
         base_metrics_port: 42_000,
@@ -119,7 +122,8 @@ fn generated_testnet_has_unique_ports_dirs_and_complete_peer_sets() {
         let max_participants =
             NonZeroU32::new(config.peer_config.max_participants_per_round()).unwrap();
         decode_output(&config.output, max_participants).expect("decode output");
-        decode_unit::<group::Share>(&config.share, "share").expect("decode share");
+        decode_unit::<group::Share>(config.share.as_deref().unwrap(), "share")
+            .expect("decode share");
         decode_unit::<ed25519::PrivateKey>(&config.private_key, "private_key")
             .expect("decode private key");
         let dkg_storage_key =
@@ -133,6 +137,158 @@ fn generated_testnet_has_unique_ports_dirs_and_complete_peer_sets() {
 }
 
 #[test]
+fn generated_testnet_includes_non_voting_secondaries() {
+    let dir = std::env::temp_dir().join(format!(
+        "coins-chain-secondary-testnet-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    let manifest = generate_local_testnet(LocalTestnetConfig {
+        validators: 2,
+        secondaries: 2,
+        base_port: 47_000,
+        base_rpc_port: 47_100,
+        base_metrics_port: 47_200,
+        base_data_dir: dir.clone(),
+        bind_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        public_ips: None,
+        storage_dir: None,
+        genesis_path: None,
+        indexer_url: Some("https://indexer.example.com".to_string()),
+        seed: 91,
+    })
+    .expect("generate testnet with secondaries");
+
+    assert_eq!(manifest.nodes.len(), 4);
+    assert_eq!(manifest.indexer.participants, 2);
+    let configs = manifest
+        .nodes
+        .iter()
+        .map(|node| NodeConfig::read(&node.config_path).unwrap())
+        .collect::<Vec<_>>();
+    let validators = &configs[..2];
+    let secondaries = &configs[2..];
+    for config in &configs {
+        assert_eq!(config.peer_config.participants.len(), 2);
+        assert_eq!(config.secondary_nodes.len(), 2);
+        assert_eq!(config.bootstrappers.len(), 3);
+    }
+    assert!(validators
+        .iter()
+        .all(|config| config.share.is_some() && config.indexer_url.is_some()));
+    assert!(secondaries
+        .iter()
+        .all(|config| config.share.is_none() && config.indexer_url.is_none()));
+    assert!(manifest.nodes[2].name.starts_with("secondary-"));
+    assert_eq!(
+        configs
+            .iter()
+            .map(|config| config.storage_dir.clone())
+            .collect::<HashSet<_>>()
+            .len(),
+        4
+    );
+
+    let mut invalid = secondaries[0].clone();
+    invalid.share = validators[0].share.clone();
+    let path = dir.join("secondary-with-share.toml");
+    invalid.write(&path).unwrap();
+    assert!(matches!(NodeConfig::read(&path), Err(Error::SecondaryHasShare)));
+
+    invalid = validators[0].clone();
+    invalid.share = None;
+    invalid.write(&path).unwrap();
+    assert!(matches!(NodeConfig::read(&path), Err(Error::ValidatorMissingShare)));
+
+    invalid = validators[0].clone();
+    invalid.share = validators[1].share.clone();
+    invalid.write(&path).unwrap();
+    assert!(matches!(NodeConfig::read(&path), Err(Error::InvalidShare(_))));
+
+    invalid = validators[0].clone();
+    invalid.share = Some("not-hex".to_string());
+    invalid.write(&path).unwrap();
+    assert!(matches!(
+        NodeConfig::read(&path),
+        Err(Error::InvalidShareEncoding(_))
+    ));
+
+    invalid = secondaries[0].clone();
+    invalid.indexer_url = Some("https://indexer.example.com".to_string());
+    invalid.write(&path).unwrap();
+    assert!(matches!(NodeConfig::read(&path), Err(Error::SecondaryIndexer)));
+
+    invalid = validators[0].clone();
+    let other_validator = decode_unit::<ed25519::PrivateKey>(
+        &validators[1].private_key,
+        "private_key",
+    )
+    .unwrap()
+    .public_key();
+    invalid.secondary_nodes = Set::from_iter_dedup(
+        invalid
+            .secondary_nodes
+            .iter()
+            .cloned()
+            .chain([other_validator]),
+    );
+    invalid.write(&path).unwrap();
+    assert!(matches!(NodeConfig::read(&path), Err(Error::OverlappingNodeSets)));
+
+    invalid = validators[0].clone();
+    let local_key = decode_unit::<ed25519::PrivateKey>(&invalid.private_key, "private_key")
+        .unwrap()
+        .public_key();
+    invalid.secondary_nodes = Set::from_iter_dedup(
+        invalid
+            .secondary_nodes
+            .iter()
+            .cloned()
+            .chain([local_key]),
+    );
+    invalid.write(&path).unwrap();
+    assert!(matches!(
+        NodeConfig::read(&path),
+        Err(Error::AmbiguousLocalIdentity)
+    ));
+
+    invalid = validators[0].clone();
+    invalid.private_key = hex(&ed25519::PrivateKey::from_seed(998).encode());
+    invalid.write(&path).unwrap();
+    assert!(matches!(
+        NodeConfig::read(&path),
+        Err(Error::UnknownLocalIdentity)
+    ));
+
+    invalid = validators[0].clone();
+    invalid.peer_config.num_participants_per_round.clear();
+    invalid.write(&path).unwrap();
+    assert!(matches!(
+        NodeConfig::read(&path),
+        Err(Error::InvalidParticipantSchedule)
+    ));
+
+    invalid = validators[0].clone();
+    invalid.peer_config.num_participants_per_round = vec![1, 2];
+    invalid.write(&path).unwrap();
+    assert!(matches!(NodeConfig::read(&path), Err(Error::InitialPlayersMismatch)));
+
+    invalid = validators[0].clone();
+    invalid.bootstrappers[0].public_key = ed25519::PrivateKey::from_seed(999).public_key();
+    invalid.write(&path).unwrap();
+    assert!(matches!(NodeConfig::read(&path), Err(Error::UnknownBootstrapper(_))));
+
+    let secondary_path = &manifest.nodes[2].config_path;
+    let raw = fs::read_to_string(secondary_path).unwrap();
+    let key = secondaries[0].secondary_nodes.iter().next().unwrap().to_string();
+    let duplicate = raw.replacen(&format!("\"{key}\""), &format!("\"{key}\", \"{key}\""), 1);
+    fs::write(&path, duplicate).unwrap();
+    assert!(matches!(NodeConfig::read(&path), Err(Error::TomlDeserialize(_))));
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn prune_config_is_required_and_validated() {
     let dir = std::env::temp_dir().join(format!(
         "coins-chain-prune-config-{}",
@@ -141,6 +297,7 @@ fn prune_config_is_required_and_validated() {
     let _ = fs::remove_dir_all(&dir);
     let manifest = generate_local_testnet(LocalTestnetConfig {
         validators: 1,
+        secondaries: 0,
         base_port: 46_000,
         base_rpc_port: 46_100,
         base_metrics_port: 46_200,
@@ -235,6 +392,7 @@ fn node_config_uses_defaults_when_omitted_and_reads_overrides() {
     let _ = fs::remove_dir_all(&dir);
     let manifest = generate_local_testnet(LocalTestnetConfig {
         validators: 1,
+        secondaries: 0,
         base_port: 43_000,
         base_rpc_port: 44_000,
         base_metrics_port: 45_000,
@@ -285,6 +443,7 @@ fn generated_testnet_can_advertise_remote_hosts() {
     let storage_dir = PathBuf::from("/var/lib/nunchi/coins-chain");
     let manifest = generate_local_testnet(LocalTestnetConfig {
         validators: 2,
+        secondaries: 0,
         base_port: 30_000,
         base_rpc_port: 8_545,
         base_metrics_port: 9_090,
@@ -311,7 +470,7 @@ fn generated_testnet_can_advertise_remote_hosts() {
     assert!(first_raw.contains("dialable_address = \"192.0.2.10:30000\""));
     assert!(first_raw.contains(&format!("\"{}\"", first.bootstrappers[0])));
     assert!(!first_raw.contains("[[bootstrappers]]"));
-    assert_eq!(first.storage_dir, storage_dir);
+    assert_eq!(first.storage_dir, storage_dir.join("validator-0"));
     assert_eq!(
         first.indexer_url.as_deref(),
         Some("https://indexer.example.com/coins-chain")
@@ -335,6 +494,7 @@ fn peer_addresses_round_trip_dns_and_ipv6_as_strings() {
     let _ = fs::remove_dir_all(&dir);
     let manifest = generate_local_testnet(LocalTestnetConfig {
         validators: 2,
+        secondaries: 0,
         base_port: 32_000,
         base_rpc_port: 33_000,
         base_metrics_port: 34_000,
@@ -533,6 +693,7 @@ fn invalid_peer_addresses_are_rejected_through_node_config_read() {
     let _ = fs::remove_dir_all(&dir);
     let manifest = generate_local_testnet(LocalTestnetConfig {
         validators: 1,
+        secondaries: 0,
         base_port: 35_000,
         base_rpc_port: 36_000,
         base_metrics_port: 37_000,
@@ -586,6 +747,7 @@ fn parse_dns_address_through_node_config(address: &str, seed: u64) -> Ingress {
     let _ = fs::remove_dir_all(&dir);
     let manifest = generate_local_testnet(LocalTestnetConfig {
         validators: 1,
+        secondaries: 0,
         base_port: 38_000,
         base_rpc_port: 38_100,
         base_metrics_port: 38_200,
