@@ -343,9 +343,7 @@ pub(crate) struct ValidatedNodeConfig {
 
 impl ValidatedNodeConfig {
     pub(crate) fn indexer_url(&self) -> Option<&str> {
-        matches!(&self.role, NodeRole::Secondary)
-            .then_some(self.config.indexer_url.as_deref())
-            .flatten()
+        self.config.indexer_url.as_deref()
     }
 }
 
@@ -806,7 +804,7 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
             bootstrappers,
             storage_dir: storage_dir.clone(),
             genesis_path: config.genesis_path.clone(),
-            indexer_url: (!validator).then(|| config.indexer_url.clone()).flatten(),
+            indexer_url: config.indexer_url.clone(),
             epoch_length: default_epoch_length(),
             min_block_interval_ms: default_min_block_interval_ms(),
             indexer_spool_max_entries: default_indexer_spool_max_entries(),

@@ -13,8 +13,8 @@ cargo build -p nunchi-coins-chain --bin coins-chain-node
 cargo run -p narae -- up coins-chain
 ```
 
-To include non-voting secondary nodes that upload consensus artifacts to an indexer, add
-`--secondaries` and `--indexer-url`:
+To have every generated node upload consensus artifacts to an indexer, add `--indexer-url`.
+Secondary nodes can be included to provide non-voting uploader redundancy:
 
 ```sh
 cargo run -p narae -- generate coins-chain --validators 4 --secondaries 2 \\
@@ -43,14 +43,16 @@ curl -s -X POST -H 'Content-Type: application/json' \
 curl -s http://127.0.0.1:9090/metrics
 ```
 
-Only secondary configs receive `indexer_url`. Zero, one, or multiple secondary nodes may be
-configured independently; no uploader is required for consensus. Redundant secondaries can
-submit duplicate artifacts because indexer requests are idempotent.
+Voting validator and non-voting secondary configs both receive `indexer_url` when the generation
+option is provided. Remove or omit `indexer_url` to disable uploading on an individual node; no
+uploader is required for consensus. Redundant nodes can submit duplicate artifacts because indexer
+requests are idempotent. On voting validators, enabling uploads adds bounded background HTTP,
+encoding, and storage work, so production operators should enable only the redundancy they need.
 
 An uploader restart retains and drains its own bounded spool when its storage is preserved. A
 fresh or state-synced replacement has only bounded finalized history and cannot reconstruct
 arbitrary historical uploads. Preserve storage when using one uploader, or configure redundant
-secondaries. After enabling or restarting an uploader, wait until its applied height and latest
+nodes. After enabling or restarting an uploader, wait until its applied height and latest
 successful DKG-upload metric are current before relying on it.
 
 Inside the dashboard: `↑`/`↓` (or `j`/`k`) select a node, `PgUp`/`PgDn` scroll its logs, `/`

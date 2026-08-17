@@ -1,4 +1,4 @@
-//! Indexer upload integration for configured coins-chain secondary full nodes.
+//! Indexer upload integration for configured coins-chain nodes.
 
 use crate::{Block, Finalized, Notarized, Seed};
 use commonware_consensus::marshal::{core::Mailbox as MarshalMailbox, standard::Standard};

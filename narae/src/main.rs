@@ -76,7 +76,7 @@ enum ChainCommand {
         validators: u32,
         #[arg(long, default_value_t = 0)]
         secondaries: u32,
-        /// Configure uploads from every generated secondary full node.
+        /// Configure uploads from every generated node.
         #[arg(long)]
         indexer_url: Option<String>,
         #[arg(long, default_value = "testnet")]
