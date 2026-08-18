@@ -1,196 +1,146 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <meta charset="UTF-8">
-  <title>Nunchi Wallet Test Fixtures</title>
-  <style>
-    body {
-      font-family: monospace;
-      padding: 20px;
-      background: #0a0e17;
-      color: #e8eaed;
-    }
-    h1 { color: #3b82f6; }
-    .test { 
-      margin: 20px 0;
-      padding: 15px;
-      background: #141824;
-      border: 1px solid #2a2f3e;
-      border-radius: 8px;
-    }
-    .pass { border-left: 4px solid #10b981; }
-    .fail { border-left: 4px solid #ef4444; }
-    .label { color: #9aa0a6; font-size: 12px; }
-    .value { margin-top: 5px; }
-    .error { color: #ef4444; }
-  </style>
+    <title>Nunchi Wallet WASM Fixtures</title>
+    <style>
+        body { font-family: monospace; padding: 20px; background: #1a1a1a; color: #00ff00; }
+        .test { margin: 20px 0; padding: 15px; border: 1px solid #333; background: #222; }
+        .pass { color: #00ff00; }
+        .fail { color: #ff0000; }
+        pre { background: #111; padding: 10px; border-radius: 4px; overflow-x: auto; }
+    </style>
 </head>
 <body>
-  <h1>Nunchi Wallet WASM Crypto Test Fixtures</h1>
-  <div id="tests"></div>
+    <h1>Nunchi Wallet Extension - Test Fixtures</h1>
+    <p>Testing WASM crypto operations match Rust SDK</p>
+    <div id="output"></div>
 
-  <script type="module">
-    import init, * as wasm from './src/wasm/nunchi_wallet_crypto.js';
-
-    const tests = document.getElementById('tests');
-
-    async function runTests() {
-      await init();
-
-      // Test 1: Verify address format (should be ~62 chars, start with nch1)
-      await testAddressFormat();
-
-      // Test 2: Import and verify address derivation
-      await testAddressDerivation();
-
-      // Test 3: Transaction signing and digest
-      await testTransactionSigning();
-
-      // Test 4: Verify Bech32 encoding (not Bech32m)
-      await testBech32Encoding();
-    }
-
-    async function testAddressFormat() {
-      const testDiv = document.createElement('div');
-      testDiv.className = 'test';
-      tests.appendChild(testDiv);
-
-      try {
-        const ed25519 = wasm.generate_ed25519_keypair();
-        const secp256r1 = wasm.generate_secp256r1_keypair();
-
-        const ed25519Valid = ed25519.address.startsWith('nch1') && ed25519.address.length >= 60 && ed25519.address.length <= 65;
-        const secp256r1Valid = secp256r1.address.startsWith('nch1') && secp256r1.address.length >= 60 && secp256r1.address.length <= 65;
-
-        testDiv.className = (ed25519Valid && secp256r1Valid) ? 'test pass' : 'test fail';
-        testDiv.innerHTML = `
-          <strong>Address Format (Bech32, HRP nch)</strong>
-          <div class="label">Ed25519 Address:</div>
-          <div class="value">${ed25519.address} (${ed25519.address.length} chars)</div>
-          <div class="label">Valid:</div>
-          <div class="value">${ed25519Valid ? '✓ YES' : '✗ NO'}</div>
-          <div class="label">Secp256r1 Address:</div>
-          <div class="value">${secp256r1.address} (${secp256r1.address.length} chars)</div>
-          <div class="label">Valid:</div>
-          <div class="value">${secp256r1Valid ? '✓ YES' : '✗ NO'}</div>
-        `;
-      } catch (error) {
-        testDiv.className = 'test fail';
-        testDiv.innerHTML = `
-          <strong>Address Format</strong>
-          <div class="error">ERROR: ${error.message}</div>
-        `;
-      }
-    }
-
-    async function testBech32Encoding() {
-      const testDiv = document.createElement('div');
-      testDiv.className = 'test';
-      tests.appendChild(testDiv);
-
-      try {
-        const keyPair = wasm.generate_ed25519_keypair();
-        const valid = wasm.validate_address(keyPair.address);
+    <script type="module">
+        import init, * as wasm from './dist/nunchi_wallet_crypto.js';
         
-        // Bech32 addresses have a checksum that should validate
-        testDiv.className = valid ? 'test pass' : 'test fail';
-        testDiv.innerHTML = `
-          <strong>Bech32 Encoding (not Bech32m)</strong>
-          <div class="label">Address:</div>
-          <div class="value">${keyPair.address}</div>
-          <div class="label">Validates:</div>
-          <div class="value">${valid ? '✓ YES' : '✗ NO'}</div>
-          <div class="label">Note:</div>
-          <div class="value">Uses Bech32 (not Bech32m) with HRP 'nch'</div>
-        `;
-      } catch (error) {
-        testDiv.className = 'test fail';
-        testDiv.innerHTML = `
-          <strong>Bech32 Encoding</strong>
-          <div class="error">ERROR: ${error.message}</div>
-        `;
-      }
-    }
-
-    async function testAddressDerivation() {
-      const testDiv = document.createElement('div');
-      testDiv.className = 'test';
-      tests.appendChild(testDiv);
-
-      try {
-        const keyPair = wasm.generate_ed25519_keypair();
-        const valid = wasm.validate_address(keyPair.address);
-        const reImported = wasm.import_private_key(keyPair.private_key_hex);
-        const addressMatch = keyPair.address === reImported.address;
-
-        testDiv.className = (valid && addressMatch) ? 'test pass' : 'test fail';
-        testDiv.innerHTML = `
-          <strong>Address Generation & Import Roundtrip</strong>
-          <div class="label">Generated Address:</div>
-          <div class="value">${keyPair.address}</div>
-          <div class="label">Valid Bech32:</div>
-          <div class="value">${valid ? '✓ YES' : '✗ NO'}</div>
-          <div class="label">Re-import Match:</div>
-          <div class="value">${addressMatch ? '✓ YES' : '✗ NO'}</div>
-        `;
-      } catch (error) {
-        testDiv.className = 'test fail';
-        testDiv.innerHTML = `
-          <strong>Address Generation</strong>
-          <div class="error">ERROR: ${error.message}</div>
-        `;
-      }
-    }
-
-    async function testTransactionSigning() {
-      const testDiv = document.createElement('div');
-      testDiv.className = 'test';
-      tests.appendChild(testDiv);
-
-      try {
-        const keyPair = wasm.generate_ed25519_keypair();
-        const to = wasm.generate_ed25519_keypair();
+        const output = document.getElementById('output');
         
-        // Sign with nonce 0
-        const signed = wasm.sign_transfer(
-          keyPair.private_key_hex,
-          0,
-          'a1b2c3d4e5f6',
-          keyPair.address,
-          to.address,
-          '1000'
-        );
-
-        // Verify digest is 64 hex chars (32 bytes SHA256)
-        const digestValid = signed.digest_hex.length === 64;
+        function log(html) {
+            output.innerHTML += html + '<br>';
+        }
         
-        // Transaction should be encoded (has account_id, payload, authorization)
-        const txValid = signed.transaction_hex.length > 100;
-
-        testDiv.className = (digestValid && txValid) ? 'test pass' : 'test fail';
-        testDiv.innerHTML = `
-          <strong>Transaction Signing</strong>
-          <div class="label">From:</div>
-          <div class="value">${keyPair.address.substring(0, 20)}...</div>
-          <div class="label">To:</div>
-          <div class="value">${to.address.substring(0, 20)}...</div>
-          <div class="label">Transaction Digest (SHA256):</div>
-          <div class="value">${signed.digest_hex.substring(0, 16)}... (${signed.digest_hex.length / 2} bytes)</div>
-          <div class="label">Transaction Bytes:</div>
-          <div class="value">${signed.transaction_hex.length / 2} bytes (inner coins Transaction)</div>
-          <div class="label">Valid:</div>
-          <div class="value">${(digestValid && txValid) ? '✓ YES' : '✗ NO'}</div>
-        `;
-      } catch (error) {
-        testDiv.className = 'test fail';
-        testDiv.innerHTML = `
-          <strong>Transaction Signing</strong>
-          <div class="error">ERROR: ${error.message}</div>
-        `;
-      }
-    }
-
-    runTests().catch(console.error);
-  </script>
+        function test(name, fn) {
+            const div = document.createElement('div');
+            div.className = 'test';
+            try {
+                fn(div);
+                div.innerHTML = `<span class="pass">✓</span> ${name}<br>${div.innerHTML}`;
+            } catch (e) {
+                div.innerHTML = `<span class="fail">✗</span> ${name}<br><span class="fail">${e.message}</span><br>${div.innerHTML}`;
+            }
+            output.appendChild(div);
+        }
+        
+        async function runTests() {
+            await init();
+            log('<h2>Initialization Complete</h2>');
+            
+            test('Generate Ed25519 keypair', (div) => {
+                const result = wasm.generate_ed25519_keypair();
+                div.innerHTML += `Curve: ${result.curve}<br>`;
+                div.innerHTML += `Private key: ${result.private_key_hex.substring(0, 20)}...<br>`;
+                div.innerHTML += `Public key: ${result.public_key_hex}<br>`;
+                div.innerHTML += `Address: ${result.address}<br>`;
+                
+                if (result.curve !== 'Ed25519') throw new Error('Wrong curve');
+                if (!result.address.startsWith('nch1')) throw new Error('Address must start with nch1');
+                if (result.address.length < 60 || result.address.length > 65) throw new Error(`Address length ${result.address.length} out of range`);
+                
+                const reimported = wasm.import_private_key(result.private_key_hex);
+                if (reimported.address !== result.address) throw new Error('Re-import mismatch');
+                div.innerHTML += '<span class="pass">Re-import verified</span><br>';
+            });
+            
+            test('Address format validation', (div) => {
+                const result = wasm.generate_ed25519_keypair();
+                const addr = result.address;
+                
+                div.innerHTML += `Address: ${addr}<br>`;
+                div.innerHTML += `Length: ${addr.length}<br>`;
+                div.innerHTML += `HRP: nch<br>`;
+                div.innerHTML += `Encoding: Bech32<br>`;
+                
+                if (!addr.startsWith('nch1')) throw new Error('Must start with nch1');
+                if (addr.toUpperCase() !== addr.toLowerCase() && addr === addr.toUpperCase()) throw new Error('Mixed case not allowed');
+                
+                const isValid = wasm.validate_address(addr);
+                if (!isValid) throw new Error('Address validation failed');
+            });
+            
+            test('Known address from genesis', (div) => {
+                const knownPrivateKey = '01d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a';
+                const knownAddress = 'nch1h2l9l85pj8u49qfgnnxc0smcccv28n8q7utwfz5zjxg8zr8xzls4gqyjq';
+                
+                const imported = wasm.import_private_key(knownPrivateKey);
+                div.innerHTML += `Expected: ${knownAddress}<br>`;
+                div.innerHTML += `Derived:  ${imported.address}<br>`;
+                
+                if (imported.address !== knownAddress) {
+                    throw new Error('Address derivation mismatch!');
+                }
+                div.innerHTML += '<span class="pass">Address derivation matches Rust SDK</span><br>';
+            });
+            
+            test('Sign transfer transaction', (div) => {
+                const privateKey = '01d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a';
+                const imported = wasm.import_private_key(privateKey);
+                const from = imported.address;
+                
+                const result = wasm.sign_transfer(
+                    privateKey,
+                    0n,
+                    '0000000000000000000000000000000000000000000000000000000000000001',
+                    from,
+                    'nch1vtd2hfzay8r2tlwymfvfg7kdrpnns3h47r2f8x2qxg84syx6gf4scajgpg',
+                    '1000'
+                );
+                
+                div.innerHTML += `Digest: ${result.digest_hex}<br>`;
+                div.innerHTML += `Tx length: ${result.transaction_hex.length / 2} bytes<br>`;
+                div.innerHTML += `Tx hex (first 80): ${result.transaction_hex.substring(0, 80)}...<br>`;
+                
+                if (result.digest_hex.length !== 64) throw new Error('Digest must be 32 bytes (64 hex chars)');
+                if (result.transaction_hex.length < 100) throw new Error('Transaction too short');
+            });
+            
+            test('Secp256r1 keypair generation', (div) => {
+                const result = wasm.generate_secp256r1_keypair();
+                div.innerHTML += `Curve: ${result.curve}<br>`;
+                div.innerHTML += `Address: ${result.address}<br>`;
+                
+                if (result.curve !== 'Secp256r1') throw new Error('Wrong curve');
+                if (!result.address.startsWith('nch1')) throw new Error('Address must start with nch1');
+            });
+            
+            test('Invalid address rejection', (div) => {
+                const tests = [
+                    'not_an_address',
+                    'nch1tooshort',
+                    'eth1234567890123456789012345678901234567890',
+                    '',
+                ];
+                
+                let passed = 0;
+                for (const addr of tests) {
+                    const valid = wasm.validate_address(addr);
+                    if (!valid) passed++;
+                    div.innerHTML += `${addr}: ${valid ? '<span class="fail">accepted (bad!)</span>' : '<span class="pass">rejected</span>'}<br>`;
+                }
+                
+                if (passed !== tests.length) throw new Error(`Only ${passed}/${tests.length} invalid addresses rejected`);
+            });
+            
+            log('<h2 class="pass">All tests completed</h2>');
+        }
+        
+        runTests().catch(e => {
+            output.innerHTML += `<div class="test"><span class="fail">Fatal error:</span> ${e.message}<br><pre>${e.stack}</pre></div>`;
+        });
+    </script>
 </body>
 </html>

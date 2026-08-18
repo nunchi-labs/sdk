@@ -25,7 +25,7 @@ export interface ConnectionRequest {
 export interface TransactionRequest {
   id: string;
   origin: string;
-  nonce: u64;
+  nonce: number;
   coin: string;
   from: string;
   to: string;

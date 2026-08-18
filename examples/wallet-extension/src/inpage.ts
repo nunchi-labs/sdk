@@ -139,7 +139,7 @@ Object.defineProperty(window, "nunchi", {
   configurable: false,
 });
 
-Object.defineProperty((window as { nunchi: NunchiProvider }).nunchi, "coins", {
+Object.defineProperty((window as unknown as { nunchi: NunchiProvider }).nunchi, "coins", {
   value: coinsProvider,
   writable: false,
   configurable: false,

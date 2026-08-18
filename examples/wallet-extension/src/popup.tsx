@@ -1,10 +1,10 @@
-import React, { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Lock, Copy, Send, Activity, Settings as SettingsIcon, ArrowLeft, Check } from "lucide-react";
+import { Lock, Copy, Send as SendIcon, Activity, Settings as SettingsIcon, ArrowLeft, Check } from "lucide-react";
 import type { Settings, SubmittedTx } from "./types";
 import "./popup.css";
 
-type View = "loading" | "onboarding" | "unlock" | "home" | "send" | "activity" | "settings";
+type View = "loading" | "onboarding" | "unlock" | "home" | "send" | "activity" | "settings" | "approveConnection" | "approveTransaction";
 
 interface WalletInfo {
   hasWallet: boolean;
@@ -45,7 +45,7 @@ function App() {
     }
   }
 
-  async function handleApprovalFlow(type: string, requestId: string) {
+  async function handleApprovalFlow(type: string, _requestId: string) {
     setView(type === "connection" ? "approveConnection" : "approveTransaction");
   }
 
@@ -313,7 +313,7 @@ function Home({
   onLock: () => void;
 }) {
   const [copied, setCopied] = useState(false);
-  const [balance, setBalance] = useState<string | null>(null);
+  const [balance] = useState<string | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
 
   useEffect(() => {
@@ -369,7 +369,7 @@ function Home({
         </div>
         <div className="actions">
           <button className="primary" onClick={onSend}>
-            <Send size={16} />
+            <SendIcon size={16} />
             Send
           </button>
           <button className="secondary" onClick={onActivity}>
@@ -498,7 +498,7 @@ function ActivityView({ onBack }: { onBack: () => void }) {
             {activity.map((tx) => (
               <div key={tx.hash} className="activityItem">
                 <div className="activityIcon">
-                  <Send size={16} />
+                  <SendIcon size={16} />
                 </div>
                 <div className="activityDetails">
                   <div className="activityTo">{compactAddress(tx.to)}</div>

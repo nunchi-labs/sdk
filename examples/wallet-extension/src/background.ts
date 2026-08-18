@@ -224,7 +224,7 @@ async function handleMessage(message: Message, senderUrl?: string): Promise<Resp
       const wasm = await import("./wasm/nunchi_wallet_crypto");
       const signed = wasm.sign_transfer(
         unlockedWallet.privateKeyHex,
-        request.nonce,
+        BigInt(request.nonce),
         request.coin,
         request.from,
         request.to,

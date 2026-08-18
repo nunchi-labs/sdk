@@ -24,10 +24,10 @@ export async function encryptPrivateKey(
   const iv = new Uint8Array(12);
   crypto.getRandomValues(iv);
 
-  const cryptoKey = await crypto.subtle.importKey("raw", key, { name: "AES-GCM" }, false, ["encrypt"]);
+  const cryptoKey = await crypto.subtle.importKey("raw", key as BufferSource, { name: "AES-GCM" }, false, ["encrypt"]);
 
   const privateKeyBytes = hexToBytes(privateKeyHex);
-  const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, cryptoKey, privateKeyBytes);
+  const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv: iv as BufferSource }, cryptoKey, privateKeyBytes as BufferSource);
 
   const combined = new Uint8Array(iv.length + encrypted.byteLength);
   combined.set(iv, 0);
@@ -51,10 +51,10 @@ export async function decryptPrivateKey(
   const iv = combined.slice(0, 12);
   const encrypted = combined.slice(12);
 
-  const cryptoKey = await crypto.subtle.importKey("raw", key, { name: "AES-GCM" }, false, ["decrypt"]);
+  const cryptoKey = await crypto.subtle.importKey("raw", key as BufferSource, { name: "AES-GCM" }, false, ["decrypt"]);
 
   try {
-    const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, cryptoKey, encrypted);
+    const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv: iv as BufferSource }, cryptoKey, encrypted as BufferSource);
     return bytesToHex(new Uint8Array(decrypted));
   } catch {
     throw new Error("Invalid password");

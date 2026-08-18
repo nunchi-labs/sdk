@@ -5,7 +5,7 @@ A Manifest V3 Chrome extension wallet for Nunchi chains.
 ## Features
 
 - **Key Management**: Create or import Ed25519 and Secp256r1 (P-256) keys
-- **Secure Storage**: Private keys encrypted at rest with password and Argon2-derived keys
+- **Secure Storage**: Private keys encrypted at rest with password and PBKDF2-SHA256 (100k iterations)
 - **Address Derivation**: Byte-identical `nch...` Bech32 addresses matching `Address::external`
 - **Transaction Signing**: Sign and submit coin transfers with proper namespace and codec
 - **In-Page Provider**: `window.nunchi` and `window.nunchi.coins` API for dApps
@@ -24,7 +24,7 @@ A Manifest V3 Chrome extension wallet for Nunchi chains.
 
 ### Prerequisites
 
-- Rust 1.88+ (for WASM dependencies) with `wasm-pack` installed: `cargo install wasm-pack`
+- Rust 1.97+ (stable) with `wasm-pack` installed: `cargo install wasm-pack`
 - Node.js and npm
 - `wasm32-unknown-unknown` target: `rustup target add wasm32-unknown-unknown`
 
