@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "Nunchi Wallet",
+  "version": "0.1.0",
+  "description": "Browser wallet for Nunchi chains",
+  "permissions": ["storage", "unlimitedStorage"],
+  "host_permissions": ["http://localhost:*/", "http://127.0.0.1:*/"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icon-16.svg",
+      "48": "icon-48.svg",
+      "128": "icon-128.svg"
+    }
+  },
+  "icons": {
+    "16": "icon-16.svg",
+    "48": "icon-48.svg",
+    "128": "icon-128.svg"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["inpage.js"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

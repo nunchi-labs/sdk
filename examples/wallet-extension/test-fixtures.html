@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Nunchi Wallet Test Fixtures</title>
+  <style>
+    body {
+      font-family: monospace;
+      padding: 20px;
+      background: #0a0e17;
+      color: #e8eaed;
+    }
+    h1 { color: #3b82f6; }
+    .test { 
+      margin: 20px 0;
+      padding: 15px;
+      background: #141824;
+      border: 1px solid #2a2f3e;
+      border-radius: 8px;
+    }
+    .pass { border-left: 4px solid #10b981; }
+    .fail { border-left: 4px solid #ef4444; }
+    .label { color: #9aa0a6; font-size: 12px; }
+    .value { margin-top: 5px; }
+    .error { color: #ef4444; }
+  </style>
+</head>
+<body>
+  <h1>Nunchi Wallet WASM Crypto Test Fixtures</h1>
+  <div id="tests"></div>
+
+  <script type="module">
+    import init, * as wasm from './src/wasm/nunchi_wallet_crypto.js';
+
+    const tests = document.getElementById('tests');
+
+    async function runTests() {
+      await init();
+
+      // Test 1: Known Ed25519 key from Rust tests (seed 1)
+      // From common/src/tests/account.rs line 9: PrivateKey::ed25519_from_seed(1)
+      await testFixture(
+        'Ed25519 Address (seed 1)',
+        '0120a3c1f1e4e3e2ea2787a5e9fb82c85cdb9e59242a8c2ea2fa6a5bb7e14a0e0a',
+        'nch1qp6lnjh7rn3gaq0gm3v0k5j3v3n9qrkrc7j9zwywvexq9w3u4hkqczp9cc'
+      );
+
+      // Test 2: Import and verify address derivation
+      await testAddressDerivation();
+
+      // Test 3: Transaction signing
+      await testTransactionSigning();
+    }
+
+    async function testFixture(name, privateKeyHex, expectedAddress) {
+      const testDiv = document.createElement('div');
+      testDiv.className = 'test';
+      tests.appendChild(testDiv);
+
+      try {
+        const keyPair = wasm.import_private_key(privateKeyHex);
+        const match = keyPair.address === expectedAddress;
+
+        testDiv.className = match ? 'test pass' : 'test fail';
+        testDiv.innerHTML = `
+          <strong>${name}</strong>
+          <div class="label">Expected:</div>
+          <div class="value">${expectedAddress}</div>
+          <div class="label">Got:</div>
+          <div class="value">${keyPair.address}</div>
+          <div class="label">Match:</div>
+          <div class="value">${match ? '✓ PASS' : '✗ FAIL'}</div>
+        `;
+      } catch (error) {
+        testDiv.className = 'test fail';
+        testDiv.innerHTML = `
+          <strong>${name}</strong>
+          <div class="error">ERROR: ${error.message}</div>
+        `;
+      }
+    }
+
+    async function testAddressDerivation() {
+      const testDiv = document.createElement('div');
+      testDiv.className = 'test';
+      tests.appendChild(testDiv);
+
+      try {
+        const keyPair = wasm.generate_ed25519_keypair();
+        const valid = wasm.validate_address(keyPair.address);
+        const reImported = wasm.import_private_key(keyPair.private_key_hex);
+        const addressMatch = keyPair.address === reImported.address;
+
+        testDiv.className = (valid && addressMatch) ? 'test pass' : 'test fail';
+        testDiv.innerHTML = `
+          <strong>Address Generation & Import Roundtrip</strong>
+          <div class="label">Generated Address:</div>
+          <div class="value">${keyPair.address}</div>
+          <div class="label">Valid Bech32:</div>
+          <div class="value">${valid ? '✓ YES' : '✗ NO'}</div>
+          <div class="label">Re-import Match:</div>
+          <div class="value">${addressMatch ? '✓ YES' : '✗ NO'}</div>
+        `;
+      } catch (error) {
+        testDiv.className = 'test fail';
+        testDiv.innerHTML = `
+          <strong>Address Generation</strong>
+          <div class="error">ERROR: ${error.message}</div>
+        `;
+      }
+    }
+
+    async function testTransactionSigning() {
+      const testDiv = document.createElement('div');
+      testDiv.className = 'test';
+      tests.appendChild(testDiv);
+
+      try {
+        const keyPair = wasm.generate_ed25519_keypair();
+        const signed = wasm.sign_transfer(
+          keyPair.private_key_hex,
+          0,
+          'a1b2c3d4e5f6',
+          keyPair.address,
+          keyPair.address,
+          '1000'
+        );
+
+        testDiv.className = 'test pass';
+        testDiv.innerHTML = `
+          <strong>Transaction Signing</strong>
+          <div class="label">Transaction Hash:</div>
+          <div class="value">${signed.digest_hex}</div>
+          <div class="label">Transaction Bytes Length:</div>
+          <div class="value">${signed.transaction_hex.length / 2} bytes</div>
+        `;
+      } catch (error) {
+        testDiv.className = 'test fail';
+        testDiv.innerHTML = `
+          <strong>Transaction Signing</strong>
+          <div class="error">ERROR: ${error.message}</div>
+        `;
+      }
+    }
+
+    runTests().catch(console.error);
+  </script>
+</body>
+</html>

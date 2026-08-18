@@ -1,0 +1,24 @@
+[package]
+name = "nunchi-wallet-crypto"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+nunchi-crypto = { path = "../../../crypto" }
+nunchi-common = { path = "../../../common" }
+nunchi-coins = { path = "../../../coins", default-features = false }
+commonware-codec = "0.2"
+commonware-cryptography = "0.15"
+wasm-bindgen = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+getrandom = { version = "0.2", features = ["js"] }
+hex = "0.4"
+rand = "0.8"
+
+[profile.release]
+opt-level = "z"
+lto = true

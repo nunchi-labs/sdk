@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Activity, CircleAlert, PlugZap, RefreshCw, Search, Server, Wifi, WifiOff } from "lucide-react";
+import { Activity, CircleAlert, PlugZap, RefreshCw, Search, Server, Wifi, WifiOff, Wallet } from "lucide-react";
 import { compactHex, httpBase, wsBase } from "./utils";
+import { detectWallet, connectWallet } from "./wallet";
 import "./styles.css";
 
 type Connection = "offline" | "connecting" | "online";
@@ -77,6 +78,8 @@ function App() {
   const [events, setEvents] = useState<EventRow[]>([]);
   const [timings, setTimings] = useState<BlockTiming[]>([]);
   const [error, setError] = useState("");
+  const [walletProvider, setWalletProvider] = useState<ReturnType<typeof detectWallet>>(null);
+  const [walletAccount, setWalletAccount] = useState<string | null>(null);
   const eventId = useRef(0);
   const timingByHeight = useRef<Map<number, BlockTiming>>(new Map());
   const pendingEvents = useRef<EventRow[]>([]);
@@ -84,6 +87,27 @@ function App() {
   const flushTimer = useRef<number | undefined>(undefined);
 
   const backend = useMemo(() => httpBase(settings.backendUrl), [settings.backendUrl]);
+
+  useEffect(() => {
+    const provider = detectWallet();
+    if (provider) {
+      setWalletProvider(provider);
+      provider.on("accountsChanged", (accounts: unknown) => {
+        const accountList = accounts as string[];
+        setWalletAccount(accountList[0] || null);
+      });
+    }
+  }, []);
+
+  async function handleConnectWallet() {
+    if (!walletProvider) return;
+    try {
+      const accounts = await connectWallet(walletProvider);
+      setWalletAccount(accounts[0] || null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
 
   useEffect(() => {
     document.title = APP_TITLE;
@@ -245,6 +269,18 @@ function App() {
           <div className="subtle">{APP_SUBTITLE}</div>
         </div>
         <div className="statusStrip">
+          {walletProvider && !walletAccount && (
+            <button className="walletConnect" onClick={handleConnectWallet}>
+              <Wallet size={16} />
+              Connect Nunchi Wallet
+            </button>
+          )}
+          {walletAccount && (
+            <div className="walletAccount">
+              <Wallet size={14} />
+              {compactHex(walletAccount, 6, 4)}
+            </div>
+          )}
           <StatusPill label="API" ok={health === "ok"} busy={health === "checking"} />
           <StatusPill label="HTTP" ok={health === "ok"} busy={health === "checking"} />
           <StatusPill label="WS" ok={connection === "online"} busy={connection === "connecting"} />

@@ -68,6 +68,7 @@ This repository will contain modules for building public and private blockchains
 * [`coins-chain`](examples/coins/chain) - default PoA chain
 * [`bridge-chain`](examples/bridge-chain) - two chains bridging consensus certificates
 * [`custom-module`](examples/custom-module) - starter template for creating a custom nunchi module
+* [`wallet-extension`](examples/wallet-extension) - Manifest V3 Chrome browser wallet with WASM crypto
 
 ## Commonware compatibility
 
