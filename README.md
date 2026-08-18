@@ -18,6 +18,12 @@
   <a href="https://app.codecov.io/gh/nunchi-labs/sdk">
     <img src="https://codecov.io/gh/nunchi-labs/sdk/graph/badge.svg" alt="Codecov" />
   </a>
+  <a href="./LICENSE-MIT">
+    <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" />
+  </a>
+  <a href="./LICENSE-APACHE">
+    <img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 License" />
+  </a>
 </p>
 
 ---
@@ -78,3 +84,7 @@ When upgrading nodes:
 * Do not run mixed commonware versions in the same peer set (marshal coding / ZODA shards and other wire formats are not interchangeable).
 * Mid-sync glue metadata from v2026.5.0 cannot resume after upgrading to v2026.7.0; clear or re-sync any node that crashed mid state-sync before the bump.
 * Fresh joining nodes can enable peer QMDB state sync with `state_sync = true`. Nunchi's resolver preserves Commonware's standard wire layout while decoding variable-value operations with the chain-wide 512 KiB value bound.
+
+## License
+
+This repository is dual-licensed under both the [Apache 2.0](./LICENSE-APACHE) and [MIT](./LICENSE-MIT) licenses. You may choose either license when employing this code.
