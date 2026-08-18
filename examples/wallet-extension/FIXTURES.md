@@ -2,14 +2,28 @@
 
 These fixtures verify that the WASM crypto produces byte-identical encodings and addresses matching the Rust implementation.
 
-## Ed25519 Key (seed 1)
+## Known Addresses from Genesis
 
-From `PrivateKey::ed25519_from_seed(1)` in Rust:
+From `examples/coins/chain/tests/fixtures/genesis.json`:
 
+### Issuer
 ```
-Private Key: 0120a3c1f1e4e3e2ea2787a5e9fb82c85cdb9e59242a8c2ea2fa6a5bb7e14a0e0a
-Address:     nch1qp6lnjh7rn3gaq0gm3v0k5j3v3n9qrkrc7j9zwywvexq9w3u4hkqczp9cc
+Address: nch1jse7wvv4fhj7r7rg307a9nn5fsum4gv23pnudva725w7mhcpu2tsk096jm
 ```
+
+### Allocation 1
+```
+Address: nch1g053yaztclz5sngrkhzh4xaucc2wpktf7qzz4yn3vnknat706peq075klx
+Amount:  400
+```
+
+### Allocation 2
+```
+Address: nch1e7csjadvt76qxwus96edacptwyfcgput5lrudrt0udp4j86gmwmqnhgh8w
+Amount:  600
+```
+
+Note: These are about 62 characters (Bech32, not Bech32m, HRP `nch`).
 
 ## Verification
 
