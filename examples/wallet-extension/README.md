@@ -24,8 +24,9 @@ A Manifest V3 Chrome extension wallet for Nunchi chains.
 
 ### Prerequisites
 
-- Rust with `wasm-pack` installed: `cargo install wasm-pack`
+- Rust 1.88+ (for WASM dependencies) with `wasm-pack` installed: `cargo install wasm-pack`
 - Node.js and npm
+- `wasm32-unknown-unknown` target: `rustup target add wasm32-unknown-unknown`
 
 ### Build Steps
 
