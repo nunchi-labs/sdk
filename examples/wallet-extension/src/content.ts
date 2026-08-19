@@ -47,6 +47,7 @@ window.addEventListener("message", async (event) => {
 
 const script = document.createElement("script");
 script.src = chrome.runtime.getURL("inpage.js");
+script.type = "module";
 script.onload = function () {
   (this as HTMLScriptElement).remove();
 };

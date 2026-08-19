@@ -107,19 +107,14 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
     setError("");
 
     try {
-      const wasm = await import("./wasm/nunchi_wallet_crypto");
-      const keyPair =
-        curve === "Ed25519" ? wasm.generate_ed25519_keypair() : wasm.generate_secp256r1_keypair();
-
-      setPrivateKeyInput(keyPair.private_key_hex);
-
       const response = await chrome.runtime.sendMessage({
         type: "CREATE_WALLET",
-        payload: { ...keyPair, password },
+        payload: { curve, password },
       });
 
-      if (response.success) {
-        onComplete();
+      if (response.success && response.data) {
+        setPrivateKeyInput(response.data.private_key_hex);
+        setTimeout(() => onComplete(), 3000);
       } else {
         setError(response.error || "Failed to create wallet");
       }
@@ -144,12 +139,9 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
     setError("");
 
     try {
-      const wasm = await import("./wasm/nunchi_wallet_crypto");
-      const keyPair = wasm.import_private_key(privateKeyInput.trim());
-
       const response = await chrome.runtime.sendMessage({
         type: "IMPORT_WALLET",
-        payload: { ...keyPair, password },
+        payload: { private_key_hex: privateKeyInput.trim(), password },
       });
 
       if (response.success) {

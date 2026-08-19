@@ -52,8 +52,8 @@ const MAX_UNLOCK_ATTEMPTS = 5;
 const LOCKOUT_DURATION = 5 * 60 * 1000;
 
 function isPrivilegedSender(sender: chrome.runtime.MessageSender): boolean {
-  const extensionUrl = chrome.runtime.getURL("");
-  return !sender.tab && sender.url?.startsWith(extensionUrl) === true;
+  const extensionOrigin = `chrome-extension://${chrome.runtime.id}`;
+  return sender.origin === extensionOrigin || sender.url?.startsWith(extensionOrigin) === true;
 }
 
 function getSenderOrigin(sender: chrome.runtime.MessageSender): string {
@@ -104,15 +104,24 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
         throw new Error("Wallet already exists. Please use IMPORT_WALLET to replace.");
       }
 
-      const { privateKeyHex, password } = payload as {
-        privateKeyHex: string;
+      const { curve, password } = payload as {
+        curve: "Ed25519" | "Secp256r1";
         password: string;
       };
 
-      const wasm = await import("./wasm/nunchi_wallet_crypto");
-      const keyPair = wasm.import_private_key(privateKeyHex);
+      const wasm = await initWasm();
+      await wasm.default();
+      
+      const keyPair = curve === "Ed25519" 
+        ? wasm.generate_ed25519_keypair()
+        : wasm.generate_secp256r1_keypair();
 
-      const { encrypted, salt } = await encryptPrivateKey(privateKeyHex, password);
+      const verifyKeyPair = wasm.import_private_key(keyPair.private_key_hex);
+      if (verifyKeyPair.address !== keyPair.address) {
+        throw new Error("Address mismatch: key derivation failed");
+      }
+
+      const { encrypted, salt } = await encryptPrivateKey(keyPair.private_key_hex, password);
 
       const wallet: WalletState = { 
         encrypted, 
@@ -123,13 +132,20 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
       await chrome.storage.local.set({ wallet });
 
       unlockedWallet = { 
-        privateKeyHex, 
+        privateKeyHex: keyPair.private_key_hex, 
         publicKeyHex: keyPair.public_key_hex, 
         address: keyPair.address, 
         curve: keyPair.curve 
       };
 
-      return { success: true, data: { address: keyPair.address, curve: keyPair.curve } };
+      return { 
+        success: true, 
+        data: { 
+          private_key_hex: keyPair.private_key_hex, 
+          address: keyPair.address, 
+          curve: keyPair.curve 
+        } 
+      };
     }
 
     case "IMPORT_WALLET": {
@@ -138,15 +154,17 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
         throw new Error("Wallet already exists. Please delete existing wallet first.");
       }
 
-      const { privateKeyHex, password } = payload as {
-        privateKeyHex: string;
+      const { private_key_hex, password } = payload as {
+        private_key_hex: string;
         password: string;
       };
 
-      const wasm = await import("./wasm/nunchi_wallet_crypto");
-      const keyPair = wasm.import_private_key(privateKeyHex);
+      const wasm = await initWasm();
+      await wasm.default();
+      
+      const keyPair = wasm.import_private_key(private_key_hex);
 
-      const { encrypted, salt } = await encryptPrivateKey(privateKeyHex, password);
+      const { encrypted, salt } = await encryptPrivateKey(private_key_hex, password);
 
       const wallet: WalletState = { 
         encrypted, 
@@ -157,7 +175,7 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
       await chrome.storage.local.set({ wallet });
 
       unlockedWallet = { 
-        privateKeyHex, 
+        privateKeyHex: private_key_hex, 
         publicKeyHex: keyPair.public_key_hex, 
         address: keyPair.address, 
         curve: keyPair.curve 
@@ -188,8 +206,10 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
       try {
         const privateKeyHex = await decryptPrivateKey(wallet.encrypted, wallet.salt, password);
 
-        const wasm = await import("./wasm/nunchi_wallet_crypto");
-        const keyPair = wasm.import_private_key(privateKeyHex);
+      const wasm = await initWasm();
+      await wasm.default();
+      
+      const keyPair = wasm.import_private_key(privateKeyHex);
 
         if (keyPair.address !== wallet.address) {
           throw new Error("Address mismatch: stored address does not match derived address");
@@ -277,7 +297,7 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
     }
 
     case "REQUEST_TRANSACTION": {
-      if (!connectedSites.has(origin)) {
+      if (!isPrivileged && !connectedSites.has(origin)) {
         throw new Error("Site not connected. Call nunchi_requestAccounts first.");
       }
 
@@ -404,6 +424,8 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
       const nonce = nonceData.result || 0;
 
       const wasm = await initWasm();
+      await wasm.default();
+      
       const signedTx = wasm.sign_transfer(
         unlockedWallet.privateKeyHex,
         nonce,
