@@ -10,6 +10,12 @@ import type {
 } from "./types";
 import { encryptPrivateKey, decryptPrivateKey } from "./crypto";
 
+async function initWasm() {
+  const wasm = await import("./wasm/nunchi_wallet_crypto");
+  wasm.init_panic_hook();
+  return wasm;
+}
+
 let unlockedWallet: UnlockedWallet | null = null;
 const connectedSites: Set<string> = new Set();
 const pendingConnections: Map<string, ConnectionRequest> = new Map();
@@ -75,6 +81,7 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
     "APPROVE_TRANSACTION",
     "REJECT_CONNECTION",
     "REJECT_TRANSACTION",
+    "SEND_TRANSACTION",
     "UPDATE_SETTINGS",
     "GET_STATE",
     "GET_SETTINGS",
@@ -225,22 +232,25 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
     }
 
     case "REQUEST_CONNECTION": {
-      const origin = new URL(senderUrl || "").origin;
       if (connectedSites.has(origin)) {
-        return { success: true, data: { address: unlockedWallet?.address } };
+        return { success: true, data: { connected: true, address: unlockedWallet?.address } };
+      }
+
+      if (!unlockedWallet) {
+        throw new Error("Wallet is locked");
       }
 
       const requestId = `conn-${Date.now()}-${Math.random()}`;
       pendingConnections.set(requestId, { origin, timestamp: Date.now() });
 
       chrome.windows.create({
-        url: chrome.runtime.getURL(`popup.html?approve=connection&id=${requestId}`),
+        url: chrome.runtime.getURL(`popup.html?approve=connection&id=${requestId}&origin=${encodeURIComponent(origin)}`),
         type: "popup",
         width: 400,
         height: 600,
       });
 
-      return { success: true, data: { pending: true, requestId } };
+      return { success: true, data: { pending: true } };
     }
 
     case "APPROVE_CONNECTION": {
@@ -267,9 +277,8 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
     }
 
     case "REQUEST_TRANSACTION": {
-      const origin = new URL(senderUrl || "").origin;
       if (!connectedSites.has(origin)) {
-        throw new Error("Site not connected");
+        throw new Error("Site not connected. Call nunchi_requestAccounts first.");
       }
 
       const { coin, from, to, amount } = payload as {
@@ -305,7 +314,7 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
         height: 600,
       });
 
-      return { success: true, data: { pending: true, requestId } };
+      return { success: true, data: { pending: true } };
     }
 
     case "APPROVE_TRANSACTION": {
@@ -359,6 +368,74 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
       const { requestId } = payload as { requestId: string };
       pendingTransactions.delete(requestId);
       return { success: true };
+    }
+
+    case "SEND_TRANSACTION": {
+      if (!unlockedWallet) {
+        throw new Error("Wallet is locked");
+      }
+
+      const { from, to, amount, coin } = payload as {
+        from: string;
+        to: string;
+        amount: string;
+        coin: string;
+      };
+
+      if (from !== unlockedWallet.address) {
+        throw new Error("from address must match unlocked wallet");
+      }
+
+      const settings = await chrome.storage.local.get("settings");
+      const rpcUrl = settings.settings?.rpcUrl || "http://localhost:3000";
+      
+      const nonceResponse = await fetch(rpcUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method: "coins.nonce",
+          params: { address: from },
+          id: 1,
+        }),
+      });
+      
+      const nonceData = await nonceResponse.json();
+      const nonce = nonceData.result || 0;
+
+      const wasm = await initWasm();
+      const signedTx = wasm.sign_transfer(
+        unlockedWallet.privateKeyHex,
+        nonce,
+        coin,
+        from,
+        to,
+        amount
+      );
+
+      const submitResponse = await fetch(rpcUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method: "coins.submit_transaction",
+          params: { transaction_hex: signedTx.transaction_hex },
+          id: 2,
+        }),
+      });
+
+      const submitData = await submitResponse.json();
+      if (submitData.error) {
+        throw new Error(submitData.error.message || "Transaction failed");
+      }
+
+      return {
+        success: true,
+        data: {
+          digest: signedTx.digest_hex,
+          transaction: signedTx.transaction_hex,
+        },
+      };
     }
 
     case "GET_CONNECTED_SITES": {

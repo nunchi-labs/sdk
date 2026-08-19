@@ -10,7 +10,23 @@ mod tests;
 const ADDRESS_DOMAIN: &[u8] = b"nunchi/account/v1";
 const ADDRESS_EXTERNAL: u8 = 0;
 pub const ADDRESS_HRP: &str = "nch";
-const COINS_NAMESPACE: &[u8] = b"_NUNCHI_COINS";
+pub const COINS_NAMESPACE: &[u8] = b"_NUNCHI_COINS";
+
+pub fn encode_varint(mut n: u64) -> Vec<u8> {
+    let mut buf = Vec::new();
+    loop {
+        let mut byte = (n & 0x7F) as u8;
+        n >>= 7;
+        if n != 0 {
+            byte |= 0x80;
+        }
+        buf.push(byte);
+        if n == 0 {
+            break;
+        }
+    }
+    buf
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Address(Digest);
@@ -79,16 +95,18 @@ pub fn generate_ed25519_keypair() -> Result<JsValue, JsValue> {
     let mut entropy = [0u8; 32];
     getrandom::getrandom(&mut entropy).map_err(|e| JsValue::from_str(&e.to_string()))?;
     
-    let signing_key = ed25519_dalek::SigningKey::from_bytes(&entropy);
-    let nunchi_signing_key: nunchi_crypto::PrivateKey = nunchi_crypto::PrivateKey::Ed25519(
-        signing_key.into()
-    );
-    let public_key = nunchi_signing_key.public_key();
+    let mut encoded = Vec::with_capacity(33);
+    encoded.push(1);
+    encoded.extend_from_slice(&entropy);
+    
+    let private_key = PrivateKey::decode(encoded.as_ref())
+        .map_err(|e| JsValue::from_str(&format!("failed to decode key: {}", e)))?;
+    let public_key = private_key.public_key();
     let address = Address::external(&public_key);
 
     let result = KeyPair {
         curve: "Ed25519".to_string(),
-        private_key_hex: hex::encode(nunchi_signing_key.encode()),
+        private_key_hex: hex::encode(private_key.encode()),
         public_key_hex: hex::encode(public_key.encode()),
         address: address.to_bech32(),
     };
@@ -101,15 +119,18 @@ pub fn generate_secp256r1_keypair() -> Result<JsValue, JsValue> {
     let mut entropy = [0u8; 32];
     getrandom::getrandom(&mut entropy).map_err(|e| JsValue::from_str(&e.to_string()))?;
     
-    let signing_key = p256::ecdsa::SigningKey::from_bytes(&entropy.into())
-        .map_err(|e| JsValue::from_str(&format!("failed to create key: {}", e)))?;
-    let nunchi_key = nunchi_crypto::PrivateKey::Secp256r1(signing_key.into());
-    let public_key = nunchi_key.public_key();
+    let mut encoded = Vec::with_capacity(33);
+    encoded.push(2);
+    encoded.extend_from_slice(&entropy);
+    
+    let private_key = PrivateKey::decode(encoded.as_ref())
+        .map_err(|e| JsValue::from_str(&format!("failed to decode key: {}", e)))?;
+    let public_key = private_key.public_key();
     let address = Address::external(&public_key);
 
     let result = KeyPair {
         curve: "Secp256r1".to_string(),
-        private_key_hex: hex::encode(nunchi_key.encode()),
+        private_key_hex: hex::encode(private_key.encode()),
         public_key_hex: hex::encode(public_key.encode()),
         address: address.to_bech32(),
     };
@@ -162,6 +183,51 @@ pub struct SignedTransaction {
     pub digest_hex: String,
 }
 
+pub fn sign_transfer_internal(
+    private_key: &PrivateKey,
+    nonce: u64,
+    coin_id: &[u8; 32],
+    from_addr: &Address,
+    to_addr: &Address,
+    amount: u128,
+) -> Result<(Vec<u8>, Digest), String> {
+    let derived_from = Address::external(&private_key.public_key());
+    if &derived_from != from_addr {
+        return Err("from_address does not match private key".to_string());
+    }
+
+    let signer_public = private_key.public_key();
+    
+    let mut operation = Vec::new();
+    operation.push(3);
+    operation.extend_from_slice(coin_id);
+    operation.extend_from_slice(from_addr.encode().as_ref());
+    operation.extend_from_slice(to_addr.encode().as_ref());
+    operation.extend_from_slice(&amount.encode());
+    
+    let mut signing_bytes = Vec::new();
+    signing_bytes.extend_from_slice(from_addr.encode().as_ref());
+    signing_bytes.push(0);
+    signing_bytes.extend_from_slice(&nonce.encode());
+    signing_bytes.extend_from_slice(&operation);
+    
+    let signature = private_key.sign(COINS_NAMESPACE, &signing_bytes);
+    
+    let mut transaction_bytes = Vec::new();
+    transaction_bytes.extend_from_slice(from_addr.encode().as_ref());
+    transaction_bytes.extend_from_slice(&nonce.encode());
+    let operation_len_varint = encode_varint(operation.len() as u64);
+    transaction_bytes.extend_from_slice(&operation_len_varint);
+    transaction_bytes.extend_from_slice(&operation);
+    transaction_bytes.push(0);
+    transaction_bytes.extend_from_slice(&signer_public.encode());
+    transaction_bytes.extend_from_slice(&signature.encode());
+    
+    let digest = Sha256::hash(&transaction_bytes);
+
+    Ok((transaction_bytes, digest))
+}
+
 #[wasm_bindgen]
 pub fn sign_transfer(
     private_key_hex: &str,
@@ -182,6 +248,7 @@ pub fn sign_transfer(
     if coin_bytes.len() != 32 {
         return Err(JsValue::from_str(&format!("CoinId must be exactly 32 bytes, got {}", coin_bytes.len())));
     }
+    let coin_id: [u8; 32] = coin_bytes.try_into().unwrap();
     
     let from = Address::from_bech32(from_address)
         .map_err(|e| JsValue::from_str(&format!("invalid from address: {}", e)))?;
@@ -192,36 +259,15 @@ pub fn sign_transfer(
         .parse()
         .map_err(|e| JsValue::from_str(&format!("invalid amount: {}", e)))?;
 
-    let signer_public = private_key.public_key();
-    let account_id = Address::external(&signer_public);
-    
-    if account_id != from {
-        return Err(JsValue::from_str("from_address must match signer address (account_id)"));
-    }
-    
-    let mut payload_bytes = Vec::new();
-    payload_bytes.extend_from_slice(&nonce.encode());
-    payload_bytes.push(3);
-    payload_bytes.extend_from_slice(&coin_bytes);
-    payload_bytes.extend_from_slice(from.encode().as_ref());
-    payload_bytes.extend_from_slice(to.encode().as_ref());
-    payload_bytes.extend_from_slice(&amount.encode());
-    
-    let mut signing_bytes = Vec::new();
-    signing_bytes.extend_from_slice(account_id.encode().as_ref());
-    signing_bytes.push(0);
-    signing_bytes.extend_from_slice(&payload_bytes);
-    
-    let signature = private_key.sign(COINS_NAMESPACE, &signing_bytes);
-    
-    let mut transaction_bytes = Vec::new();
-    transaction_bytes.extend_from_slice(account_id.encode().as_ref());
-    transaction_bytes.extend_from_slice(&payload_bytes);
-    transaction_bytes.push(0);
-    transaction_bytes.extend_from_slice(&signer_public.encode());
-    transaction_bytes.extend_from_slice(&signature.encode());
-    
-    let digest = Sha256::hash(&transaction_bytes);
+    let (transaction_bytes, digest) = sign_transfer_internal(
+        &private_key,
+        nonce,
+        &coin_id,
+        &from,
+        &to,
+        amount,
+    )
+    .map_err(|e| JsValue::from_str(&e))?;
 
     let result = SignedTransaction {
         transaction_hex: hex::encode(&transaction_bytes),
