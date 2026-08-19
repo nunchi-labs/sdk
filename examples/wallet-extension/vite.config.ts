@@ -4,6 +4,9 @@ import { resolve } from "path";
 
 export default defineConfig({
   plugins: [react()],
+  test: {
+    exclude: ["**/node_modules/**", "**/dist/**", "**/*.live.test.ts"],
+  },
   build: {
     outDir: "dist",
     rollupOptions: {

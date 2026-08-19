@@ -65,6 +65,9 @@ struct GenesisArgs {
     initial_balance: u128,
     #[arg(long)]
     max_supply: Option<u128>,
+    /// Write funded account keys and the genesis coin id as JSON (wallet live tests).
+    #[arg(long)]
+    accounts_out: Option<PathBuf>,
 }
 
 #[derive(Debug, Parser)]
@@ -192,6 +195,21 @@ struct FactoryNonceResponse {
     nonce: u64,
 }
 
+#[derive(Debug, Serialize)]
+struct GenesisAccounts {
+    coin: String,
+    issuer: String,
+    initial_balance: String,
+    accounts: Vec<GenesisAccount>,
+}
+
+#[derive(Debug, Serialize)]
+struct GenesisAccount {
+    seed: u64,
+    private_key_hex: String,
+    address: String,
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     match Cli::parse().command {
         Command::Genesis(args) => write_genesis(args),
@@ -277,6 +295,31 @@ fn write_genesis(args: GenesisArgs) -> Result<(), Box<dyn Error>> {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&args.out, serde_json::to_vec_pretty(&genesis)?)?;
+
+    if let Some(accounts_out) = args.accounts_out {
+        if let Some(parent) = accounts_out
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut accounts = Vec::with_capacity(keys.len());
+        for (index, key) in keys.iter().enumerate() {
+            accounts.push(GenesisAccount {
+                seed: args.seed + u64::try_from(index)?,
+                private_key_hex: encode_hex(key),
+                address: account(key).to_string(),
+            });
+        }
+        let dump = GenesisAccounts {
+            coin: encode_hex(&coin),
+            issuer: issuer.to_string(),
+            initial_balance: args.initial_balance.to_string(),
+            accounts,
+        };
+        std::fs::write(&accounts_out, serde_json::to_vec_pretty(&dump)?)?;
+        println!("wrote {}", accounts_out.display());
+    }
 
     println!("wrote {}", args.out.display());
     println!("issuer {issuer}");
