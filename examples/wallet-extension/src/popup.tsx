@@ -111,6 +111,8 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
       const keyPair =
         curve === "Ed25519" ? wasm.generate_ed25519_keypair() : wasm.generate_secp256r1_keypair();
 
+      setPrivateKeyInput(keyPair.private_key_hex);
+
       const response = await chrome.runtime.sendMessage({
         type: "CREATE_WALLET",
         payload: { ...keyPair, password },
@@ -206,6 +208,20 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
             <span>Confirm Password</span>
             <input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} />
           </label>
+          {privateKeyInput && (
+            <label>
+              <span>Private Key (SAVE THIS!)</span>
+              <textarea
+                readOnly
+                value={privateKeyInput}
+                rows={3}
+                style={{ fontFamily: "monospace", fontSize: "12px", wordBreak: "break-all" }}
+              />
+              <p style={{ fontSize: "12px", color: "#666", marginTop: "4px" }}>
+                Save this private key securely. You'll need it to recover your wallet.
+              </p>
+            </label>
+          )}
           {error && <div className="error">{error}</div>}
           <button className="primary large" onClick={handleCreate} disabled={loading}>
             {loading ? "Creating..." : "Create"}

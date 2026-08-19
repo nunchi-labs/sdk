@@ -20,6 +20,7 @@ bytes = "1.7"
 
 [dev-dependencies]
 nunchi-common = { path = "../../../common" }
+nunchi-coins = { path = "../../../coins" }
 
 [features]
 console_error_panic_hook = ["dep:console_error_panic_hook"]

@@ -2,9 +2,10 @@
 mod tests {
     use crate::{Address, sign_transfer_internal, COINS_NAMESPACE};
     use commonware_codec::Encode;
-    use commonware_cryptography::Hasher;
-    use nunchi_common::{Address as NunchiAddress, Authorization, Transaction, TransactionPayload};
+    use commonware_cryptography::{Hasher, sha256::Digest};
+    use nunchi_common::{Address as NunchiAddress};
     use nunchi_crypto::PrivateKey as NunchiPrivateKey;
+    use nunchi_coins::{CoinOperation, Transaction, CoinId};
 
 
     #[test]
@@ -32,36 +33,18 @@ mod tests {
         let nonce = 5u64;
         let amount = 1000u128;
         
-        let operation = {
-            let mut buf = Vec::new();
-            buf.push(3);
-            buf.extend_from_slice(&coin_id);
-            buf.extend_from_slice(from_addr.encode().as_ref());
-            buf.extend_from_slice(to_addr.encode().as_ref());
-            buf.extend_from_slice(&amount.encode());
-            buf
+        let operation = CoinOperation::Transfer {
+            coin: CoinId::from(Digest::from(coin_id)),
+            from: from_addr.clone(),
+            to: to_addr.clone(),
+            amount,
         };
         
-        let payload = TransactionPayload::new(nonce, operation);
-        let signature = nunchi_key.sign(COINS_NAMESPACE, &{
-            let mut bytes = Vec::new();
-            bytes.extend_from_slice(from_addr.encode().as_ref());
-            bytes.push(0);
-            bytes.extend_from_slice(&payload.nonce.encode());
-            bytes.extend_from_slice(payload.operation.as_ref());
-            bytes
-        });
-        
-        let authorization = Authorization::Single {
-            signer: Box::new(nunchi_key.public_key()),
-            signature,
-        };
-        
-        let official_tx = Transaction {
-            account_id: from_addr.clone(),
-            payload,
-            authorization,
-        };
+        let official_tx = Transaction::sign(
+            &nunchi_key,
+            nonce,
+            operation,
+        );
         
         let official_bytes = official_tx.encode();
         let official_digest = commonware_cryptography::Sha256::hash(&official_bytes);
@@ -95,36 +78,18 @@ mod tests {
         let nonce = 7u64;
         let amount = 2000u128;
         
-        let operation = {
-            let mut buf = Vec::new();
-            buf.push(3);
-            buf.extend_from_slice(&coin_id);
-            buf.extend_from_slice(from_addr.encode().as_ref());
-            buf.extend_from_slice(to_addr.encode().as_ref());
-            buf.extend_from_slice(&amount.encode());
-            buf
+        let operation = CoinOperation::Transfer {
+            coin: CoinId::from(Digest::from(coin_id)),
+            from: from_addr.clone(),
+            to: to_addr.clone(),
+            amount,
         };
         
-        let payload = TransactionPayload::new(nonce, operation);
-        let signature = nunchi_key.sign(COINS_NAMESPACE, &{
-            let mut bytes = Vec::new();
-            bytes.extend_from_slice(from_addr.encode().as_ref());
-            bytes.push(0);
-            bytes.extend_from_slice(&payload.nonce.encode());
-            bytes.extend_from_slice(payload.operation.as_ref());
-            bytes
-        });
-        
-        let authorization = Authorization::Single {
-            signer: Box::new(nunchi_key.public_key()),
-            signature,
-        };
-        
-        let official_tx = Transaction {
-            account_id: from_addr.clone(),
-            payload,
-            authorization,
-        };
+        let official_tx = Transaction::sign(
+            &nunchi_key,
+            nonce,
+            operation,
+        );
         
         let official_bytes = official_tx.encode();
         let official_digest = commonware_cryptography::Sha256::hash(&official_bytes);

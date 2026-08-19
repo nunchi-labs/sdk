@@ -61,7 +61,7 @@ export async function decryptPrivateKey(
   }
 }
 
-function hexToBytes(hex: string): Uint8Array {
+export function hexToBytes(hex: string): Uint8Array {
   if (hex.startsWith("0x")) hex = hex.slice(2);
   
   if (hex.length % 2 !== 0) {

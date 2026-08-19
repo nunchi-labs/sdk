@@ -24,7 +24,7 @@ window.addEventListener("message", async (event) => {
 
     window.postMessage(
       {
-        type: "NUNCHI_RESPONSE",
+        target: "nunchi-wallet-inpage",
         requestId,
         response,
       },
@@ -33,7 +33,7 @@ window.addEventListener("message", async (event) => {
   } catch (error) {
     window.postMessage(
       {
-        type: "NUNCHI_RESPONSE",
+        target: "nunchi-wallet-inpage",
         requestId,
         response: {
           success: false,

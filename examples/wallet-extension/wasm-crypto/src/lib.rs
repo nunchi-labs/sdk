@@ -216,8 +216,6 @@ pub fn sign_transfer_internal(
     let mut transaction_bytes = Vec::new();
     transaction_bytes.extend_from_slice(from_addr.encode().as_ref());
     transaction_bytes.extend_from_slice(&nonce.encode());
-    let operation_len_varint = encode_varint(operation.len() as u64);
-    transaction_bytes.extend_from_slice(&operation_len_varint);
     transaction_bytes.extend_from_slice(&operation);
     transaction_bytes.push(0);
     transaction_bytes.extend_from_slice(&signer_public.encode());
