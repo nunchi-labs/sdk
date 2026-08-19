@@ -36,6 +36,10 @@ export const PRIVILEGED_TYPES = new Set<MessageType>([
   "REJECT_CONNECTION",
   "REJECT_TRANSACTION",
   "SEND_TRANSACTION",
+  "CREATE_TOKEN",
+  "MINT",
+  "BURN",
+  "REGISTER_ACCOUNT_POLICY",
   "UPDATE_SETTINGS",
   "GET_STATE",
   "GET_SETTINGS",
@@ -66,6 +70,45 @@ export interface WalletWasm {
     to: string,
     amount: string
   ): { transaction_hex: string; digest_hex: string };
+  sign_create_token(
+    privateKeyHex: string,
+    nonce: bigint,
+    symbol: string,
+    name: string,
+    decimals: number,
+    initialSupply: string,
+    maxSupply: string
+  ): { transaction_hex: string; digest_hex: string };
+  sign_mint(
+    privateKeyHex: string,
+    nonce: bigint,
+    coin: string,
+    to: string,
+    amount: string
+  ): { transaction_hex: string; digest_hex: string };
+  sign_burn(
+    privateKeyHex: string,
+    nonce: bigint,
+    coin: string,
+    from: string,
+    amount: string
+  ): { transaction_hex: string; digest_hex: string };
+  sign_register_account_policy(
+    privateKeyHex: string,
+    nonce: bigint,
+    threshold: number,
+    signerPubKeys: string
+  ): { transaction_hex: string; digest_hex: string; account: string };
+  derive_coin_id(
+    issuer: string,
+    nonce: bigint,
+    symbol: string,
+    name: string,
+    decimals: number,
+    initialSupply: string,
+    maxSupply: string
+  ): string;
+  derive_multisig_account(threshold: number, signerPubKeys: string): string;
 }
 
 export interface WalletHost {
@@ -502,6 +545,102 @@ export class Wallet {
         return { success: true, data: await this.signAndSubmit(this.unlockedWallet, nonce, coin, from, to, amount) };
       }
 
+      case "CREATE_TOKEN": {
+        if (!this.unlockedWallet) {
+          throw new Error("Wallet is locked");
+        }
+        const { symbol, name, decimals, initial_supply, max_supply } = payload as {
+          symbol: string;
+          name: string;
+          decimals: number;
+          initial_supply: string;
+          max_supply?: string;
+        };
+        const settings = await this.getSettings();
+        const nonce = await this.fetchNonce(settings.rpcUrl, this.unlockedWallet.address);
+        const factoryNonce = await this.fetchFactoryNonce(settings.rpcUrl);
+        const wasm = await this.host.wasm();
+        const maxSupply = max_supply ?? "";
+        const signed = wasm.sign_create_token(
+          this.unlockedWallet.privateKeyHex,
+          BigInt(nonce),
+          symbol,
+          name,
+          decimals,
+          initial_supply,
+          maxSupply
+        );
+        const coin = wasm.derive_coin_id(
+          this.unlockedWallet.address,
+          BigInt(factoryNonce),
+          symbol,
+          name,
+          decimals,
+          initial_supply,
+          maxSupply
+        );
+        const submitted = await this.submitSigned(signed, { coin, to: this.unlockedWallet.address, amount: initial_supply });
+        return { success: true, data: { ...submitted, coin, factoryNonce } };
+      }
+
+      case "MINT": {
+        if (!this.unlockedWallet) {
+          throw new Error("Wallet is locked");
+        }
+        const { coin, to, amount } = payload as { coin: string; to: string; amount: string };
+        const settings = await this.getSettings();
+        const nonce = await this.fetchNonce(settings.rpcUrl, this.unlockedWallet.address);
+        const wasm = await this.host.wasm();
+        const signed = wasm.sign_mint(this.unlockedWallet.privateKeyHex, BigInt(nonce), coin, to, amount);
+        return { success: true, data: await this.submitSigned(signed, { coin, to, amount }) };
+      }
+
+      case "BURN": {
+        if (!this.unlockedWallet) {
+          throw new Error("Wallet is locked");
+        }
+        const { coin, amount } = payload as { coin: string; amount: string };
+        const settings = await this.getSettings();
+        const nonce = await this.fetchNonce(settings.rpcUrl, this.unlockedWallet.address);
+        const wasm = await this.host.wasm();
+        const signed = wasm.sign_burn(
+          this.unlockedWallet.privateKeyHex,
+          BigInt(nonce),
+          coin,
+          this.unlockedWallet.address,
+          amount
+        );
+        return { success: true, data: await this.submitSigned(signed, { coin, to: this.unlockedWallet.address, amount }) };
+      }
+
+      case "REGISTER_ACCOUNT_POLICY": {
+        if (!this.unlockedWallet) {
+          throw new Error("Wallet is locked");
+        }
+        const { threshold, signer_pub_keys } = (payload || {}) as {
+          threshold?: number;
+          signer_pub_keys?: string;
+        };
+        const settings = await this.getSettings();
+        const wasm = await this.host.wasm();
+        const keys = signer_pub_keys ?? this.unlockedWallet.publicKeyHex;
+        const required = threshold ?? 1;
+        const account = wasm.derive_multisig_account(required, keys);
+        const nonce = await this.fetchNonce(settings.rpcUrl, account);
+        const signed = wasm.sign_register_account_policy(
+          this.unlockedWallet.privateKeyHex,
+          BigInt(nonce),
+          required,
+          keys
+        );
+        const submitted = await this.submitSigned(signed, {
+          coin: "",
+          to: signed.account,
+          amount: "0",
+        });
+        return { success: true, data: { ...submitted, account: signed.account ?? account } };
+      }
+
       case "GET_CONNECTED_SITES": {
         return { success: true, data: Array.from(this.connectedSites) };
       }
@@ -756,6 +895,22 @@ export class Wallet {
     return { digest: signed.digest_hex, transaction: signed.transaction_hex };
   }
 
+  private async submitSigned(
+    signed: { digest_hex: string; transaction_hex: string },
+    activity: { coin: string; to: string; amount: string }
+  ): Promise<{ hash: string; digest: string; transaction: string }> {
+    const settings = await this.getSettings();
+    const hash = await this.submitTransaction(settings.rpcUrl, signed.transaction_hex);
+    await this.addActivity({
+      hash,
+      timestamp: this.host.now(),
+      coin: activity.coin,
+      to: activity.to,
+      amount: activity.amount,
+    });
+    return { hash, digest: signed.digest_hex, transaction: signed.transaction_hex };
+  }
+
   private async signAndSubmit(
     wallet: UnlockedWallet,
     nonce: number,
@@ -769,6 +924,19 @@ export class Wallet {
     const hash = await this.submitTransaction(settings.rpcUrl, signed.transaction);
     await this.addActivity({ hash, timestamp: this.host.now(), coin, to, amount });
     return { hash, digest: signed.digest, transaction: signed.transaction };
+  }
+
+  private async fetchFactoryNonce(rpcUrl: string): Promise<number> {
+    const data = await this.host.rpc(rpcUrl, {
+      jsonrpc: "2.0",
+      id: this.host.now(),
+      method: "coins.factory_nonce",
+      params: {},
+    });
+    if (data.error) {
+      throw new Error(data.error.message);
+    }
+    return (data.result as { nonce: number }).nonce;
   }
 
   private async fetchNonce(rpcUrl: string, address: string): Promise<number> {

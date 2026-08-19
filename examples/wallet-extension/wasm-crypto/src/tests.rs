@@ -1,11 +1,11 @@
 #[cfg(test)]
 mod tests {
-    use crate::{Address, sign_transfer_internal, COINS_NAMESPACE};
+    use crate::{sign_transfer_internal, Address};
     use commonware_codec::Encode;
-    use commonware_cryptography::{Hasher, sha256::Digest};
-    use nunchi_common::{Address as NunchiAddress};
+    use commonware_cryptography::{sha256::Digest, Hasher};
+    use nunchi_coins::{CoinId, CoinOperation, Transaction};
+    use nunchi_common::Address as NunchiAddress;
     use nunchi_crypto::PrivateKey as NunchiPrivateKey;
-    use nunchi_coins::{CoinOperation, Transaction, CoinId};
 
 
     #[test]

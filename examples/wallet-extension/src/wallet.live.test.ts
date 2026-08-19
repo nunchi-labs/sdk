@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import type { Message, MessageType, Response } from "./types";
 import { Wallet, type WalletHost, type WalletKeyPair, type WalletWasm } from "./wallet";
 
@@ -78,6 +78,15 @@ function asKeyPair(value: unknown): WalletKeyPair {
   };
 }
 
+function asSigned(value: unknown): { transaction_hex: string; digest_hex: string; account?: string } {
+  const record = asRecord(value);
+  return {
+    transaction_hex: record.transaction_hex,
+    digest_hex: record.digest_hex,
+    account: record.account,
+  };
+}
+
 async function loadWalletWasm(): Promise<WalletWasm> {
   const wasmDir = join(dirname(fileURLToPath(import.meta.url)), "wasm");
   const wasmJs = join(wasmDir, "nunchi_wallet_crypto.js");
@@ -99,16 +108,70 @@ async function loadWalletWasm(): Promise<WalletWasm> {
       to: string,
       amount: string
     ) => unknown;
+    sign_create_token: (
+      privateKeyHex: string,
+      nonce: bigint,
+      symbol: string,
+      name: string,
+      decimals: number,
+      initialSupply: string,
+      maxSupply: string
+    ) => unknown;
+    sign_mint: (
+      privateKeyHex: string,
+      nonce: bigint,
+      coin: string,
+      to: string,
+      amount: string
+    ) => unknown;
+    sign_burn: (
+      privateKeyHex: string,
+      nonce: bigint,
+      coin: string,
+      from: string,
+      amount: string
+    ) => unknown;
+    sign_register_account_policy: (
+      privateKeyHex: string,
+      nonce: bigint,
+      threshold: number,
+      signerPubKeys: string
+    ) => unknown;
+    derive_coin_id: (
+      issuer: string,
+      nonce: bigint,
+      symbol: string,
+      name: string,
+      decimals: number,
+      initialSupply: string,
+      maxSupply: string
+    ) => string;
+    derive_multisig_account: (threshold: number, signerPubKeys: string) => string;
   };
   await module.default({ module_or_path: await readFile(wasmBin) });
   return {
     generate_ed25519_keypair: () => asKeyPair(module.generate_ed25519_keypair()),
     generate_secp256r1_keypair: () => asKeyPair(module.generate_secp256r1_keypair()),
     import_private_key: (privateKeyHex: string) => asKeyPair(module.import_private_key(privateKeyHex)),
-    sign_transfer: (privateKeyHex, nonce, coin, from, to, amount) => {
-      const signed = asRecord(module.sign_transfer(privateKeyHex, nonce, coin, from, to, amount));
-      return { transaction_hex: signed.transaction_hex, digest_hex: signed.digest_hex };
+    sign_transfer: (privateKeyHex, nonce, coin, from, to, amount) =>
+      asSigned(module.sign_transfer(privateKeyHex, nonce, coin, from, to, amount)),
+    sign_create_token: (privateKeyHex, nonce, symbol, name, decimals, initialSupply, maxSupply) =>
+      asSigned(module.sign_create_token(privateKeyHex, nonce, symbol, name, decimals, initialSupply, maxSupply)),
+    sign_mint: (privateKeyHex, nonce, coin, to, amount) =>
+      asSigned(module.sign_mint(privateKeyHex, nonce, coin, to, amount)),
+    sign_burn: (privateKeyHex, nonce, coin, from, amount) =>
+      asSigned(module.sign_burn(privateKeyHex, nonce, coin, from, amount)),
+    sign_register_account_policy: (privateKeyHex, nonce, threshold, signerPubKeys) => {
+      const signed = asSigned(module.sign_register_account_policy(privateKeyHex, nonce, threshold, signerPubKeys));
+      if (!signed.account) {
+        throw new Error("register policy did not return an account");
+      }
+      return { ...signed, account: signed.account };
     },
+    derive_coin_id: (issuer, nonce, symbol, name, decimals, initialSupply, maxSupply) =>
+      module.derive_coin_id(issuer, nonce, symbol, name, decimals, initialSupply, maxSupply),
+    derive_multisig_account: (threshold, signerPubKeys) =>
+      module.derive_multisig_account(threshold, signerPubKeys),
   };
 }
 
@@ -154,11 +217,7 @@ function createHost(wasm: WalletWasm): WalletHost {
   };
 }
 
-async function send(
-  wallet: Wallet,
-  type: MessageType,
-  payload?: unknown
-): Promise<Response> {
+async function send(wallet: Wallet, type: MessageType, payload?: unknown): Promise<Response> {
   return wallet.handleMessage({ type, payload } as Message, popup);
 }
 
@@ -179,61 +238,137 @@ async function waitForFinalized(hash: string): Promise<{ status: string; height?
   throw new Error(`transaction ${hash} was not finalized`);
 }
 
+async function expectSubmit(wallet: Wallet, type: MessageType, payload: unknown): Promise<string> {
+  const sent = await send(wallet, type, payload);
+  expect(sent.success, sent.error).toBe(true);
+  const hash = (sent.data as { hash: string }).hash;
+  expect(hash).toBeTruthy();
+  const finalized = await waitForFinalized(hash);
+  expect(finalized.status).toBe("finalized");
+  return hash;
+}
+
 describe("wallet live chain", () => {
   if (!rpcUrl || !accountsPath) {
     throw new Error("NUNCHI_LIVE_RPC and NUNCHI_LIVE_ACCOUNTS must be set");
   }
-  it("imports a funded key and broadcasts a transfer", async () => {
-    const fixture = JSON.parse(await readFile(accountsPath as string, "utf8")) as LiveAccounts;
+
+  let fixture: LiveAccounts;
+  let sender: LiveAccount;
+  let recipient: LiveAccount;
+  let genesisCoin: string;
+  let createdCoin: string;
+  let wallet: Wallet;
+  let genesisBalance: bigint;
+
+  beforeAll(async () => {
+    fixture = JSON.parse(await readFile(accountsPath as string, "utf8")) as LiveAccounts;
     expect(fixture.accounts.length).toBeGreaterThanOrEqual(2);
+    sender = fixture.accounts[0];
+    recipient = fixture.accounts[1];
+    genesisCoin = rawHex(fixture.coin);
+    genesisBalance = BigInt(fixture.initial_balance);
 
-    const sender = fixture.accounts[0];
-    const recipient = fixture.accounts[1];
-    const coin = rawHex(fixture.coin);
     const wasm = await loadWalletWasm();
-    const wallet = new Wallet(createHost(wasm));
-
+    wallet = new Wallet(createHost(wasm));
     const imported = await send(wallet, "IMPORT_WALLET", {
       private_key_hex: rawHex(sender.private_key_hex),
       password: PASSWORD,
     });
     expect(imported.success).toBe(true);
     expect(imported.data).toMatchObject({ address: sender.address });
-
-    const settings = await send(wallet, "UPDATE_SETTINGS", { rpcUrl, network: "local", chainId: "nunchi-local" });
+    const settings = await send(wallet, "UPDATE_SETTINGS", {
+      rpcUrl,
+      network: "local",
+      chainId: "nunchi-local",
+    });
     expect(settings.success).toBe(true);
+  });
 
-    const before = await send(wallet, "GET_BALANCE", { address: sender.address, coin });
-    expect(before.success).toBe(true);
-    expect(before.data).toMatchObject({ balance: fixture.initial_balance });
-
-    const nonce = await send(wallet, "GET_NONCE", { address: sender.address });
-    expect(nonce.success).toBe(true);
-    expect(nonce.data).toMatchObject({ nonce: 0 });
-
-    const sent = await send(wallet, "SEND_TRANSACTION", {
+  it("broadcasts a transfer", async () => {
+    await expectSubmit(wallet, "SEND_TRANSACTION", {
       from: sender.address,
       to: recipient.address,
       amount: "1",
-      coin,
+      coin: genesisCoin,
     });
-    expect(sent.success, sent.error).toBe(true);
-    const hash = (sent.data as { hash: string }).hash;
-    expect(hash).toBeTruthy();
-
-    const finalized = await waitForFinalized(hash);
-    expect(finalized.status).toBe("finalized");
-
-    const afterSender = await send(wallet, "GET_BALANCE", { address: sender.address, coin });
-    const afterRecipient = await send(wallet, "GET_BALANCE", { address: recipient.address, coin });
-    expect(afterSender.data).toMatchObject({
-      balance: (BigInt(fixture.initial_balance) - 1n).toString(),
-    });
+    genesisBalance -= 1n;
+    const afterSender = await send(wallet, "GET_BALANCE", { address: sender.address, coin: genesisCoin });
+    const afterRecipient = await send(wallet, "GET_BALANCE", { address: recipient.address, coin: genesisCoin });
+    expect(afterSender.data).toMatchObject({ balance: genesisBalance.toString() });
     expect(afterRecipient.data).toMatchObject({
       balance: (BigInt(fixture.initial_balance) + 1n).toString(),
     });
+  });
 
-    const afterNonce = await send(wallet, "GET_NONCE", { address: sender.address });
-    expect(afterNonce.data).toMatchObject({ nonce: 1 });
+  it("mints the genesis coin as issuer", async () => {
+    await expectSubmit(wallet, "MINT", {
+      coin: genesisCoin,
+      to: recipient.address,
+      amount: "25",
+    });
+    const afterRecipient = await send(wallet, "GET_BALANCE", { address: recipient.address, coin: genesisCoin });
+    expect(afterRecipient.data).toMatchObject({
+      balance: (BigInt(fixture.initial_balance) + 26n).toString(),
+    });
+  });
+
+  it("burns genesis coin from the signer", async () => {
+    await expectSubmit(wallet, "BURN", { coin: genesisCoin, amount: "5" });
+    genesisBalance -= 5n;
+    const afterSender = await send(wallet, "GET_BALANCE", { address: sender.address, coin: genesisCoin });
+    expect(afterSender.data).toMatchObject({ balance: genesisBalance.toString() });
+  });
+
+  it("creates a new token", async () => {
+    const created = await send(wallet, "CREATE_TOKEN", {
+      symbol: "WLT",
+      name: "WalletLive",
+      decimals: 6,
+      initial_supply: "1000",
+      max_supply: "5000",
+    });
+    expect(created.success, created.error).toBe(true);
+    const data = created.data as { hash: string; coin: string };
+    expect(data.coin).toMatch(/^[0-9a-f]{64}$/);
+    await waitForFinalized(data.hash);
+    createdCoin = data.coin;
+    const token = await rpc<{ symbol: string; name: string; issuer: string; total_supply: string } | null>(
+      "coins.token",
+      { coin: createdCoin }
+    );
+    expect(token).toMatchObject({
+      symbol: "WLT",
+      name: "WalletLive",
+      issuer: sender.address,
+      total_supply: "1000",
+    });
+    const balance = await send(wallet, "GET_BALANCE", { address: sender.address, coin: createdCoin });
+    expect(balance.data).toMatchObject({ balance: "1000" });
+  });
+
+  it("mints the created token", async () => {
+    await expectSubmit(wallet, "MINT", { coin: createdCoin, to: recipient.address, amount: "10" });
+    const issuer = await send(wallet, "GET_BALANCE", { address: sender.address, coin: createdCoin });
+    const other = await send(wallet, "GET_BALANCE", { address: recipient.address, coin: createdCoin });
+    expect(issuer.data).toMatchObject({ balance: "1000" });
+    expect(other.data).toMatchObject({ balance: "10" });
+  });
+
+  it("burns the created token", async () => {
+    await expectSubmit(wallet, "BURN", { coin: createdCoin, amount: "3" });
+    const issuer = await send(wallet, "GET_BALANCE", { address: sender.address, coin: createdCoin });
+    expect(issuer.data).toMatchObject({ balance: "997" });
+  });
+
+  it("registers a 1-of-1 account policy", async () => {
+    const registered = await send(wallet, "REGISTER_ACCOUNT_POLICY", {});
+    expect(registered.success, registered.error).toBe(true);
+    const data = registered.data as { hash: string; account: string };
+    expect(data.account.startsWith("nch1")).toBe(true);
+    expect(data.account).not.toBe(sender.address);
+    await waitForFinalized(data.hash);
+    const nonce = await rpc<{ nonce: number }>("coins.nonce", { account: data.account });
+    expect(nonce.nonce).toBe(1);
   });
 });

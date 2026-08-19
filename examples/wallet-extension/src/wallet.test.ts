@@ -83,6 +83,25 @@ function mockWasm(): WalletWasm & { signed: Array<{ nonce: bigint; submitHint: s
         digest_hex: `digest:${nonce}`,
       };
     },
+    sign_create_token: (_privateKeyHex, nonce) => ({
+      transaction_hex: `create:${nonce}`,
+      digest_hex: `digest:${nonce}`,
+    }),
+    sign_mint: (_privateKeyHex, nonce, coin, to, amount) => ({
+      transaction_hex: `mint:${nonce}:${coin}:${to}:${amount}`,
+      digest_hex: `digest:${nonce}`,
+    }),
+    sign_burn: (_privateKeyHex, nonce, coin, from, amount) => ({
+      transaction_hex: `burn:${nonce}:${coin}:${from}:${amount}`,
+      digest_hex: `digest:${nonce}`,
+    }),
+    sign_register_account_policy: (_privateKeyHex, nonce) => ({
+      transaction_hex: `policy:${nonce}`,
+      digest_hex: `digest:${nonce}`,
+      account: "nch1policy",
+    }),
+    derive_coin_id: () => "cc".repeat(32),
+    derive_multisig_account: () => "nch1policy",
   };
 }
 
@@ -122,6 +141,9 @@ function createHarness(options?: { storage?: MemoryStorage; clock?: FakeClock })
       rpcCalls.push(request);
       if (request.method === "coins.nonce") {
         return { result: { nonce } };
+      }
+      if (request.method === "coins.factory_nonce") {
+        return { result: { nonce: 1 } };
       }
       if (request.method === "coins.balance") {
         return { result: { amount: "42" } };
@@ -260,6 +282,53 @@ describe("create, backup, and delete", () => {
     expect(deleted.success).toBe(true);
     const afterDelete = await send(wallet, "GET_STATE", popup);
     expect(afterDelete.data).toMatchObject({ hasWallet: false, isUnlocked: false });
+  });
+});
+
+describe("coin operations", () => {
+  it("creates, mints, burns, and registers a policy through the wallet", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+
+    const created = await send(harness.wallet, "CREATE_TOKEN", popup, {
+      symbol: "WLT",
+      name: "Wallet",
+      decimals: 6,
+      initial_supply: "1000",
+      max_supply: "5000",
+    });
+    expect(created.success, created.error).toBe(true);
+    expect(created.data).toMatchObject({
+      hash: "0xabc",
+      coin: "cc".repeat(32),
+      factoryNonce: 1,
+    });
+
+    const minted = await send(harness.wallet, "MINT", popup, {
+      coin: "aa".repeat(32),
+      to: "nch1to",
+      amount: "10",
+    });
+    expect(minted.success, minted.error).toBe(true);
+    expect(minted.data).toMatchObject({ hash: "0xabc" });
+
+    const burned = await send(harness.wallet, "BURN", popup, { coin: "aa".repeat(32), amount: "3" });
+    expect(burned.success, burned.error).toBe(true);
+
+    const registered = await send(harness.wallet, "REGISTER_ACCOUNT_POLICY", popup, {});
+    expect(registered.success, registered.error).toBe(true);
+    expect(registered.data).toMatchObject({ account: "nch1policy", hash: "0xabc" });
+    expect(harness.rpcCalls.map((call) => call.method)).toEqual([
+      "coins.nonce",
+      "coins.factory_nonce",
+      "coins.submit_transaction",
+      "coins.nonce",
+      "coins.submit_transaction",
+      "coins.nonce",
+      "coins.submit_transaction",
+      "coins.nonce",
+      "coins.submit_transaction",
+    ]);
   });
 });
 

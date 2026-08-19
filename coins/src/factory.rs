@@ -1,4 +1,6 @@
-use super::{Address, CoinId, CoinSpec, LedgerError, TokenDefinition, COINS_NAMESPACE};
+use super::{Address, CoinId, CoinSpec, COINS_NAMESPACE};
+#[cfg(feature = "ledger")]
+use super::{LedgerError, TokenDefinition};
 use commonware_codec::{Encode, EncodeSize, Read, ReadExt, Write};
 use commonware_cryptography::{Hasher, Sha256};
 
@@ -28,6 +30,7 @@ impl TokenFactory {
         CoinId(hasher.finalize())
     }
 
+    #[cfg(feature = "ledger")]
     pub fn create(
         &mut self,
         issuer: Address,
@@ -44,6 +47,7 @@ impl TokenFactory {
     }
 }
 
+#[cfg(feature = "ledger")]
 fn validate_spec(spec: &CoinSpec) -> Result<(), LedgerError> {
     if let Some(max_supply) = spec.max_supply {
         if spec.initial_supply > max_supply {

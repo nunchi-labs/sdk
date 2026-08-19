@@ -1,5 +1,9 @@
 use commonware_codec::{DecodeExt, Encode, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+use nunchi_coins::{
+    multisig_account_id, CoinId, CoinOperation, CoinSpec, MultisigPolicy, TokenFactory, TokenName,
+    TokenSymbol, Transaction,
+};
 use nunchi_crypto::{PrivateKey, PublicKey};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -181,6 +185,89 @@ pub fn validate_address(address: &str) -> bool {
 pub struct SignedTransaction {
     pub transaction_hex: String,
     pub digest_hex: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+}
+
+fn encode_signed(transaction: Transaction) -> SignedTransaction {
+    SignedTransaction {
+        transaction_hex: hex::encode(transaction.encode()),
+        digest_hex: hex::encode(transaction.digest().as_ref()),
+        account: None,
+    }
+}
+
+fn parse_private_key(private_key_hex: &str) -> Result<PrivateKey, String> {
+    let private_bytes = hex::decode(private_key_hex).map_err(|e| format!("invalid private key hex: {e}"))?;
+    PrivateKey::decode(private_bytes.as_ref()).map_err(|e| format!("invalid private key: {e}"))
+}
+
+fn parse_address(value: &str, label: &str) -> Result<nunchi_coins::Address, String> {
+    nunchi_coins::Address::from_bech32(value).map_err(|e| format!("invalid {label}: {e}"))
+}
+
+fn parse_coin(coin_hex: &str) -> Result<CoinId, String> {
+    let coin_bytes = hex::decode(coin_hex).map_err(|e| format!("invalid coin hex: {e}"))?;
+    if coin_bytes.len() != 32 {
+        return Err(format!("CoinId must be exactly 32 bytes, got {}", coin_bytes.len()));
+    }
+    let coin_id: [u8; 32] = coin_bytes.try_into().expect("length checked");
+    Ok(CoinId::from(Digest::from(coin_id)))
+}
+
+fn parse_amount(amount_str: &str) -> Result<u128, String> {
+    amount_str.parse().map_err(|e| format!("invalid amount: {e}"))
+}
+
+fn parse_spec(
+    symbol: &str,
+    name: &str,
+    decimals: u8,
+    initial_supply: &str,
+    max_supply: &str,
+) -> Result<CoinSpec, String> {
+    let max_supply = if max_supply.is_empty() {
+        None
+    } else {
+        Some(parse_amount(max_supply)?)
+    };
+    Ok(CoinSpec::new(
+        TokenSymbol::new(symbol).map_err(|e| e.to_string())?,
+        TokenName::new(name).map_err(|e| e.to_string())?,
+        decimals,
+        parse_amount(initial_supply)?,
+        max_supply,
+    ))
+}
+
+fn parse_signers(signer_pub_keys: &str) -> Result<Vec<PublicKey>, String> {
+    let mut keys = Vec::new();
+    for key in signer_pub_keys
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let bytes = hex::decode(key).map_err(|e| format!("invalid signer public key hex: {e}"))?;
+        keys.push(
+            PublicKey::decode(bytes.as_ref()).map_err(|e| format!("invalid signer public key: {e}"))?,
+        );
+    }
+    Ok(keys)
+}
+
+fn parse_policy(
+    threshold: u16,
+    signer_pub_keys: &str,
+    fallback: Option<&PublicKey>,
+) -> Result<MultisigPolicy, String> {
+    let mut keys = parse_signers(signer_pub_keys)?;
+    if keys.is_empty() {
+        match fallback {
+            Some(key) => keys.push(key.clone()),
+            None => return Err("signer public keys are required".to_string()),
+        }
+    }
+    MultisigPolicy::new(threshold, keys).map_err(|e| e.to_string())
 }
 
 pub fn sign_transfer_internal(
@@ -196,34 +283,21 @@ pub fn sign_transfer_internal(
         return Err("from_address does not match private key".to_string());
     }
 
-    let signer_public = private_key.public_key();
-    
-    let mut operation = Vec::new();
-    operation.push(3);
-    operation.extend_from_slice(coin_id);
-    operation.extend_from_slice(from_addr.encode().as_ref());
-    operation.extend_from_slice(to_addr.encode().as_ref());
-    operation.extend_from_slice(&amount.encode());
-    
-    let mut signing_bytes = Vec::new();
-    signing_bytes.extend_from_slice(from_addr.encode().as_ref());
-    signing_bytes.push(0);
-    signing_bytes.extend_from_slice(&nonce.encode());
-    signing_bytes.extend_from_slice(&operation);
-    
-    let signature = private_key.sign(COINS_NAMESPACE, &signing_bytes);
-    
-    let mut transaction_bytes = Vec::new();
-    transaction_bytes.extend_from_slice(from_addr.encode().as_ref());
-    transaction_bytes.extend_from_slice(&nonce.encode());
-    transaction_bytes.extend_from_slice(&operation);
-    transaction_bytes.push(0);
-    transaction_bytes.extend_from_slice(&signer_public.encode());
-    transaction_bytes.extend_from_slice(&signature.encode());
-    
-    let digest = Sha256::hash(&transaction_bytes);
+    let transaction = Transaction::sign(
+        private_key,
+        nonce,
+        CoinOperation::Transfer {
+            coin: CoinId::from(Digest::from(*coin_id)),
+            from: parse_address(&from_addr.to_bech32(), "from")?,
+            to: parse_address(&to_addr.to_bech32(), "to")?,
+            amount,
+        },
+    );
+    Ok((transaction.encode().to_vec(), transaction.digest()))
+}
 
-    Ok((transaction_bytes, digest))
+fn to_js(result: SignedTransaction) -> Result<JsValue, JsValue> {
+    serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 #[wasm_bindgen]
@@ -235,43 +309,128 @@ pub fn sign_transfer(
     to_address: &str,
     amount_str: &str,
 ) -> Result<JsValue, JsValue> {
-    let private_bytes = hex::decode(private_key_hex)
-        .map_err(|e| JsValue::from_str(&format!("invalid private key hex: {}", e)))?;
-    let private_key = PrivateKey::decode(private_bytes.as_ref())
-        .map_err(|e| JsValue::from_str(&format!("invalid private key: {}", e)))?;
-
-    let coin_bytes = hex::decode(coin_hex)
-        .map_err(|e| JsValue::from_str(&format!("invalid coin hex: {}", e)))?;
-    
-    if coin_bytes.len() != 32 {
-        return Err(JsValue::from_str(&format!("CoinId must be exactly 32 bytes, got {}", coin_bytes.len())));
+    let private_key = parse_private_key(private_key_hex).map_err(|e| JsValue::from_str(&e))?;
+    let coin = parse_coin(coin_hex).map_err(|e| JsValue::from_str(&e))?;
+    let from = parse_address(from_address, "from address").map_err(|e| JsValue::from_str(&e))?;
+    let to = parse_address(to_address, "to address").map_err(|e| JsValue::from_str(&e))?;
+    let amount = parse_amount(amount_str).map_err(|e| JsValue::from_str(&e))?;
+    if from != nunchi_coins::Address::external(&private_key.public_key()) {
+        return Err(JsValue::from_str("from_address does not match private key"));
     }
-    let coin_id: [u8; 32] = coin_bytes.try_into().unwrap();
-    
-    let from = Address::from_bech32(from_address)
-        .map_err(|e| JsValue::from_str(&format!("invalid from address: {}", e)))?;
-    let to = Address::from_bech32(to_address)
-        .map_err(|e| JsValue::from_str(&format!("invalid to address: {}", e)))?;
-
-    let amount: u128 = amount_str
-        .parse()
-        .map_err(|e| JsValue::from_str(&format!("invalid amount: {}", e)))?;
-
-    let (transaction_bytes, digest) = sign_transfer_internal(
+    to_js(encode_signed(Transaction::sign(
         &private_key,
         nonce,
-        &coin_id,
-        &from,
-        &to,
-        amount,
-    )
-    .map_err(|e| JsValue::from_str(&e))?;
+        CoinOperation::Transfer { coin, from, to, amount },
+    )))
+}
 
-    let result = SignedTransaction {
-        transaction_hex: hex::encode(&transaction_bytes),
-        digest_hex: hex::encode(digest.as_ref()),
-    };
+#[wasm_bindgen]
+pub fn sign_create_token(
+    private_key_hex: &str,
+    nonce: u64,
+    symbol: &str,
+    name: &str,
+    decimals: u8,
+    initial_supply: &str,
+    max_supply: &str,
+) -> Result<JsValue, JsValue> {
+    let private_key = parse_private_key(private_key_hex).map_err(|e| JsValue::from_str(&e))?;
+    let spec = parse_spec(symbol, name, decimals, initial_supply, max_supply).map_err(|e| JsValue::from_str(&e))?;
+    to_js(encode_signed(Transaction::sign(
+        &private_key,
+        nonce,
+        CoinOperation::CreateToken { spec },
+    )))
+}
 
-    serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
+#[wasm_bindgen]
+pub fn sign_mint(
+    private_key_hex: &str,
+    nonce: u64,
+    coin_hex: &str,
+    to_address: &str,
+    amount_str: &str,
+) -> Result<JsValue, JsValue> {
+    let private_key = parse_private_key(private_key_hex).map_err(|e| JsValue::from_str(&e))?;
+    let coin = parse_coin(coin_hex).map_err(|e| JsValue::from_str(&e))?;
+    let to = parse_address(to_address, "to address").map_err(|e| JsValue::from_str(&e))?;
+    let amount = parse_amount(amount_str).map_err(|e| JsValue::from_str(&e))?;
+    to_js(encode_signed(Transaction::sign(
+        &private_key,
+        nonce,
+        CoinOperation::Mint { coin, to, amount },
+    )))
+}
+
+#[wasm_bindgen]
+pub fn sign_burn(
+    private_key_hex: &str,
+    nonce: u64,
+    coin_hex: &str,
+    from_address: &str,
+    amount_str: &str,
+) -> Result<JsValue, JsValue> {
+    let private_key = parse_private_key(private_key_hex).map_err(|e| JsValue::from_str(&e))?;
+    let coin = parse_coin(coin_hex).map_err(|e| JsValue::from_str(&e))?;
+    let from = parse_address(from_address, "from address").map_err(|e| JsValue::from_str(&e))?;
+    let amount = parse_amount(amount_str).map_err(|e| JsValue::from_str(&e))?;
+    if from != nunchi_coins::Address::external(&private_key.public_key()) {
+        return Err(JsValue::from_str("from_address does not match private key"));
+    }
+    to_js(encode_signed(Transaction::sign(
+        &private_key,
+        nonce,
+        CoinOperation::Burn { coin, from, amount },
+    )))
+}
+
+#[wasm_bindgen]
+pub fn derive_multisig_account(threshold: u16, signer_pub_keys: &str) -> Result<String, JsValue> {
+    let policy =
+        parse_policy(threshold, signer_pub_keys, None).map_err(|e| JsValue::from_str(&e))?;
+    Ok(multisig_account_id(&policy).to_bech32())
+}
+
+#[wasm_bindgen]
+pub fn sign_register_account_policy(
+    private_key_hex: &str,
+    nonce: u64,
+    threshold: u16,
+    signer_pub_keys: &str,
+) -> Result<JsValue, JsValue> {
+    let private_key = parse_private_key(private_key_hex).map_err(|e| JsValue::from_str(&e))?;
+    let policy = parse_policy(threshold, signer_pub_keys, Some(&private_key.public_key()))
+        .map_err(|e| JsValue::from_str(&e))?;
+    let account_id = multisig_account_id(&policy);
+    let transaction = Transaction::sign_multisig(
+        account_id.clone(),
+        policy.clone(),
+        &[&private_key],
+        nonce,
+        CoinOperation::RegisterAccountPolicy {
+            account_id: account_id.clone(),
+            policy,
+        },
+    );
+    to_js(SignedTransaction {
+        transaction_hex: hex::encode(transaction.encode()),
+        digest_hex: hex::encode(transaction.digest().as_ref()),
+        account: Some(account_id.to_bech32()),
+    })
+}
+
+#[wasm_bindgen]
+pub fn derive_coin_id(
+    issuer: &str,
+    nonce: u64,
+    symbol: &str,
+    name: &str,
+    decimals: u8,
+    initial_supply: &str,
+    max_supply: &str,
+) -> Result<String, JsValue> {
+    let issuer = parse_address(issuer, "issuer").map_err(|e| JsValue::from_str(&e))?;
+    let spec = parse_spec(symbol, name, decimals, initial_supply, max_supply).map_err(|e| JsValue::from_str(&e))?;
+    Ok(hex::encode(TokenFactory::derive_coin_id(&issuer, nonce, &spec).encode()))
 }
 
