@@ -10,14 +10,21 @@ crate-type = ["cdylib"]
 nunchi-crypto = { path = "../../../crypto" }
 commonware-codec = "2026.7.0"
 commonware-cryptography = "2026.7.0"
+commonware-math = "2026.7.0"
 wasm-bindgen = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 serde-wasm-bindgen = "0.6"
 getrandom = { version = "0.2", features = ["js"] }
 hex = "0.4"
 rand = "0.8"
+rand_core = "0.9"
 bech32 = "0.11"
 bytes = "1.7"
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+p256 = { version = "0.14", features = ["ecdsa"] }
+
+[dev-dependencies]
+nunchi-common = { path = "../../../common" }
 
 [features]
 console_error_panic_hook = ["dep:console_error_panic_hook"]

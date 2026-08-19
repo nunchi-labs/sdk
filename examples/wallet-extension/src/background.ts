@@ -41,53 +41,122 @@ async function addActivity(tx: SubmittedTx): Promise<void> {
   await chrome.storage.local.set({ activity: activity.slice(0, 50) });
 }
 
+const failedUnlockAttempts = new Map<string, { count: number; lastAttempt: number }>();
+const MAX_UNLOCK_ATTEMPTS = 5;
+const LOCKOUT_DURATION = 5 * 60 * 1000;
+
+function isPrivilegedSender(sender: chrome.runtime.MessageSender): boolean {
+  const extensionUrl = chrome.runtime.getURL("");
+  return !sender.tab && sender.url?.startsWith(extensionUrl) === true;
+}
+
+function getSenderOrigin(sender: chrome.runtime.MessageSender): string {
+  return sender.origin || new URL(sender.url || "").origin;
+}
+
 chrome.runtime.onMessage.addListener((message: Message, sender, sendResponse) => {
-  handleMessage(message, sender.tab?.url)
+  handleMessage(message, sender)
     .then((response) => sendResponse(response))
     .catch((error) => sendResponse({ success: false, error: error.message }));
   return true;
 });
 
-async function handleMessage(message: Message, senderUrl?: string): Promise<Response> {
+async function handleMessage(message: Message, sender: chrome.runtime.MessageSender): Promise<Response> {
   const { type, payload } = message;
+  const isPrivileged = isPrivilegedSender(sender);
+  const origin = getSenderOrigin(sender);
+
+  const PRIVILEGED_TYPES = new Set([
+    "CREATE_WALLET",
+    "IMPORT_WALLET",
+    "UNLOCK_WALLET",
+    "LOCK_WALLET",
+    "APPROVE_CONNECTION",
+    "APPROVE_TRANSACTION",
+    "REJECT_CONNECTION",
+    "REJECT_TRANSACTION",
+    "UPDATE_SETTINGS",
+    "GET_STATE",
+    "GET_SETTINGS",
+    "GET_CONNECTED_SITES",
+    "DISCONNECT_SITE",
+    "GET_NONCE",
+    "GET_BALANCE",
+    "GET_ACTIVITY",
+  ]);
+
+  if (PRIVILEGED_TYPES.has(type) && !isPrivileged) {
+    console.warn(`[Nunchi Wallet] Blocked privileged message ${type} from ${origin}`);
+    throw new Error("Unauthorized: privileged operation");
+  }
 
   switch (type) {
     case "CREATE_WALLET": {
-      const { privateKeyHex, publicKeyHex, address, curve, password } = payload as {
+      const existingWallet = await getWalletState();
+      if (existingWallet) {
+        throw new Error("Wallet already exists. Please use IMPORT_WALLET to replace.");
+      }
+
+      const { privateKeyHex, password } = payload as {
         privateKeyHex: string;
-        publicKeyHex: string;
-        address: string;
-        curve: string;
         password: string;
       };
 
+      const wasm = await import("./wasm/nunchi_wallet_crypto");
+      const keyPair = wasm.import_private_key(privateKeyHex);
+
       const { encrypted, salt } = await encryptPrivateKey(privateKeyHex, password);
 
-      const wallet: WalletState = { encrypted, salt, address, curve };
+      const wallet: WalletState = { 
+        encrypted, 
+        salt, 
+        address: keyPair.address, 
+        curve: keyPair.curve 
+      };
       await chrome.storage.local.set({ wallet });
 
-      unlockedWallet = { privateKeyHex, publicKeyHex, address, curve };
+      unlockedWallet = { 
+        privateKeyHex, 
+        publicKeyHex: keyPair.public_key_hex, 
+        address: keyPair.address, 
+        curve: keyPair.curve 
+      };
 
-      return { success: true, data: { address, curve } };
+      return { success: true, data: { address: keyPair.address, curve: keyPair.curve } };
     }
 
     case "IMPORT_WALLET": {
-      const { privateKeyHex, publicKeyHex, address, curve, password } = payload as {
+      const existingWallet = await getWalletState();
+      if (existingWallet) {
+        throw new Error("Wallet already exists. Please delete existing wallet first.");
+      }
+
+      const { privateKeyHex, password } = payload as {
         privateKeyHex: string;
-        publicKeyHex: string;
-        address: string;
-        curve: string;
         password: string;
       };
 
+      const wasm = await import("./wasm/nunchi_wallet_crypto");
+      const keyPair = wasm.import_private_key(privateKeyHex);
+
       const { encrypted, salt } = await encryptPrivateKey(privateKeyHex, password);
 
-      const wallet: WalletState = { encrypted, salt, address, curve };
+      const wallet: WalletState = { 
+        encrypted, 
+        salt, 
+        address: keyPair.address, 
+        curve: keyPair.curve 
+      };
       await chrome.storage.local.set({ wallet });
 
-      unlockedWallet = { privateKeyHex, publicKeyHex, address, curve };
+      unlockedWallet = { 
+        privateKeyHex, 
+        publicKeyHex: keyPair.public_key_hex, 
+        address: keyPair.address, 
+        curve: keyPair.curve 
+      };
 
-      return { success: true, data: { address, curve } };
+      return { success: true, data: { address: keyPair.address, curve: keyPair.curve } };
     }
 
     case "UNLOCK_WALLET": {
@@ -97,19 +166,44 @@ async function handleMessage(message: Message, senderUrl?: string): Promise<Resp
         throw new Error("No wallet found");
       }
 
-      const privateKeyHex = await decryptPrivateKey(wallet.encrypted, wallet.salt, password);
+      const now = Date.now();
+      const attempts = failedUnlockAttempts.get(origin) || { count: 0, lastAttempt: 0 };
+      
+      if (attempts.count >= MAX_UNLOCK_ATTEMPTS) {
+        const timeSinceLastAttempt = now - attempts.lastAttempt;
+        if (timeSinceLastAttempt < LOCKOUT_DURATION) {
+          const remainingMs = LOCKOUT_DURATION - timeSinceLastAttempt;
+          throw new Error(`Too many failed attempts. Try again in ${Math.ceil(remainingMs / 1000)}s`);
+        }
+        failedUnlockAttempts.delete(origin);
+      }
 
-      const wasm = await import("./wasm/nunchi_wallet_crypto");
-      const keyPair = wasm.import_private_key(privateKeyHex);
+      try {
+        const privateKeyHex = await decryptPrivateKey(wallet.encrypted, wallet.salt, password);
 
-      unlockedWallet = {
-        privateKeyHex,
-        publicKeyHex: keyPair.public_key_hex,
-        address: wallet.address,
-        curve: wallet.curve,
-      };
+        const wasm = await import("./wasm/nunchi_wallet_crypto");
+        const keyPair = wasm.import_private_key(privateKeyHex);
 
-      return { success: true, data: { address: wallet.address } };
+        if (keyPair.address !== wallet.address) {
+          throw new Error("Address mismatch: stored address does not match derived address");
+        }
+
+        unlockedWallet = {
+          privateKeyHex,
+          publicKeyHex: keyPair.public_key_hex,
+          address: keyPair.address,
+          curve: wallet.curve,
+        };
+
+        failedUnlockAttempts.delete(origin);
+
+        return { success: true, data: { address: wallet.address } };
+      } catch (error) {
+        attempts.count++;
+        attempts.lastAttempt = now;
+        failedUnlockAttempts.set(origin, attempts);
+        throw error;
+      }
     }
 
     case "LOCK_WALLET": {
@@ -153,13 +247,17 @@ async function handleMessage(message: Message, senderUrl?: string): Promise<Resp
       const { requestId } = payload as { requestId: string };
       const request = pendingConnections.get(requestId);
       if (!request) {
-        throw new Error("Connection request not found");
+        throw new Error("Connection request not found or expired");
+      }
+
+      if (!unlockedWallet) {
+        throw new Error("Wallet is locked");
       }
 
       connectedSites.add(request.origin);
       pendingConnections.delete(requestId);
 
-      return { success: true, data: { address: unlockedWallet?.address } };
+      return { success: true, data: { address: unlockedWallet.address } };
     }
 
     case "REJECT_CONNECTION": {
@@ -214,37 +312,47 @@ async function handleMessage(message: Message, senderUrl?: string): Promise<Resp
       const { requestId } = payload as { requestId: string };
       const request = pendingTransactions.get(requestId);
       if (!request) {
-        throw new Error("Transaction request not found");
+        throw new Error("Transaction request not found or expired");
       }
 
       if (!unlockedWallet) {
         throw new Error("Wallet is locked");
       }
 
-      const wasm = await import("./wasm/nunchi_wallet_crypto");
-      const signed = wasm.sign_transfer(
-        unlockedWallet.privateKeyHex,
-        BigInt(request.nonce),
-        request.coin,
-        request.from,
-        request.to,
-        request.amount
-      );
+      if (request.from !== unlockedWallet.address) {
+        pendingTransactions.delete(requestId);
+        throw new Error("Transaction from address must match unlocked wallet");
+      }
 
-      const settings = await getSettings();
-      const hash = await submitTransaction(settings.rpcUrl, signed.transaction_hex);
+      try {
+        const wasm = await import("./wasm/nunchi_wallet_crypto");
+        const signed = wasm.sign_transfer(
+          unlockedWallet.privateKeyHex,
+          BigInt(request.nonce),
+          request.coin,
+          request.from,
+          request.to,
+          request.amount
+        );
 
-      await addActivity({
-        hash,
-        timestamp: Date.now(),
-        coin: request.coin,
-        to: request.to,
-        amount: request.amount,
-      });
+        const settings = await getSettings();
+        const hash = await submitTransaction(settings.rpcUrl, signed.transaction_hex);
 
-      pendingTransactions.delete(requestId);
+        await addActivity({
+          hash,
+          timestamp: Date.now(),
+          coin: request.coin,
+          to: request.to,
+          amount: request.amount,
+        });
 
-      return { success: true, data: { hash } };
+        pendingTransactions.delete(requestId);
+
+        return { success: true, data: { hash } };
+      } catch (error) {
+        pendingTransactions.delete(requestId);
+        throw error;
+      }
     }
 
     case "REJECT_TRANSACTION": {

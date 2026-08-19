@@ -1,20 +1,30 @@
-const script = document.createElement("script");
-script.src = chrome.runtime.getURL("inpage.js");
-script.type = "module";
-(document.head || document.documentElement).appendChild(script);
+const ALLOWED_PAGE_MESSAGES = new Set([
+  "REQUEST_CONNECTION",
+  "REQUEST_TRANSACTION",
+]);
 
 window.addEventListener("message", async (event) => {
   if (event.source !== window) return;
-  if (event.data.target !== "nunchi-wallet-content") return;
+  if (!event.data || typeof event.data.type !== "string") return;
 
-  const { type, payload, requestId } = event.data;
+  if (!ALLOWED_PAGE_MESSAGES.has(event.data.type)) {
+    console.warn("[Nunchi Wallet] Blocked privileged message from page:", event.data.type);
+    return;
+  }
+
+  const requestId = event.data.requestId || `req-${Date.now()}-${Math.random()}`;
 
   try {
-    const response = await chrome.runtime.sendMessage({ type, payload });
+    const response = await chrome.runtime.sendMessage({
+      type: event.data.type,
+      payload: event.data.payload,
+      requestId,
+      origin: window.location.origin,
+    });
 
     window.postMessage(
       {
-        target: "nunchi-wallet-inpage",
+        type: "NUNCHI_RESPONSE",
         requestId,
         response,
       },
@@ -23,7 +33,7 @@ window.addEventListener("message", async (event) => {
   } catch (error) {
     window.postMessage(
       {
-        target: "nunchi-wallet-inpage",
+        type: "NUNCHI_RESPONSE",
         requestId,
         response: {
           success: false,
@@ -34,3 +44,10 @@ window.addEventListener("message", async (event) => {
     );
   }
 });
+
+const script = document.createElement("script");
+script.src = chrome.runtime.getURL("inpage.js");
+script.onload = function () {
+  (this as HTMLScriptElement).remove();
+};
+(document.head || document.documentElement).appendChild(script);

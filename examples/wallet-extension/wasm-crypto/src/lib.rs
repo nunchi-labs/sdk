@@ -4,6 +4,9 @@ use nunchi_crypto::{PrivateKey, PublicKey};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
+#[cfg(test)]
+mod tests;
+
 const ADDRESS_DOMAIN: &[u8] = b"nunchi/account/v1";
 const ADDRESS_EXTERNAL: u8 = 0;
 pub const ADDRESS_HRP: &str = "nch";
@@ -73,17 +76,19 @@ pub struct KeyPair {
 
 #[wasm_bindgen]
 pub fn generate_ed25519_keypair() -> Result<JsValue, JsValue> {
-    let mut seed_bytes = [0u8; 8];
-    getrandom::getrandom(&mut seed_bytes).map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let seed = u64::from_le_bytes(seed_bytes);
+    let mut entropy = [0u8; 32];
+    getrandom::getrandom(&mut entropy).map_err(|e| JsValue::from_str(&e.to_string()))?;
     
-    let private_key = PrivateKey::ed25519_from_seed(seed);
-    let public_key = private_key.public_key();
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&entropy);
+    let nunchi_signing_key: nunchi_crypto::PrivateKey = nunchi_crypto::PrivateKey::Ed25519(
+        signing_key.into()
+    );
+    let public_key = nunchi_signing_key.public_key();
     let address = Address::external(&public_key);
 
     let result = KeyPair {
         curve: "Ed25519".to_string(),
-        private_key_hex: hex::encode(private_key.encode()),
+        private_key_hex: hex::encode(nunchi_signing_key.encode()),
         public_key_hex: hex::encode(public_key.encode()),
         address: address.to_bech32(),
     };
@@ -93,17 +98,18 @@ pub fn generate_ed25519_keypair() -> Result<JsValue, JsValue> {
 
 #[wasm_bindgen]
 pub fn generate_secp256r1_keypair() -> Result<JsValue, JsValue> {
-    let mut seed_bytes = [0u8; 8];
-    getrandom::getrandom(&mut seed_bytes).map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let seed = u64::from_le_bytes(seed_bytes);
+    let mut entropy = [0u8; 32];
+    getrandom::getrandom(&mut entropy).map_err(|e| JsValue::from_str(&e.to_string()))?;
     
-    let private_key = PrivateKey::secp256r1_from_seed(seed);
-    let public_key = private_key.public_key();
+    let signing_key = p256::ecdsa::SigningKey::from_bytes(&entropy.into())
+        .map_err(|e| JsValue::from_str(&format!("failed to create key: {}", e)))?;
+    let nunchi_key = nunchi_crypto::PrivateKey::Secp256r1(signing_key.into());
+    let public_key = nunchi_key.public_key();
     let address = Address::external(&public_key);
 
     let result = KeyPair {
         curve: "Secp256r1".to_string(),
-        private_key_hex: hex::encode(private_key.encode()),
+        private_key_hex: hex::encode(nunchi_key.encode()),
         public_key_hex: hex::encode(public_key.encode()),
         address: address.to_bech32(),
     };
@@ -173,6 +179,10 @@ pub fn sign_transfer(
     let coin_bytes = hex::decode(coin_hex)
         .map_err(|e| JsValue::from_str(&format!("invalid coin hex: {}", e)))?;
     
+    if coin_bytes.len() != 32 {
+        return Err(JsValue::from_str(&format!("CoinId must be exactly 32 bytes, got {}", coin_bytes.len())));
+    }
+    
     let from = Address::from_bech32(from_address)
         .map_err(|e| JsValue::from_str(&format!("invalid from address: {}", e)))?;
     let to = Address::from_bech32(to_address)
@@ -184,6 +194,10 @@ pub fn sign_transfer(
 
     let signer_public = private_key.public_key();
     let account_id = Address::external(&signer_public);
+    
+    if account_id != from {
+        return Err(JsValue::from_str("from_address must match signer address (account_id)"));
+    }
     
     let mut payload_bytes = Vec::new();
     payload_bytes.extend_from_slice(&nonce.encode());
@@ -217,40 +231,3 @@ pub fn sign_transfer(
     serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-struct OsRngWrapper;
-
-impl rand::CryptoRng for OsRngWrapper {}
-
-impl rand::RngCore for OsRngWrapper {
-    fn next_u32(&mut self) -> u32 {
-        let mut bytes = [0u8; 4];
-        self.fill_bytes(&mut bytes);
-        u32::from_le_bytes(bytes)
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut bytes = [0u8; 8];
-        self.fill_bytes(&mut bytes);
-        u64::from_le_bytes(bytes)
-    }
-
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        getrandom::getrandom(dest).expect("getrandom failed");
-    }
-
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        getrandom::getrandom(dest).map_err(|e| {
-            rand::Error::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("getrandom failed: {}", e),
-            ))
-        })
-    }
-}
-
-mod rand {
-    pub use ::rand::*;
-    pub fn thread_rng() -> super::OsRngWrapper {
-        super::OsRngWrapper
-    }
-}
