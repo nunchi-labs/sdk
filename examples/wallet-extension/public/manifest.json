@@ -5,6 +5,7 @@
   "description": "Browser wallet for Nunchi chains",
   "permissions": ["storage", "unlimitedStorage"],
   "host_permissions": ["http://localhost:*/", "http://127.0.0.1:*/"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
   "background": {
     "service_worker": "background.js",
     "type": "module"
@@ -26,7 +27,8 @@
     {
       "matches": ["<all_urls>"],
       "js": ["content.js"],
-      "run_at": "document_start"
+      "run_at": "document_start",
+      "all_frames": true
     }
   ],
   "web_accessible_resources": [

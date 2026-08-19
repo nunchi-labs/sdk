@@ -2,15 +2,27 @@ import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Lock, Copy, Send as SendIcon, Activity, Settings as SettingsIcon, ArrowLeft, Check } from "lucide-react";
 import type { Settings, SubmittedTx } from "./types";
+import { rpcOriginPattern } from "./rpc";
 import "./popup.css";
 
-type View = "loading" | "onboarding" | "unlock" | "home" | "send" | "activity" | "settings" | "approveConnection" | "approveTransaction";
+type View =
+  | "loading"
+  | "onboarding"
+  | "backup"
+  | "unlock"
+  | "home"
+  | "send"
+  | "activity"
+  | "settings"
+  | "approveConnection"
+  | "approveTransaction";
 
 interface WalletInfo {
   hasWallet: boolean;
   isUnlocked: boolean;
   address?: string;
   curve?: string;
+  needsBackup?: boolean;
 }
 
 function App() {
@@ -38,6 +50,8 @@ function App() {
         setWalletInfo(response.data);
         if (!response.data.hasWallet) {
           setView("onboarding");
+        } else if (response.data.needsBackup) {
+          setView("backup");
         } else if (!response.data.isUnlocked) {
           setView("unlock");
         } else {
@@ -69,8 +83,12 @@ function App() {
     return <Onboarding onComplete={() => loadState()} />;
   }
 
+  if (view === "backup") {
+    return <BackupView onComplete={() => loadState()} />;
+  }
+
   if (view === "unlock") {
-    return <Unlock onUnlock={() => setView("home")} />;
+    return <Unlock onUnlock={() => loadState()} />;
   }
 
   return (
@@ -86,7 +104,7 @@ function App() {
       )}
       {view === "send" && walletInfo && <Send address={walletInfo.address!} onBack={() => setView("home")} />}
       {view === "activity" && <ActivityView onBack={() => setView("home")} />}
-      {view === "settings" && <SettingsView onBack={() => setView("home")} />}
+      {view === "settings" && <SettingsView onBack={() => loadState()} />}
       {error && <div className="error">{error}</div>}
     </div>
   );
@@ -247,6 +265,107 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
   );
 }
 
+function BackupView({ onComplete }: { onComplete: () => void }) {
+  const [privateKey, setPrivateKey] = useState("");
+  const [saved, setSaved] = useState(false);
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    void loadBackup();
+  }, []);
+
+  async function loadBackup() {
+    setLoading(true);
+    setError("");
+    try {
+      const response = await chrome.runtime.sendMessage({ type: "REVEAL_BACKUP" });
+      if (response.success) {
+        setPrivateKey(response.data.private_key_hex);
+      } else if (response.error?.includes("Password required")) {
+        setError("Unlock expired. Enter your password to reveal the backup key.");
+      } else {
+        setError(response.error || "Failed to reveal backup");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function revealWithPassword() {
+    setLoading(true);
+    setError("");
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: "REVEAL_BACKUP",
+        payload: { password },
+      });
+      if (response.success) {
+        setPrivateKey(response.data.private_key_hex);
+      } else {
+        setError(response.error || "Failed to reveal backup");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="container">
+      <div className="header">
+        <h2>Save Your Key</h2>
+      </div>
+      <div className="content">
+        <p className="subtitle">This is the only time the wallet shows your private key. Store it offline.</p>
+        {privateKey ? (
+          <label>
+            <span>Private Key</span>
+            <textarea readOnly value={privateKey} rows={4} />
+          </label>
+        ) : (
+          <label>
+            <span>Password</span>
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+          </label>
+        )}
+        {error && <div className="error">{error}</div>}
+        {!privateKey && (
+          <button className="primary large" onClick={() => void revealWithPassword()} disabled={loading || !password}>
+            {loading ? "Revealing..." : "Reveal key"}
+          </button>
+        )}
+        {privateKey && (
+          <>
+            <label className="checkRow">
+              <input type="checkbox" checked={saved} onChange={(e) => setSaved(e.target.checked)} />
+              <span>I saved this private key in a safe place</span>
+            </label>
+            <button
+              className="primary large"
+              disabled={!saved}
+              onClick={async () => {
+                const response = await chrome.runtime.sendMessage({ type: "CONFIRM_BACKUP" });
+                if (response.success) {
+                  onComplete();
+                } else {
+                  setError(response.error || "Failed to confirm backup");
+                }
+              }}
+            >
+              Continue
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function Unlock({ onUnlock }: { onUnlock: () => void }) {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -314,17 +433,36 @@ function Home({
   onLock: () => void;
 }) {
   const [copied, setCopied] = useState(false);
-  const [balance] = useState<string | null>(null);
+  const [balance, setBalance] = useState<string | null>(null);
+  const [balanceError, setBalanceError] = useState("");
   const [settings, setSettings] = useState<Settings | null>(null);
 
   useEffect(() => {
-    loadSettings();
-  }, []);
+    void load();
+  }, [address]);
 
-  async function loadSettings() {
-    const response = await chrome.runtime.sendMessage({ type: "GET_SETTINGS" });
-    if (response.success) {
-      setSettings(response.data);
+  async function load() {
+    const settingsResponse = await chrome.runtime.sendMessage({ type: "GET_SETTINGS" });
+    if (!settingsResponse.success) {
+      return;
+    }
+    const next: Settings = settingsResponse.data;
+    setSettings(next);
+    if (!next.displayCoin) {
+      setBalance(null);
+      setBalanceError("");
+      return;
+    }
+    const balanceResponse = await chrome.runtime.sendMessage({
+      type: "GET_BALANCE",
+      payload: { address, coin: next.displayCoin },
+    });
+    if (balanceResponse.success) {
+      setBalance(balanceResponse.data.balance);
+      setBalanceError("");
+    } else {
+      setBalance(null);
+      setBalanceError(balanceResponse.error || "Failed to load balance");
     }
   }
 
@@ -361,12 +499,20 @@ function Home({
         </div>
         {settings && (
           <div className="networkBadge">
-            {settings.network} ({settings.rpcUrl})
+            {settings.network} / {settings.chainId} ({settings.rpcUrl})
           </div>
         )}
         <div className="balanceSection">
           <div className="balanceLabel">Balance</div>
-          <div className="balanceValue">{balance || "0"}</div>
+          {settings?.displayCoin ? (
+            <>
+              <div className="balanceValue">{balance ?? (balanceError ? "-" : "...")}</div>
+              <div className="subtitle">{compactAddress(settings.displayCoin, 8, 8)}</div>
+            </>
+          ) : (
+            <div className="subtitle">Set a display coin in Settings to load a balance</div>
+          )}
+          {balanceError && <div className="error">{balanceError}</div>}
         </div>
         <div className="actions">
           <button className="primary" onClick={onSend}>
@@ -390,6 +536,14 @@ function Send({ address, onBack }: { address: string; onBack: () => void }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState(false);
+
+  useEffect(() => {
+    void chrome.runtime.sendMessage({ type: "GET_SETTINGS" }).then((response) => {
+      if (response.success && response.data.displayCoin) {
+        setCoin(response.data.displayCoin);
+      }
+    });
+  }, []);
 
   async function handleSend() {
     if (!recipient || !coin || !amount) {
@@ -473,7 +627,7 @@ function ActivityView({ onBack }: { onBack: () => void }) {
   const [activity, setActivity] = useState<SubmittedTx[]>([]);
 
   useEffect(() => {
-    loadActivity();
+    void loadActivity();
   }, []);
 
   async function loadActivity() {
@@ -516,24 +670,89 @@ function ActivityView({ onBack }: { onBack: () => void }) {
 }
 
 function SettingsView({ onBack }: { onBack: () => void }) {
-  const [settings, setSettings] = useState<Settings>({ rpcUrl: "", network: "" });
+  const [settings, setSettings] = useState<Settings>({
+    rpcUrl: "",
+    network: "",
+    chainId: "",
+    displayCoin: "",
+  });
+  const [sites, setSites] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [exportPassword, setExportPassword] = useState("");
+  const [exportedKey, setExportedKey] = useState("");
+  const [deletePassword, setDeletePassword] = useState("");
+  const [deleteConfirm, setDeleteConfirm] = useState("");
 
   useEffect(() => {
-    loadSettings();
+    void load();
   }, []);
 
-  async function loadSettings() {
-    const response = await chrome.runtime.sendMessage({ type: "GET_SETTINGS" });
-    if (response.success) {
-      setSettings(response.data);
-      setLoading(false);
+  async function load() {
+    const [settingsResponse, sitesResponse] = await Promise.all([
+      chrome.runtime.sendMessage({ type: "GET_SETTINGS" }),
+      chrome.runtime.sendMessage({ type: "GET_CONNECTED_SITES" }),
+    ]);
+    if (settingsResponse.success) {
+      setSettings(settingsResponse.data);
     }
+    if (sitesResponse.success) {
+      setSites(sitesResponse.data);
+    }
+    setLoading(false);
   }
 
   async function saveSettings() {
-    await chrome.runtime.sendMessage({ type: "UPDATE_SETTINGS", payload: settings });
-    onBack();
+    setError("");
+    try {
+      const origin = rpcOriginPattern(settings.rpcUrl);
+      if (chrome.permissions?.request) {
+        await chrome.permissions.request({ origins: [origin] });
+      }
+      const response = await chrome.runtime.sendMessage({ type: "UPDATE_SETTINGS", payload: settings });
+      if (!response.success) {
+        setError(response.error || "Failed to save settings");
+        return;
+      }
+      onBack();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function disconnect(origin: string) {
+    await chrome.runtime.sendMessage({ type: "DISCONNECT_SITE", payload: { origin } });
+    setSites((current) => current.filter((site) => site !== origin));
+  }
+
+  async function exportKey() {
+    setError("");
+    const response = await chrome.runtime.sendMessage({
+      type: "EXPORT_PRIVATE_KEY",
+      payload: { password: exportPassword },
+    });
+    if (response.success) {
+      setExportedKey(response.data.private_key_hex);
+    } else {
+      setError(response.error || "Export failed");
+    }
+  }
+
+  async function deleteWallet() {
+    if (deleteConfirm !== "DELETE") {
+      setError("Type DELETE to confirm");
+      return;
+    }
+    setError("");
+    const response = await chrome.runtime.sendMessage({
+      type: "DELETE_WALLET",
+      payload: { password: deletePassword },
+    });
+    if (response.success) {
+      onBack();
+    } else {
+      setError(response.error || "Delete failed");
+    }
   }
 
   if (loading) return <div className="container">Loading...</div>;
@@ -552,12 +771,68 @@ function SettingsView({ onBack }: { onBack: () => void }) {
           <input type="text" value={settings.network} onChange={(e) => setSettings({ ...settings, network: e.target.value })} />
         </label>
         <label>
+          <span>Chain ID</span>
+          <input type="text" value={settings.chainId} onChange={(e) => setSettings({ ...settings, chainId: e.target.value })} />
+        </label>
+        <label>
           <span>RPC URL</span>
           <input type="text" value={settings.rpcUrl} onChange={(e) => setSettings({ ...settings, rpcUrl: e.target.value })} />
         </label>
-        <button className="primary large" onClick={saveSettings}>
+        <label>
+          <span>Display coin (hex)</span>
+          <input
+            type="text"
+            value={settings.displayCoin}
+            onChange={(e) => setSettings({ ...settings, displayCoin: e.target.value })}
+            placeholder="32-byte coin id"
+          />
+        </label>
+        <button className="primary large" onClick={() => void saveSettings()}>
           Save
         </button>
+
+        <h2>Connected Sites</h2>
+        {sites.length === 0 ? (
+          <div className="empty">No connected sites</div>
+        ) : (
+          sites.map((site) => (
+            <div className="detailRow" key={site}>
+              <div className="mono">{site}</div>
+              <button className="danger" onClick={() => void disconnect(site)}>
+                Disconnect
+              </button>
+            </div>
+          ))
+        )}
+
+        <h2>Export Key</h2>
+        <label>
+          <span>Password</span>
+          <input type="password" value={exportPassword} onChange={(e) => setExportPassword(e.target.value)} />
+        </label>
+        {exportedKey && (
+          <label>
+            <span>Private Key</span>
+            <textarea readOnly value={exportedKey} rows={3} />
+          </label>
+        )}
+        <button className="secondary large" onClick={() => void exportKey()} disabled={!exportPassword}>
+          Export
+        </button>
+
+        <h2>Delete Wallet</h2>
+        <label>
+          <span>Password</span>
+          <input type="password" value={deletePassword} onChange={(e) => setDeletePassword(e.target.value)} />
+        </label>
+        <label>
+          <span>Type DELETE</span>
+          <input type="text" value={deleteConfirm} onChange={(e) => setDeleteConfirm(e.target.value)} />
+        </label>
+        <button className="danger large" onClick={() => void deleteWallet()} disabled={!deletePassword}>
+          Delete wallet
+        </button>
+        {error && <div className="error">{error}</div>}
       </div>
     </>
   );
@@ -577,6 +852,7 @@ interface PendingTransactionView {
   from: string;
   to: string;
   amount: string;
+  submit?: boolean;
 }
 
 function ApproveConnection({ requestId }: { requestId: string }) {
@@ -736,13 +1012,17 @@ function ApproveTransaction({ requestId }: { requestId: string }) {
     );
   }
 
+  const submit = pending.submit !== false;
+
   return (
     <div className="container">
       <div className="header">
-        <h2>Transaction Request</h2>
+        <h2>{submit ? "Send Transaction" : "Sign Transaction"}</h2>
       </div>
       <div className="content">
-        <p className="subtitle">Review this transfer before signing.</p>
+        <p className="subtitle">
+          {submit ? "Review this transfer before signing and submitting." : "Review this transfer before signing. It will not be submitted."}
+        </p>
         <div className="detailCard">
           <div className="detailRow">
             <span>Site</span>
@@ -771,7 +1051,7 @@ function ApproveTransaction({ requestId }: { requestId: string }) {
             Reject
           </button>
           <button className="primary" onClick={() => decide("APPROVE_TRANSACTION")} disabled={loading}>
-            {loading ? "Signing..." : "Confirm"}
+            {loading ? "Working..." : submit ? "Confirm" : "Sign"}
           </button>
         </div>
       </div>

@@ -360,3 +360,15 @@ button.danger.large {
   padding: 14px;
   font-size: 15px;
 }
+
+.checkRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.checkRow span {
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text);
+}

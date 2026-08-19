@@ -1,15 +1,11 @@
 import { randomRequestId } from "./ids";
-
-const ALLOWED_PAGE_MESSAGES = new Set([
-  "REQUEST_CONNECTION",
-  "REQUEST_TRANSACTION",
-]);
+import { isAllowedPageMessage } from "./page-messages";
 
 window.addEventListener("message", async (event) => {
   if (event.source !== window) return;
   if (!event.data || typeof event.data.type !== "string") return;
 
-  if (!ALLOWED_PAGE_MESSAGES.has(event.data.type)) {
+  if (!isAllowedPageMessage(event.data.type)) {
     console.warn("[Nunchi Wallet] Blocked privileged message from page:", event.data.type);
     return;
   }
@@ -21,7 +17,6 @@ window.addEventListener("message", async (event) => {
       type: event.data.type,
       payload: event.data.payload,
       requestId,
-      origin: window.location.origin,
     });
 
     window.postMessage(
@@ -49,7 +44,6 @@ window.addEventListener("message", async (event) => {
 
 const script = document.createElement("script");
 script.src = chrome.runtime.getURL("inpage.js");
-script.type = "module";
 script.onload = function () {
   (this as HTMLScriptElement).remove();
 };

@@ -10,7 +10,9 @@ import type {
 } from "./types";
 import { encryptPrivateKey, decryptPrivateKey } from "./crypto";
 import { randomRequestId } from "./ids";
+import { senderOrigin } from "./origin";
 import { isPrivilegedSender as originIsPrivileged } from "./privilege";
+import { parseRpcUrl } from "./rpc";
 
 const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -24,6 +26,9 @@ type PendingTransaction = TransactionRequest & {
   resolve: (response: Response) => void;
 };
 
+type StoredConnection = { id: string; origin: string; timestamp: number; windowId?: number };
+type StoredTransaction = Omit<TransactionRequest, "id"> & { id: string; windowId?: number };
+
 async function initWasm() {
   const wasm = await import("./wasm/nunchi_wallet_crypto");
   await wasm.default();
@@ -35,20 +40,95 @@ let unlockedWallet: UnlockedWallet | null = null;
 const connectedSites: Set<string> = new Set();
 const pendingConnections: Map<string, PendingConnection> = new Map();
 const pendingTransactions: Map<string, PendingTransaction> = new Map();
+let hydrated = false;
 
 const DEFAULT_SETTINGS: Settings = {
   rpcUrl: "http://localhost:8545",
   network: "local",
+  chainId: "nunchi-local",
+  displayCoin: "",
 };
+
+async function hydrate(): Promise<void> {
+  if (hydrated) {
+    return;
+  }
+  hydrated = true;
+  const stored = await chrome.storage.local.get(["connectedSites", "pendingConnections", "pendingTransactions"]);
+  if (Array.isArray(stored.connectedSites)) {
+    connectedSites.clear();
+    for (const site of stored.connectedSites) {
+      if (typeof site === "string" && site) {
+        connectedSites.add(site);
+      }
+    }
+  }
+  if (Array.isArray(stored.pendingConnections)) {
+    for (const item of stored.pendingConnections as StoredConnection[]) {
+      if (!item?.id || !item.origin) {
+        continue;
+      }
+      pendingConnections.set(item.id, {
+        origin: item.origin,
+        timestamp: item.timestamp,
+        windowId: item.windowId,
+        resolve: () => undefined,
+      });
+    }
+  }
+  if (Array.isArray(stored.pendingTransactions)) {
+    for (const item of stored.pendingTransactions as StoredTransaction[]) {
+      if (!item?.id) {
+        continue;
+      }
+      pendingTransactions.set(item.id, {
+        ...item,
+        submit: item.submit !== false,
+        resolve: () => undefined,
+      });
+    }
+  }
+}
+
+async function persistConnectedSites(): Promise<void> {
+  await chrome.storage.local.set({ connectedSites: Array.from(connectedSites) });
+}
+
+async function persistPending(): Promise<void> {
+  const connections: StoredConnection[] = [];
+  for (const [id, request] of pendingConnections) {
+    connections.push({ id, origin: request.origin, timestamp: request.timestamp, windowId: request.windowId });
+  }
+  const transactions: StoredTransaction[] = [];
+  for (const request of pendingTransactions.values()) {
+    transactions.push({
+      id: request.id,
+      origin: request.origin,
+      nonce: request.nonce,
+      coin: request.coin,
+      from: request.from,
+      to: request.to,
+      amount: request.amount,
+      timestamp: request.timestamp,
+      submit: request.submit,
+      windowId: request.windowId,
+    });
+  }
+  await chrome.storage.local.set({ pendingConnections: connections, pendingTransactions: transactions });
+}
 
 async function getWalletState(): Promise<WalletState | null> {
   const result = await chrome.storage.local.get("wallet");
   return result.wallet || null;
 }
 
+async function setWalletState(wallet: WalletState): Promise<void> {
+  await chrome.storage.local.set({ wallet });
+}
+
 async function getSettings(): Promise<Settings> {
   const result = await chrome.storage.local.get("settings");
-  return result.settings || DEFAULT_SETTINGS;
+  return { ...DEFAULT_SETTINGS, ...(result.settings || {}) };
 }
 
 async function getActivity(): Promise<SubmittedTx[]> {
@@ -71,7 +151,14 @@ function isPrivilegedSender(sender: chrome.runtime.MessageSender): boolean {
 }
 
 function getSenderOrigin(sender: chrome.runtime.MessageSender): string {
-  return sender.origin || new URL(sender.url || "").origin;
+  return senderOrigin(sender);
+}
+
+function requireOrigin(origin: string): string {
+  if (!origin) {
+    throw new Error("Missing sender origin");
+  }
+  return origin;
 }
 
 function settlePending<T extends { resolve: (response: Response) => void }>(
@@ -85,6 +172,7 @@ function settlePending<T extends { resolve: (response: Response) => void }>(
   }
   map.delete(requestId);
   entry.resolve(response);
+  void persistPending();
   return true;
 }
 
@@ -113,6 +201,7 @@ chrome.runtime.onMessage.addListener((message: Message, sender, sendResponse) =>
 });
 
 async function handleMessage(message: Message, sender: chrome.runtime.MessageSender): Promise<Response> {
+  await hydrate();
   const { type, payload } = message;
   const isPrivileged = isPrivilegedSender(sender);
   const origin = getSenderOrigin(sender);
@@ -120,6 +209,10 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
   const PRIVILEGED_TYPES = new Set([
     "CREATE_WALLET",
     "IMPORT_WALLET",
+    "REVEAL_BACKUP",
+    "CONFIRM_BACKUP",
+    "EXPORT_PRIVATE_KEY",
+    "DELETE_WALLET",
     "UNLOCK_WALLET",
     "LOCK_WALLET",
     "APPROVE_CONNECTION",
@@ -147,7 +240,7 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
     case "CREATE_WALLET": {
       const existingWallet = await getWalletState();
       if (existingWallet) {
-        throw new Error("Wallet already exists. Please use IMPORT_WALLET to replace.");
+        throw new Error("Wallet already exists. Delete it in Settings before creating a new one.");
       }
 
       const { curve, password } = payload as {
@@ -165,14 +258,14 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
       }
 
       const { encrypted, salt } = await encryptPrivateKey(keyPair.private_key_hex, password);
-
       const wallet: WalletState = {
         encrypted,
         salt,
         address: keyPair.address,
         curve: keyPair.curve,
+        needsBackup: true,
       };
-      await chrome.storage.local.set({ wallet });
+      await setWalletState(wallet);
 
       unlockedWallet = {
         privateKeyHex: keyPair.private_key_hex,
@@ -181,19 +274,13 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
         curve: keyPair.curve,
       };
 
-      return {
-        success: true,
-        data: {
-          address: keyPair.address,
-          curve: keyPair.curve,
-        },
-      };
+      return { success: true, data: { address: keyPair.address, curve: keyPair.curve, needsBackup: true } };
     }
 
     case "IMPORT_WALLET": {
       const existingWallet = await getWalletState();
       if (existingWallet) {
-        throw new Error("Wallet already exists. Please delete existing wallet first.");
+        throw new Error("Wallet already exists. Delete it in Settings before importing another.");
       }
 
       const { private_key_hex, password } = payload as {
@@ -203,16 +290,15 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
 
       const wasm = await initWasm();
       const keyPair = wasm.import_private_key(private_key_hex);
-
       const { encrypted, salt } = await encryptPrivateKey(private_key_hex, password);
-
       const wallet: WalletState = {
         encrypted,
         salt,
         address: keyPair.address,
         curve: keyPair.curve,
+        needsBackup: false,
       };
-      await chrome.storage.local.set({ wallet });
+      await setWalletState(wallet);
 
       unlockedWallet = {
         privateKeyHex: private_key_hex,
@@ -221,7 +307,60 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
         curve: keyPair.curve,
       };
 
-      return { success: true, data: { address: keyPair.address, curve: keyPair.curve } };
+      return { success: true, data: { address: keyPair.address, curve: keyPair.curve, needsBackup: false } };
+    }
+
+    case "REVEAL_BACKUP": {
+      const wallet = await getWalletState();
+      if (!wallet?.needsBackup) {
+        throw new Error("No pending backup");
+      }
+
+      const { password } = (payload || {}) as { password?: string };
+      let privateKeyHex = unlockedWallet?.privateKeyHex;
+      if (!privateKeyHex) {
+        if (!password) {
+          throw new Error("Password required to reveal backup");
+        }
+        privateKeyHex = await decryptPrivateKey(wallet.encrypted, wallet.salt, password);
+      }
+
+      return { success: true, data: { private_key_hex: privateKeyHex } };
+    }
+
+    case "CONFIRM_BACKUP": {
+      const wallet = await getWalletState();
+      if (!wallet) {
+        throw new Error("No wallet found");
+      }
+      await setWalletState({ ...wallet, needsBackup: false });
+      return { success: true };
+    }
+
+    case "EXPORT_PRIVATE_KEY": {
+      const { password } = payload as { password: string };
+      const wallet = await getWalletState();
+      if (!wallet) {
+        throw new Error("No wallet found");
+      }
+      const privateKeyHex = await decryptPrivateKey(wallet.encrypted, wallet.salt, password);
+      return { success: true, data: { private_key_hex: privateKeyHex } };
+    }
+
+    case "DELETE_WALLET": {
+      const { password } = payload as { password: string };
+      const wallet = await getWalletState();
+      if (!wallet) {
+        throw new Error("No wallet found");
+      }
+      await decryptPrivateKey(wallet.encrypted, wallet.salt, password);
+      unlockedWallet = null;
+      connectedSites.clear();
+      pendingConnections.clear();
+      pendingTransactions.clear();
+      await chrome.storage.local.remove(["wallet", "activity", "connectedSites", "pendingConnections", "pendingTransactions"]);
+      await persistPending();
+      return { success: true };
     }
 
     case "UNLOCK_WALLET": {
@@ -260,8 +399,7 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
         };
 
         failedUnlockAttempts.delete(origin);
-
-        return { success: true, data: { address: wallet.address } };
+        return { success: true, data: { address: wallet.address, needsBackup: !!wallet.needsBackup } };
       } catch (error) {
         attempts.count++;
         attempts.lastAttempt = now;
@@ -284,6 +422,7 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
           isUnlocked: !!unlockedWallet,
           address: wallet?.address,
           curve: wallet?.curve,
+          needsBackup: !!wallet?.needsBackup,
         },
       };
     }
@@ -316,6 +455,7 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
             to: transaction.to,
             amount: transaction.amount,
             timestamp: transaction.timestamp,
+            submit: transaction.submit,
           },
         };
       }
@@ -324,6 +464,7 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
     }
 
     case "REQUEST_CONNECTION": {
+      requireOrigin(origin);
       if (connectedSites.has(origin)) {
         if (!unlockedWallet) {
           throw new Error("Wallet is locked");
@@ -336,11 +477,12 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
       }
 
       const requestId = randomRequestId("conn");
-      return waitForApproval(requestId, pendingConnections, {
-        origin,
-        timestamp: Date.now(),
-        resolve: () => undefined,
-      }, `popup.html?approve=connection&id=${encodeURIComponent(requestId)}`);
+      return waitForApproval(
+        requestId,
+        pendingConnections,
+        { origin, timestamp: Date.now(), resolve: () => undefined },
+        `popup.html?approve=connection&id=${encodeURIComponent(requestId)}`
+      );
     }
 
     case "APPROVE_CONNECTION": {
@@ -349,12 +491,12 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
       if (!request) {
         throw new Error("Connection request not found or expired");
       }
-
       if (!unlockedWallet) {
         throw new Error("Wallet is locked");
       }
 
       connectedSites.add(request.origin);
+      await persistConnectedSites();
       const address = unlockedWallet.address;
       settlePending(pendingConnections, requestId, { success: true, data: { address } });
       return { success: true, data: { address } };
@@ -368,7 +510,9 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
       return { success: true };
     }
 
-    case "REQUEST_TRANSACTION": {
+    case "REQUEST_TRANSACTION":
+    case "REQUEST_SIGN": {
+      requireOrigin(origin);
       if (!isPrivileged && !connectedSites.has(origin)) {
         throw new Error("Site not connected. Call nunchi_requestAccounts first.");
       }
@@ -385,19 +529,24 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
 
       const settings = await getSettings();
       const nonce = await fetchNonce(settings.rpcUrl, unlockedWallet.address);
-
       const requestId = randomRequestId("tx");
-      return waitForApproval(requestId, pendingTransactions, {
-        id: requestId,
-        origin,
-        nonce,
-        coin,
-        from: unlockedWallet.address,
-        to,
-        amount,
-        timestamp: Date.now(),
-        resolve: () => undefined,
-      }, `popup.html?approve=transaction&id=${encodeURIComponent(requestId)}`);
+      return waitForApproval(
+        requestId,
+        pendingTransactions,
+        {
+          id: requestId,
+          origin,
+          nonce,
+          coin,
+          from: unlockedWallet.address,
+          to,
+          amount,
+          timestamp: Date.now(),
+          submit: type === "REQUEST_TRANSACTION",
+          resolve: () => undefined,
+        },
+        `popup.html?approve=transaction&id=${encodeURIComponent(requestId)}`
+      );
     }
 
     case "APPROVE_TRANSACTION": {
@@ -406,11 +555,9 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
       if (!request) {
         throw new Error("Transaction request not found or expired");
       }
-
       if (!unlockedWallet) {
         throw new Error("Wallet is locked");
       }
-
       if (request.from !== unlockedWallet.address) {
         settlePending(pendingTransactions, requestId, {
           success: false,
@@ -420,14 +567,9 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
       }
 
       try {
-        const result = await signAndSubmit(
-          unlockedWallet,
-          request.nonce,
-          request.coin,
-          request.from,
-          request.to,
-          request.amount
-        );
+        const result = request.submit
+          ? await signAndSubmit(unlockedWallet, request.nonce, request.coin, request.from, request.to, request.amount)
+          : await signOnly(unlockedWallet, request.nonce, request.coin, request.from, request.to, request.amount);
         settlePending(pendingTransactions, requestId, { success: true, data: result });
         return { success: true, data: result };
       } catch (error) {
@@ -474,6 +616,7 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
     case "DISCONNECT_SITE": {
       const { origin: siteOrigin } = payload as { origin: string };
       connectedSites.delete(siteOrigin);
+      await persistConnectedSites();
       return { success: true };
     }
 
@@ -483,9 +626,23 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
     }
 
     case "UPDATE_SETTINGS": {
-      const settings = payload as Settings;
+      const incoming = payload as Partial<Settings>;
+      const current = await getSettings();
+      const settings: Settings = {
+        ...current,
+        ...incoming,
+      };
+      parseRpcUrl(settings.rpcUrl);
+      if (!settings.chainId) {
+        settings.chainId = settings.network || DEFAULT_SETTINGS.chainId;
+      }
       await chrome.storage.local.set({ settings });
-      return { success: true };
+      return { success: true, data: settings };
+    }
+
+    case "GET_CHAIN_ID": {
+      const settings = await getSettings();
+      return { success: true, data: { chainId: settings.chainId || settings.network || DEFAULT_SETTINGS.chainId } };
     }
 
     case "GET_NONCE": {
@@ -530,11 +687,10 @@ async function waitForApproval<T extends { windowId?: number; resolve: (response
 
     request.resolve = finish;
     map.set(requestId, request);
+    void persistPending();
 
     const timer = setTimeout(() => {
-      if (settlePending(map, requestId, { success: false, error: "Request timed out" })) {
-        clearTimeout(timer);
-      }
+      settlePending(map, requestId, { success: false, error: "Request timed out" });
     }, APPROVAL_TIMEOUT_MS);
 
     const originalResolve = request.resolve;
@@ -560,11 +716,25 @@ async function waitForApproval<T extends { windowId?: number; resolve: (response
           return;
         }
         entry.windowId = win.id;
+        void persistPending();
       })
       .catch(() => {
         settlePending(map, requestId, { success: false, error: "Failed to open approval window" });
       });
   });
+}
+
+async function signOnly(
+  wallet: UnlockedWallet,
+  nonce: number,
+  coin: string,
+  from: string,
+  to: string,
+  amount: string
+): Promise<{ digest: string; transaction: string }> {
+  const wasm = await initWasm();
+  const signed = wasm.sign_transfer(wallet.privateKeyHex, BigInt(nonce), coin, from, to, amount);
+  return { digest: signed.digest_hex, transaction: signed.transaction_hex };
 }
 
 async function signAndSubmit(
@@ -575,10 +745,9 @@ async function signAndSubmit(
   to: string,
   amount: string
 ): Promise<{ hash: string; digest: string; transaction: string }> {
-  const wasm = await initWasm();
-  const signed = wasm.sign_transfer(wallet.privateKeyHex, BigInt(nonce), coin, from, to, amount);
+  const signed = await signOnly(wallet, nonce, coin, from, to, amount);
   const settings = await getSettings();
-  const hash = await submitTransaction(settings.rpcUrl, signed.transaction_hex);
+  const hash = await submitTransaction(settings.rpcUrl, signed.transaction);
   await addActivity({
     hash,
     timestamp: Date.now(),
@@ -586,7 +755,7 @@ async function signAndSubmit(
     to,
     amount,
   });
-  return { hash, digest: signed.digest_hex, transaction: signed.transaction_hex };
+  return { hash, digest: signed.digest, transaction: signed.transaction };
 }
 
 async function fetchNonce(rpcUrl: string, address: string): Promise<number> {

@@ -21,6 +21,7 @@ jobs:
 
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
+      wallet: ${{ steps.filter.outputs.wallet }}
 
     steps:
       - name: Checkout Repository
@@ -42,6 +43,8 @@ jobs:
               - 'rustfmt.toml'
               - 'clippy.toml'
               - '.cargo/**'
+            wallet:
+              - 'examples/wallet-extension/**'
 
   fmt:
     needs: changes
@@ -147,3 +150,23 @@ jobs:
 
       - name: Run Clippy
         run: cargo clippy --locked --all --all-targets -- -D warnings
+
+  wallet-test:
+    needs: changes
+    if: ${{ always() && !cancelled() && (needs.changes.result == 'failure' || needs.changes.outputs.wallet == 'true') }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: examples/wallet-extension/package-lock.json
+
+      - name: Run wallet extension tests
+        working-directory: examples/wallet-extension
+        run: npm ci && npm test

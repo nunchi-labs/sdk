@@ -105,19 +105,18 @@ class NunchiWalletProvider extends EventEmitter implements NunchiProvider {
       }
 
       case "nunchi_chainId": {
-        return "nunchi-local";
+        const result = (await this.sendMessage("GET_CHAIN_ID")) as { chainId?: string };
+        return result?.chainId || "nunchi-local";
       }
 
       case "nunchi_signTransaction": {
         const [txParams] = params as [{ coin: string; from: string; to: string; amount: string }];
-        const result = await this.sendMessage("REQUEST_TRANSACTION", txParams);
-        return result;
+        return this.sendMessage("REQUEST_SIGN", txParams);
       }
 
       case "nunchi_sendTransaction": {
         const [txParams] = params as [{ coin: string; from: string; to: string; amount: string }];
-        const result = await this.sendMessage("REQUEST_TRANSACTION", txParams);
-        return result;
+        return this.sendMessage("REQUEST_TRANSACTION", txParams);
       }
 
       default:

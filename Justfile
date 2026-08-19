@@ -8,6 +8,10 @@ test:
     @echo "Running tests..."
     @cargo nextest run --workspace
 
+wallet-test:
+    @echo "Running wallet extension tests..."
+    cd examples/wallet-extension && npm test
+
 coverage:
     @echo "Running tests with coverage..."
     @cargo llvm-cov nextest --workspace
