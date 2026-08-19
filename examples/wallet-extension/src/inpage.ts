@@ -1,6 +1,16 @@
 import { randomRequestId } from "./ids";
+import { isTrustedPageResponse, PAGE_REQUEST_TARGET } from "./page-messages";
 
 const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;
+
+function readBridgeToken(): string {
+  const script = document.currentScript as HTMLScriptElement | null;
+  const token = script?.dataset.nunchiBridge || "";
+  script?.removeAttribute("data-nunchi-bridge");
+  return token;
+}
+
+const bridgeToken = readBridgeToken();
 
 interface NunchiProvider {
   isNunchi: boolean;
@@ -46,7 +56,7 @@ class NunchiWalletProvider extends EventEmitter implements NunchiProvider {
   private setupMessageListener(): void {
     window.addEventListener("message", (event) => {
       if (event.source !== window) return;
-      if (event.data.target !== "nunchi-wallet-inpage") return;
+      if (!isTrustedPageResponse(event.data || {}, bridgeToken)) return;
 
       const { requestId, response } = event.data;
       const pending = this.pendingRequests.get(requestId);
@@ -69,7 +79,8 @@ class NunchiWalletProvider extends EventEmitter implements NunchiProvider {
 
       window.postMessage(
         {
-          target: "nunchi-wallet-content",
+          target: PAGE_REQUEST_TARGET,
+          token: bridgeToken,
           type,
           payload,
           requestId,

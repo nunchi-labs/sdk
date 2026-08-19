@@ -1,7 +1,7 @@
 import { pbkdf2 } from "@noble/hashes/pbkdf2";
 import { sha256 } from "@noble/hashes/sha256";
 
-const ITERATIONS = 100000;
+const ITERATIONS = 210000;
 const KEY_LENGTH = 32;
 
 export async function deriveKey(password: string, salt: Uint8Array): Promise<Uint8Array> {

@@ -1,12 +1,11 @@
 import { randomRequestId } from "./ids";
-import { isAllowedPageMessage } from "./page-messages";
+import { isTrustedPageRequest, PAGE_RESPONSE_TARGET } from "./page-messages";
+
+const bridgeToken = randomRequestId("tok");
 
 window.addEventListener("message", async (event) => {
   if (event.source !== window) return;
-  if (!event.data || typeof event.data.type !== "string") return;
-
-  if (!isAllowedPageMessage(event.data.type)) {
-    console.warn("[Nunchi Wallet] Blocked privileged message from page:", event.data.type);
+  if (!isTrustedPageRequest(event.data || {}, bridgeToken)) {
     return;
   }
 
@@ -21,7 +20,8 @@ window.addEventListener("message", async (event) => {
 
     window.postMessage(
       {
-        target: "nunchi-wallet-inpage",
+        target: PAGE_RESPONSE_TARGET,
+        token: bridgeToken,
         requestId,
         response,
       },
@@ -30,7 +30,8 @@ window.addEventListener("message", async (event) => {
   } catch (error) {
     window.postMessage(
       {
-        target: "nunchi-wallet-inpage",
+        target: PAGE_RESPONSE_TARGET,
+        token: bridgeToken,
         requestId,
         response: {
           success: false,
@@ -44,6 +45,7 @@ window.addEventListener("message", async (event) => {
 
 const script = document.createElement("script");
 script.src = chrome.runtime.getURL("inpage.js");
+script.dataset.nunchiBridge = bridgeToken;
 script.onload = function () {
   (this as HTMLScriptElement).remove();
 };

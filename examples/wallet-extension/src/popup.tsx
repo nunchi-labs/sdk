@@ -536,6 +536,7 @@ function Send({ address, onBack }: { address: string; onBack: () => void }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState(false);
+  const [confirming, setConfirming] = useState(false);
 
   useEffect(() => {
     void chrome.runtime.sendMessage({ type: "GET_SETTINGS" }).then((response) => {
@@ -548,6 +549,11 @@ function Send({ address, onBack }: { address: string; onBack: () => void }) {
   async function handleSend() {
     if (!recipient || !coin || !amount) {
       setError("All fields are required");
+      return;
+    }
+    if (!confirming) {
+      setConfirming(true);
+      setError("");
       return;
     }
 
@@ -597,26 +603,54 @@ function Send({ address, onBack }: { address: string; onBack: () => void }) {
         <h2>Send</h2>
       </div>
       <div className="content">
-        <label>
-          <span>Recipient</span>
-          <input
-            type="text"
-            value={recipient}
-            onChange={(e) => setRecipient(e.target.value)}
-            placeholder="nch1..."
-          />
-        </label>
-        <label>
-          <span>Coin (hex)</span>
-          <input type="text" value={coin} onChange={(e) => setCoin(e.target.value)} placeholder="a1b2c3..." />
-        </label>
-        <label>
-          <span>Amount</span>
-          <input type="text" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="1000" />
-        </label>
+        {confirming ? (
+          <div className="detailCard">
+            <div className="detailRow">
+              <span>From</span>
+              <div className="mono">{address}</div>
+            </div>
+            <div className="detailRow">
+              <span>To</span>
+              <div className="mono">{recipient}</div>
+            </div>
+            <div className="detailRow">
+              <span>Amount</span>
+              <div className="mono">{amount}</div>
+            </div>
+            <div className="detailRow">
+              <span>Coin</span>
+              <div className="mono">{coin}</div>
+            </div>
+          </div>
+        ) : (
+          <>
+            <label>
+              <span>Recipient</span>
+              <input
+                type="text"
+                value={recipient}
+                onChange={(e) => setRecipient(e.target.value)}
+                placeholder="nch1..."
+              />
+            </label>
+            <label>
+              <span>Coin (hex)</span>
+              <input type="text" value={coin} onChange={(e) => setCoin(e.target.value)} placeholder="a1b2c3..." />
+            </label>
+            <label>
+              <span>Amount</span>
+              <input type="text" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="1000" />
+            </label>
+          </>
+        )}
         {error && <div className="error">{error}</div>}
+        {confirming && (
+          <button className="secondary large" onClick={() => setConfirming(false)} disabled={loading}>
+            Edit
+          </button>
+        )}
         <button className="primary large" onClick={handleSend} disabled={loading}>
-          {loading ? "Sending..." : "Send"}
+          {loading ? "Sending..." : confirming ? "Confirm send" : "Review"}
         </button>
       </div>
     </>
@@ -932,7 +966,7 @@ function ApproveConnection({ requestId }: { requestId: string }) {
           {pending.address && (
             <div className="detailRow">
               <span>Account</span>
-              <div className="mono">{compactAddress(pending.address)}</div>
+              <div className="mono">{pending.address}</div>
             </div>
           )}
         </div>
@@ -1030,11 +1064,11 @@ function ApproveTransaction({ requestId }: { requestId: string }) {
           </div>
           <div className="detailRow">
             <span>From</span>
-            <div className="mono">{compactAddress(pending.from)}</div>
+            <div className="mono">{pending.from}</div>
           </div>
           <div className="detailRow">
             <span>To</span>
-            <div className="mono">{compactAddress(pending.to)}</div>
+            <div className="mono">{pending.to}</div>
           </div>
           <div className="detailRow">
             <span>Amount</span>
@@ -1042,7 +1076,7 @@ function ApproveTransaction({ requestId }: { requestId: string }) {
           </div>
           <div className="detailRow">
             <span>Coin</span>
-            <div className="mono">{compactAddress(pending.coin, 8, 8)}</div>
+            <div className="mono">{pending.coin}</div>
           </div>
         </div>
         {error && <div className="error">{error}</div>}

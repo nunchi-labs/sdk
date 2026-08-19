@@ -15,6 +15,9 @@ import { isPrivilegedSender as originIsPrivileged } from "./privilege";
 import { parseRpcUrl } from "./rpc";
 
 const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;
+const AUTO_LOCK_MS = 15 * 60 * 1000;
+const MIN_PASSWORD_LENGTH = 8;
+const LOCKOUT_STORAGE = "unlockLockout";
 
 type PendingConnection = ConnectionRequest & {
   windowId?: number;
@@ -142,9 +145,43 @@ async function addActivity(tx: SubmittedTx): Promise<void> {
   await chrome.storage.local.set({ activity: activity.slice(0, 50) });
 }
 
-const failedUnlockAttempts = new Map<string, { count: number; lastAttempt: number }>();
 const MAX_UNLOCK_ATTEMPTS = 5;
 const LOCKOUT_DURATION = 5 * 60 * 1000;
+let lastActive = Date.now();
+
+function applyAutoLock(): void {
+  if (unlockedWallet && Date.now() - lastActive > AUTO_LOCK_MS) {
+    unlockedWallet = null;
+  }
+}
+
+function markActive(): void {
+  lastActive = Date.now();
+}
+
+function requirePassword(password: unknown): string {
+  if (typeof password !== "string" || password.length < MIN_PASSWORD_LENGTH) {
+    throw new Error(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`);
+  }
+  return password;
+}
+
+async function readLockout(origin: string): Promise<{ count: number; lastAttempt: number }> {
+  const stored = await chrome.storage.local.get(LOCKOUT_STORAGE);
+  const map = stored[LOCKOUT_STORAGE] || {};
+  return map[origin] || { count: 0, lastAttempt: 0 };
+}
+
+async function writeLockout(origin: string, value: { count: number; lastAttempt: number } | null): Promise<void> {
+  const stored = await chrome.storage.local.get(LOCKOUT_STORAGE);
+  const map = { ...(stored[LOCKOUT_STORAGE] || {}) };
+  if (value) {
+    map[origin] = value;
+  } else {
+    delete map[origin];
+  }
+  await chrome.storage.local.set({ [LOCKOUT_STORAGE]: map });
+}
 
 function isPrivilegedSender(sender: chrome.runtime.MessageSender): boolean {
   return originIsPrivileged(sender, `chrome-extension://${chrome.runtime.id}`);
@@ -202,9 +239,13 @@ chrome.runtime.onMessage.addListener((message: Message, sender, sendResponse) =>
 
 async function handleMessage(message: Message, sender: chrome.runtime.MessageSender): Promise<Response> {
   await hydrate();
+  applyAutoLock();
   const { type, payload } = message;
   const isPrivileged = isPrivilegedSender(sender);
   const origin = getSenderOrigin(sender);
+  if (isPrivileged) {
+    markActive();
+  }
 
   const PRIVILEGED_TYPES = new Set([
     "CREATE_WALLET",
@@ -243,10 +284,11 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
         throw new Error("Wallet already exists. Delete it in Settings before creating a new one.");
       }
 
-      const { curve, password } = payload as {
+      const { curve, password: rawPassword } = payload as {
         curve: "Ed25519" | "Secp256r1";
         password: string;
       };
+      const password = requirePassword(rawPassword);
 
       const wasm = await initWasm();
       const keyPair =
@@ -283,10 +325,11 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
         throw new Error("Wallet already exists. Delete it in Settings before importing another.");
       }
 
-      const { private_key_hex, password } = payload as {
+      const { private_key_hex, password: rawPassword } = payload as {
         private_key_hex: string;
         password: string;
       };
+      const password = requirePassword(rawPassword);
 
       const wasm = await initWasm();
       const keyPair = wasm.import_private_key(private_key_hex);
@@ -358,7 +401,14 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
       connectedSites.clear();
       pendingConnections.clear();
       pendingTransactions.clear();
-      await chrome.storage.local.remove(["wallet", "activity", "connectedSites", "pendingConnections", "pendingTransactions"]);
+      await chrome.storage.local.remove([
+        "wallet",
+        "activity",
+        "connectedSites",
+        "pendingConnections",
+        "pendingTransactions",
+        LOCKOUT_STORAGE,
+      ]);
       await persistPending();
       return { success: true };
     }
@@ -371,7 +421,7 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
       }
 
       const now = Date.now();
-      const attempts = failedUnlockAttempts.get(origin) || { count: 0, lastAttempt: 0 };
+      const attempts = await readLockout(origin);
 
       if (attempts.count >= MAX_UNLOCK_ATTEMPTS) {
         const timeSinceLastAttempt = now - attempts.lastAttempt;
@@ -379,7 +429,9 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
           const remainingMs = LOCKOUT_DURATION - timeSinceLastAttempt;
           throw new Error(`Too many failed attempts. Try again in ${Math.ceil(remainingMs / 1000)}s`);
         }
-        failedUnlockAttempts.delete(origin);
+        await writeLockout(origin, null);
+        attempts.count = 0;
+        attempts.lastAttempt = 0;
       }
 
       try {
@@ -398,12 +450,13 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
           curve: wallet.curve,
         };
 
-        failedUnlockAttempts.delete(origin);
+        await writeLockout(origin, null);
+        markActive();
         return { success: true, data: { address: wallet.address, needsBackup: !!wallet.needsBackup } };
       } catch (error) {
         attempts.count++;
         attempts.lastAttempt = now;
-        failedUnlockAttempts.set(origin, attempts);
+        await writeLockout(origin, attempts);
         throw error;
       }
     }
@@ -527,8 +580,6 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
         throw new Error("Wallet is locked");
       }
 
-      const settings = await getSettings();
-      const nonce = await fetchNonce(settings.rpcUrl, unlockedWallet.address);
       const requestId = randomRequestId("tx");
       return waitForApproval(
         requestId,
@@ -536,7 +587,7 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
         {
           id: requestId,
           origin,
-          nonce,
+          nonce: 0,
           coin,
           from: unlockedWallet.address,
           to,
@@ -567,9 +618,11 @@ async function handleMessage(message: Message, sender: chrome.runtime.MessageSen
       }
 
       try {
+        const settings = await getSettings();
+        const nonce = await fetchNonce(settings.rpcUrl, unlockedWallet.address);
         const result = request.submit
-          ? await signAndSubmit(unlockedWallet, request.nonce, request.coin, request.from, request.to, request.amount)
-          : await signOnly(unlockedWallet, request.nonce, request.coin, request.from, request.to, request.amount);
+          ? await signAndSubmit(unlockedWallet, nonce, request.coin, request.from, request.to, request.amount)
+          : await signOnly(unlockedWallet, nonce, request.coin, request.from, request.to, request.amount);
         settlePending(pendingTransactions, requestId, { success: true, data: result });
         return { success: true, data: result };
       } catch (error) {
