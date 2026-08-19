@@ -313,3 +313,50 @@ textarea {
   font-weight: 500;
   color: var(--text);
 }
+
+.detailCard {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.detailRow {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.detailRow span {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.mono {
+  font-family: monospace;
+  font-size: 13px;
+  color: var(--text);
+  word-break: break-all;
+}
+
+button.danger {
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--error);
+  border: 1px solid var(--error);
+  padding: 10px 16px;
+}
+
+button.danger:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.25);
+}
+
+button.danger.large {
+  padding: 14px;
+  font-size: 15px;
+}

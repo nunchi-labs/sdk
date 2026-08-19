@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { encryptPrivateKey, decryptPrivateKey, generateSalt } from './crypto';
+import { encryptPrivateKey, decryptPrivateKey, generateSalt, hexToBytes } from './crypto';
 
 describe('crypto', () => {
   it('should reject wrong password', async () => {
@@ -44,12 +44,10 @@ describe('crypto', () => {
   });
 
   it('should reject odd-length hex in hexToBytes', () => {
-    const { hexToBytes } = require('./crypto');
     expect(() => hexToBytes('abc')).toThrow('even length');
   });
 
   it('should reject non-hex characters', () => {
-    const { hexToBytes } = require('./crypto');
     expect(() => hexToBytes('xyz123')).toThrow('invalid characters');
   });
 });

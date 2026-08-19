@@ -1,3 +1,7 @@
+import { randomRequestId } from "./ids";
+
+const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;
+
 interface NunchiProvider {
   isNunchi: boolean;
   request(args: { method: string; params?: unknown[] }): Promise<unknown>;
@@ -60,7 +64,7 @@ class NunchiWalletProvider extends EventEmitter implements NunchiProvider {
 
   private sendMessage(type: string, payload?: unknown): Promise<unknown> {
     return new Promise((resolve, reject) => {
-      const requestId = `req-${Date.now()}-${Math.random()}`;
+      const requestId = randomRequestId("req");
       this.pendingRequests.set(requestId, { resolve, reject });
 
       window.postMessage(
@@ -78,7 +82,7 @@ class NunchiWalletProvider extends EventEmitter implements NunchiProvider {
           this.pendingRequests.delete(requestId);
           reject(new Error("Request timeout"));
         }
-      }, 30000);
+      }, APPROVAL_TIMEOUT_MS);
     });
   }
 
@@ -87,13 +91,13 @@ class NunchiWalletProvider extends EventEmitter implements NunchiProvider {
 
     switch (method) {
       case "nunchi_requestAccounts": {
-        const result = (await this.sendMessage("REQUEST_CONNECTION")) as { address: string; pending?: boolean };
-        if (!result.pending) {
-          this.connectedAddress = result.address;
-          this.emit("accountsChanged", [result.address]);
-          return [result.address];
+        const result = (await this.sendMessage("REQUEST_CONNECTION")) as { address?: string };
+        if (!result?.address) {
+          throw new Error("No account returned");
         }
-        return [];
+        this.connectedAddress = result.address;
+        this.emit("accountsChanged", [result.address]);
+        return [result.address];
       }
 
       case "nunchi_accounts": {

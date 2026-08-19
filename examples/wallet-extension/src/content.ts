@@ -1,3 +1,5 @@
+import { randomRequestId } from "./ids";
+
 const ALLOWED_PAGE_MESSAGES = new Set([
   "REQUEST_CONNECTION",
   "REQUEST_TRANSACTION",
@@ -12,7 +14,7 @@ window.addEventListener("message", async (event) => {
     return;
   }
 
-  const requestId = event.data.requestId || `req-${Date.now()}-${Math.random()}`;
+  const requestId = typeof event.data.requestId === "string" ? event.data.requestId : randomRequestId("req");
 
   try {
     const response = await chrome.runtime.sendMessage({

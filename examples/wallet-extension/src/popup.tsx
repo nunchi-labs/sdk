@@ -16,15 +16,19 @@ interface WalletInfo {
 function App() {
   const [view, setView] = useState<View>("loading");
   const [walletInfo, setWalletInfo] = useState<WalletInfo | null>(null);
+  const [requestId, setRequestId] = useState("");
   const [error, setError] = useState("");
 
   useEffect(() => {
-    loadState();
     const params = new URLSearchParams(window.location.search);
     const approve = params.get("approve");
-    if (approve) {
-      handleApprovalFlow(approve, params.get("id") || "");
+    const id = params.get("id") || "";
+    if (approve === "connection" || approve === "transaction") {
+      setRequestId(id);
+      setView(approve === "connection" ? "approveConnection" : "approveTransaction");
+      return;
     }
+    void loadState();
   }, []);
 
   async function loadState() {
@@ -45,16 +49,20 @@ function App() {
     }
   }
 
-  async function handleApprovalFlow(type: string, _requestId: string) {
-    setView(type === "connection" ? "approveConnection" : "approveTransaction");
-  }
-
   if (view === "loading") {
     return (
       <div className="container">
         <div className="loading">Loading wallet...</div>
       </div>
     );
+  }
+
+  if (view === "approveConnection") {
+    return <ApproveConnection requestId={requestId} />;
+  }
+
+  if (view === "approveTransaction") {
+    return <ApproveTransaction requestId={requestId} />;
   }
 
   if (view === "onboarding") {
@@ -112,9 +120,8 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
         payload: { curve, password },
       });
 
-      if (response.success && response.data) {
-        setPrivateKeyInput(response.data.private_key_hex);
-        setTimeout(() => onComplete(), 3000);
+      if (response.success) {
+        onComplete();
       } else {
         setError(response.error || "Failed to create wallet");
       }
@@ -200,20 +207,6 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
             <span>Confirm Password</span>
             <input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} />
           </label>
-          {privateKeyInput && (
-            <label>
-              <span>Private Key (SAVE THIS!)</span>
-              <textarea
-                readOnly
-                value={privateKeyInput}
-                rows={3}
-                style={{ fontFamily: "monospace", fontSize: "12px", wordBreak: "break-all" }}
-              />
-              <p style={{ fontSize: "12px", color: "#666", marginTop: "4px" }}>
-                Save this private key securely. You'll need it to recover your wallet.
-              </p>
-            </label>
-          )}
           {error && <div className="error">{error}</div>}
           <button className="primary large" onClick={handleCreate} disabled={loading}>
             {loading ? "Creating..." : "Create"}
@@ -409,7 +402,7 @@ function Send({ address, onBack }: { address: string; onBack: () => void }) {
 
     try {
       const response = await chrome.runtime.sendMessage({
-        type: "REQUEST_TRANSACTION",
+        type: "SEND_TRANSACTION",
         payload: { coin, from: address, to: recipient, amount },
       });
 
@@ -567,6 +560,222 @@ function SettingsView({ onBack }: { onBack: () => void }) {
         </button>
       </div>
     </>
+  );
+}
+
+interface PendingConnectionView {
+  kind: "connection";
+  origin: string;
+  address?: string;
+}
+
+interface PendingTransactionView {
+  kind: "transaction";
+  origin: string;
+  nonce: number;
+  coin: string;
+  from: string;
+  to: string;
+  amount: string;
+}
+
+function ApproveConnection({ requestId }: { requestId: string }) {
+  const [pending, setPending] = useState<PendingConnectionView | null>(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    void loadRequest();
+  }, [requestId]);
+
+  async function loadRequest() {
+    const response = await chrome.runtime.sendMessage({
+      type: "GET_PENDING_REQUEST",
+      payload: { requestId },
+    });
+    if (!response.success || response.data?.kind !== "connection") {
+      setError(response.error || "Request not found or expired");
+      return;
+    }
+    setPending(response.data);
+  }
+
+  async function decide(type: "APPROVE_CONNECTION" | "REJECT_CONNECTION") {
+    setLoading(true);
+    setError("");
+    try {
+      const response = await chrome.runtime.sendMessage({ type, payload: { requestId } });
+      if (!response.success) {
+        setError(response.error || "Request failed");
+        setLoading(false);
+        return;
+      }
+      window.close();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setLoading(false);
+    }
+  }
+
+  if (error && !pending) {
+    return (
+      <div className="container">
+        <div className="header">
+          <h2>Connection Request</h2>
+        </div>
+        <div className="content">
+          <div className="error">{error}</div>
+          <button className="secondary large" onClick={() => window.close()}>
+            Close
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!pending) {
+    return (
+      <div className="container">
+        <div className="loading">Loading request...</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="container">
+      <div className="header">
+        <h2>Connection Request</h2>
+      </div>
+      <div className="content">
+        <p className="subtitle">This site wants to see your account address.</p>
+        <div className="detailCard">
+          <div className="detailRow">
+            <span>Site</span>
+            <div className="mono">{pending.origin}</div>
+          </div>
+          {pending.address && (
+            <div className="detailRow">
+              <span>Account</span>
+              <div className="mono">{compactAddress(pending.address)}</div>
+            </div>
+          )}
+        </div>
+        {error && <div className="error">{error}</div>}
+        <div className="actions">
+          <button className="danger" onClick={() => decide("REJECT_CONNECTION")} disabled={loading}>
+            Reject
+          </button>
+          <button className="primary" onClick={() => decide("APPROVE_CONNECTION")} disabled={loading}>
+            {loading ? "Working..." : "Connect"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ApproveTransaction({ requestId }: { requestId: string }) {
+  const [pending, setPending] = useState<PendingTransactionView | null>(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    void loadRequest();
+  }, [requestId]);
+
+  async function loadRequest() {
+    const response = await chrome.runtime.sendMessage({
+      type: "GET_PENDING_REQUEST",
+      payload: { requestId },
+    });
+    if (!response.success || response.data?.kind !== "transaction") {
+      setError(response.error || "Request not found or expired");
+      return;
+    }
+    setPending(response.data);
+  }
+
+  async function decide(type: "APPROVE_TRANSACTION" | "REJECT_TRANSACTION") {
+    setLoading(true);
+    setError("");
+    try {
+      const response = await chrome.runtime.sendMessage({ type, payload: { requestId } });
+      if (!response.success) {
+        setError(response.error || "Request failed");
+        setLoading(false);
+        return;
+      }
+      window.close();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setLoading(false);
+    }
+  }
+
+  if (error && !pending) {
+    return (
+      <div className="container">
+        <div className="header">
+          <h2>Transaction Request</h2>
+        </div>
+        <div className="content">
+          <div className="error">{error}</div>
+          <button className="secondary large" onClick={() => window.close()}>
+            Close
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!pending) {
+    return (
+      <div className="container">
+        <div className="loading">Loading request...</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="container">
+      <div className="header">
+        <h2>Transaction Request</h2>
+      </div>
+      <div className="content">
+        <p className="subtitle">Review this transfer before signing.</p>
+        <div className="detailCard">
+          <div className="detailRow">
+            <span>Site</span>
+            <div className="mono">{pending.origin}</div>
+          </div>
+          <div className="detailRow">
+            <span>From</span>
+            <div className="mono">{compactAddress(pending.from)}</div>
+          </div>
+          <div className="detailRow">
+            <span>To</span>
+            <div className="mono">{compactAddress(pending.to)}</div>
+          </div>
+          <div className="detailRow">
+            <span>Amount</span>
+            <div className="mono">{pending.amount}</div>
+          </div>
+          <div className="detailRow">
+            <span>Coin</span>
+            <div className="mono">{compactAddress(pending.coin, 8, 8)}</div>
+          </div>
+        </div>
+        {error && <div className="error">{error}</div>}
+        <div className="actions">
+          <button className="danger" onClick={() => decide("REJECT_TRANSACTION")} disabled={loading}>
+            Reject
+          </button>
+          <button className="primary" onClick={() => decide("APPROVE_TRANSACTION")} disabled={loading}>
+            {loading ? "Signing..." : "Confirm"}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 

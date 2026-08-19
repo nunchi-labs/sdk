@@ -65,7 +65,8 @@ export type MessageType =
   | "UPDATE_SETTINGS"
   | "GET_NONCE"
   | "GET_BALANCE"
-  | "GET_ACTIVITY";
+  | "GET_ACTIVITY"
+  | "GET_PENDING_REQUEST";
 
 export interface Message<T = unknown> {
   type: MessageType;
