@@ -8,7 +8,8 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 nunchi-crypto = { path = "../../../crypto" }
-nunchi-coins = { path = "../../../coins", default-features = false }
+nunchi-coins = { path = "../../../coins", default-features = false, features = [] }
+nunchi-common = { path = "../../../common", default-features = false }
 commonware-codec = "2026.7.0"
 commonware-cryptography = "2026.7.0"
 wasm-bindgen = "0.2"
