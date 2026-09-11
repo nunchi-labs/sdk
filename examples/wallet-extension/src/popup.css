@@ -4,86 +4,301 @@
   box-sizing: border-box;
 }
 
+/* ---------------------------------------------------------------------------
+   Themes
+
+   Shape tokens are theme-independent; every colour lives in a theme block.
+   Status colours are stored as RGB triplets so their tints compose with
+   rgba(var(--x-rgb), a) instead of being restated per theme.
+
+   Contrast was checked for each theme against its bg, surface and hover
+   surfaces; every text token clears 4.5:1 on the worst of the three.
+   --------------------------------------------------------------------------- */
 :root {
-  --bg: #0a0e17;
-  --bg-card: #141824;
-  --bg-hover: #1a1f2e;
-  --border: #2a2f3e;
-  --text: #e8eaed;
-  --text-dim: #9aa0a6;
-  --primary: #3b82f6;
-  --primary-hover: #2563eb;
-  --success: #10b981;
-  --error: #ef4444;
-  --radius: 8px;
+  --radius-sm: 10px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --radius-full: 9999px;
+  --popup-width: 360px;
+  --popup-height: 600px;
+  --tab-bar-height: 58px;
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+/* Monotone dark — the default. */
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #0a0a0a;
+  --bg-elevated: #131313;
+  --bg-surface: #171717;
+  --bg-hover: #212121;
+  --bg-bar: rgba(18, 18, 18, 0.92);
+  --border: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 255, 255, 0.18);
+
+  /* Orange carries primary actions, the active tab, focus rings, and the
+     numbers that matter; nothing else is coloured. */
+  --accent-rgb: 255, 122, 26;
+  --accent: rgb(var(--accent-rgb));
+  --accent-hover: #ff9040;
+  /* Orange is a light surface: it needs dark text, not white. */
+  --on-accent: #180b00;
+
+  --text: #f5f5f5;
+  --text-secondary: #a1a1a1;
+  --text-tertiary: #828282;
+
+  /* Status keeps its hue on purpose — a failed transfer must not read as
+     just another grey row. */
+  --success-rgb: 52, 211, 153;
+  --warning-rgb: 251, 191, 36;
+  --error-rgb: 248, 113, 113;
+
+  --identicon-hue: 0;
+  --identicon-sat: 0%;
+  --shadow-rgb: 0, 0, 0;
+  --shadow-soft: 0 8px 32px rgba(0, 0, 0, 0.45);
+  --shadow-raised: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+
+/* Monotone light. The accent darkens to #c2410c because #ff7a1a on white is
+   2.3:1 — unreadable as text — and takes white text rather than dark. */
+[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #fafafa;
+  --bg-elevated: #ffffff;
+  --bg-surface: #ffffff;
+  --bg-hover: #f0f0f0;
+  --bg-bar: rgba(255, 255, 255, 0.92);
+  --border: rgba(0, 0, 0, 0.10);
+  --border-strong: rgba(0, 0, 0, 0.20);
+
+  /* Darker than it needs to be on plain white, because accent text also sits
+     on accent-muted (the active tab, the asset badge) where the tint lifts the
+     ground and drops the ratio below 4.5. */
+  --accent-rgb: 176, 58, 11;
+  --accent: rgb(var(--accent-rgb));
+  --accent-hover: #8f2d08;
+  --on-accent: #ffffff;
+
+  --text: #171717;
+  --text-secondary: #565656;
+  --text-tertiary: #666666;
+
+  /* Darker than plain-on-white needs: the change pill puts this colour on its
+     own 14% tint, which lifts the ground and costs about a point of contrast. */
+  --success-rgb: 3, 107, 78;
+  --warning-rgb: 162, 87, 8;
+  --error-rgb: 184, 27, 27;
+
+  --identicon-hue: 0;
+  --identicon-sat: 0%;
+  --shadow-rgb: 0, 0, 0;
+  --shadow-soft: 0 8px 28px rgba(0, 0, 0, 0.10);
+  --shadow-raised: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+/* Derived from the triplets above, so a theme never restates a tint. */
+:root {
+  --accent-muted: rgba(var(--accent-rgb), 0.14);
+  --accent-ring: rgba(var(--accent-rgb), 0.38);
+  --shadow-glow: 0 0 32px rgba(var(--accent-rgb), 0.18);
+
+  --success: rgb(var(--success-rgb));
+  --warning: rgb(var(--warning-rgb));
+  --error: rgb(var(--error-rgb));
 }
 
 body {
-  width: 360px;
-  min-height: 500px;
+  width: var(--popup-width);
+  min-height: var(--popup-height);
   background: var(--bg);
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   font-size: 14px;
   line-height: 1.5;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  min-height: var(--popup-height);
+}
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  min-height: var(--popup-height);
+}
+
+.shell.withTabs .shellMain {
+  min-height: calc(var(--popup-height) - var(--tab-bar-height));
+  max-height: calc(var(--popup-height) - var(--tab-bar-height));
+  overflow-y: auto;
+}
+
+.shellMain {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
 }
 
 .container {
   display: flex;
   flex-direction: column;
-  min-height: 500px;
+  min-height: var(--popup-height);
 }
 
-.header {
-  padding: 20px;
-  background: var(--bg-card);
-  border-bottom: 1px solid var(--border);
+.container.approval {
+  min-height: var(--popup-height);
+  display: flex;
+  flex-direction: column;
+}
+
+.pageHeader {
+  padding: 16px 20px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
+  flex-shrink: 0;
 }
 
-.header h1 {
-  font-size: 20px;
-  font-weight: 600;
-}
-
-.header h2 {
+.pageHeader h1 {
   font-size: 18px;
   font-weight: 600;
 }
 
-.subtitle {
-  color: var(--text-dim);
-  font-size: 12px;
-  margin-top: 4px;
+.pageHeader h2 {
+  font-size: 17px;
+  font-weight: 600;
 }
 
-.headerActions {
-  display: flex;
-  gap: 8px;
-}
-
-.content {
+.pageContent {
+  /* Anchors the swap confirmation overlay. */
+  position: relative;
   flex: 1;
-  padding: 20px;
+  padding: 0 20px 20px;
   display: flex;
   flex-direction: column;
   gap: 16px;
+  overflow-y: auto;
+}
+
+/* .pageContent is a scrolling flex column, so its children must keep their
+   natural height. Without this they shrink toward zero once the content is
+   taller than the popup — the Info table and About text collapsed to nothing. */
+.pageContent > * {
+  flex-shrink: 0;
+}
+
+.pageContent.withFooter {
+  padding-bottom: 0;
+}
+
+.subtitle {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.sectionTitle {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-top: 8px;
+}
+
+.tabBar {
+  position: relative;
+  height: var(--tab-bar-height);
+  display: grid;
+  grid-template-columns: repeat(var(--tab-count, 3), 1fr);
+  border-top: 1px solid var(--border);
+  background: var(--bg-bar);
+  backdrop-filter: blur(12px);
+  flex-shrink: 0;
+  padding: 4px 8px 8px;
+}
+
+.tabItem {
+  position: relative;
+  min-height: 48px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 500;
+  padding: 8px 4px;
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: color 0.2s, background 0.2s, transform 0.15s;
+}
+
+.tabItem:hover {
+  color: var(--text-secondary);
+  background: var(--bg-hover);
+}
+
+.tabItem.active {
+  color: var(--accent);
+  background: var(--accent-muted);
+  box-shadow: var(--shadow-raised);
+}
+
+/* One indicator for the whole bar, parked over the active tab. Width matches a
+   single tab column: the bar's 8px side padding is subtracted so the thirds
+   line up with the pills rather than the padding box. */
+.tabIndicator {
+  position: absolute;
+  top: 0;
+  left: 8px;
+  width: calc((100% - 16px) / var(--tab-count, 3));
+  height: 3px;
+  pointer-events: none;
+  transition: transform 0.28s var(--ease-out);
+}
+
+.tabIndicator::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 50%;
+  margin-left: -15px;
+  width: 30px;
+  height: 3px;
+  border-radius: 0 0 999px 999px;
+  background: var(--accent);
 }
 
 button {
   border: none;
-  border-radius: var(--radius);
+  /* Buttons otherwise fall back to the UA `buttontext` colour, which is black.
+     Any button-shaped surface whose children do not set a colour of their own
+     would render black-on-black; inheriting keeps them on the app palette. */
+  color: inherit;
+  border-radius: var(--radius-sm);
   font-size: 14px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: transform 0.1s, background 0.15s, opacity 0.15s;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
+}
+
+button:active:not(:disabled) {
+  transform: scale(0.98);
 }
 
 button:disabled {
@@ -91,43 +306,58 @@ button:disabled {
   cursor: not-allowed;
 }
 
+/* Fading the accent to 50% yields a muddy brown. A disabled primary reads
+   better as a neutral surface than as a washed-out orange. */
+button.primary:disabled {
+  opacity: 1;
+  background: var(--bg-hover);
+  /* Tertiary on the hover surface is 4.19:1 — the muted surface already reads
+     as disabled, so the label does not need to be faint as well. */
+  color: var(--text-secondary);
+}
+
 button.primary {
-  background: var(--primary);
-  color: white;
-  padding: 10px 16px;
+  background: var(--accent);
+  color: var(--on-accent);
+  padding: 12px 16px;
+  font-weight: 600;
 }
 
 button.primary:hover:not(:disabled) {
-  background: var(--primary-hover);
+  background: var(--accent-hover);
 }
 
 button.primary.large {
   padding: 14px;
   font-size: 15px;
+  border-radius: var(--radius-full);
 }
 
 button.secondary {
-  background: var(--bg-card);
+  background: var(--bg-surface);
   color: var(--text);
   border: 1px solid var(--border);
-  padding: 10px 16px;
+  padding: 12px 16px;
 }
 
 button.secondary:hover:not(:disabled) {
   background: var(--bg-hover);
+  border-color: var(--border-strong);
 }
 
 button.secondary.large {
   padding: 14px;
   font-size: 15px;
+  border-radius: var(--radius-full);
 }
 
 button.icon {
   background: transparent;
-  color: var(--text-dim);
+  color: var(--text-secondary);
   padding: 8px;
-  min-width: 34px;
-  min-height: 34px;
+  min-width: 36px;
+  min-height: 36px;
+  border-radius: var(--radius-sm);
 }
 
 button.icon:hover {
@@ -137,12 +367,30 @@ button.icon:hover {
 
 button.back {
   background: transparent;
-  color: var(--text-dim);
+  color: var(--text-secondary);
   padding: 4px;
+  min-width: auto;
+  min-height: auto;
 }
 
 button.back:hover {
   color: var(--text);
+}
+
+button.danger {
+  background: rgba(var(--error-rgb), 0.12);
+  color: var(--error);
+  border: 1px solid rgba(var(--error-rgb), 0.35);
+  padding: 12px 16px;
+}
+
+button.danger:hover:not(:disabled) {
+  background: rgba(var(--error-rgb), 0.2);
+}
+
+button.danger.large {
+  padding: 14px;
+  border-radius: var(--radius-full);
 }
 
 label {
@@ -152,113 +400,311 @@ label {
 }
 
 label span {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.06em;
 }
 
 input,
 select,
 textarea {
-  background: var(--bg-card);
+  background: var(--bg-surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-sm);
   color: var(--text);
-  padding: 10px 12px;
+  padding: 12px 14px;
   font-size: 14px;
   font-family: inherit;
+  transition: border-color 0.15s;
 }
 
 input:focus,
 select:focus,
 textarea:focus {
   outline: none;
-  border-color: var(--primary);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring);
 }
 
 textarea {
   resize: vertical;
-  font-family: monospace;
-}
-
-.addressCard {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.addressText {
-  font-family: monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 13px;
-  color: var(--text);
 }
 
-.networkBadge {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 8px 12px;
-  font-size: 12px;
-  color: var(--text-dim);
-  text-align: center;
-}
-
-.balanceSection {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 20px;
-  text-align: center;
-}
-
-.balanceLabel {
-  font-size: 12px;
-  color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin-bottom: 8px;
-}
-
-.balanceValue {
-  font-size: 32px;
+.amountInput {
+  font-size: 28px;
   font-weight: 600;
-  color: var(--text);
-}
-
-.actions {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
+  text-align: center;
+  padding: 16px;
+  font-variant-numeric: tabular-nums;
 }
 
 .error {
-  background: rgba(239, 68, 68, 0.1);
-  border: 1px solid var(--error);
-  border-radius: var(--radius);
+  background: rgba(var(--error-rgb), 0.1);
+  border: 1px solid rgba(var(--error-rgb), 0.35);
+  border-radius: var(--radius-sm);
   padding: 10px 12px;
   color: var(--error);
   font-size: 13px;
 }
 
+.warningBanner {
+  background: rgba(var(--warning-rgb), 0.1);
+  border: 1px solid rgba(var(--warning-rgb), 0.35);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  color: var(--warning);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .success {
   color: var(--success);
   display: flex;
+  flex-direction: column;
+  align-items: center;
   justify-content: center;
-  padding: 40px;
+  gap: 12px;
+  padding: 48px 20px;
+  flex: 1;
 }
 
 .loading,
 .empty {
-  color: var(--text-dim);
+  color: var(--text-secondary);
   text-align: center;
-  padding: 40px 20px;
+  padding: 48px 20px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.emptyIcon {
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-full);
+  background: var(--bg-surface);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+  margin-bottom: 4px;
+}
+
+.identicon {
+  border-radius: var(--radius-full);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.accountBar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 20px 8px;
+}
+
+.accountChip {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  padding: 8px 14px;
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  cursor: pointer;
+  position: relative;
+}
+
+.accountChip:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.toast {
+  position: fixed;
+  bottom: 72px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  padding: 8px 16px;
+  border-radius: var(--radius-full);
+  font-size: 13px;
+  font-weight: 500;
+  z-index: 100;
+  box-shadow: 0 8px 24px rgba(var(--shadow-rgb), 0.4);
+  animation: toastIn 0.2s ease;
+}
+
+@keyframes toastIn {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+.heroBalance {
+  text-align: center;
+  padding: 8px 20px 20px;
+}
+
+.heroLabel {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 8px;
+}
+
+.heroValue {
+  display: block;
+  font-size: 36px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+  margin-bottom: 6px;
+}
+
+.heroNetwork {
+  display: inline-block;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  padding: 4px 12px;
+}
+
+.skeleton {
+  background: linear-gradient(90deg, var(--bg-surface) 25%, var(--bg-hover) 50%, var(--bg-surface) 75%);
+  /* Neutral shimmer — a loading affordance, not decoration. */
+  background-size: 200% 100%;
+  animation: shimmer 1.2s infinite;
+  border-radius: var(--radius-sm);
+  height: 36px;
+  width: 120px;
+  margin: 0 auto;
+}
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.quickActions {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  padding: 16px 20px;
+}
+
+.assetSection {
+  padding: 0 20px 16px;
+}
+
+.assetCard {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  transition: border-color 0.15s;
+}
+
+.assetCard.open {
+  border-color: var(--border-strong);
+}
+
+.assetRow {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  cursor: pointer;
+  padding: 12px;
+}
+
+.assetIcon {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-full);
+  background: var(--accent-muted);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+.assetMeta {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.assetName {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.assetSub {
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assetBalance {
+  font-size: 15px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.activityGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.activityGroupLabel {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 4px 0;
 }
 
 .activityList {
@@ -267,25 +713,39 @@ textarea {
   gap: 8px;
 }
 
+/* A button now, so rows are clickable and keyboard-reachable. The global
+   button rule centres its content, which has to be undone here. */
 .activityItem {
-  background: var(--bg-card);
+  background: var(--bg-surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-md);
   padding: 12px;
   display: flex;
   align-items: center;
+  justify-content: flex-start;
   gap: 12px;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
 }
 
+.activityItem:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+/* Neutral, not red: every row here is an ordinary outgoing transfer. Red is
+   reserved for failure, and colouring all sends with it read as "all failed". */
 .activityIcon {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-full);
   background: var(--bg-hover);
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--text-dim);
+  color: var(--text-secondary);
   flex-shrink: 0;
 }
 
@@ -294,34 +754,47 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  min-width: 0;
 }
 
-.activityTo {
-  font-size: 13px;
-  font-family: monospace;
+.activityTitle {
+  font-size: 14px;
+  font-weight: 600;
   color: var(--text);
+}
+
+.activitySub {
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .activityTime {
   font-size: 11px;
-  color: var(--text-dim);
+  color: var(--text-tertiary);
 }
 
 .activityAmount {
-  font-family: monospace;
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  /* Never give up width to the address: the figure is the point of the row. */
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .detailCard {
-  background: var(--bg-card);
+  background: var(--bg-surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 12px;
+  border-radius: var(--radius-md);
+  padding: 14px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
 }
 
 .detailRow {
@@ -331,44 +804,2483 @@ textarea {
 }
 
 .detailRow span {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.06em;
 }
 
 .mono {
-  font-family: monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 13px;
   color: var(--text);
   word-break: break-all;
 }
 
-button.danger {
-  background: rgba(239, 68, 68, 0.15);
-  color: var(--error);
-  border: 1px solid var(--error);
-  padding: 10px 16px;
+.settingsSection {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
 }
 
-button.danger:hover:not(:disabled) {
-  background: rgba(239, 68, 68, 0.25);
+.settingsSection:last-child {
+  border-bottom: none;
 }
 
-button.danger.large {
+.dangerZone {
+  background: rgba(var(--error-rgb), 0.06);
+  border: 1px solid rgba(var(--error-rgb), 0.2);
+  border-radius: var(--radius-md);
   padding: 14px;
-  font-size: 15px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.siteRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+
+.siteRow .mono {
+  flex: 1;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .checkRow {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
 }
 
 .checkRow span {
   text-transform: none;
   letter-spacing: 0;
   color: var(--text);
+  font-size: 14px;
+  font-weight: 400;
+}
+
+.onboardingHero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 32px 20px 16px;
+  gap: 12px;
+}
+
+/* The mark is a transparent vector, so it needs no tile or rounded corners.
+   Sizing is by height; width follows the 80:90 aspect ratio on its own. */
+.logoMark {
+  height: 68px;
+  width: auto;
+  color: var(--text);
+  animation: pulseGlow 3s ease-in-out infinite;
+}
+
+.brandLogo {
+  height: 44px;
+  width: auto;
+  color: var(--text);
+}
+
+.brandLogo.large {
+  height: 68px;
+}
+
+.choiceCards {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 0 20px 20px;
+}
+
+.choiceCard {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.choiceCard:hover {
+  border-color: var(--accent);
+  background: var(--bg-hover);
+}
+
+.choiceCardTitle {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.choiceCardDesc {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.stickyFooter {
+  margin-top: auto;
+  padding: 16px 20px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-elevated);
+}
+
+.approvalHeader {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 24px 20px 16px;
+}
+
+.siteFavicon {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+}
+
+.approvalTitle {
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.approvalOrigin {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+.approvalBody {
+  flex: 1;
+  padding: 0 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow-y: auto;
+}
+
+.approvalAmount {
+  text-align: center;
+  padding: 16px 0;
+}
+
+.approvalAmountLabel {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 8px;
+}
+
+.approvalAmountValue {
+  font-size: 32px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.approvalFooter {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  padding: 16px 20px 20px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-elevated);
+}
+
+.approvalFooter button {
+  border-radius: var(--radius-full);
+  padding: 14px;
+  font-weight: 600;
+}
+
+.unlockHero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 40px 20px 8px;
+  text-align: center;
+}
+
+.unlockIcon {
+  width: 56px;
+  height: 56px;
+  border-radius: var(--radius-full);
+  background: var(--accent-muted);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.progressDots {
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+  padding: 12px 0 4px;
+}
+
+.progressDot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--border-strong);
+}
+
+.progressDot.active {
+  background: var(--accent);
+  width: 18px;
+}
+
+.advancedToggle {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 13px;
+  padding: 4px 0;
+  cursor: pointer;
+  text-align: left;
+  justify-content: flex-start;
+}
+
+.advancedToggle:hover {
+  color: var(--text);
+}
+
+.tabPanel {
+  animation: fadeUp 0.22s ease;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+@keyframes fadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.brandLogo {
+  width: 56px;
+  height: 56px;
+  border-radius: 18px;
+  box-shadow: var(--shadow-glow);
+}
+
+.brandLogo.large {
+  width: 72px;
+  height: 72px;
+  border-radius: 22px;
+}
+
+.loadingScreen {
+  min-height: var(--popup-height);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  padding: 40px;
+}
+
+.loadingSpinner {
+  width: 28px;
+  height: 28px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  border-radius: var(--radius-full);
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.homeHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px 0;
+}
+
+.homeBrand {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+
+.identiconRing {
+  padding: 2px;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  flex-shrink: 0;
+}
+
+.identiconRing .identicon {
+  border: 2px solid var(--bg);
+}
+
+.actionPill.primary {
+  box-shadow: none;
+}
+
+.actionPill.secondary:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.assetRow {
+  transition: border-color 0.2s, transform 0.15s;
+}
+
+.assetRow:hover {
+  border-color: var(--border-strong);
+  transform: translateY(-1px);
+}
+
+.emptyCard {
+  padding: 20px;
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  border: 1px dashed var(--border-strong);
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.emptyCard button {
+  margin-top: 4px;
+}
+
+@keyframes pulseGlow {
+  0%, 100% {
+    filter: drop-shadow(0 0 10px rgba(var(--accent-rgb), 0.4));
+  }
+  50% {
+    filter: drop-shadow(0 0 18px rgba(var(--accent-rgb), 0.62));
+  }
+}
+
+.choiceCard {
+  box-shadow: var(--shadow-soft);
+}
+
+.successCircle {
+  width: 72px;
+  height: 72px;
+  border-radius: var(--radius-full);
+  background: rgba(var(--success-rgb), 0.12);
+  border: 1px solid rgba(var(--success-rgb), 0.3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--success);
+}
+
+.approvalHeader {
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+}
+
+/* Dev-only bypass control (see src/demo.ts). Absent from production builds. */
+.demoBypass {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: max(14px, env(safe-area-inset-bottom, 0px));
+  /* Centred with auto margins, not translateX: the global
+     `button:active { transform: scale(.98) }` would replace a centring
+     transform and kick the button sideways on every press. */
+  margin-inline: auto;
+  width: fit-content;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-full);
+  background: var(--bg-bar);
+  backdrop-filter: blur(8px);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.demoBypass:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.demoBypassTag {
+  padding: 1px 6px;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* ---------------------------------------------------------------------------
+   Keyboard focus
+   A visible ring on every focusable element. :focus-visible keeps it off for
+   mouse clicks, so it costs nothing visually but makes the popup navigable.
+   --------------------------------------------------------------------------- */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: none;
+}
+
+/* ---------------------------------------------------------------------------
+   Opening the wallet
+   Played once when the main shell is entered — after unlocking, or via the
+   demo bypass. The panel settles into place and the tab bar rises under it.
+   --------------------------------------------------------------------------- */
+@keyframes walletOpen {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes tabBarRise {
+  from {
+    opacity: 0;
+    transform: translateY(100%);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.shell.opening {
+  animation: walletOpen 0.36s var(--ease-out) both;
+  transform-origin: 50% 60%;
+}
+
+.shell.opening .tabBar {
+  animation: tabBarRise 0.42s var(--ease-out) 0.06s both;
+}
+
+.shell.opening .quickActions {
+  animation: fadeUp 0.4s var(--ease-out) 0.2s both;
+}
+
+.shell.opening .assetSection {
+  animation: fadeUp 0.4s var(--ease-out) 0.26s both;
+}
+
+/* ---------------------------------------------------------------------------
+   Responsive
+   The desktop popup is a fixed 360x600 because Chrome sizes the window from
+   the document. The queries below only take effect outside that context:
+   touch devices, and the page opened in a full browser tab.
+   --------------------------------------------------------------------------- */
+
+/* Touch: fill the screen, clear the home indicator, grow every hit target. */
+@media (pointer: coarse) {
+  :root {
+    --popup-height: 100dvh;
+    --tab-bar-height: calc(64px + env(safe-area-inset-bottom, 0px));
+  }
+
+  body {
+    width: 100%;
+  }
+
+  .tabBar {
+    padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .tabItem {
+    min-height: 56px;
+  }
+
+  button.icon {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  button.back {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 8px;
+  }
+}
+
+/* Opened as a full tab rather than the popup: centre the app. */
+@media (pointer: fine) and (min-width: 480px) {
+  body {
+    width: 100%;
+    display: flex;
+    justify-content: center;
+  }
+
+  #root {
+    width: var(--popup-width);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Reduced motion
+   --------------------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Balance type scale — set by BalanceValue from the formatted length so a
+   grouped eleven-digit figure still fits the card at 360px. */
+.balanceValue {
+  overflow-wrap: anywhere;
+}
+
+/* ---------------------------------------------------------------------------
+   Transaction detail
+   --------------------------------------------------------------------------- */
+.txHero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0 4px;
+}
+
+.txHeroLabel {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.txHeroAmount {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 26px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+
+.txRows {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 4px;
+}
+
+.txRow {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+}
+
+.txRowLabel {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* Long hashes and addresses wrap rather than truncate — in a wallet the middle
+   of the string is exactly what you check against. */
+.txRowValue {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+button.txRowValue.copyable {
+  background: transparent;
+  border: none;
+  padding: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  color: var(--text);
+  cursor: pointer;
+}
+
+button.txRowValue.copyable:hover {
+  color: var(--accent);
+}
+
+button.txRowValue.copyable svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--text-tertiary);
+}
+
+button.txRowValue.copyable:hover svg {
+  color: var(--accent);
+}
+
+.txRowText {
+  min-width: 0;
+}
+
+/* Pinned to the bottom of the scroll area: the hash and address wrap to as
+   many lines as they need, and the action must not drift below the fold. */
+.explorerLink {
+  position: sticky;
+  bottom: 0;
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 13px 16px;
+  border-radius: var(--radius-full);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.explorerLink:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.explorerNote {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-tertiary);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-full);
+  padding: 1px 7px;
+}
+
+/* ---------------------------------------------------------------------------
+   Accounts
+   --------------------------------------------------------------------------- */
+.accountMeta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.accountName {
+  background: transparent;
+  border: none;
+  padding: 0;
+  gap: 4px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.accountName:hover {
+  color: var(--accent);
+}
+
+.accountName svg {
+  color: var(--text-tertiary);
+}
+
+.accountName:hover svg {
+  color: var(--accent);
+}
+
+.accountList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.accountRow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-right: 6px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.accountRow:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+/* Selecting and renaming are separate controls: a button cannot nest in a
+   button, and the rename target needs its own hit area anyway. */
+.accountRowSelect {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+  padding: 10px 6px 10px 12px;
+  background: transparent;
+  border-radius: var(--radius-md);
+  text-align: left;
+  cursor: pointer;
+}
+
+.accountRow.active {
+  border-color: var(--accent);
+  background: var(--accent-muted);
+}
+
+.accountRow.active svg {
+  color: var(--accent);
+}
+
+.accountRowMeta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.accountRowLabel {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.accountRowAddress {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.accountActions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: auto;
+  padding-top: 8px;
+}
+
+/* The chip stretched to fill the bar when it was a direct child; inside the
+   stacked account block it should hug its text instead. */
+.accountMeta .accountChip {
+  flex: 0 0 auto;
+  max-width: 100%;
+  padding: 5px 12px;
+  font-size: 12px;
+}
+
+/* ---------------------------------------------------------------------------
+   Asset detail
+   --------------------------------------------------------------------------- */
+.assetChevron {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+  transition: transform 0.2s var(--ease-out);
+}
+
+.assetCard.open .assetChevron {
+  transform: rotate(90deg);
+}
+
+.assetDetail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 14px 14px;
+  border-top: 1px solid var(--border);
+  margin-top: 2px;
+  animation: fadeUp 0.22s var(--ease-out);
+}
+
+.assetDetailRow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 8px;
+  font-size: 13px;
+}
+
+.assetDetailRow > span:first-child {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+.assetDetailRow.stacked {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.breakAll {
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.assetDetailActions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.assetDetailActions button {
+  padding: 9px 12px;
+  font-size: 13px;
+}
+
+/* ---------------------------------------------------------------------------
+   Rename
+   --------------------------------------------------------------------------- */
+.accountRename {
+  flex-shrink: 0;
+  min-width: 32px;
+  min-height: 32px;
+  color: var(--text-tertiary);
+}
+
+.accountRename:hover {
+  color: var(--accent);
+  background: transparent;
+}
+
+.accountRenameAddress {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+/* ---------------------------------------------------------------------------
+   Swap
+   --------------------------------------------------------------------------- */
+/* The legs carry a picker, an amount, a fiat line and a balance line each, so
+   they are kept tight enough that the whole swap fits a 600px popup. */
+.swapLeg {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+}
+
+.swapLeg.receiving {
+  background: var(--bg-elevated);
+}
+
+.swapLegLabel {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.swapLeg .amountInput {
+  background: transparent;
+  border: none;
+  padding: 2px 0;
+  width: 100%;
+  font-size: 24px;
+}
+
+.swapLeg .amountInput:focus {
+  box-shadow: none;
+}
+
+.swapOut {
+  font-size: 24px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  padding: 4px 0;
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+
+.swapLegCoin {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+.swapArrow {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  margin: -22px auto;
+  border-radius: var(--radius-full);
+  background: var(--bg-hover);
+  border: 1px solid var(--border-strong);
+  color: var(--text-secondary);
+  position: relative;
+  z-index: 1;
+}
+
+.swapMeta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+  color: var(--text-tertiary);
+  padding: 0 2px;
+}
+
+.swapMeta .mono {
+  color: var(--text-secondary);
+}
+
+/* ---------------------------------------------------------------------------
+   Coin picker
+   --------------------------------------------------------------------------- */
+.swapLegTop {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+}
+
+.swapArrow:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ---------------------------------------------------------------------------
+   Add funds
+   --------------------------------------------------------------------------- */
+.topUpAddress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+}
+
+.providerCard {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px;
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  text-decoration: none;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.providerCard:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+}
+
+.providerCard > svg:last-child {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+.providerCard:hover > svg:last-child {
+  color: var(--accent);
+}
+
+.providerIcon {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-full);
+  background: var(--accent-muted);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.providerMeta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.providerName {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.providerDesc {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+.topUpNote {
+  margin-top: auto;
+  font-size: 12px;
+}
+
+/* ---------------------------------------------------------------------------
+   Fiat values
+   --------------------------------------------------------------------------- */
+.fiatLine {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: 14px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+}
+
+.swapFiat {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.staleTag {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--warning);
+  border: 1px dashed rgba(var(--warning-rgb), 0.4);
+  border-radius: var(--radius-full);
+  padding: 1px 6px;
+}
+
+/* ---------------------------------------------------------------------------
+   Theme picker
+   --------------------------------------------------------------------------- */
+.themeField {
+  gap: 6px;
+}
+
+/* The swatch shows the selected theme's ground and accent, so the choice is
+   legible before it is applied. */
+.themeSwatch {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+  border: 1px solid var(--border-strong);
+  background-image: linear-gradient(135deg, var(--swatch-bg) 0 50%, var(--swatch-accent) 50% 100%);
+}
+
+.swatch-system {
+  --swatch-bg: #0a0a0a;
+  --swatch-accent: #fafafa;
+}
+
+.swatch-dark {
+  --swatch-bg: #0a0a0a;
+  --swatch-accent: #ff7a1a;
+}
+
+.swatch-light {
+  --swatch-bg: #fafafa;
+  --swatch-accent: #b03a0b;
+}
+
+.themeHint {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+}
+
+/* ---------------------------------------------------------------------------
+   Home hero
+   The fiat figure leads and sits on the page rather than in a card, so the
+   number itself is the only thing competing for attention.
+   --------------------------------------------------------------------------- */
+.balanceHero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 20px 20px 4px;
+  text-align: center;
+}
+
+.balanceHero .balanceValue.lg { font-size: 46px; }
+.balanceHero .balanceValue.md { font-size: 40px; }
+.balanceHero .balanceValue.sm { font-size: 33px; }
+.balanceHero .balanceValue.xs { font-size: 27px; }
+
+.balanceHero .heroValue {
+  letter-spacing: -0.035em;
+  margin-bottom: 0;
+}
+
+.heroSub {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.heroTokenAmount {
+  font-size: 14px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.changeBadge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.changeBadge.up { color: var(--success); }
+.changeBadge.down { color: var(--error); }
+
+.changePill {
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+
+.changeBadge.up .changePill { background: rgba(var(--success-rgb), 0.14); }
+.changeBadge.down .changePill { background: rgba(var(--error-rgb), 0.14); }
+
+/* ---------------------------------------------------------------------------
+   Action tiles
+   Four equal affordances: none of them is "the" primary action, so none is
+   styled as one.
+   --------------------------------------------------------------------------- */
+.quickActions {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  padding: 18px 20px 8px;
+}
+
+.actionTile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 14px 4px 12px;
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.actionTile svg {
+  color: var(--accent);
+}
+
+.actionTile:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+/* ---------------------------------------------------------------------------
+   Token list
+   --------------------------------------------------------------------------- */
+.assetsHeading {
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text);
+  padding-bottom: 10px;
+}
+
+.assetValue {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.assetFiat {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.rowChange {
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.rowChange.up { color: var(--success); }
+.rowChange.down { color: var(--error); }
+
+.shell.opening .balanceHero {
+  animation: fadeUp 0.4s var(--ease-out) 0.14s both;
+}
+
+/* The address reads as a caption under the account name rather than a control
+   competing with it. */
+.accountAddress {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  color: var(--text-tertiary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.accountAddress:hover {
+  color: var(--accent);
+}
+
+.accountBar {
+  padding: 14px 20px 4px;
+}
+
+/* ---------------------------------------------------------------------------
+   Token logos
+   Generated marks (see TokenLogo.tsx) — a coloured disc with a white glyph.
+   --------------------------------------------------------------------------- */
+.tokenLogo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* Clipped to a circle: some official marks (WBTC) ship on an opaque square,
+     which would otherwise read as a white tile among round logos. */
+  border-radius: var(--radius-full);
+  overflow: hidden;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.tokenLogo.generated {
+  color: #ffffff;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+}
+
+.tokenLogo img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
+/* Rows stack, so each needs breathing room from the next. */
+.assetSection .assetCard + .assetCard {
+  margin-top: 8px;
+}
+
+.swapEstimate {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* ---------------------------------------------------------------------------
+   Swap balances
+   --------------------------------------------------------------------------- */
+.swapBalance {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.maxButton {
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  background: var(--accent-muted);
+  border: 1px solid transparent;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.maxButton:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.maxButton:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ---------------------------------------------------------------------------
+   Rate refresh
+   --------------------------------------------------------------------------- */
+.pageHeader .refreshRates {
+  margin-left: auto;
+}
+
+.refreshRates:disabled {
+  opacity: 1;
+  cursor: progress;
+}
+
+.spinning {
+  animation: spin 0.8s linear infinite;
+}
+
+/* ---------------------------------------------------------------------------
+   Swap rows in activity
+   --------------------------------------------------------------------------- */
+.activityPair {
+  position: relative;
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+}
+
+.activityPair .tokenLogo {
+  position: absolute;
+}
+
+/* The sold asset sits behind, the received one in front, so the pair reads
+   left-to-right in the same order as the amounts beside it. */
+.activityPair .tokenLogo:first-child {
+  top: 0;
+  left: 0;
+}
+
+.activityPair .tokenLogo:last-child {
+  bottom: 0;
+  right: 0;
+  box-shadow: 0 0 0 2px var(--bg-surface);
+}
+
+.activityAmounts {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.activityAmount.out {
+  color: var(--text);
+}
+
+.activityAmount.in {
+  color: var(--success);
+}
+
+.txHeroAmount.in {
+  color: var(--success);
+  font-size: 20px;
+}
+
+/* The token logo carries a small action badge, so a row says what happened and
+   to which asset in one glance. */
+.activityMark {
+  position: relative;
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+}
+
+.activityBadge {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--radius-full);
+  /* Neutral rather than accent: the accent is orange and so is the Hexy disc,
+     which made the badge disappear into the logo it sits on. The page ground
+     separates it from any logo colour in either theme. */
+  background: var(--bg);
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 0 0 2px var(--bg-surface);
+}
+
+/* ---------------------------------------------------------------------------
+   Swap complete
+   --------------------------------------------------------------------------- */
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.swapComplete {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Never intercepts a tap; the form stays usable underneath. */
+  pointer-events: none;
+  z-index: 2;
+  animation: swapCompleteFade 2s var(--ease-out) forwards;
+}
+
+.successMark {
+  width: 100%;
+  height: 100%;
+  color: var(--success);
+  filter: drop-shadow(0 6px 24px rgba(var(--shadow-rgb), 0.45));
+  animation: successPop 0.42s cubic-bezier(0.2, 1.35, 0.35, 1) both;
+}
+
+.successMark circle {
+  fill: var(--bg-elevated);
+  stroke: currentColor;
+  stroke-width: 3;
+}
+
+.successMark path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 4.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  /* Path length is ~34; drawn from fully offset back to zero. */
+  stroke-dasharray: 34;
+  stroke-dashoffset: 34;
+  animation: successDraw 0.34s var(--ease-out) 0.22s forwards;
+}
+
+/* A single ring expanding out from under the mark. */
+.successRing {
+  position: absolute;
+  width: 92px;
+  height: 92px;
+  border-radius: var(--radius-full);
+  border: 2px solid var(--success);
+  animation: successRing 0.9s var(--ease-out) 0.16s both;
+}
+
+@keyframes successPop {
+  0% {
+    transform: scale(0.2);
+    opacity: 0;
+  }
+  60% {
+    transform: scale(1.08);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes successDraw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes successRing {
+  from {
+    transform: scale(0.9);
+    opacity: 0.55;
+  }
+  to {
+    transform: scale(1.9);
+    opacity: 0;
+  }
+}
+
+@keyframes swapCompleteFade {
+  0%,
+  78% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+/* The global reduced-motion rule collapses every animation to ~0ms. For most
+   things that is right, but this confirmation *ends* at opacity 0, so it
+   collapsed to invisible — reduced motion must mean less movement, not a
+   missing confirmation. Pin the end state instead and let the timer dismiss it. */
+@media (prefers-reduced-motion: reduce) {
+  .swapComplete {
+    animation: none !important;
+    opacity: 1;
+  }
+
+  .successMark {
+    animation: none !important;
+    opacity: 1;
+    transform: none;
+  }
+
+  .successMark path {
+    animation: none !important;
+    stroke-dashoffset: 0;
+  }
+
+  .successRing {
+    display: none;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Swap phases
+   The form clears while the swap settles so the confirmation lands on an empty
+   canvas. It stays mounted rather than unmounting, which keeps the page height
+   stable — the tab bar and button must not jump under the user's finger.
+   --------------------------------------------------------------------------- */
+.swapForm {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  transition: opacity 0.3s var(--ease-out), transform 0.3s var(--ease-out);
+}
+
+.swapForm.clearing {
+  opacity: 0;
+  transform: scale(0.97);
+  pointer-events: none;
+}
+
+.swapWorking {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.swapWorking .loadingSpinner {
+  width: 42px;
+  height: 42px;
+  border-width: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .swapForm {
+    transition: none;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Balance chart
+   --------------------------------------------------------------------------- */
+.changeBadge {
+  background: transparent;
+  border: none;
+  padding: 2px 4px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.changeChevron {
+  color: currentColor;
+  opacity: 0.7;
+}
+
+.changeBadge:hover {
+  background: var(--bg-hover);
+}
+
+.chartSummary {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding-top: 4px;
+}
+
+.chartValue {
+  font-size: 32px;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+}
+
+.chartDelta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.chartDelta.up {
+  color: var(--success);
+}
+
+.chartDelta.down {
+  color: var(--error);
+}
+
+.chartDelta.up .changePill {
+  background: rgba(var(--success-rgb), 0.14);
+}
+
+.chartDelta.down .changePill {
+  background: rgba(var(--error-rgb), 0.14);
+}
+
+.chartWhen {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.chartFrame {
+  height: 150px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.chart {
+  width: 100%;
+  height: 150px;
+  /* The viewBox is stretched to fill, so strokes are kept at true width with
+     vector-effect rather than being scaled into wedges. */
+  overflow: visible;
+  touch-action: none;
+  cursor: crosshair;
+}
+
+.chart.up {
+  color: var(--success);
+}
+
+.chart.down {
+  color: var(--error);
+}
+
+.chartLine {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.chartArea {
+  fill: currentColor;
+  opacity: 0.1;
+  stroke: none;
+}
+
+.chartCursor {
+  stroke: var(--border-strong);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
+.chartDot {
+  fill: currentColor;
+  stroke: var(--bg);
+  stroke-width: 2;
+}
+
+.chartLoading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 150px;
+}
+
+.rangeTabs {
+  display: grid;
+  grid-template-columns: repeat(var(--range-count, 5), 1fr);
+  gap: 4px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  padding: 4px;
+}
+
+.rangeTab {
+  padding: 7px 4px;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.rangeTab:hover {
+  color: var(--text);
+}
+
+.rangeTab.active {
+  background: var(--accent-muted);
+  color: var(--accent);
+}
+
+.chartNote {
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text-tertiary);
+  margin-top: auto;
+}
+
+.chartFailed {
+  flex-direction: column;
+  gap: 12px;
+}
+
+.chartFailed .secondary {
+  padding: 8px 16px;
+  font-size: 13px;
+}
+
+/* ---------------------------------------------------------------------------
+   Balance privacy
+   --------------------------------------------------------------------------- */
+.balanceToggle {
+  background: transparent;
+  border: none;
+  padding: 2px 8px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  color: inherit;
+  transition: background 0.15s;
+}
+
+.balanceToggle:hover {
+  background: var(--bg-hover);
+}
+
+/* The dots are their own glyph run, so they get their own tracking rather than
+   inheriting the tight negative letter-spacing set for large figures. */
+.masked {
+  letter-spacing: 0.12em;
+  font-variant-numeric: normal;
+}
+
+.assetFiat.masked {
+  color: var(--text-secondary);
+}
+
+/* ---------------------------------------------------------------------------
+   Send
+   --------------------------------------------------------------------------- */
+/* ---------------------------------------------------------------------------
+   Dropdown
+   Rendered in-page rather than by the OS, so it inherits the theme, stays
+   inside the popup, and can carry a logo and a balance per row.
+   --------------------------------------------------------------------------- */
+.dropdown {
+  position: relative;
+  min-width: 0;
+}
+
+.dropdownTrigger {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 9px;
+  width: 100%;
+  padding: 9px 10px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.dropdownTrigger:hover {
+  border-color: var(--border-strong);
+}
+
+.dropdown.open .dropdownTrigger {
+  border-color: var(--accent);
+}
+
+/* These sit inside <label>, whose span rule uppercases and shrinks field
+   captions. A value is not a caption, so that styling is undone here. */
+.dropdownLabel,
+.dropdownHint {
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.dropdownLabel {
+  font-size: 14px;
+  font-weight: 500;
+  color: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dropdownHint {
+  margin-left: auto;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dropdownChevron {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+  transition: transform 0.18s var(--ease-out);
+}
+
+.dropdown.open .dropdownChevron {
+  transform: rotate(180deg);
+}
+
+.dropdownList {
+  position: absolute;
+  z-index: 20;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  /* Scrolls rather than growing past the popup. */
+  max-height: 232px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-soft);
+  animation: dropdownIn 0.14s var(--ease-out);
+}
+
+.dropdownList.flip {
+  top: auto;
+  bottom: calc(100% + 4px);
+}
+
+@keyframes dropdownIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.dropdownOption {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.dropdownOption.active {
+  background: var(--bg-hover);
+}
+
+.dropdownOption.selected {
+  color: var(--accent);
+}
+
+.dropdownTick {
+  flex-shrink: 0;
+  color: var(--accent);
+}
+
+.dropdownOption .dropdownHint {
+  margin-left: auto;
+  padding-left: 8px;
+}
+
+/* The swap legs give the control its own width rather than filling the row. */
+.tokenDropdown {
+  max-width: 74%;
+  flex: 1;
+}
+
+.tokenDropdown .dropdownHint {
+  display: none;
+}
+
+.tokenDropdown .dropdownList .dropdownHint {
+  display: block;
+}
+
+/* ---------------------------------------------------------------------------
+   Field
+   A <label> forwards any click inside it to its form control. For a composite
+   widget like the dropdown that meant selecting an option fired the trigger
+   again and reopened the list, so these captions use a div instead. The
+   dropdown carries its own aria-label, so nothing is lost.
+   --------------------------------------------------------------------------- */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fieldLabel {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* ---------------------------------------------------------------------------
+   Send — step 1, pick an asset
+   --------------------------------------------------------------------------- */
+.searchField {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 14px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-tertiary);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.searchField:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+
+.searchField input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--text);
+  font-size: 15px;
+}
+
+.searchField input:focus {
+  outline: none;
+  box-shadow: none;
+}
+
+.assetList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.assetOption {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+  width: 100%;
+  padding: 12px;
+  text-align: left;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.assetOption:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.assetOptionMeta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.assetOptionName {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.assetOptionAmount {
+  font-size: 13px;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------------------
+   Send — step 2, recipient and amount
+   --------------------------------------------------------------------------- */
+.sendHero {
+  display: flex;
+  justify-content: center;
+  padding: 6px 0 10px;
+}
+
+.sendField {
+  width: 100%;
+  font-size: 15px;
+}
+
+.amountField {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px 4px 14px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.amountField:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+
+.amountFieldInput {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  padding: 10px 0;
+  color: var(--text);
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+}
+
+.amountFieldInput:focus {
+  outline: none;
+  box-shadow: none;
+}
+
+.amountFieldUnit {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.sendMeta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: -8px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------------------
+   Send — step 3, confirm
+   --------------------------------------------------------------------------- */
+.confirmHero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 0 6px;
+  color: var(--accent);
+}
+
+.confirmAmount {
+  font-size: 30px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.confirmFiat {
+  font-size: 14px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Cancel and the action sit side by side on the send screens. */
+.stickyFooter.row {
+  flex-direction: row;
+}
+
+.stickyFooter.row > button {
+  flex: 1;
+}
+
+/* ---------------------------------------------------------------------------
+   Sending stage
+   The dots and the tick are stacked on one centre. The dots fade and shrink
+   away as the tick grows out of the same point, so the two states read as a
+   single continuous motion instead of a screen swap.
+   --------------------------------------------------------------------------- */
+.sendStage {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 22px;
+  padding: 48px 20px;
+}
+
+.sendStageMarks {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 92px;
+  height: 92px;
+}
+
+.sendStageMarks > * {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.successMarkWrap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sendingDots {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  transition: opacity 0.22s var(--ease-out), transform 0.28s var(--ease-out);
+}
+
+.sendingDots span {
+  width: 11px;
+  height: 11px;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  animation: dotPulse 1.15s var(--ease-out) infinite;
+}
+
+.sendingDots span:nth-child(2) {
+  animation-delay: 0.16s;
+}
+
+.sendingDots span:nth-child(3) {
+  animation-delay: 0.32s;
+}
+
+/* Collapsing inward hands the eye to the circle rising from the same point. */
+.sendingDots.out {
+  opacity: 0;
+  transform: translate(-50%, -50%) scale(0.35);
+}
+
+@keyframes dotPulse {
+  0%,
+  100% {
+    opacity: 0.3;
+    transform: scale(0.75);
+  }
+  40% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.sendStageLabel {
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  transition: color 0.25s var(--ease-out);
+}
+
+.sendStageLabel.done {
+  color: var(--text);
+  animation: fadeUp 0.34s var(--ease-out) 0.12s both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sendingDots span {
+    animation: none !important;
+    opacity: 1;
+  }
+
+  .sendingDots.out {
+    display: none;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Asset page
+   --------------------------------------------------------------------------- */
+.assetTitle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.assetPriceHero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding-top: 2px;
+}
+
+.assetPrice {
+  font-size: 34px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+}
+
+.quickActions.assetActions {
+  padding: 4px 0 0;
+}
+
+.positionGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.positionCard {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  min-width: 0;
+}
+
+.positionLabel {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+.positionValue {
+  font-size: 15px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.infoTable {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.infoRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  font-size: 14px;
+  color: var(--text-tertiary);
+}
+
+.infoRow + .infoRow {
+  border-top: 1px solid var(--border);
+}
+
+.infoValue {
+  font-weight: 600;
+  color: var(--text);
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+/* Clamped until expanded; descriptions run to several paragraphs. */
+.assetAbout {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.assetAbout.open {
+  -webkit-line-clamp: unset;
+  display: block;
+}
+
+.assetAbout a {
+  color: var(--accent);
+}
+
+.linkButton {
+  align-self: flex-start;
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.linkChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.linkChip {
+  padding: 7px 14px;
+  border-radius: var(--radius-full);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.linkChip:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Read-only rows on the asset page. */
+.activityItem.static {
+  cursor: default;
+}
+
+.activityItem.static:hover {
+  background: var(--bg-surface);
+  border-color: var(--border);
 }

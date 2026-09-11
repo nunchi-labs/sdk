@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build && vite build --config vite.content.config.ts && vite build --config vite.inpage.config.ts",
+    "build:demo": "VITE_DEMO=1 npm run build",
     "build:wasm": "cd wasm-crypto && wasm-pack build --target web --out-dir ../src/wasm --release",
     "preview": "vite preview",
     "test": "vitest run --exclude src/**/*.live.test.ts",

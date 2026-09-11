@@ -45,9 +45,15 @@ export interface Balance {
 export interface SubmittedTx {
   hash: string;
   timestamp: number;
+  /** The coin that left the wallet. */
   coin: string;
   to: string;
   amount: string;
+  /** Absent means a plain transfer, so existing records keep working. */
+  kind?: "send" | "swap";
+  /** Swaps only: what came back. */
+  toCoin?: string;
+  toAmount?: string;
 }
 
 export type MessageType =
@@ -76,6 +82,18 @@ export type MessageType =
   | "REGISTER_ACCOUNT_POLICY"
   | "GET_SETTINGS"
   | "UPDATE_SETTINGS"
+  // Account management. Only the demo backend implements these today; the
+  // real Wallet rejects them, and the popup hides the UI when it does.
+  | "GET_ACCOUNTS"
+  | "SWITCH_ACCOUNT"
+  | "ADD_ACCOUNT"
+  | "IMPORT_ACCOUNT"
+  | "RENAME_ACCOUNT"
+  | "GET_HOLDINGS"
+  // Swap. No Nunchi chain endpoint backs these yet; the demo backend answers
+  // them and the popup shows an unavailable state when nothing does.
+  | "GET_SWAP_QUOTE"
+  | "SWAP"
   | "GET_CHAIN_ID"
   | "GET_NONCE"
   | "GET_BALANCE"
