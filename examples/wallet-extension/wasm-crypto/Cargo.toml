@@ -1,0 +1,35 @@
+[package]
+name = "nunchi-wallet-crypto"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+nunchi-crypto = { path = "../../../crypto" }
+nunchi-coins = { path = "../../../coins", default-features = false }
+commonware-codec = "2026.7.0"
+commonware-cryptography = "2026.7.0"
+wasm-bindgen = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+getrandom = { version = "0.2", features = ["js"] }
+hex = "0.4"
+bech32 = "0.11"
+bytes = "1.7"
+
+[dev-dependencies]
+nunchi-common = { path = "../../../common" }
+nunchi-coins = { path = "../../../coins" }
+
+[features]
+console_error_panic_hook = ["dep:console_error_panic_hook"]
+
+[dependencies.console_error_panic_hook]
+version = "0.1"
+optional = true
+
+[profile.release]
+opt-level = "z"
+lto = true

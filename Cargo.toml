@@ -20,6 +20,10 @@ members = [
     "examples/coins/indexer",
     "examples/custom-module",
 ]
+exclude = [
+    "examples/wallet-extension/wasm-crypto",
+    "examples/wallet-extension/fixture-gen",
+]
 resolver = "2"
 
 [workspace.package]

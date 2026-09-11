@@ -21,6 +21,8 @@ jobs:
 
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
+      wallet: ${{ steps.filter.outputs.wallet }}
+      wallet-live: ${{ steps.filter.outputs.wallet-live }}
 
     steps:
       - name: Checkout Repository
@@ -42,6 +44,17 @@ jobs:
               - 'rustfmt.toml'
               - 'clippy.toml'
               - '.cargo/**'
+            wallet:
+              - 'examples/wallet-extension/**'
+            wallet-live:
+              - 'examples/wallet-extension/**'
+              - 'examples/coins/chain/**'
+              - 'coins/**'
+              - 'crypto/**'
+              - 'common/**'
+              - 'rpc/**'
+              - 'chain/**'
+              - 'xtask/**'
 
   fmt:
     needs: changes
@@ -147,3 +160,66 @@ jobs:
 
       - name: Run Clippy
         run: cargo clippy --locked --all --all-targets -- -D warnings
+
+  wallet-test:
+    needs: changes
+    if: ${{ always() && !cancelled() && (needs.changes.result == 'failure' || needs.changes.outputs.wallet == 'true') }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: examples/wallet-extension/package-lock.json
+
+      - name: Run wallet extension tests
+        working-directory: examples/wallet-extension
+        run: npm ci && npm test
+
+  wallet-live:
+    needs: changes
+    if: ${{ always() && !cancelled() && (needs.changes.result == 'failure' || needs.changes.outputs.wallet-live == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+
+      - name: Install mold
+        run: command -v mold || (sudo apt-get update && sudo apt-get install -y mold)
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-unknown-unknown
+          rustflags: ""
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@wasm-pack
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: examples/wallet-extension/package-lock.json
+
+      - name: Install wallet dependencies
+        working-directory: examples/wallet-extension
+        run: npm ci
+
+      - name: Build wallet wasm
+        working-directory: examples/wallet-extension
+        run: npm run build:wasm
+
+      - name: Build coins-chain binaries
+        run: cargo build --locked -p nunchi-coins-chain --bins -p xtask
+
+      - name: Broadcast a wallet transfer on a local testnet
+        run: ./examples/wallet-extension/scripts/run-live-tests.sh

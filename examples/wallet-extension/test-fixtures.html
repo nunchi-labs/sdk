@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Nunchi Wallet WASM Fixtures</title>
+    <style>
+        body { font-family: monospace; padding: 20px; background: #1a1a1a; color: #00ff00; }
+        .test { margin: 20px 0; padding: 15px; border: 1px solid #333; background: #222; }
+        .pass { color: #00ff00; }
+        .fail { color: #ff0000; }
+        pre { background: #111; padding: 10px; border-radius: 4px; overflow-x: auto; }
+    </style>
+</head>
+<body>
+    <h1>Nunchi Wallet Extension - Test Fixtures</h1>
+    <p>Testing WASM crypto operations match Rust SDK</p>
+    <div id="output"></div>
+
+    <script type="module">
+        import init, * as wasm from './dist/nunchi_wallet_crypto.js';
+        
+        const output = document.getElementById('output');
+        
+        function log(html) {
+            output.innerHTML += html + '<br>';
+        }
+        
+        function test(name, fn) {
+            const div = document.createElement('div');
+            div.className = 'test';
+            try {
+                fn(div);
+                div.innerHTML = `<span class="pass">✓</span> ${name}<br>${div.innerHTML}`;
+            } catch (e) {
+                div.innerHTML = `<span class="fail">✗</span> ${name}<br><span class="fail">${e.message}</span><br>${div.innerHTML}`;
+            }
+            output.appendChild(div);
+        }
+        
+        async function runTests() {
+            await init();
+            log('<h2>Initialization Complete</h2>');
+            
+            test('Generate Ed25519 keypair', (div) => {
+                const result = wasm.generate_ed25519_keypair();
+                div.innerHTML += `Curve: ${result.curve}<br>`;
+                div.innerHTML += `Private key: ${result.private_key_hex.substring(0, 20)}...<br>`;
+                div.innerHTML += `Public key: ${result.public_key_hex}<br>`;
+                div.innerHTML += `Address: ${result.address}<br>`;
+                
+                if (result.curve !== 'Ed25519') throw new Error('Wrong curve');
+                if (!result.address.startsWith('nch1')) throw new Error('Address must start with nch1');
+                if (result.address.length < 60 || result.address.length > 65) throw new Error(`Address length ${result.address.length} out of range`);
+                
+                const reimported = wasm.import_private_key(result.private_key_hex);
+                if (reimported.address !== result.address) throw new Error('Re-import mismatch');
+                div.innerHTML += '<span class="pass">Re-import verified</span><br>';
+            });
+            
+            test('Address format validation', (div) => {
+                const result = wasm.generate_ed25519_keypair();
+                const addr = result.address;
+                
+                div.innerHTML += `Address: ${addr}<br>`;
+                div.innerHTML += `Length: ${addr.length}<br>`;
+                div.innerHTML += `HRP: nch<br>`;
+                div.innerHTML += `Encoding: Bech32<br>`;
+                
+                if (!addr.startsWith('nch1')) throw new Error('Must start with nch1');
+                if (addr.toUpperCase() !== addr.toLowerCase() && addr === addr.toUpperCase()) throw new Error('Mixed case not allowed');
+                
+                const isValid = wasm.validate_address(addr);
+                if (!isValid) throw new Error('Address validation failed');
+            });
+            
+            test('Known address from genesis', (div) => {
+                const knownPrivateKey = '01d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a';
+                const knownAddress = 'nch1h2l9l85pj8u49qfgnnxc0smcccv28n8q7utwfz5zjxg8zr8xzls4gqyjq';
+                
+                const imported = wasm.import_private_key(knownPrivateKey);
+                div.innerHTML += `Expected: ${knownAddress}<br>`;
+                div.innerHTML += `Derived:  ${imported.address}<br>`;
+                
+                if (imported.address !== knownAddress) {
+                    throw new Error('Address derivation mismatch!');
+                }
+                div.innerHTML += '<span class="pass">Address derivation matches Rust SDK</span><br>';
+            });
+            
+            test('Sign transfer transaction', (div) => {
+                const privateKey = '01d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a';
+                const imported = wasm.import_private_key(privateKey);
+                const from = imported.address;
+                
+                const result = wasm.sign_transfer(
+                    privateKey,
+                    0n,
+                    '0000000000000000000000000000000000000000000000000000000000000001',
+                    from,
+                    'nch1vtd2hfzay8r2tlwymfvfg7kdrpnns3h47r2f8x2qxg84syx6gf4scajgpg',
+                    '1000'
+                );
+                
+                div.innerHTML += `Digest: ${result.digest_hex}<br>`;
+                div.innerHTML += `Tx length: ${result.transaction_hex.length / 2} bytes<br>`;
+                div.innerHTML += `Tx hex (first 80): ${result.transaction_hex.substring(0, 80)}...<br>`;
+                
+                if (result.digest_hex.length !== 64) throw new Error('Digest must be 32 bytes (64 hex chars)');
+                if (result.transaction_hex.length < 100) throw new Error('Transaction too short');
+            });
+            
+            test('Secp256r1 keypair generation', (div) => {
+                const result = wasm.generate_secp256r1_keypair();
+                div.innerHTML += `Curve: ${result.curve}<br>`;
+                div.innerHTML += `Address: ${result.address}<br>`;
+                
+                if (result.curve !== 'Secp256r1') throw new Error('Wrong curve');
+                if (!result.address.startsWith('nch1')) throw new Error('Address must start with nch1');
+            });
+            
+            test('Invalid address rejection', (div) => {
+                const tests = [
+                    'not_an_address',
+                    'nch1tooshort',
+                    'eth1234567890123456789012345678901234567890',
+                    '',
+                ];
+                
+                let passed = 0;
+                for (const addr of tests) {
+                    const valid = wasm.validate_address(addr);
+                    if (!valid) passed++;
+                    div.innerHTML += `${addr}: ${valid ? '<span class="fail">accepted (bad!)</span>' : '<span class="pass">rejected</span>'}<br>`;
+                }
+                
+                if (passed !== tests.length) throw new Error(`Only ${passed}/${tests.length} invalid addresses rejected`);
+            });
+            
+            log('<h2 class="pass">All tests completed</h2>');
+        }
+        
+        runTests().catch(e => {
+            output.innerHTML += `<div class="test"><span class="fail">Fatal error:</span> ${e.message}<br><pre>${e.stack}</pre></div>`;
+        });
+    </script>
+</body>
+</html>
