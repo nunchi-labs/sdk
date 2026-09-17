@@ -1,0 +1,102 @@
+# Changelog
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## 0.3.1 (2026-01-03)
+### Added
+- `Choice::to_u8_mask`/`to_u16_mask` ([#1322])
+- `Choice::select_u8`/`select_u16` ([#1324])
+
+[#1322]: https://github.com/RustCrypto/utils/pull/1322
+[#1324]: https://github.com/RustCrypto/utils/pull/1324
+
+## 0.3.0 (2025-12-29)
+### Removed
+- `Choice::new` ([#1314])
+- `(Partial)Eq` impls for `Choice` ([#1315])
+
+[#1314]: https://github.com/RustCrypto/utils/pull/1314
+[#1315]: https://github.com/RustCrypto/utils/pull/1315
+
+## 0.2.3 (2025-12-29)
+### Added
+- Impl `From<u8>` for `Choice` ([#1309])
+- `Choice::from_u8*` and `from_u16*` ([#1311])
+
+### Changed
+- Deprecate `Choice::new` ([#1312])
+
+[#1309]: https://github.com/RustCrypto/utils/pull/1309
+[#1311]: https://github.com/RustCrypto/utils/pull/1311
+[#1312]: https://github.com/RustCrypto/utils/pull/1312
+
+## 0.2.2 (2025-12-28)
+### Added
+- Unsigned `CtNeg` impls ([#1306])
+
+[#1306]: https://github.com/RustCrypto/utils/pull/1306
+
+## 0.2.1 (2025-12-27)
+### Added
+- Enhanced `subtle` interop ([#1289])
+
+### Security
+- Pin to `cmov` v0.4.3+ - includes important security fixes ([#1304])
+
+[#1289]: https://github.com/RustCrypto/utils/pull/1304
+[#1304]: https://github.com/RustCrypto/utils/pull/1304
+
+## 0.2.0 (2025-12-27)
+### Added
+- Additional `Choice::from_u128*` constructors ([#1285])
+- `CtNeg` trait ([#1286])
+
+### Changed
+- Renamed `Choice::from_*_nonzero` => `from_*_nz` ([#1287])
+
+[#1285]: https://github.com/RustCrypto/utils/pull/1285
+[#1286]: https://github.com/RustCrypto/utils/pull/1286
+[#1287]: https://github.com/RustCrypto/utils/pull/1287
+
+## 0.1.4 (2025-12-26)
+### Added
+- Impl `CtEq`/`CtSelect` for `isize` ([#1283])
+
+[#1283]: https://github.com/RustCrypto/utils/pull/1283
+
+## 0.1.3 (2025-12-26)
+### Fixed
+- Rustdoc syntax for variable-time-related warning text ([#1278])
+
+[#1278]: https://github.com/RustCrypto/utils/pull/1278
+
+## 0.1.2 (2025-12-26)
+### Added
+- Additional methods for `CtOption` ([#1274]):
+  - `some`
+  - `none`
+  - `into_option_copied`
+  - `filter_by`
+  - `as_inner_unchecked`
+  - `to_inner_unchecked`
+- `Default` impl for `CtOption` ([#1274])
+- `map!` and `unwrap_or!` macros ([#1274])
+- `u128` methods for `Choice` ([#1277]):
+  - `from_u128_le`
+  - `from_u128_lsb`
+  - `select_u128`
+
+[#1274]: https://github.com/RustCrypto/utils/pull/1274
+[#1277]: https://github.com/RustCrypto/utils/pull/1277
+
+## 0.1.1 (2025-12-26)
+### Added
+- Additional `const fn` constructor and predication methods for `Choice` ([#1266], [#1272])
+
+[#1266]: https://github.com/RustCrypto/utils/pull/1266
+[#1272]: https://github.com/RustCrypto/utils/pull/1272
+
+## 0.1.0 (2025-12-19)
+- Initial release

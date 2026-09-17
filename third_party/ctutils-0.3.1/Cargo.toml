@@ -1,0 +1,31 @@
+# Vendored ctutils 0.3.1 with cmov 0.5.4. commonware-cryptography 2026.7.0
+# still depends on ctutils 0.3.1 (cmov 0.4.6, GHSA-3rjw-m598-pq24). Keep
+# package version 0.3.1 so [patch.crates-io] replaces only that line;
+# ctutils 0.4.2 stays on crates.io. Remove this crate when commonware
+# cryptography moves to ctutils 0.4.
+[package]
+name = "ctutils"
+description = """
+Constant-time utility library with selection and equality testing support targeting cryptographic
+applications. Supports `const fn` where appropriate. Built on the `cmov` crate which provides
+architecture-specific predication intrinsics. Heavily inspired by the `subtle` crate.
+"""
+version = "0.3.1"
+authors = ["RustCrypto Developers"]
+license = "Apache-2.0 OR MIT"
+homepage = "https://github.com/RustCrypto/utils/tree/master/ctselect"
+repository = "https://github.com/RustCrypto/utils"
+categories = ["cryptography", "no-std"]
+keywords = ["constant-time", "crypto", "intrinsics"]
+readme = "README.md"
+edition = "2024"
+rust-version = "1.85"
+
+[dependencies]
+cmov = "0.5.4"
+
+# optional dependencies
+subtle = { version = "2", optional = true, default-features = false }
+
+[package.metadata.docs.rs]
+all-features = true
