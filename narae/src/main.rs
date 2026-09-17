@@ -92,33 +92,42 @@ enum ChainCommand {
     },
 }
 
-fn generate_local(chain: ChainCommand) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    match chain {
-        ChainCommand::CoinsChain {
-            validators,
-            secondaries,
-            indexer_url,
-            out,
-            base_port,
-            base_rpc_port,
-            base_metrics_port,
-            seed,
-        } => {
-            let mut generate = nunchi_xtask::coins_chain::Generate::local(
+impl ChainCommand {
+    fn generate(self) -> nunchi_xtask::coins_chain::Generate {
+        match self {
+            ChainCommand::CoinsChain {
                 validators,
+                secondaries,
+                indexer_url,
                 out,
                 base_port,
                 base_rpc_port,
                 base_metrics_port,
                 seed,
-            );
-            generate.secondaries = secondaries;
-            generate.indexer_url = indexer_url;
-            generate.run()
+            } => {
+                let mut generate = nunchi_xtask::coins_chain::Generate::local(
+                    validators,
+                    out,
+                    base_port,
+                    base_rpc_port,
+                    base_metrics_port,
+                    seed,
+                );
+                generate.secondaries = secondaries;
+                generate.indexer_url = indexer_url;
+                generate
+            }
         }
     }
+}
+
+fn generate_local(chain: ChainCommand) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    chain.generate().run()
 }
 
 fn manifest_path(dir: &Path) -> PathBuf {
     nunchi_xtask::coins_chain::manifest_path(dir)
 }
+
+#[cfg(test)]
+mod tests;
