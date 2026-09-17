@@ -393,7 +393,7 @@ mod tests {
         types::{Epoch, Round, View},
     };
     use commonware_cryptography::{ed25519, sha256, Digest as _, Signer as _};
-    use commonware_runtime::{Runner as _, Supervisor as _};
+    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
     use commonware_runtime::telemetry::metrics::{raw, Registered, Registration};
     use futures::{pin_mut, task::noop_waker};
     use nunchi_dkg::{Context as ConsensusContext, Scheme};
@@ -482,6 +482,23 @@ mod tests {
 
         drop(first);
         assert!(matches!(second.as_mut().poll(&mut context), Poll::Ready(_)));
+    }
+
+    #[test]
+    fn pending_application_propose_returns_none() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut application = PendingApplication {
+                pending_once: Arc::new(AtomicBool::new(false)),
+            };
+            assert!(commonware_consensus::Application::propose(
+                &mut application,
+                (context, consensus_context()),
+                ancestry::from_iter(Vec::<Arc<crate::Block<EmptyPayload>>>::new()),
+                (),
+            )
+            .await
+            .is_none());
+        });
     }
 
     #[test]

@@ -659,6 +659,12 @@ mod tests {
         }
     }
 
+    #[test]
+    fn dummy_blocker_exposes_blocked_subscription() {
+        let mut blocker = DummyBlocker;
+        let _ = commonware_p2p::Blocker::blocked(&mut blocker);
+    }
+
     type TestActor =
         Actor<deterministic::Context, ed25519::PublicKey, DummyProvider, DummyBlocker>;
     type TestPending = PendingSubscriber;
@@ -731,6 +737,19 @@ mod tests {
         .encode()
     }
 
+    fn encoded_boundary_payload() -> Bytes {
+        Response::Boundary {
+            proof: Proof {
+                leaves: Location::new(10),
+                inactive_peaks: 0,
+                digests: vec![Digest::from([7; 32])],
+            },
+            op: QmdbOperation::CommitFloor(None, Location::new(0)),
+            pinned_nodes: vec![Digest::from([9; 32])],
+        }
+        .encode()
+    }
+
     fn operations_len(response: &SyncResponse) -> usize {
         match response {
             Response::Operations { operations, .. } => operations.len(),
@@ -766,17 +785,15 @@ mod tests {
         };
         let encoded = response.encode();
         let decoded = SyncResponse::decode_cfg(encoded, &(1, qmdb_operation_codec_config())).unwrap();
-        match decoded {
+        assert_eq!(operations_len(&decoded), 1);
+        assert!(matches!(
+            decoded,
             Response::Boundary {
-                op: _,
                 pinned_nodes,
                 proof,
-            } => {
-                assert_eq!(pinned_nodes.len(), 1);
-                assert_eq!(proof.leaves, Location::new(10));
-            }
-            Response::Operations { .. } => panic!("expected boundary response"),
-        }
+                ..
+            } if pinned_nodes.len() == 1 && proof.leaves == Location::new(10)
+        ));
     }
 
     #[test]
@@ -824,14 +841,14 @@ mod tests {
                 futures::pin_mut!(get);
                 assert!(futures::poll!(get.as_mut()).is_pending());
             }
-            match receiver.recv().await.expect("request should be queued") {
-                Message::GetOperations { .. } => {}
-                _ => panic!("expected get operations"),
-            }
-            match receiver.recv().await.expect("cancel should be queued") {
-                Message::CancelOperations { .. } => {}
-                _ => panic!("expected cancel operations"),
-            }
+            assert!(matches!(
+                receiver.recv().await.expect("request should be queued"),
+                Message::GetOperations { .. }
+            ));
+            assert!(matches!(
+                receiver.recv().await.expect("cancel should be queued"),
+                Message::CancelOperations { .. }
+            ));
         });
     }
 
@@ -1015,6 +1032,27 @@ mod tests {
             let (ack_tx, ack_rx) = oneshot::channel();
             actor
                 .handle_deliver(request, encoded_fetch_payload(), ack_tx)
+                .await;
+            assert!(ack_rx.await.unwrap());
+        });
+    }
+
+    #[test]
+    fn deliver_accepts_matching_boundary_payload() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
+            let request = Request::Boundary {
+                size: Location::new(10),
+                start: Location::new(10),
+            };
+
+            let (subscriber_tx, subscriber_rx) = test_subscriber();
+            drop(subscriber_rx);
+            actor.pending.insert(request, vec![subscriber_tx]);
+
+            let (ack_tx, ack_rx) = oneshot::channel();
+            actor
+                .handle_deliver(request, encoded_boundary_payload(), ack_tx)
                 .await;
             assert!(ack_rx.await.unwrap());
         });

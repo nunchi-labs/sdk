@@ -18,9 +18,10 @@ use commonware_glue::stateful::{
     db::{DatabaseSet as _, Merkleized as _},
     Application as StatefulApplication, Input,
 };
+use commonware_actor::mailbox;
 use commonware_runtime::{deterministic, Clock as _, Runner as _, Supervisor as _};
 use commonware_storage::mmr::Location;
-use commonware_utils::{non_empty_range, SystemTimeExt as _, NZU64};
+use commonware_utils::{non_empty_range, SystemTimeExt as _, NZU64, NZUsize};
 use futures::{lock::Mutex as AsyncMutex, FutureExt};
 use nunchi_common::{
     shared_database, Event, EventSink, NoopEventSink, QmdbBackend, QmdbBatch, QmdbDatabaseSet,
@@ -31,8 +32,8 @@ use nunchi_mempool::{Mempool, PoolConfig, PoolTransaction};
 use thiserror::Error;
 
 use crate::{
-    dummy_genesis_parent, Application, CodingBlock, CodingContext, EmptyPayload, EventConsumer,
-    InMemoryEventConsumer, NoConsensusExtension, NoopEventConsumer, StateCommitment,
+    dummy_genesis_parent, Application, CodingBlock, CodingContext, DkgMailbox, EmptyPayload,
+    EventConsumer, InMemoryEventConsumer, NoConsensusExtension, NoopEventConsumer, StateCommitment,
 };
 
 // Keep this test runtime local to nunchi-chain so event reporting tests do not depend on
@@ -827,5 +828,35 @@ fn finalized_reports_empty_events_when_handoff_is_missing() {
         assert_eq!(report.block_digest, block.digest());
         assert_eq!(report.block_timestamp, block.header.timestamp);
         assert!(report.transactions.is_empty());
+    });
+}
+
+#[test]
+fn with_dkg_and_events_uses_dummy_genesis_parent() {
+    deterministic::Runner::default().start(|context| async move {
+        let (_mempool, submitter) = Mempool::<TestTx>::new(PoolConfig::default());
+        let config = QmdbState::<deterministic::Context>::config(&context, "dkg-events-genesis");
+        let db = QmdbBackend::init(context.child("state"), config)
+            .await
+            .expect("init state db");
+        let databases: QmdbDatabaseSet<deterministic::Context> = shared_database(db);
+        let genesis_target = databases.committed_targets().await;
+        let genesis_state = StateCommitment {
+            root: genesis_target.root,
+            range: genesis_target.range,
+        };
+        let (sender, _receiver) = mailbox::new(context.child("dkg"), NZUsize!(8));
+        let app = Application::<TestRuntime, _, _>::with_dkg_and_events(
+            submitter,
+            16,
+            NZU64!(1),
+            DkgMailbox::new(sender),
+            NoopEventConsumer,
+            Arc::new(AsyncMutex::new(Height::zero())),
+            genesis_state,
+            Sha256::hash(&[b"dkg genesis"]),
+        );
+        let genesis = app.genesis_block();
+        assert_eq!(genesis.header.context.parent.1, dummy_genesis_parent());
     });
 }

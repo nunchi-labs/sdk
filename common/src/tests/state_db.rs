@@ -36,6 +36,11 @@ fn state_proof_roundtrips_and_rejects_wrong_root() {
         // Negative: an unrelated root must not verify.
         assert!(!verify_state_proof(&proof, &Sha256::hash(&[b"not-the-root"])));
 
+        assert!(state
+            .proof(bounds.end, NonZeroU64::new(1).unwrap())
+            .await
+            .is_err());
+
         // Negative: once the state advances, the stale proof no longer verifies against the
         // new committed root; the proof is bound to the exact committed state.
         state.set(ns.key(0u8, b"account-2"), b"other".to_vec());
