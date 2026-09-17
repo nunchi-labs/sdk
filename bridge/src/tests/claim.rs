@@ -5,7 +5,7 @@ use commonware_cryptography::{sha256, Hasher, Sha256};
 use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
 use nunchi_common::{
     state_db::{verify_state_update, StateError, StateProof},
-    Address, CommitState, NoopEventSink, QmdbState, VecEventSink,
+    Address, CommitState, Namespace, NoopEventSink, QmdbState, StateStore, VecEventSink,
 };
 use nunchi_crypto::PrivateKey;
 
@@ -15,7 +15,8 @@ use crate::events::{
 use crate::genesis::BridgeGenesis;
 use crate::ledger::{BridgeError, BridgeLedger, BridgeReceipt};
 use crate::record::{
-    is_consumed, put_transfer_record, transfer_record_key, AssetId, BridgeTransferRecord, ChainId,
+    consumed_record_key, foreign_root_key, is_consumed, put_transfer_record, set_bridge_nonce,
+    transfer_record_key, AssetId, BridgeTransferRecord, ChainId, BRIDGE_NAMESPACE,
 };
 use crate::transaction::{BridgeOperation, BridgeOperationId, Transaction};
 
@@ -568,7 +569,12 @@ fn operation_ids_round_trip_and_reject_unknown() {
     };
     let encoded = anchor.encode();
     assert_eq!(encoded.len(), anchor.encode_size());
-    assert!(BridgeOperation::decode(&encoded[..encoded.len() - 1]).is_err());
+    for i in 0..encoded.len() {
+        assert!(
+            BridgeOperation::decode(&encoded[..i]).is_err(),
+            "anchor prefix {i} must fail"
+        );
+    }
 }
 
 #[test]
@@ -630,5 +636,234 @@ fn anchor_rejects_view_below_latest() {
                 submitted: 4
             }
         );
+    });
+}
+
+struct FailGet<S> {
+    inner: S,
+    fail: sha256::Digest,
+}
+
+impl<S: StateStore + Send + Sync> StateStore for FailGet<S> {
+    async fn get(&self, key: &sha256::Digest) -> Result<Option<Vec<u8>>, StateError> {
+        if *key == self.fail {
+            Err(StateError::Backend("injected".into()))
+        } else {
+            self.inner.get(key).await
+        }
+    }
+
+    fn set(&mut self, key: sha256::Digest, value: Vec<u8>) {
+        self.inner.set(key, value);
+    }
+
+    fn remove(&mut self, key: sha256::Digest) {
+        self.inner.remove(key);
+    }
+}
+
+fn attestor_key() -> sha256::Digest {
+    Namespace::new(BRIDGE_NAMESPACE).key(3u8, b"attestor")
+}
+
+fn local_chain_id_key() -> sha256::Digest {
+    Namespace::new(BRIDGE_NAMESPACE).key(3u8, b"local_chain_id")
+}
+
+fn latest_view_key(source: &ChainId) -> sha256::Digest {
+    Namespace::new(BRIDGE_NAMESPACE).key(5u8, source.encode().as_ref())
+}
+
+async fn configured_dest(
+    context: &deterministic::Context,
+    attestor: &Address,
+    partition: &str,
+) -> QmdbState<deterministic::Context> {
+    let mut dest = QmdbState::init(context.child("dst"), partition)
+        .await
+        .expect("init dest");
+    BridgeGenesis::new(dest_chain())
+        .with_attestor(attestor.clone())
+        .apply(&mut dest);
+    dest
+}
+
+#[test]
+fn claim_operation_rejects_every_truncated_prefix() {
+    deterministic::Runner::default().start(|context| async move {
+        let record = sample_record(addr(&signer(2)));
+        let (_root, proof) = source_root_and_proof(&context, &record).await;
+        let op = BridgeOperation::Claim {
+            source_chain_id: source_chain(),
+            source_view: 7,
+            record,
+            proof,
+        };
+        let encoded = op.encode();
+        assert_eq!(encoded.len(), op.encode_size());
+        for i in 0..encoded.len() {
+            assert!(
+                BridgeOperation::decode(&encoded[..i]).is_err(),
+                "claim prefix {i} must fail"
+            );
+        }
+        assert_eq!(
+            BridgeOperation::decode(encoded.as_ref()).expect("full claim"),
+            op
+        );
+    });
+}
+
+#[test]
+fn anchor_accepts_strictly_higher_view() {
+    deterministic::Runner::default().start(|context| async move {
+        let attestor = signer(1);
+        let mut ledger = dest_ledger(&context, &addr(&attestor)).await;
+        ledger
+            .apply_transaction(
+                &anchor_tx(&attestor, 0, source_chain(), 5, Sha256::hash(b"root-5")),
+                NoopEventSink,
+            )
+            .await
+            .expect("anchor view 5");
+        let receipt = ledger
+            .apply_transaction(
+                &anchor_tx(&attestor, 1, source_chain(), 8, Sha256::hash(b"root-8")),
+                NoopEventSink,
+            )
+            .await
+            .expect("anchor view 8");
+        assert_eq!(
+            receipt,
+            BridgeReceipt::Anchored {
+                source_chain_id: source_chain(),
+                view: 8,
+            }
+        );
+    });
+}
+
+#[test]
+fn apply_rejects_nonce_overflow() {
+    deterministic::Runner::default().start(|context| async move {
+        let attestor = signer(1);
+        let mut dest = configured_dest(&context, &addr(&attestor), "nonce-overflow").await;
+        set_bridge_nonce(&mut dest, &addr(&attestor), u64::MAX);
+
+        let mut ledger = BridgeLedger::new(dest);
+        let err = ledger
+            .apply_transaction(
+                &anchor_tx(&attestor, u64::MAX, source_chain(), 1, Sha256::hash(b"root")),
+                NoopEventSink,
+            )
+            .await
+            .expect_err("overflow");
+        assert_eq!(err, BridgeError::NonceOverflow);
+    });
+}
+
+#[test]
+fn apply_surfaces_injected_storage_errors() {
+    deterministic::Runner::default().start(|context| async move {
+        let attestor = signer(1);
+        let attestor_addr = addr(&attestor);
+        let record = sample_record(addr(&signer(2)));
+        let (root, proof) = source_root_and_proof(&context, &record).await;
+        let record_id = record.record_id();
+
+        let mut ledger = BridgeLedger::new(FailGet {
+            inner: configured_dest(&context, &attestor_addr, "fail-attestor").await,
+            fail: attestor_key(),
+        });
+        let err = ledger
+            .apply_transaction(
+                &anchor_tx(&attestor, 0, source_chain(), 1, Sha256::hash(b"root")),
+                NoopEventSink,
+            )
+            .await
+            .expect_err("attestor get");
+        assert!(matches!(err, BridgeError::Storage(_)));
+
+        let mut ledger = BridgeLedger::new(FailGet {
+            inner: configured_dest(&context, &attestor_addr, "fail-latest").await,
+            fail: latest_view_key(&source_chain()),
+        });
+        let err = ledger
+            .apply_transaction(
+                &anchor_tx(&attestor, 0, source_chain(), 1, Sha256::hash(b"root")),
+                NoopEventSink,
+            )
+            .await
+            .expect_err("latest view get");
+        assert!(matches!(err, BridgeError::Storage(_)));
+
+        let mut ledger = BridgeLedger::new(FailGet {
+            inner: configured_dest(&context, &attestor_addr, "fail-chain").await,
+            fail: local_chain_id_key(),
+        });
+        let err = ledger
+            .apply_transaction(
+                &claim_tx(
+                    &signer(3),
+                    0,
+                    source_chain(),
+                    7,
+                    record.clone(),
+                    proof.clone(),
+                ),
+                NoopEventSink,
+            )
+            .await
+            .expect_err("local chain get");
+        assert!(matches!(err, BridgeError::Storage(_)));
+
+        let mut inner = configured_dest(&context, &attestor_addr, "fail-root").await;
+        BridgeLedger::new(&mut inner)
+            .apply_transaction(
+                &anchor_tx(&attestor, 0, source_chain(), 7, root),
+                NoopEventSink,
+            )
+            .await
+            .expect("anchor");
+        let mut ledger = BridgeLedger::new(FailGet {
+            inner,
+            fail: foreign_root_key(&source_chain(), 7),
+        });
+        let err = ledger
+            .apply_transaction(
+                &claim_tx(
+                    &signer(3),
+                    0,
+                    source_chain(),
+                    7,
+                    record.clone(),
+                    proof.clone(),
+                ),
+                NoopEventSink,
+            )
+            .await
+            .expect_err("foreign root get");
+        assert!(matches!(err, BridgeError::Storage(_)));
+
+        let mut inner = configured_dest(&context, &attestor_addr, "fail-consumed").await;
+        BridgeLedger::new(&mut inner)
+            .apply_transaction(
+                &anchor_tx(&attestor, 0, source_chain(), 7, root),
+                NoopEventSink,
+            )
+            .await
+            .expect("anchor");
+        let mut ledger = BridgeLedger::new(FailGet {
+            inner,
+            fail: consumed_record_key(&source_chain(), &record_id),
+        });
+        let err = ledger
+            .apply_transaction(
+                &claim_tx(&signer(3), 0, source_chain(), 7, record, proof),
+                NoopEventSink,
+            )
+            .await
+            .expect_err("consumed get");
+        assert!(matches!(err, BridgeError::Storage(_)));
     });
 }

@@ -1235,3 +1235,30 @@ fn bridge_mint_rejects_unknown_token_and_max_supply() {
         );
     });
 }
+
+#[test]
+fn bridge_mint_rejects_balance_overflow() {
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let mut ledger = ledger(context).await;
+        let issuer = address(&PrivateKey::ed25519_from_seed(1));
+        let recipient = address(&PrivateKey::ed25519_from_seed(2));
+
+        let coin = ledger
+            .create_token(issuer, spec(0, None).expect("valid coin spec"))
+            .await
+            .expect("create token");
+        ledger
+            .credit(&recipient, coin, u128::MAX)
+            .await
+            .expect("seed max balance");
+        assert_eq!(
+            ledger.bridge_mint(&recipient, coin, 1).await.unwrap_err(),
+            LedgerError::BalanceOverflow
+        );
+        assert_eq!(
+            ledger.token(&coin).await.unwrap().unwrap().total_supply,
+            1
+        );
+    });
+}

@@ -52,17 +52,18 @@ fn claimed() -> TransferClaimed {
     }
 }
 
-fn assert_truncated_fails<T>(value: &T)
+fn assert_every_prefix_fails<T>(value: &T)
 where
-    T: Encode + DecodeExt<()> + Eq + std::fmt::Debug,
+    T: Encode + DecodeExt<()>,
 {
     let encoded = value.encode();
-    assert!(
-        encoded.len() > 1,
-        "encoded payload must be large enough to truncate"
-    );
-    assert!(T::decode(&encoded[..encoded.len() - 1]).is_err());
-    assert!(T::decode(&[][..]).is_err());
+    for i in 0..encoded.len() {
+        assert!(
+            T::decode(&encoded[..i]).is_err(),
+            "prefix {i}/{} must fail to decode",
+            encoded.len()
+        );
+    }
 }
 
 #[test]
@@ -70,7 +71,7 @@ fn transfer_locked_event_round_trips() {
     let value = locked();
     let decoded = TransferLocked::decode(value.encode().as_ref()).expect("decode");
     assert_eq!(decoded, value);
-    assert_truncated_fails(&value);
+    assert_every_prefix_fails(&value);
 
     let event = transfer_locked_event(value);
     assert_eq!(event.name.as_ref(), TRANSFER_LOCKED_EVENT);
@@ -81,7 +82,7 @@ fn foreign_root_anchored_event_round_trips() {
     let value = anchored();
     let decoded = ForeignRootAnchored::decode(value.encode().as_ref()).expect("decode");
     assert_eq!(decoded, value);
-    assert_truncated_fails(&value);
+    assert_every_prefix_fails(&value);
 
     let event = foreign_root_anchored_event(value);
     assert_eq!(event.name.as_ref(), FOREIGN_ROOT_ANCHORED_EVENT);
@@ -92,7 +93,7 @@ fn transfer_claimed_event_round_trips() {
     let value = claimed();
     let decoded = TransferClaimed::decode(value.encode().as_ref()).expect("decode");
     assert_eq!(decoded, value);
-    assert_truncated_fails(&value);
+    assert_every_prefix_fails(&value);
 
     let event = transfer_claimed_event(value);
     assert_eq!(event.name.as_ref(), TRANSFER_CLAIMED_EVENT);

@@ -1,7 +1,7 @@
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::{Hasher, Sha256};
+use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_runtime::{deterministic, Runner as _};
-use nunchi_common::{state_db::Namespace, Address, CommitState, QmdbState, StateStore};
+use nunchi_common::{state_db::Namespace, Address, CommitState, QmdbState, StateError, StateStore};
 use nunchi_crypto::PrivateKey;
 
 use crate::record::{
@@ -276,5 +276,39 @@ fn corrupt_state_values_surface_as_backend_errors() {
         // Latest-view table discriminant 5 matches `Table::ForeignLatestView`.
         state.set(ns.key(5u8, source.encode().as_ref()), garbage);
         assert!(latest_foreign_view(&state, &source).await.is_err());
+    });
+}
+
+struct FailStore;
+
+impl StateStore for FailStore {
+    async fn get(&self, _: &Digest) -> Result<Option<Vec<u8>>, StateError> {
+        Err(StateError::Backend("fail".into()))
+    }
+
+    fn set(&mut self, _: Digest, _: Vec<u8>) {}
+
+    fn remove(&mut self, _: Digest) {}
+}
+
+#[test]
+fn foreign_root_rejects_every_truncated_prefix() {
+    let root = ForeignRoot {
+        state_root: Sha256::hash(b"root"),
+    };
+    let encoded = root.encode();
+    for i in 0..encoded.len() {
+        assert!(ForeignRoot::decode(&encoded[..i]).is_err());
+    }
+}
+
+#[test]
+fn destination_accessors_propagate_storage_errors() {
+    deterministic::Runner::default().start(|_context| async move {
+        let source = ChainId(Sha256::hash(b"foreign-chain"));
+        let store = FailStore;
+        assert!(foreign_root(&store, &source, 1).await.is_err());
+        assert!(latest_foreign_view(&store, &source).await.is_err());
+        assert!(attestor(&store).await.is_err());
     });
 }
