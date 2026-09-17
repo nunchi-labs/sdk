@@ -321,17 +321,15 @@ fn coding_block_empty_transactions_encode_decode_round_trip() {
 
 #[test]
 fn coding_block_decode_rejects_exceeding_max_transactions() {
-    use nunchi_chain::MAX_TRANSACTIONS;
-
-    let mut block = coding_block(vec![]);
+    let block = coding_block(vec![1, 2, 3]);
     let mut encoded = block.encode().to_vec();
 
     let header_size = block.header.encode_size();
     let count_position = header_size;
-
-    encoded[count_position] = 0xFF;
-    encoded[count_position + 1] = 0xFF;
-
+    
+    encoded[count_position] = 0x88;
+    encoded[count_position + 1] = 0x27;
+    
     let result = CodingBlock::<u8>::decode_cfg(encoded.as_slice(), &header_cfg());
     assert!(matches!(
         result,
