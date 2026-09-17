@@ -300,8 +300,11 @@ fn notarized_and_finalized_round_trip_and_reject_digest_mismatch() {
 fn empty_coding_block_has_stable_transaction_root() {
     let empty1 = coding_block(vec![]);
     let empty2 = coding_block(vec![]);
-    
-    assert_eq!(empty1.header.transaction_root, empty2.header.transaction_root);
+
+    assert_eq!(
+        empty1.header.transaction_root,
+        empty2.header.transaction_root
+    );
     assert_eq!(empty1.digest(), empty2.digest());
 }
 
@@ -311,7 +314,7 @@ fn coding_block_empty_transactions_encode_decode_round_trip() {
     let encoded = block.encode();
     let decoded = CodingBlock::<u8>::decode_cfg(encoded.as_ref(), &header_cfg())
         .expect("empty coding block should decode");
-    
+
     assert_eq!(decoded.transactions.len(), 0);
     assert_eq!(decoded.digest(), block.digest());
 }
@@ -319,16 +322,16 @@ fn coding_block_empty_transactions_encode_decode_round_trip() {
 #[test]
 fn coding_block_decode_rejects_exceeding_max_transactions() {
     use nunchi_chain::MAX_TRANSACTIONS;
-    
+
     let mut block = coding_block(vec![]);
     let mut encoded = block.encode().to_vec();
-    
+
     let header_size = block.header.encode_size();
     let count_position = header_size;
-    
+
     encoded[count_position] = 0xFF;
     encoded[count_position + 1] = 0xFF;
-    
+
     let result = CodingBlock::<u8>::decode_cfg(encoded.as_slice(), &header_cfg());
     assert!(matches!(
         result,
@@ -340,16 +343,19 @@ fn coding_block_decode_rejects_exceeding_max_transactions() {
 fn coding_block_with_tamperedtransaction_root_rejects() {
     let block = coding_block(vec![9]);
     let mut bytes = block.encode().to_vec();
-    
+
     let first_transaction = block.header.encode_size() + 1;
     if first_transaction < bytes.len() {
         bytes[first_transaction] = 99;
     }
-    
+
     let result = CodingBlock::<u8>::decode_cfg(bytes.as_slice(), &header_cfg());
     assert!(matches!(
         result,
-        Err(Error::Invalid(_, "transaction root does not match transactions"))
+        Err(Error::Invalid(
+            _,
+            "transaction root does not match transactions"
+        ))
     ));
 }
 
@@ -357,7 +363,7 @@ fn coding_block_with_tamperedtransaction_root_rejects() {
 fn coding_context_wraps_block_commitment() {
     let ctx = coding_context();
     let genesis_parent = dummy_genesis_parent::<u8>();
-    
+
     assert_eq!(ctx.parent.1, genesis_parent);
 }
 
@@ -365,7 +371,7 @@ fn coding_context_wraps_block_commitment() {
 fn notarized_verify_requires_valid_scheme() {
     let block = coding_block(vec![7]);
     let notarized = Notarized::new(notarization_for(&block), block);
-    
+
     let schemes_set = schemes();
     assert!(notarized.verify(&schemes_set[0], &Sequential));
 }
@@ -374,7 +380,7 @@ fn notarized_verify_requires_valid_scheme() {
 fn finalized_verify_requires_valid_scheme() {
     let block = coding_block(vec![7]);
     let finalized = Finalized::new(finalization_for(&block), block);
-    
+
     let schemes_set = schemes();
     assert!(finalized.verify(&schemes_set[0], &Sequential));
 }
@@ -385,7 +391,7 @@ fn state_range_must_be_nonempty() {
         root: sha256::Digest::EMPTY,
         range: non_empty_range!(Location::new(0), Location::new(1)),
     };
-    
+
     assert!(valid_state.range.start < valid_state.range.end);
 }
 
@@ -401,7 +407,7 @@ fn coding_block_with_different_heights_have_different_digests() {
         EmptyPayload,
         state(),
     );
-    
+
     let block2 = CodingBlock::new(
         coding_context(),
         sha256::Digest::EMPTY,
@@ -412,7 +418,7 @@ fn coding_block_with_different_heights_have_different_digests() {
         EmptyPayload,
         state(),
     );
-    
+
     assert_ne!(block1.digest(), block2.digest());
 }
 
@@ -428,7 +434,7 @@ fn coding_block_with_different_timestamps_have_different_digests() {
         EmptyPayload,
         state(),
     );
-    
+
     let block2 = CodingBlock::new(
         coding_context(),
         sha256::Digest::EMPTY,
@@ -439,7 +445,7 @@ fn coding_block_with_different_timestamps_have_different_digests() {
         EmptyPayload,
         state(),
     );
-    
+
     assert_ne!(block1.digest(), block2.digest());
 }
 
@@ -447,7 +453,7 @@ fn coding_block_with_different_timestamps_have_different_digests() {
 fn coding_block_with_different_parents_have_different_digests() {
     let parent1 = sha256::Digest::EMPTY;
     let parent2 = sha256::Digest::from([1; 32]);
-    
+
     let block1 = CodingBlock::new(
         coding_context(),
         parent1,
@@ -458,7 +464,7 @@ fn coding_block_with_different_parents_have_different_digests() {
         EmptyPayload,
         state(),
     );
-    
+
     let block2 = CodingBlock::new(
         coding_context(),
         parent2,
@@ -469,7 +475,7 @@ fn coding_block_with_different_parents_have_different_digests() {
         EmptyPayload,
         state(),
     );
-    
+
     assert_ne!(block1.digest(), block2.digest());
 }
 
@@ -479,12 +485,12 @@ fn coding_block_with_different_state_roots_have_different_digests() {
         root: sha256::Digest::EMPTY,
         range: non_empty_range!(Location::new(0), Location::new(1)),
     };
-    
+
     let state2 = StateCommitment {
         root: sha256::Digest::from([1; 32]),
         range: non_empty_range!(Location::new(0), Location::new(1)),
     };
-    
+
     let block1 = CodingBlock::new(
         coding_context(),
         sha256::Digest::EMPTY,
@@ -495,7 +501,7 @@ fn coding_block_with_different_state_roots_have_different_digests() {
         EmptyPayload,
         state1,
     );
-    
+
     let block2 = CodingBlock::new(
         coding_context(),
         sha256::Digest::EMPTY,
@@ -506,7 +512,7 @@ fn coding_block_with_different_state_roots_have_different_digests() {
         EmptyPayload,
         state2,
     );
-    
+
     assert_ne!(block1.digest(), block2.digest());
 }
 
@@ -516,12 +522,12 @@ fn coding_block_with_different_state_ranges_have_different_digests() {
         root: sha256::Digest::EMPTY,
         range: non_empty_range!(Location::new(0), Location::new(1)),
     };
-    
+
     let state2 = StateCommitment {
         root: sha256::Digest::EMPTY,
         range: non_empty_range!(Location::new(0), Location::new(2)),
     };
-    
+
     let block1 = CodingBlock::new(
         coding_context(),
         sha256::Digest::EMPTY,
@@ -532,7 +538,7 @@ fn coding_block_with_different_state_ranges_have_different_digests() {
         EmptyPayload,
         state1,
     );
-    
+
     let block2 = CodingBlock::new(
         coding_context(),
         sha256::Digest::EMPTY,
@@ -543,14 +549,14 @@ fn coding_block_with_different_state_ranges_have_different_digests() {
         EmptyPayload,
         state2,
     );
-    
+
     assert_ne!(block1.digest(), block2.digest());
 }
 
 #[test]
 fn coding_block_deref_allows_direct_field_access() {
     let block = coding_block(vec![7]);
-    
+
     assert_eq!(block.header.height, Height::zero());
     assert_eq!(block.transactions.len(), 1);
 }
@@ -559,7 +565,7 @@ fn coding_block_deref_allows_direct_field_access() {
 fn notarized_encode_size_matches_actual_encoding() {
     let block = coding_block(vec![7, 8, 9]);
     let notarized = Notarized::new(notarization_for(&block), block);
-    
+
     assert_eq!(notarized.encode_size(), notarized.encode().len());
 }
 
@@ -567,6 +573,6 @@ fn notarized_encode_size_matches_actual_encoding() {
 fn finalized_encode_size_matches_actual_encoding() {
     let block = coding_block(vec![7, 8, 9]);
     let finalized = Finalized::new(finalization_for(&block), block);
-    
+
     assert_eq!(finalized.encode_size(), finalized.encode().len());
 }
