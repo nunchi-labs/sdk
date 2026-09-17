@@ -1,10 +1,25 @@
 import { randomRequestId } from "./ids";
+import { isAllowedPageOrigin } from "./origin";
 import { isTrustedPageRequest, PAGE_EVENT_TARGET, PAGE_RESPONSE_TARGET } from "./page-messages";
 
 const bridgeToken = randomRequestId("tok");
 
+function frameOrigin(): string {
+  try {
+    return window.location.origin || "";
+  } catch {
+    return "";
+  }
+}
+
 function connectPagePort(): void {
-  const connectTime = Date.now();
+  // Content scripts run in all_frames, including opaque/null and file: contexts.
+  // The worker rejects those origins; skip connect entirely so we never spin a
+  // connect/disconnect loop for as long as the page stays open.
+  if (!isAllowedPageOrigin(frameOrigin())) {
+    return;
+  }
+
   const port = chrome.runtime.connect({ name: "nunchi-page" });
   port.onMessage.addListener((message: { event?: string; params?: unknown }) => {
     if (typeof message?.event !== "string") {
@@ -21,8 +36,9 @@ function connectPagePort(): void {
     );
   });
   port.onDisconnect.addListener(() => {
-    const disconnectTime = Date.now();
-    if (disconnectTime - connectTime < 100) {
+    // Re-check: a frame can become opaque after navigation, and cold worker
+    // restarts should still reconnect only for origins the worker will accept.
+    if (!isAllowedPageOrigin(frameOrigin())) {
       return;
     }
     setTimeout(connectPagePort, 1000);

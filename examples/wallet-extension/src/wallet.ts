@@ -174,7 +174,7 @@ export class Wallet {
   private connectedSites: Set<string> = new Set();
   private pendingConnections: Map<string, PendingConnection> = new Map();
   private pendingTransactions: Map<string, PendingTransaction> = new Map();
-  private hydrated = false;
+  private hydratePromise: Promise<void> | null = null;
   private lastActive: number;
   private busy = false;
   private backupRevealed = false;
@@ -828,11 +828,19 @@ export class Wallet {
   }
 
   private async hydrate(): Promise<void> {
-    if (this.hydrated) {
-      return;
+    if (!this.hydratePromise) {
+      this.hydratePromise = this.loadPersisted();
     }
-    this.hydrated = true;
-    const stored = await this.host.storageGet(["connectedSites", "pendingConnections", "pendingTransactions", "backupRevealed"]);
+    await this.hydratePromise;
+  }
+
+  private async loadPersisted(): Promise<void> {
+    const stored = await this.host.storageGet([
+      "connectedSites",
+      "pendingConnections",
+      "pendingTransactions",
+      "backupRevealed",
+    ]);
     if (Array.isArray(stored.connectedSites)) {
       this.connectedSites.clear();
       for (const site of stored.connectedSites) {

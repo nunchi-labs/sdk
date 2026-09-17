@@ -1376,10 +1376,10 @@ function Send({
       const options: Holding[] | null = held.success ? held.data : null;
       setHoldings(options);
 
-      // Without a holdings list there is nothing to pick from, so fall back to
-      // the configured display coin (which may still be empty) and go to the form.
+      // Without holdings there is nothing to pick from. Fall through to the form
+      // (optionally seeded by displayCoin). Next stays disabled until coin is set.
       if (!options?.length) {
-        const fallback = config.success ? config.data.displayCoin : "";
+        const fallback = config.success ? String(config.data.displayCoin || "") : "";
         setCoin((current) => current || fallback);
         setStep((current) => (current === "asset" ? "form" : current));
         setUsedPicker(false);

@@ -302,6 +302,21 @@ describe("create, backup, and delete", () => {
     const afterDelete = await send(wallet, "GET_STATE", popup);
     expect(afterDelete.data).toMatchObject({ hasWallet: false, isUnlocked: false });
   });
+
+  it("keeps backup revealed across a worker restart", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    expect((await send(harness.wallet, "REVEAL_BACKUP", popup, {})).success).toBe(true);
+    expect((await harness.storage.get(["backupRevealed"])).backupRevealed).toBe(true);
+
+    harness.wallet.shutdown();
+    const restarted = harness.restart();
+    const confirmed = await send(restarted, "CONFIRM_BACKUP", popup);
+    expect(confirmed.success).toBe(true);
+    expect((await harness.storage.get(["backupRevealed"])).backupRevealed).toBe(false);
+    const state = await send(restarted, "GET_STATE", popup);
+    expect(state.data).toMatchObject({ needsBackup: false });
+  });
 });
 
 describe("coin operations", () => {
@@ -515,11 +530,12 @@ describe("accounts, disconnect, and validation", () => {
       success: true,
       data: { accounts: [keyPair(GENERATED_KEY).address] },
     });
-    expect(events).toContainEqual({
-      origin: PAGE_ORIGIN,
-      event: "accountsChanged",
-      params: [keyPair(GENERATED_KEY).address],
-    });
+    const connectEvents = events.filter(
+      (event) => event.origin === PAGE_ORIGIN && event.event === "accountsChanged"
+    );
+    expect(connectEvents).toEqual([
+      { origin: PAGE_ORIGIN, event: "accountsChanged", params: [keyPair(GENERATED_KEY).address] },
+    ]);
 
     expect((await send(harness.wallet, "LOCK_WALLET", popup)).success).toBe(true);
     const locked = await send(harness.wallet, "GET_ACCOUNTS", page);
@@ -531,8 +547,10 @@ describe("accounts, disconnect, and validation", () => {
       accounts: [keyPair(GENERATED_KEY).address],
     });
 
+    events.length = 0;
     expect((await send(harness.wallet, "DISCONNECT", page)).success).toBe(true);
     expect((await send(harness.wallet, "GET_ACCOUNTS", page)).data).toEqual({ accounts: [] });
+    expect(events).toEqual([{ origin: PAGE_ORIGIN, event: "accountsChanged", params: [] }]);
     const sites = await send(harness.wallet, "GET_CONNECTED_SITES", popup);
     expect(sites.data).toEqual([]);
   });
