@@ -40,7 +40,7 @@ use commonware_runtime::{
     Network, Spawner, Storage, Strategizer,
 };
 use commonware_storage::{archive::{Archive as ArchiveStore, Identifier as ArchiveIdentifier}, metadata::{self, Metadata}, queue};
-use commonware_utils::{sequence::U64, union, NZDuration};
+use commonware_utils::{ordered::Set, sequence::U64, union, NZDuration};
 use futures::lock::Mutex as AsyncMutex;
 use governor::clock::Clock as GClock;
 use nunchi_chain::engine::*;
@@ -93,6 +93,7 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
     pub output: Output<MinSig, PublicKey>,
     pub share: Option<group::Share>,
     pub peer_config: PeerConfig<PublicKey>,
+    pub secondary_nodes: Set<PublicKey>,
     pub epoch_length: NonZeroU64,
     pub min_block_interval_ms: NonZeroU64,
     pub leader_timeout: Duration,
@@ -256,6 +257,7 @@ where
                 execution: dkg::Execution::default(),
                 partition_prefix: config.partition_prefix.clone(),
                 peer_config: config.peer_config.clone(),
+                secondary_nodes: config.secondary_nodes.clone(),
                 max_supported_mode: MAX_SUPPORTED_MODE,
                 namespace: NAMESPACE.to_vec(),
                 storage_protector: dkg::StorageProtector::new(config.dkg_storage_key),

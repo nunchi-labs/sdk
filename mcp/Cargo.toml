@@ -13,7 +13,7 @@ name = "nunchi-mcp"
 path = "src/main.rs"
 
 [dependencies]
-rmcp = { version = "1.7.0", features = ["server", "transport-io"] }
+rmcp = { version = "2.2.0", features = ["server", "transport-io"] }
 tokio = { version = "1", features = ["full"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

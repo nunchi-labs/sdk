@@ -26,13 +26,15 @@ pub use nunchi_coins::rpc::{
 pub struct RpcContext<Q> {
     query: Q,
     applied_height: SharedAppliedHeight,
+    node_type: NodeType,
 }
 
 impl<Q: CoinQuery> RpcContext<Q> {
-    pub fn new(query: Q, applied_height: SharedAppliedHeight) -> Self {
+    pub fn new(query: Q, applied_height: SharedAppliedHeight, node_type: NodeType) -> Self {
         Self {
             query,
             applied_height,
+            node_type,
         }
     }
 
@@ -41,10 +43,18 @@ impl<Q: CoinQuery> RpcContext<Q> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeType {
+    Validator,
+    Secondary,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StatusResponse {
     pub applied_height: u64,
     pub state_root: String,
+    pub node_type: NodeType,
 }
 
 #[derive(Clone)]
@@ -87,11 +97,12 @@ pub fn module<Q>(
     query: Q,
     mempool: MempoolHandle<Transaction>,
     applied_height: SharedAppliedHeight,
+    node_type: NodeType,
 ) -> Result<RpcModule<RpcContext<Q>>, RpcBuildError>
 where
     Q: CoinQuery,
 {
-    let mut router = RpcRouter::new(RpcContext::new(query.clone(), applied_height));
+    let mut router = RpcRouter::new(RpcContext::new(query.clone(), applied_height, node_type));
     nunchi_coins::rpc::register(&mut router, CoinsRpc::new(query))?;
     nunchi_coins::rpc::register_mempool(
         &mut router,
@@ -118,6 +129,7 @@ where
         RpcResult::Ok(StatusResponse {
             applied_height: applied_height.get(),
             state_root: encode_hex(&state_root),
+            node_type: context.node_type,
         })
     })?;
     Ok(module)

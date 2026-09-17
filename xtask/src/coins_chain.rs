@@ -13,6 +13,8 @@ const DEFAULT_BASE_METRICS_PORT: u16 = 9_090;
 pub struct Generate {
     #[arg(long, default_value_t = 4)]
     pub validators: u32,
+    #[arg(long, default_value_t = 0)]
+    pub secondaries: u32,
     #[arg(long, default_value = "testnet")]
     pub out: PathBuf,
     #[arg(long, default_value_t = 30_000)]
@@ -46,6 +48,7 @@ impl Generate {
     ) -> Self {
         Self {
             validators,
+            secondaries: 0,
             out,
             base_port,
             base_rpc_port,
@@ -64,6 +67,7 @@ impl Generate {
         let genesis_path = normalize_path(self.genesis_path)?;
         let mut manifest = generate_local_testnet(LocalTestnetConfig {
             validators: self.validators,
+            secondaries: self.secondaries,
             base_port: self.base_port,
             base_rpc_port: self.base_rpc_port,
             base_metrics_port: self.base_metrics_port,

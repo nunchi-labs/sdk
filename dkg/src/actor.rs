@@ -115,6 +115,7 @@ pub struct Config<P> {
     pub execution: Execution,
     pub partition_prefix: String,
     pub peer_config: PeerConfig<ed25519::PublicKey>,
+    pub secondary_nodes: Set<ed25519::PublicKey>,
     pub max_supported_mode: ModeVersion,
     pub namespace: Vec<u8>,
     pub storage_protector: StorageProtector,
@@ -148,6 +149,23 @@ pub enum Execution {
     Dedicated,
 }
 
+pub(crate) fn tracked_peers(
+    dealers: Set<ed25519::PublicKey>,
+    players: &Set<ed25519::PublicKey>,
+    next_players: &Set<ed25519::PublicKey>,
+    static_secondaries: &Set<ed25519::PublicKey>,
+) -> TrackedPeers<ed25519::PublicKey> {
+    let secondaries = Set::from_iter_dedup(
+        players
+            .iter()
+            .chain(next_players.iter())
+            .chain(static_secondaries.iter())
+            .filter(|key| dealers.position(key).is_none())
+            .cloned(),
+    );
+    TrackedPeers::new(dealers, secondaries)
+}
+
 pub struct Actor<E, P, B>
 where
     E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + RuntimeStorage,
@@ -160,6 +178,7 @@ where
     signer: ed25519::PrivateKey,
     execution: Execution,
     peer_config: PeerConfig<ed25519::PublicKey>,
+    secondary_nodes: Set<ed25519::PublicKey>,
     partition_prefix: String,
     max_supported_mode: ModeVersion,
     namespace: Vec<u8>,
@@ -208,6 +227,7 @@ where
                 signer: config.signer,
                 execution: config.execution,
                 peer_config: config.peer_config,
+                secondary_nodes: config.secondary_nodes,
                 partition_prefix: config.partition_prefix,
                 max_supported_mode: config.max_supported_mode,
                 namespace: config.namespace,
@@ -401,14 +421,14 @@ where
             };
 
             // Primary = dealers (drive the DKG round/running consensus)
-            // Secondary = current players + next-epoch players (give time to sync)
-            //
-            // Overlapping keys are deduplicated as primary (so we don't need to do any filtering here)
+            // Secondary = current players + next-epoch players + static observers (give time to sync)
             self.manager.track(
                 epoch.get(),
-                TrackedPeers::new(
+                tracked_peers(
                     dealers.clone(),
-                    Set::from_iter_dedup(players.iter().chain(next_players.iter()).cloned()),
+                    &players,
+                    &next_players,
+                    &self.secondary_nodes,
                 ),
             );
 

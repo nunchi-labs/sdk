@@ -74,6 +74,8 @@ enum ChainCommand {
     CoinsChain {
         #[arg(long, default_value_t = 4)]
         validators: u32,
+        #[arg(long, default_value_t = 0)]
+        secondaries: u32,
         #[arg(long, default_value = "testnet")]
         out: PathBuf,
         #[arg(long, default_value_t = 30_000)]
@@ -91,20 +93,24 @@ fn generate_local(chain: ChainCommand) -> Result<PathBuf, Box<dyn std::error::Er
     match chain {
         ChainCommand::CoinsChain {
             validators,
+            secondaries,
             out,
             base_port,
             base_rpc_port,
             base_metrics_port,
             seed,
-        } => nunchi_xtask::coins_chain::Generate::local(
-            validators,
-            out,
-            base_port,
-            base_rpc_port,
-            base_metrics_port,
-            seed,
-        )
-        .run(),
+        } => {
+            let mut generate = nunchi_xtask::coins_chain::Generate::local(
+                validators,
+                out,
+                base_port,
+                base_rpc_port,
+                base_metrics_port,
+                seed,
+            );
+            generate.secondaries = secondaries;
+            generate.run()
+        }
     }
 }
 

@@ -208,6 +208,7 @@ where
                 execution: dkg::Execution::default(),
                 partition_prefix: config.partition_prefix.clone(),
                 peer_config: config.peer_config.clone(),
+                secondary_nodes: Default::default(),
                 max_supported_mode: MAX_SUPPORTED_MODE,
                 namespace: config.namespace.clone(),
                 storage_protector: dkg::StorageProtector::new(config.dkg_storage_key),

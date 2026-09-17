@@ -26,6 +26,33 @@ use std::collections::BTreeMap;
 
 const TEST_STORAGE_KEY: [u8; 32] = [7u8; 32];
 
+#[test]
+fn static_secondaries_are_tracked_and_dealers_are_filtered() {
+    let dealer = PrivateKey::from_seed(1).public_key();
+    let observer = PrivateKey::from_seed(2).public_key();
+    let other_player = PrivateKey::from_seed(3).public_key();
+    let dealers = commonware_utils::ordered::Set::from_iter_dedup([dealer.clone()]);
+    let players = commonware_utils::ordered::Set::from_iter_dedup([
+        dealer.clone(),
+        other_player.clone(),
+    ]);
+    let secondaries = commonware_utils::ordered::Set::from_iter_dedup([
+        dealer.clone(),
+        observer.clone(),
+    ]);
+    let tracked = crate::actor::tracked_peers(
+        dealers,
+        &players,
+        &Default::default(),
+        &secondaries,
+    );
+
+    assert!(tracked.primary.position(&dealer).is_some());
+    assert!(tracked.secondary.position(&dealer).is_none());
+    assert!(tracked.secondary.position(&observer).is_some());
+    assert!(tracked.secondary.position(&other_player).is_some());
+}
+
 #[derive(Clone)]
 struct TestBlock {
     height: Height,
@@ -242,6 +269,7 @@ fn assert_recovered_storage_controls_dkg_mode_on_restart(execution: Execution, s
                 execution,
                 partition_prefix,
                 peer_config: peer_config.clone(),
+                secondary_nodes: Default::default(),
                 max_supported_mode: crate::MAX_SUPPORTED_MODE,
                 namespace: b"test_dkg".to_vec(),
                 storage_protector: StorageProtector::new(TEST_STORAGE_KEY),
@@ -352,6 +380,7 @@ fn legacy_missing_player_dealing_exits_actor() {
                 execution: Execution::default(),
                 partition_prefix,
                 peer_config: peer_config.clone(),
+                secondary_nodes: Default::default(),
                 max_supported_mode: crate::MAX_SUPPORTED_MODE,
                 namespace,
                 storage_protector: StorageProtector::new(TEST_STORAGE_KEY),

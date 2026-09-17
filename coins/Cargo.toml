@@ -9,14 +9,16 @@ workspace = true
 
 [features]
 default = ["rpc"]
-rpc = ["dep:nunchi-rpc", "dep:jsonrpsee", "dep:futures"]
+ledger = ["nunchi-common/state"]
+rpc = ["ledger", "dep:nunchi-rpc", "dep:jsonrpsee", "dep:futures"]
 mempool = ["dep:nunchi-mempool"]
 
 [dependencies]
 async-trait = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
-nunchi-common = { workspace = true }
+# Path dep: workspace inheritance ignores default-features = false.
+nunchi-common = { path = "../common", default-features = false }
 nunchi-crypto = { workspace = true }
 nunchi-mempool = { workspace = true, optional = true }
 nunchi-rpc = { workspace = true, optional = true }
