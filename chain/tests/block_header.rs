@@ -262,6 +262,15 @@ fn notarized_and_finalized_round_trip_and_reject_digest_mismatch() {
         .expect("finalized round-trip");
     assert_eq!(decoded_finalized.block.digest(), block.digest());
 
+    assert!(Notarized::<u8>::decode_cfg(&[] as &[u8], &header_cfg()).is_err());
+    assert!(Finalized::<u8>::decode_cfg(&[] as &[u8], &header_cfg()).is_err());
+    let mut truncated_notarized = notarized.encode().to_vec();
+    truncated_notarized.truncate(truncated_notarized.len() / 2);
+    assert!(Notarized::<u8>::decode_cfg(truncated_notarized.as_slice(), &header_cfg()).is_err());
+    let mut truncated_finalized = finalized.encode().to_vec();
+    truncated_finalized.truncate(truncated_finalized.len() / 2);
+    assert!(Finalized::<u8>::decode_cfg(truncated_finalized.as_slice(), &header_cfg()).is_err());
+
     let mut mismatched_notarized = notarized.encode().to_vec();
     let proof_len = notarized.proof.encode_size();
     mismatched_notarized.truncate(proof_len);

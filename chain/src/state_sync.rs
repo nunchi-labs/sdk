@@ -42,6 +42,14 @@ type SyncRequest = Request<mmr::Family>;
 type SyncResponse = Response<mmr::Family, QmdbOperation, Digest>;
 type PendingSubscriber = oneshot::Sender<(SyncResponse, FeedbackTx)>;
 
+fn response_matches_request(request: &SyncRequest, response: &SyncResponse) -> bool {
+    matches!(
+        (request, response),
+        (Request::Operations { .. }, Response::Operations { .. })
+            | (Request::Boundary { .. }, Response::Boundary { .. })
+    )
+}
+
 /// Probe-only certificate provider for nodes that have not started their DKG actor yet.
 ///
 /// The epoch-independent scheme authenticates recovered certificates from any resharing epoch.
@@ -557,15 +565,7 @@ where
             self.config.operation_codec_config,
         );
         let decoded = match SyncResponse::decode_cfg(value, &decode_cfg) {
-            Ok(decoded)
-                if matches!(
-                    (&key, &decoded),
-                    (Request::Operations { .. }, Response::Operations { .. })
-                        | (Request::Boundary { .. }, Response::Boundary { .. })
-                ) =>
-            {
-                decoded
-            }
+            Ok(decoded) if response_matches_request(&key, &decoded) => decoded,
             Ok(_) | Err(_) => {
                 self.pending.insert(key, subscribers);
                 feedback_tx.send_lossy(false);
@@ -755,6 +755,44 @@ mod tests {
             Response::Operations { operations, .. } => operations.len(),
             Response::Boundary { .. } => 1,
         }
+    }
+
+    #[test]
+    fn response_matches_request_accepts_same_variant_only() {
+        let operations_request = test_request_at(Location::new(1));
+        let boundary_request = Request::Boundary {
+            size: Location::new(10),
+            start: Location::new(10),
+        };
+        let operations_response = Response::Operations {
+            proof: empty_proof(),
+            operations: Vec::<QmdbOperation>::new(),
+        };
+        let boundary_response = Response::Boundary {
+            proof: Proof {
+                leaves: Location::new(10),
+                inactive_peaks: 0,
+                digests: vec![Digest::from([7; 32])],
+            },
+            op: QmdbOperation::CommitFloor(None, Location::new(0)),
+            pinned_nodes: vec![Digest::from([9; 32])],
+        };
+        assert!(response_matches_request(
+            &operations_request,
+            &operations_response
+        ));
+        assert!(response_matches_request(
+            &boundary_request,
+            &boundary_response
+        ));
+        assert!(!response_matches_request(
+            &operations_request,
+            &boundary_response
+        ));
+        assert!(!response_matches_request(
+            &boundary_request,
+            &operations_response
+        ));
     }
 
     #[test]
