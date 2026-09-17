@@ -48,6 +48,11 @@ export interface SubmittedTx {
   coin: string;
   to: string;
   amount: string;
+  /** Absent means a plain transfer, so existing records keep working. */
+  kind?: "send" | "swap";
+  /** Swaps only: what came back. */
+  toCoin?: string;
+  toAmount?: string;
 }
 
 export type MessageType =
@@ -78,6 +83,15 @@ export type MessageType =
   | "UPDATE_SETTINGS"
   | "GET_CHAIN_ID"
   | "GET_ACCOUNTS"
+  // Account management and swap are popup-only. The real Wallet rejects them;
+  // the demo backend answers them, and the popup hides the UI when they fail.
+  | "SWITCH_ACCOUNT"
+  | "ADD_ACCOUNT"
+  | "IMPORT_ACCOUNT"
+  | "RENAME_ACCOUNT"
+  | "GET_HOLDINGS"
+  | "GET_SWAP_QUOTE"
+  | "SWAP"
   | "DISCONNECT"
   | "GET_NONCE"
   | "GET_BALANCE"

@@ -211,24 +211,34 @@ def create_wallet_and_backup(driver, failures: Failures) -> tuple[str, str]:
 def exercise_send_validation(driver, address: str, failures: Failures) -> None:
     wait_click(driver, "send")
     wait_el(driver, "recipient")
-    wait_click(driver, "send-submit")
-    failures.check("send requires all fields", "All fields are required" in error_text(driver))
+    next_btn = wait_el(driver, "send-submit")
+    failures.check("send next is disabled without fields", not next_btn.is_enabled())
 
     fill(driver, "recipient", "not-an-address")
-    fill(driver, "coin", DISPLAY_COIN)
-    fill(driver, "amount", "1")
-    wait_click(driver, "send-submit")
-    failures.check("send rejects invalid address", "Invalid nch address" in error_text(driver))
-
-    fill(driver, "recipient", address)
-    fill(driver, "amount", "1.5")
-    wait_click(driver, "send-submit")
-    failures.check("send rejects decimal amount", "Amount must be a whole number" in error_text(driver))
-
+    if not (wait_el(driver, "coin").get_attribute("value") or "").strip():
+        fill(driver, "coin", DISPLAY_COIN)
     fill(driver, "amount", "1")
     wait_click(driver, "send-submit")
     wait_el(driver, "send-review")
-    failures.check("send review shows recipient", address in wait_el(driver, "review-to").text)
+    wait_click(driver, "send-submit")
+    failures.check("send rejects invalid address", "Invalid nch address" in error_text(driver))
+
+    wait_click(driver, "send-edit")
+    wait_el(driver, "recipient")
+    fill(driver, "recipient", address)
+    fill(driver, "amount", "1.5")
+    amount_value = wait_el(driver, "amount").get_attribute("value") or ""
+    failures.check(
+        "custom coin amount stays whole units",
+        amount_value.replace(",", "") == "15",
+        amount_value,
+    )
+    fill(driver, "amount", "1")
+    wait_click(driver, "send-submit")
+    wait_el(driver, "send-review")
+    review_to = wait_el(driver, "review-to")
+    review_addr = review_to.get_attribute("data-address") or review_to.text
+    failures.check("send review shows recipient", address in review_addr, review_addr)
     wait_click(driver, "send-edit")
     wait_el(driver, "recipient")
     wait_click(driver, "back")
@@ -239,7 +249,7 @@ def exercise_settings_and_transfer(driver, address: str, rpc_url: str, failures:
     wait_click(driver, "activity")
     wait_el(driver, "activity-empty")
     failures.check("empty activity list", True)
-    wait_click(driver, "back")
+    wait_click(driver, "home")
     wait_el(driver, "send")
 
     wait_click(driver, "settings")
@@ -254,7 +264,8 @@ def exercise_settings_and_transfer(driver, address: str, rpc_url: str, failures:
     fill(driver, "settings-display-coin", DISPLAY_COIN)
     wait_click(driver, "settings-save")
     wait_el(driver, "send", timeout=20)
-    failures.check("home shows display-coin balance", wait_el(driver, "balance-value", timeout=20).text.strip() == "1250")
+    balance_text = (wait_el(driver, "balance-value", timeout=20).text or "").replace(",", "").split()[0]
+    failures.check("home shows display-coin balance", balance_text == "1250", balance_text)
 
     wait_click(driver, "send")
     fill(driver, "recipient", address)
@@ -270,7 +281,7 @@ def exercise_settings_and_transfer(driver, address: str, rpc_url: str, failures:
     wait_click(driver, "activity")
     wait_el(driver, "activity-item", timeout=10)
     failures.check("activity lists submitted transfer", True)
-    wait_click(driver, "back")
+    wait_click(driver, "home")
     wait_el(driver, "send")
 
 
@@ -283,7 +294,7 @@ def exercise_export_and_lock(driver, private_key: str, failures: Failures) -> No
     wait_click(driver, "export-key")
     exported = wait_el(driver, "exported-key", timeout=20).get_attribute("value") or ""
     failures.check("export returns the backup key", exported == private_key, exported[:12])
-    wait_click(driver, "back")
+    wait_click(driver, "home")
     wait_el(driver, "send")
 
     wait_click(driver, "lock")
@@ -539,7 +550,7 @@ def check_connection_and_transactions(
     wait_click(driver, "settings")
     wait_el(driver, "connected-empty", timeout=10)
     failures.check("settings shows no connected sites after disconnect", True)
-    wait_click(driver, "back")
+    wait_click(driver, "home")
     wait_el(driver, "send")
 
 

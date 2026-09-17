@@ -236,6 +236,13 @@ describe("wallet message table", () => {
     expect(connection.error).toBe("Wallet is locked");
   });
 
+  it("rejects GET_ACCOUNTS from the popup so the account switcher stays hidden", async () => {
+    const { wallet } = createHarness();
+    const response = await send(wallet, "GET_ACCOUNTS", popup);
+    expect(response.success).toBe(false);
+    expect(response.error).toBe("Unknown message type: GET_ACCOUNTS");
+  });
+
   it("rejects an unsupported curve", async () => {
     const { wallet } = createHarness();
     const created = await send(wallet, "CREATE_WALLET", popup, { curve: "secp256k1", password: PASSWORD });

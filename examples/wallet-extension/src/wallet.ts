@@ -67,6 +67,13 @@ export const PRIVILEGED_TYPES = new Set<MessageType>([
   "GET_BALANCE",
   "GET_ACTIVITY",
   "GET_PENDING_REQUEST",
+  "SWITCH_ACCOUNT",
+  "ADD_ACCOUNT",
+  "IMPORT_ACCOUNT",
+  "RENAME_ACCOUNT",
+  "GET_HOLDINGS",
+  "GET_SWAP_QUOTE",
+  "SWAP",
 ]);
 
 export interface WalletKeyPair {
@@ -703,6 +710,12 @@ export class Wallet {
       }
 
       case "GET_ACCOUNTS": {
+        // Pages get `{ accounts: string[] }`. The popup probes the same type
+        // expecting AccountSummary[], so privileged callers must miss so the
+        // account switcher stays hidden on a real (single-key) wallet.
+        if (isPrivileged) {
+          throw new Error("Unknown message type: GET_ACCOUNTS");
+        }
         if (!this.connectedSites.has(origin) || !this.unlockedWallet) {
           return { success: true, data: { accounts: [] } };
         }

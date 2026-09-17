@@ -24,6 +24,9 @@ describe("isAllowedPageMessage", () => {
     expect(isAllowedPageMessage("APPROVE_TRANSACTION")).toBe(false);
     expect(isAllowedPageMessage("CREATE_WALLET")).toBe(false);
     expect(isAllowedPageMessage("GET_STATE")).toBe(false);
+    expect(isAllowedPageMessage("GET_HOLDINGS")).toBe(false);
+    expect(isAllowedPageMessage("SWAP")).toBe(false);
+    expect(isAllowedPageMessage("SWITCH_ACCOUNT")).toBe(false);
   });
 });
 
