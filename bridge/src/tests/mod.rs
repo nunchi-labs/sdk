@@ -1,6 +1,7 @@
 mod genesis;
 mod ledger;
 mod record;
+mod rpc;
 
 use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{
