@@ -142,7 +142,7 @@ impl<E: Spawner + Metrics + Clock, C: Client> Pusher<E, C> {
                 drop(wait);
 
                 let block = block.as_ref().clone();
-                let height = block.height.get();
+                let height = block.header.height.get();
                 metrics.observe_block(BlockMetricSource::LiveCertificate, &block);
                 guard.cache_block(block.clone());
                 if let Err(e) = upload_fn(client, block).await {

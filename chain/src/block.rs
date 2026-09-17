@@ -7,8 +7,8 @@ use commonware_cryptography::{sha256::Digest, Committable, Digestible, Hasher, S
 use commonware_parallel::Strategy;
 use commonware_storage::mmr::Location;
 use commonware_utils::range::NonEmptyRange;
-use nunchi_dkg::{Context, DealerLog, Finalization, Notarization, ReshareBlock, Scheme};
 use commonware_utils::sys_rng;
+use nunchi_dkg::{Context, DealerLog, Finalization, Notarization, ReshareBlock, Scheme};
 
 use crate::{BlockExtension, NoConsensusExtension};
 
@@ -26,12 +26,31 @@ pub struct StateCommitment {
     pub range: NonEmptyRange<Location>,
 }
 
-#[derive(Debug)]
-pub struct Block<Tx, Ext = NoConsensusExtension>
+/// Domain separator for a block's transaction commitment.
+const TRANSACTION_ROOT_DOMAIN: &[u8] = b"nunchi/chain/transaction_root/v1";
+
+/// Domain-separated commitment over the ordered transaction list.
+///
+/// A sequential hash, not a Merkle tree: it supports equality checks but not per-transaction
+/// inclusion proofs.
+fn transaction_root<Tx>(transactions: &[Tx]) -> Digest
 where
-    Ext: BlockExtension,
+    Tx: EncodeSize + Write,
 {
-    /// The consensus context when this block was proposed.
+    let mut hasher = Sha256::new();
+    hasher.update(TRANSACTION_ROOT_DOMAIN);
+    hasher.update(&(transactions.len() as u64).to_be_bytes());
+    for transaction in transactions {
+        hasher.update(&transaction.encode());
+    }
+    hasher.finalize()
+}
+
+/// A [`Block`]'s header: every field the block digest commits to, with the transactions folded
+/// into [`BlockHeader::transaction_root`], so the digest can be recomputed without them.
+#[derive(Debug)]
+pub struct BlockHeader<Ext: BlockExtension> {
+    /// The consensus context when the block was proposed.
     pub context: Context,
 
     /// The parent block's digest.
@@ -43,8 +62,8 @@ where
     /// The timestamp of the block (in milliseconds since the Unix epoch).
     pub timestamp: u64,
 
-    /// Runtime transactions to execute when this block is finalized.
-    pub transactions: Vec<Tx>,
+    /// Commitment over the block's ordered transaction list.
+    pub transaction_root: Digest,
 
     /// Optional DKG resharing payload included outside ordinary runtime transactions.
     pub reshare_log: Option<DealerLog>,
@@ -52,25 +71,130 @@ where
     /// Additional consensus-side payload included outside ordinary runtime transactions.
     pub extension: Ext::Payload,
 
-    /// Authenticated state root after executing `transactions`.
+    /// Authenticated state root after executing the block's transactions.
     pub state_root: Digest,
 
     /// QMDB operation range that supports state sync to `state_root`.
     pub state_range: NonEmptyRange<Location>,
+}
+
+impl<Ext: BlockExtension> BlockHeader<Ext> {
+    /// The block digest this header commits to.
+    pub fn digest(&self) -> Digest {
+        let mut hasher = Sha256::new();
+        hasher.update(&self.context.encode());
+        hasher.update(&self.parent);
+        hasher.update(&self.height.get().to_be_bytes());
+        hasher.update(&self.timestamp.to_be_bytes());
+        hasher.update(&self.transaction_root);
+        hasher.update(&self.reshare_log.encode());
+        hasher.update(&self.extension.encode());
+        hasher.update(&self.state_root);
+        hasher.update(&self.state_range.encode());
+        hasher.finalize()
+    }
+}
+
+impl<Ext: BlockExtension> Clone for BlockHeader<Ext> {
+    fn clone(&self) -> Self {
+        Self {
+            context: self.context.clone(),
+            parent: self.parent,
+            height: self.height,
+            timestamp: self.timestamp,
+            transaction_root: self.transaction_root,
+            reshare_log: self.reshare_log.clone(),
+            extension: self.extension.clone(),
+            state_root: self.state_root,
+            state_range: self.state_range.clone(),
+        }
+    }
+}
+
+impl<Ext: BlockExtension> PartialEq for BlockHeader<Ext> {
+    fn eq(&self, other: &Self) -> bool {
+        self.context == other.context
+            && self.parent == other.parent
+            && self.height == other.height
+            && self.timestamp == other.timestamp
+            && self.transaction_root == other.transaction_root
+            && self.reshare_log.encode() == other.reshare_log.encode()
+            && self.extension.encode() == other.extension.encode()
+            && self.state_root == other.state_root
+            && self.state_range == other.state_range
+    }
+}
+
+impl<Ext: BlockExtension> Eq for BlockHeader<Ext> {}
+
+impl<Ext: BlockExtension> Write for BlockHeader<Ext> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.context.write(writer);
+        self.parent.write(writer);
+        self.height.write(writer);
+        UInt(self.timestamp).write(writer);
+        self.transaction_root.write(writer);
+        self.reshare_log.write(writer);
+        self.extension.write(writer);
+        self.state_root.write(writer);
+        self.state_range.write(writer);
+    }
+}
+
+impl<Ext: BlockExtension> Read for BlockHeader<Ext> {
+    type Cfg = (NonZeroU32, Ext::ReadCfg);
+
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
+        let context = Context::read(reader)?;
+        let parent = Digest::read(reader)?;
+        let height = Height::read(reader)?;
+        let timestamp = UInt::read(reader)?.0;
+        let transaction_root = Digest::read(reader)?;
+        let reshare_log = Option::<DealerLog>::read_cfg(reader, &cfg.0)?;
+        let extension = Ext::Payload::read_cfg(reader, &cfg.1)?;
+        let state_root = Digest::read(reader)?;
+        let state_range = NonEmptyRange::read(reader)?;
+        Ok(Self {
+            context,
+            parent,
+            height,
+            timestamp,
+            transaction_root,
+            reshare_log,
+            extension,
+            state_root,
+            state_range,
+        })
+    }
+}
+
+impl<Ext: BlockExtension> EncodeSize for BlockHeader<Ext> {
+    fn encode_size(&self) -> usize {
+        self.context.encode_size()
+            + self.parent.encode_size()
+            + self.height.encode_size()
+            + UInt(self.timestamp).encode_size()
+            + self.transaction_root.encode_size()
+            + self.reshare_log.encode_size()
+            + self.extension.encode_size()
+            + self.state_root.encode_size()
+            + self.state_range.encode_size()
+    }
+}
+
+#[derive(Debug)]
+pub struct Block<Tx, Ext = NoConsensusExtension>
+where
+    Ext: BlockExtension,
+{
+    /// Header committing to this block's contents.
+    pub header: BlockHeader<Ext>,
+
+    /// Runtime transactions to execute when this block is finalized.
+    pub transactions: Vec<Tx>,
 
     /// Pre-computed digest of the block.
     digest: Digest,
-}
-
-struct DigestInput<'a, Tx, Payload> {
-    context: &'a Context,
-    parent: &'a Digest,
-    height: Height,
-    timestamp: u64,
-    transactions: &'a [Tx],
-    reshare_log: &'a Option<DealerLog>,
-    extension: &'a Payload,
-    state: &'a StateCommitment,
 }
 
 impl<Tx, Ext> Clone for Block<Tx, Ext>
@@ -80,15 +204,8 @@ where
 {
     fn clone(&self) -> Self {
         Self {
-            context: self.context.clone(),
-            parent: self.parent,
-            height: self.height,
-            timestamp: self.timestamp,
+            header: self.header.clone(),
             transactions: self.transactions.clone(),
-            reshare_log: self.reshare_log.clone(),
-            extension: self.extension.clone(),
-            state_root: self.state_root,
-            state_range: self.state_range.clone(),
             digest: self.digest,
         }
     }
@@ -100,15 +217,8 @@ where
     Ext: BlockExtension,
 {
     fn eq(&self, other: &Self) -> bool {
-        self.context == other.context
-            && self.parent == other.parent
-            && self.height == other.height
-            && self.timestamp == other.timestamp
+        self.header == other.header
             && self.transactions == other.transactions
-            && self.reshare_log.encode() == other.reshare_log.encode()
-            && self.extension.encode() == other.extension.encode()
-            && self.state_root == other.state_root
-            && self.state_range == other.state_range
             && self.digest == other.digest
     }
 }
@@ -125,23 +235,6 @@ where
     Tx: EncodeSize + Write,
     Ext: BlockExtension,
 {
-    fn compute_digest(input: DigestInput<'_, Tx, Ext::Payload>) -> Digest {
-        let mut hasher = Sha256::new();
-        hasher.update(&input.context.encode());
-        hasher.update(input.parent);
-        hasher.update(&input.height.get().to_be_bytes());
-        hasher.update(&input.timestamp.to_be_bytes());
-        hasher.update(&(input.transactions.len() as u64).to_be_bytes());
-        for transaction in input.transactions {
-            hasher.update(&transaction.encode());
-        }
-        hasher.update(&input.reshare_log.encode());
-        hasher.update(&input.extension.encode());
-        hasher.update(&input.state.root);
-        hasher.update(&input.state.range.encode());
-        hasher.finalize()
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         context: Context,
@@ -153,26 +246,21 @@ where
         extension: Ext::Payload,
         state: StateCommitment,
     ) -> Self {
-        let digest = Self::compute_digest(DigestInput {
-            context: &context,
-            parent: &parent,
-            height,
-            timestamp,
-            transactions: &transactions,
-            reshare_log: &reshare_log,
-            extension: &extension,
-            state: &state,
-        });
-        Self {
+        let header = BlockHeader {
             context,
             parent,
             height,
             timestamp,
-            transactions,
+            transaction_root: transaction_root(&transactions),
             reshare_log,
             extension,
             state_root: state.root,
             state_range: state.range,
+        };
+        let digest = header.digest();
+        Self {
+            header,
+            transactions,
             digest,
         }
     }
@@ -184,18 +272,11 @@ where
     Ext: BlockExtension,
 {
     fn write(&self, writer: &mut impl BufMut) {
-        self.context.write(writer);
-        self.parent.write(writer);
-        self.height.write(writer);
-        UInt(self.timestamp).write(writer);
+        self.header.write(writer);
         UInt(self.transactions.len() as u64).write(writer);
         for transaction in &self.transactions {
             transaction.write(writer);
         }
-        self.reshare_log.write(writer);
-        self.extension.write(writer);
-        self.state_root.write(writer);
-        self.state_range.write(writer);
     }
 }
 
@@ -207,10 +288,7 @@ where
     type Cfg = (NonZeroU32, Ext::ReadCfg);
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
-        let context = Context::read(reader)?;
-        let parent = Digest::read(reader)?;
-        let height = Height::read(reader)?;
-        let timestamp = UInt::read(reader)?.0;
+        let header = BlockHeader::<Ext>::read_cfg(reader, cfg)?;
         let count = UInt::read(reader)?.0;
         if count > MAX_TRANSACTIONS {
             return Err(Error::Invalid(
@@ -222,35 +300,16 @@ where
         for _ in 0..count {
             transactions.push(Tx::read(reader)?);
         }
-        let reshare_log = Option::<DealerLog>::read_cfg(reader, &cfg.0)?;
-        let extension = Ext::Payload::read_cfg(reader, &cfg.1)?;
-        let state_root = Digest::read(reader)?;
-        let state_range = NonEmptyRange::read(reader)?;
-        let state = StateCommitment {
-            root: state_root,
-            range: state_range,
-        };
-
-        let digest = Self::compute_digest(DigestInput {
-            context: &context,
-            parent: &parent,
-            height,
-            timestamp,
-            transactions: &transactions,
-            reshare_log: &reshare_log,
-            extension: &extension,
-            state: &state,
-        });
+        if transaction_root(&transactions) != header.transaction_root {
+            return Err(Error::Invalid(
+                "nunchi_chain::Block",
+                "transaction root does not match transactions",
+            ));
+        }
+        let digest = header.digest();
         Ok(Self {
-            context,
-            parent,
-            height,
-            timestamp,
+            header,
             transactions,
-            reshare_log,
-            extension,
-            state_root: state.root,
-            state_range: state.range,
             digest,
         })
     }
@@ -262,20 +321,13 @@ where
     Ext: BlockExtension,
 {
     fn encode_size(&self) -> usize {
-        self.context.encode_size()
-            + self.parent.encode_size()
-            + self.height.encode_size()
-            + UInt(self.timestamp).encode_size()
+        self.header.encode_size()
             + UInt(self.transactions.len() as u64).encode_size()
             + self
                 .transactions
                 .iter()
                 .map(EncodeSize::encode_size)
                 .sum::<usize>()
-            + self.reshare_log.encode_size()
-            + self.extension.encode_size()
-            + self.state_root.encode_size()
-            + self.state_range.encode_size()
     }
 }
 
@@ -437,7 +489,7 @@ where
     Ext: BlockExtension,
 {
     fn parent(&self) -> Digest {
-        self.parent
+        self.header.parent
     }
 }
 
@@ -446,7 +498,7 @@ where
     Ext: BlockExtension,
 {
     fn height(&self) -> Height {
-        self.height
+        self.header.height
     }
 }
 
@@ -458,7 +510,7 @@ where
     type Context = Context;
 
     fn context(&self) -> Self::Context {
-        self.context.clone()
+        self.header.context.clone()
     }
 }
 
@@ -468,6 +520,6 @@ where
     Ext: BlockExtension,
 {
     fn reshare_log(&self) -> Option<&DealerLog> {
-        self.reshare_log.as_ref()
+        self.header.reshare_log.as_ref()
     }
 }

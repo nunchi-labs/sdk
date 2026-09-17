@@ -116,3 +116,8 @@ split-debuginfo = "unpacked"
 debug = "line-tables-only"
 overflow-checks = true
 split-debuginfo = "unpacked"
+
+# commonware-cryptography 2026.7.0 depends on ctutils 0.3.1 (cmov 0.4.6,
+# GHSA-3rjw-m598-pq24). Replace only that ctutils version; 0.4.2 is unchanged.
+[patch.crates-io]
+ctutils = { path = "third_party/ctutils-0.3.1" }

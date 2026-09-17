@@ -111,10 +111,11 @@ fn blocks_respect_configured_minimum_timestamp_interval() {
             );
             for adjacent in blocks.windows(2) {
                 assert!(
-                    adjacent[1].timestamp - adjacent[0].timestamp >= min_block_interval_ms.get(),
+                    adjacent[1].header.timestamp - adjacent[0].header.timestamp
+                        >= min_block_interval_ms.get(),
                     "heights {} and {} violate the configured interval",
-                    adjacent[0].height,
-                    adjacent[1].height,
+                    adjacent[0].header.height,
+                    adjacent[1].header.height,
                 );
             }
         });

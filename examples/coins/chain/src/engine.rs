@@ -965,8 +965,8 @@ fn block_state_target(
     Digest,
 > {
     commonware_storage::qmdb::sync::Target::new(
-        block.state_root,
-        block.state_range.clone(),
+        block.header.state_root,
+        block.header.state_range.clone(),
     )
 }
 
@@ -1060,7 +1060,7 @@ where
             return Some((
                 processed_height,
                 nunchi_chain::startup::StartupCandidate {
-                    height: block.height,
+                    height: block.header.height,
                     digest: block.digest(),
                     state_target: target,
                     certificate_payload: Some(certificate.proposal.payload),
@@ -1121,7 +1121,7 @@ where
             );
             assert_eq!(
                 certificate.proposal.round.epoch(),
-                block.context.round.epoch(),
+                block.header.context.round.epoch(),
                 "finalized block and certificate epochs conflict at height {height}"
             );
         }
