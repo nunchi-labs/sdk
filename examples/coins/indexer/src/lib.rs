@@ -1,6 +1,6 @@
 //! In-memory indexer for coins-chain consensus artifacts.
 //!
-//! The API mirrors Alto's binary indexer shape so validators can upload
+//! The API mirrors Alto's binary indexer shape so configured nodes can upload
 //! encoded consensus artifacts and browsers or tooling can fetch the same
 //! encoded bytes for local verification.
 

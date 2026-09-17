@@ -70,12 +70,15 @@ fn ensure_executables(config: &Config) -> Result<(), Box<dyn std::error::Error>>
 
 #[derive(Debug, Subcommand)]
 enum ChainCommand {
-    /// Generate a coins-chain local validator set.
+    /// Generate a coins-chain local validator and secondary node set.
     CoinsChain {
         #[arg(long, default_value_t = 4)]
         validators: u32,
         #[arg(long, default_value_t = 0)]
         secondaries: u32,
+        /// Configure uploads from every generated node.
+        #[arg(long)]
+        indexer_url: Option<String>,
         #[arg(long, default_value = "testnet")]
         out: PathBuf,
         #[arg(long, default_value_t = 30_000)]
@@ -89,31 +92,42 @@ enum ChainCommand {
     },
 }
 
-fn generate_local(chain: ChainCommand) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    match chain {
-        ChainCommand::CoinsChain {
-            validators,
-            secondaries,
-            out,
-            base_port,
-            base_rpc_port,
-            base_metrics_port,
-            seed,
-        } => {
-            let mut generate = nunchi_xtask::coins_chain::Generate::local(
+impl ChainCommand {
+    fn generate(self) -> nunchi_xtask::coins_chain::Generate {
+        match self {
+            ChainCommand::CoinsChain {
                 validators,
+                secondaries,
+                indexer_url,
                 out,
                 base_port,
                 base_rpc_port,
                 base_metrics_port,
                 seed,
-            );
-            generate.secondaries = secondaries;
-            generate.run()
+            } => {
+                let mut generate = nunchi_xtask::coins_chain::Generate::local(
+                    validators,
+                    out,
+                    base_port,
+                    base_rpc_port,
+                    base_metrics_port,
+                    seed,
+                );
+                generate.secondaries = secondaries;
+                generate.indexer_url = indexer_url;
+                generate
+            }
         }
     }
+}
+
+fn generate_local(chain: ChainCommand) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    chain.generate().run()
 }
 
 fn manifest_path(dir: &Path) -> PathBuf {
     nunchi_xtask::coins_chain::manifest_path(dir)
 }
+
+#[cfg(test)]
+mod tests;

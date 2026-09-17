@@ -178,12 +178,28 @@ fn generated_testnet_includes_non_voting_secondaries() {
             .position(&bootstrapper.public_key)
             .is_some()));
     }
-    assert!(validators
-        .iter()
-        .all(|config| config.share.is_some() && config.indexer_url.is_some()));
-    assert!(secondaries
-        .iter()
-        .all(|config| config.share.is_none() && config.indexer_url.is_none()));
+    assert!(validators.iter().all(|config| {
+        config.share.is_some()
+            && config.indexer_url.as_deref() == Some("https://indexer.example.com")
+    }));
+    assert!(secondaries.iter().all(|config| {
+        config.share.is_none()
+            && config.indexer_url.as_deref() == Some("https://indexer.example.com")
+    }));
+    assert!(configs.iter().all(|config| {
+        NodeConfig::read_validated(
+            manifest
+                .nodes
+                .iter()
+                .find(|node| node.name == config.name)
+                .unwrap()
+                .config_path
+                .as_path(),
+        )
+        .unwrap()
+        .indexer_url()
+            == Some("https://indexer.example.com")
+    }));
     assert!(manifest.nodes[2].name.starts_with("secondary-"));
     assert_eq!(
         configs
@@ -219,9 +235,31 @@ fn generated_testnet_includes_non_voting_secondaries() {
     ));
 
     invalid = secondaries[0].clone();
-    invalid.indexer_url = Some("https://indexer.example.com".to_string());
+    invalid.indexer_url = None;
     invalid.write(&path).unwrap();
-    assert!(matches!(NodeConfig::read(&path), Err(Error::SecondaryIndexer)));
+    assert!(NodeConfig::read(&path).is_ok());
+    assert!(NodeConfig::read_validated(&path)
+        .unwrap()
+        .indexer_url()
+        .is_none());
+
+    invalid = validators[0].clone();
+    invalid.indexer_url = None;
+    invalid.write(&path).unwrap();
+    assert!(NodeConfig::read(&path).is_ok());
+    assert!(NodeConfig::read_validated(&path)
+        .unwrap()
+        .indexer_url()
+        .is_none());
+
+    invalid = validators[0].clone();
+    invalid.indexer_url = Some("https://other-indexer.example.com".to_string());
+    invalid.write(&path).unwrap();
+    assert!(NodeConfig::read(&path).is_ok());
+    assert_eq!(
+        NodeConfig::read_validated(&path).unwrap().indexer_url(),
+        Some("https://other-indexer.example.com")
+    );
 
     invalid = validators[0].clone();
     let other_validator = decode_unit::<ed25519::PrivateKey>(
@@ -289,6 +327,42 @@ fn generated_testnet_includes_non_voting_secondaries() {
     let duplicate = raw.replacen(&format!("\"{key}\""), &format!("\"{key}\", \"{key}\""), 1);
     fs::write(&path, duplicate).unwrap();
     assert!(matches!(NodeConfig::read(&path), Err(Error::TomlDeserialize(_))));
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn generated_testnet_without_indexer_disables_all_uploaders() {
+    let dir = std::env::temp_dir().join(format!(
+        "coins-chain-no-indexer-testnet-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+
+    let manifest = generate_local_testnet(LocalTestnetConfig {
+        validators: 2,
+        secondaries: 2,
+        base_port: 48_000,
+        base_rpc_port: 48_100,
+        base_metrics_port: 48_200,
+        base_data_dir: dir.clone(),
+        bind_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        public_ips: None,
+        storage_dir: None,
+        genesis_path: None,
+        indexer_url: None,
+        seed: 92,
+    })
+    .expect("generate testnet without indexer");
+
+    for node in &manifest.nodes {
+        let config = NodeConfig::read(&node.config_path).unwrap();
+        assert!(config.indexer_url.is_none());
+        assert!(NodeConfig::read_validated(&node.config_path)
+            .unwrap()
+            .indexer_url()
+            .is_none());
+    }
 
     let _ = fs::remove_dir_all(dir);
 }
@@ -484,6 +558,18 @@ fn generated_testnet_can_advertise_remote_hosts() {
     assert_eq!(second.bootstrappers[0].address.ip(), Some(public_ips[0]));
     assert_eq!(
         second.indexer_url.as_deref(),
+        Some("https://indexer.example.com/coins-chain")
+    );
+    assert_eq!(
+        NodeConfig::read_validated(&manifest.nodes[0].config_path)
+            .unwrap()
+            .indexer_url(),
+        Some("https://indexer.example.com/coins-chain")
+    );
+    assert_eq!(
+        NodeConfig::read_validated(&manifest.nodes[1].config_path)
+            .unwrap()
+            .indexer_url(),
         Some("https://indexer.example.com/coins-chain")
     );
 
