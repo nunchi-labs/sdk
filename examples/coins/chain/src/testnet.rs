@@ -30,7 +30,7 @@ use commonware_p2p::{
 use commonware_runtime::{
     tokio, Clock as _, Handle, Runner as _, Spawner as _, Strategizer as _, Supervisor as _,
 };
-use commonware_utils::{ordered::Set, Hostname, N3f1, NZUsize, NZU32};
+use commonware_utils::{ordered::Set, Hostname, N3f1, NZUsize};
 use governor::Quota;
 use nunchi_dkg::{
     ContinueOnUpdate, PeerConfig, Storage as DkgStorage, StorageKey, StorageProtector,
@@ -57,6 +57,10 @@ use tracing::{info, warn, Level};
 const DEFAULT_MAX_BLOCK_TRANSACTIONS: usize = 4_096;
 const DEFAULT_MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 const DEFAULT_CHANNEL_BACKLOG: usize = 1024;
+/// Per-channel received-message quota. Authenticated discovery sizes each channel
+/// mailbox as `max_peers * quota.burst`, so unbounded rates are not safe.
+const DEFAULT_CHANNEL_RATE_PER_SECOND: u32 = 1_024;
+const MAX_CHANNEL_RATE_PER_SECOND: u32 = 4_096;
 
 #[derive(Clone, Debug)]
 pub struct LocalTestnetConfig {
@@ -607,7 +611,7 @@ impl Default for ConsensusConfig {
 pub struct NetworkConfig {
     pub max_message_size: u32,
     pub channel_backlog: usize,
-    /// Received-message rate limit per p2p channel. `0` disables the limit.
+    /// Received-message rate limit per p2p channel. `0` (and `u32::MAX`) use the default.
     pub channel_rate_per_second: u32,
 }
 
@@ -616,7 +620,7 @@ impl Default for NetworkConfig {
         Self {
             max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
             channel_backlog: DEFAULT_CHANNEL_BACKLOG,
-            channel_rate_per_second: u32::MAX,
+            channel_rate_per_second: DEFAULT_CHANNEL_RATE_PER_SECOND,
         }
     }
 }
@@ -846,6 +850,14 @@ pub fn generate_local_testnet(config: LocalTestnetConfig) -> Result<LocalTestnet
     })
 }
 
+fn channel_quota(rate_per_second: u32) -> Quota {
+    let rate = match rate_per_second {
+        0 | u32::MAX => DEFAULT_CHANNEL_RATE_PER_SECOND,
+        rate => rate.min(MAX_CHANNEL_RATE_PER_SECOND),
+    };
+    Quota::per_second(NonZeroU32::new(rate).expect("channel rate"))
+}
+
 fn check_port_range(base_port: u16, nodes: u32) -> Result<(), Error> {
     let out_of_range = || Error::PortRange {
         base_port,
@@ -1017,9 +1029,7 @@ async fn start_node(
         ),
     );
 
-    let channel_rate = Quota::per_second(
-        NonZeroU32::new(config.networking.channel_rate_per_second).unwrap_or(NZU32!(u32::MAX)),
-    );
+    let channel_rate = channel_quota(config.networking.channel_rate_per_second);
     let mut register = |channel| network.register(channel, channel_rate);
     let pending = register(channels::PENDING);
     let recovered = register(channels::RECOVERED);
@@ -1261,4 +1271,28 @@ fn storage_key(seed: u64, index: usize) -> StorageKey {
     let mut key = [0u8; 32];
     rng.fill_bytes(&mut key);
     key
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn channel_quota_rejects_unbounded_rates() {
+        assert_eq!(
+            channel_quota(0).burst_size().get(),
+            DEFAULT_CHANNEL_RATE_PER_SECOND
+        );
+        assert_eq!(
+            channel_quota(u32::MAX).burst_size().get(),
+            DEFAULT_CHANNEL_RATE_PER_SECOND
+        );
+        assert_eq!(channel_quota(100).burst_size().get(), 100);
+        assert_eq!(
+            channel_quota(MAX_CHANNEL_RATE_PER_SECOND + 1)
+                .burst_size()
+                .get(),
+            MAX_CHANNEL_RATE_PER_SECOND
+        );
+    }
 }

@@ -117,6 +117,11 @@ fn generated_testnet_has_unique_ports_dirs_and_complete_peer_sets() {
         assert_eq!(config.maintenance_interval, NZUsize!(32));
         assert_eq!(config.retained_marshal_blocks, 200);
         assert_eq!(config.retained_qmdb_blocks, 200);
+        assert_eq!(
+            config.networking.channel_rate_per_second,
+            1_024,
+            "unbounded channel quotas OOM authenticated discovery mailboxes"
+        );
 
         // The threshold material must round-trip from the written config.
         let max_participants =

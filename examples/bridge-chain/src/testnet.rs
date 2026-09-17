@@ -24,7 +24,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{tokio, Handle, Runner as _, Supervisor as _};
 use commonware_utils::{
     ordered::{Map, Set},
-    union, Hostname, N3f1, NZUsize, NZU32,
+    union, Hostname, N3f1, NZUsize,
 };
 use governor::Quota;
 use nunchi_bridge::BridgeActor;
@@ -52,6 +52,10 @@ use tracing::info;
 const FREEZER_TABLE_INITIAL_SIZE: u32 = 2u32.pow(14);
 const DEFAULT_MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 const DEFAULT_CHANNEL_BACKLOG: usize = 1024;
+/// Per-channel received-message quota. Authenticated discovery sizes each channel
+/// mailbox as `max_peers * quota.burst`, so unbounded rates are not safe.
+const DEFAULT_CHANNEL_RATE_PER_SECOND: u32 = 1_024;
+const MAX_CHANNEL_RATE_PER_SECOND: u32 = 4_096;
 
 #[derive(Clone, Debug)]
 pub struct LocalBridgePairConfig {
@@ -364,6 +368,7 @@ impl Default for ConsensusConfig {
 pub struct NetworkConfig {
     pub max_message_size: u32,
     pub channel_backlog: usize,
+    /// Received-message rate limit per p2p channel. `0` (and `u32::MAX`) use the default.
     pub channel_rate_per_second: u32,
 }
 
@@ -372,7 +377,7 @@ impl Default for NetworkConfig {
         Self {
             max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
             channel_backlog: DEFAULT_CHANNEL_BACKLOG,
-            channel_rate_per_second: u32::MAX,
+            channel_rate_per_second: DEFAULT_CHANNEL_RATE_PER_SECOND,
         }
     }
 }
@@ -608,6 +613,14 @@ fn write_chain(
     Ok(())
 }
 
+fn channel_quota(rate_per_second: u32) -> Quota {
+    let rate = match rate_per_second {
+        0 | u32::MAX => DEFAULT_CHANNEL_RATE_PER_SECOND,
+        rate => rate.min(MAX_CHANNEL_RATE_PER_SECOND),
+    };
+    Quota::per_second(NonZeroU32::new(rate).expect("channel rate"))
+}
+
 fn check_port_range(base_port: u16, validators: u32) -> Result<(), Error> {
     let out_of_range = || Error::PortRange {
         base_port,
@@ -747,9 +760,7 @@ async fn start_node(
     let (mut network, mut oracle) = Network::new(context.child("network"), p2p_config);
     oracle.track(0, config.peer_config.participants.clone());
 
-    let channel_rate = Quota::per_second(
-        NonZeroU32::new(config.networking.channel_rate_per_second).unwrap_or(NZU32!(u32::MAX)),
-    );
+    let channel_rate = channel_quota(config.networking.channel_rate_per_second);
     let mut register = |channel| network.register(channel, channel_rate);
     let pending = register(channels::PENDING);
     let recovered = register(channels::RECOVERED);
@@ -880,6 +891,25 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
+    fn channel_quota_rejects_unbounded_rates() {
+        assert_eq!(
+            channel_quota(0).burst_size().get(),
+            DEFAULT_CHANNEL_RATE_PER_SECOND
+        );
+        assert_eq!(
+            channel_quota(u32::MAX).burst_size().get(),
+            DEFAULT_CHANNEL_RATE_PER_SECOND
+        );
+        assert_eq!(channel_quota(100).burst_size().get(), 100);
+        assert_eq!(
+            channel_quota(MAX_CHANNEL_RATE_PER_SECOND + 1)
+                .burst_size()
+                .get(),
+            MAX_CHANNEL_RATE_PER_SECOND
+        );
+    }
+
+    #[test]
     fn generated_pair_has_distinct_validator_sets_and_foreign_outputs() {
         let dir = std::env::temp_dir().join(format!("bridge-chain-pair-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -954,6 +984,11 @@ mod tests {
             assert_eq!(config.maintenance_interval, NZUsize!(32));
             assert_eq!(config.retained_marshal_blocks, 200);
             assert_eq!(config.retained_qmdb_blocks, 200);
+            assert_eq!(
+                config.networking.channel_rate_per_second,
+                1_024,
+                "unbounded channel quotas OOM authenticated discovery mailboxes"
+            );
             assert_eq!(
                 config.min_block_interval_ms,
                 nunchi_chain::DEFAULT_MIN_BLOCK_INTERVAL_MS
