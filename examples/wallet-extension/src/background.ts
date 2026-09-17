@@ -98,6 +98,14 @@ function chromeHost(): WalletHost {
 
 const wallet = new Wallet(chromeHost());
 
+chrome.alarms.create("autolock-check", { periodInMinutes: 1 });
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === "autolock-check") {
+    wallet.checkAutoLock();
+  }
+});
+
 chrome.windows.onRemoved.addListener((windowId) => {
   wallet.rejectWindow(windowId);
 });

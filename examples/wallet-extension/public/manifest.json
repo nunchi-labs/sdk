@@ -5,7 +5,7 @@
   "description": "Chrome wallet for Nunchi coins. Ed25519 or P-256 keys, nch addresses. Not an EVM wallet.",
   "homepage_url": "https://nunchi.trade",
   "minimum_chrome_version": "120",
-  "permissions": ["storage"],
+  "permissions": ["storage", "alarms"],
   "host_permissions": ["http://localhost:*/", "http://127.0.0.1:*/"],
   "optional_host_permissions": ["http://*/*", "https://*/*"],
   "content_security_policy": {

@@ -192,6 +192,11 @@ export class Wallet {
     this.approvalTimers.clear();
   }
 
+  /** Check and apply auto-lock if timeout exceeded. Called periodically by alarm. */
+  checkAutoLock(): void {
+    this.applyAutoLock();
+  }
+
   rejectWindow(windowId: number): void {
     for (const [requestId, request] of this.pendingConnections) {
       if (request.windowId === windowId) {
