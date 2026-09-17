@@ -67,11 +67,11 @@ impl Address {
     }
 
     fn derive(kind: u8, material: &[u8]) -> Self {
-        let mut hasher = Sha256::new();
+        let mut hasher = Sha256::default();
         hasher.update(ADDRESS_DOMAIN);
         hasher.update(&[kind]);
         hasher.update(material);
-        Self(hasher.finalize())
+        Self(hasher.finalize().1)
     }
 }
 

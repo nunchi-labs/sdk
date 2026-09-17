@@ -11,10 +11,11 @@ use commonware_storage::{
     translator::EightCap,
 };
 use commonware_utils::{sequence::U64, NZU64};
-use nunchi_chain::engine::{REPLAY_BUFFER, WRITE_BUFFER};
+use nunchi_chain::engine::{EngineStoredBlock, REPLAY_BUFFER, WRITE_BUFFER};
+use nunchi_clob::ClobExtension;
 use std::num::NonZeroU64;
 
-pub(crate) const FORMAT_VERSION: u64 = 1;
+pub(crate) const FORMAT_VERSION: u64 = 2;
 pub(crate) const PRUNABLE_ITEMS_PER_SECTION: NonZeroU64 = NZU64!(4_096);
 const MARKER_KEY: U64 = U64::new(0);
 
@@ -35,9 +36,11 @@ pub enum RetentionPolicyError {
 }
 
 impl RetentionPolicy {
-    pub(crate) fn new(config: PruneConfig) -> Result<Self, RetentionPolicyError> {
-        let logical_retention = config
-            .max_pending_acks
+    pub(crate) fn new(
+        config: PruneConfig,
+        max_pending_acks: std::num::NonZeroUsize,
+    ) -> Result<Self, RetentionPolicyError> {
+        let logical_retention = max_pending_acks
             .get()
             .checked_add(1)
             .and_then(|base| base.checked_add(config.retained_marshal_blocks))
@@ -58,7 +61,8 @@ impl RetentionPolicy {
 
 pub(crate) type FinalizationsArchive<E> =
     prunable::Archive<EightCap, E, Digest, Finalization>;
-pub(crate) type BlocksArchive<E> = prunable::Archive<EightCap, E, Digest, Block>;
+pub(crate) type BlocksArchive<E> =
+    prunable::Archive<EightCap, E, Digest, EngineStoredBlock<crate::Transaction, ClobExtension>>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MarkerStatus {
@@ -107,6 +111,8 @@ pub(crate) struct Partitions {
     pub(crate) finalizations_value: String,
     pub(crate) blocks_key: String,
     pub(crate) blocks_value: String,
+    pub(crate) finalizations_metadata: String,
+    pub(crate) blocks_metadata: String,
     pub(crate) metadata: String,
 }
 
@@ -121,6 +127,10 @@ impl Partitions {
             ),
             blocks_key: format!("{prefix}-finalized-blocks-prunable-v1-key"),
             blocks_value: format!("{prefix}-finalized-blocks-prunable-v1-value"),
+            finalizations_metadata: format!(
+                "{prefix}-finalizations-by-height-prunable-v1-index-metadata"
+            ),
+            blocks_metadata: format!("{prefix}-finalized-blocks-prunable-v1-index-metadata"),
             metadata: format!("{prefix}-history-prunable-v1-metadata"),
         }
     }
@@ -212,11 +222,11 @@ where
 
         // Ensure all newly-created archive blobs are durable and structurally reopenable before
         // committing the format marker.
-        finalizations.sync().await.map_err(|source| HistoryError::Archive {
+        finalizations = finalizations.sync().await.map_err(|source| HistoryError::Archive {
             partition: partitions.finalizations_key.clone(),
             source,
         })?;
-        blocks.sync().await.map_err(|source| HistoryError::Archive {
+        blocks = blocks.sync().await.map_err(|source| HistoryError::Archive {
             partition: partitions.blocks_key.clone(),
             source,
         })?;
@@ -253,6 +263,7 @@ where
         context.child("finalizations_by_height"),
         prunable::Config {
             translator: EightCap,
+            metadata_partition: partitions.finalizations_metadata.clone(),
             key_partition: partitions.finalizations_key.clone(),
             key_page_cache: page_cache,
             value_partition: partitions.finalizations_value.clone(),
@@ -284,6 +295,7 @@ where
         context.child("finalized_blocks"),
         prunable::Config {
             translator: EightCap,
+            metadata_partition: partitions.blocks_metadata.clone(),
             key_partition: partitions.blocks_key.clone(),
             key_page_cache: page_cache,
             value_partition: partitions.blocks_value.clone(),
@@ -344,7 +356,7 @@ async fn write_marker<E>(context: &E, partition: &str) -> Result<(), HistoryErro
 where
     E: BufferPooler + Clock + Storage + Metrics + Spawner,
 {
-    let mut marker = Metadata::<E, U64, u64>::init(
+    let marker = Metadata::<E, U64, u64>::init(
         context.child("history_marker"),
         metadata::Config {
             partition: partition.to_string(),
@@ -356,13 +368,14 @@ where
         partition: partition.to_string(),
         source,
     })?;
-    marker
+    let _ = marker
         .put_sync(MARKER_KEY, FORMAT_VERSION)
         .await
         .map_err(|source| HistoryError::Marker {
             partition: partition.to_string(),
             source,
-        })
+        })?;
+    Ok(())
 }
 
 async fn reject_legacy<E: Storage>(context: &E, prefix: &str) -> Result<(), HistoryError> {
@@ -393,24 +406,26 @@ async fn reject_legacy<E: Storage>(context: &E, prefix: &str) -> Result<(), Hist
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner as _};
-    use commonware_utils::{NZU16, NZU32, NZUsize};
+    use commonware_runtime::{buffer::paged::{page_size, CacheRef}, deterministic, Runner as _};
+    use commonware_utils::{NZU32, NZUsize};
     use nunchi_chain::engine::default_state_prune_config;
 
     #[test]
     fn retention_policy_arithmetic() {
-        let standard = RetentionPolicy::new(default_state_prune_config()).unwrap();
+        let standard = RetentionPolicy::new(default_state_prune_config(), NZUsize!(16)).unwrap();
         assert_eq!(policy_floor(216, standard.logical_retention), 0);
         assert_eq!(policy_floor(217, standard.logical_retention), 1);
         assert_eq!(standard.logical_retention, 217);
         assert_eq!(standard.max_retained_heights, 4_343);
 
-        let asymmetric = RetentionPolicy::new(PruneConfig {
-            max_pending_acks: NZUsize!(1),
-            maintenance_interval: NZUsize!(3),
-            retained_marshal_blocks: 5,
-            retained_qmdb_blocks: 1,
-        })
+        let asymmetric = RetentionPolicy::new(
+            PruneConfig {
+                maintenance_interval: NZUsize!(3),
+                retained_marshal_blocks: 5,
+                retained_qmdb_blocks: 1,
+            },
+            NZUsize!(1),
+        )
         .unwrap();
         assert_eq!(asymmetric.logical_retention, 7);
         assert_eq!(asymmetric.max_retained_heights, 4_104);
@@ -419,13 +434,13 @@ mod tests {
     #[test]
     fn fresh_format_marker_is_durable_and_legacy_is_not_created() {
         deterministic::Runner::default().start(|context| async move {
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(4_096), NZUsize!(32));
+            let page_cache = CacheRef::from_pooler(&context, page_size(4_096), NZUsize!(32));
             let first = open(
                 &context,
                 "validator",
                 page_cache.clone(),
                 (NZU32!(1), ()),
-                RetentionPolicy::new(default_state_prune_config()).unwrap(),
+                RetentionPolicy::new(default_state_prune_config(), NZUsize!(16)).unwrap(),
             )
             .await
             .expect("initialize fresh history");
@@ -439,7 +454,7 @@ mod tests {
                 "validator",
                 page_cache,
                 (NZU32!(1), ()),
-                RetentionPolicy::new(default_state_prune_config()).unwrap(),
+                RetentionPolicy::new(default_state_prune_config(), NZUsize!(16)).unwrap(),
             )
             .await
             .expect("reopen marked history");
@@ -472,13 +487,13 @@ mod tests {
                 .open("validator-finalized_blocks-ordinal", b"legacy")
                 .await
                 .expect("create legacy partition");
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(4_096), NZUsize!(32));
+            let page_cache = CacheRef::from_pooler(&context, page_size(4_096), NZUsize!(32));
             let result = open(
                 &context,
                 "validator",
                 page_cache,
                 (NZU32!(1), ()),
-                RetentionPolicy::new(default_state_prune_config()).unwrap(),
+                RetentionPolicy::new(default_state_prune_config(), NZUsize!(16)).unwrap(),
             )
             .await;
             assert!(matches!(result, Err(HistoryError::LegacyPartition { .. })));

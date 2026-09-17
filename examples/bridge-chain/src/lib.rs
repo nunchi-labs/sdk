@@ -24,15 +24,21 @@ pub mod execution;
 pub mod rpc;
 pub mod testnet;
 
-pub type Block = nunchi_bridge::BridgeBlock<NoopTransaction>;
+pub type Block = nunchi_chain::CodingBlock<NoopTransaction, BridgeExtension>;
+pub type BlockCommitment = nunchi_chain::BlockCommitment<NoopTransaction, BridgeExtension>;
+pub type Context = nunchi_chain::CodingContext<NoopTransaction, BridgeExtension>;
 pub type Application = nunchi_chain::Application<NoopRuntime, BridgeExtension>;
 pub type Submitter = MempoolHandle<NoopTransaction>;
 pub type TxPool = Mempool<NoopTransaction>;
+pub type EngineVariant = nunchi_chain::EngineVariant<NoopTransaction, BridgeExtension>;
 
 pub use nunchi_dkg::{
-    Activity, Context, EdScheme, EpochProvider, Finalization, Identity, Notarization, Provider,
-    PublicKey, Scheme, Seed, Seedable, Signature, ThresholdScheme,
+    EdScheme, EpochProvider, Identity, Provider, PublicKey, Scheme, Seed, Seedable, Signature,
+    ThresholdScheme,
 };
+pub type Finalization = nunchi_dkg::Finalization<BlockCommitment>;
+pub type Notarization = nunchi_dkg::Notarization<BlockCommitment>;
+pub type Activity = nunchi_dkg::Activity<BlockCommitment>;
 
 /// Default namespace prefix used by generated bridge chains.
 pub const NAMESPACE: &[u8] = b"_NUNCHI_BRIDGE_CHAIN";
@@ -42,7 +48,8 @@ pub mod channels {
     pub const PENDING: u64 = 0;
     pub const RECOVERED: u64 = 1;
     pub const RESOLVER: u64 = 2;
-    pub const BROADCAST: u64 = 3;
+    /// Erasure-coded marshal shard dissemination.
+    pub const MARSHAL: u64 = 3;
     pub const DKG: u64 = 4;
     pub const BACKFILL: u64 = 5;
     /// Floor-probe channel (finalization discovery / service for state-sync floors).
@@ -125,7 +132,7 @@ impl PoolTransaction for NoopTransaction {
     type VerifyError = NoopVerificationError;
 
     fn digest(&self) -> Digest {
-        Sha256::hash(&self.encode())
+        Sha256::hash(&[self.encode().as_ref()])
     }
 
     fn nonce_key(&self) -> Self::NonceKey {

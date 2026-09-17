@@ -92,5 +92,5 @@ pub fn tx(account: u8, nonce: u64, id: u64) -> TestTx {
 }
 
 pub fn digest(id: u64) -> Digest {
-    Sha256::hash(&id.to_be_bytes())
+    Sha256::hash(&[id.to_be_bytes().as_slice()])
 }

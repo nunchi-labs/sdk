@@ -5,7 +5,7 @@ use commonware_p2p::{
     Ingress, Manager, Receiver as _, Recipients, Sender as _,
 };
 use commonware_runtime::{deterministic, Clock as _, Runner as _, Supervisor as _};
-use commonware_utils::{ordered::Set, Hostname, NZU32};
+use commonware_utils::{ordered::Set, Hostname, NZU32, NZUsize};
 use governor::Quota;
 use std::{
     fs,
@@ -343,6 +343,7 @@ fn reconnect_config(
         listen,
         dialable,
         bootstrappers,
+        NZUsize!(4),
         1024 * 1024,
     );
     config.peer_connection_cooldown = Duration::from_millis(100);
@@ -377,7 +378,7 @@ fn run_dns_bootstrapper_redeployment(seed: u64, dns: Ingress) -> String {
             Network::new(context.child("b_initial").child("network"), config_b);
         oracle_b.track(0, peers.clone());
         let (mut sender_b, mut receiver_b) =
-            network_b.register(0, Quota::per_second(NZU32!(100)), 128);
+            network_b.register(0, Quota::per_second(NZU32!(100)));
         let handle_b = network_b.start();
 
         let config_a = reconnect_config(
@@ -391,7 +392,7 @@ fn run_dns_bootstrapper_redeployment(seed: u64, dns: Ingress) -> String {
             Network::new(context.child("a").child("network"), config_a);
         oracle_a.track(0, peers.clone());
         let (mut sender_a, mut receiver_a) =
-            network_a.register(0, Quota::per_second(NZU32!(100)), 128);
+            network_a.register(0, Quota::per_second(NZU32!(100)));
         let _handle_a = network_a.start();
 
         let initial_exchange = async {
@@ -444,7 +445,7 @@ fn run_dns_bootstrapper_redeployment(seed: u64, dns: Ingress) -> String {
             Network::new(context.child("b_restarted").child("network"), config_b);
         oracle_b.track(0, peers);
         let (_sender_b, mut receiver_b) =
-            network_b.register(0, Quota::per_second(NZU32!(100)), 128);
+            network_b.register(0, Quota::per_second(NZU32!(100)));
         let _handle_b = network_b.start();
 
         let reconnected = async {

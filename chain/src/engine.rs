@@ -1,15 +1,27 @@
 //! Reusable engine tuning and support types.
 
+use crate::{BlockCommitment, CodingBlock, NoConsensusExtension};
 use commonware_actor::Feedback;
+use commonware_coding::ReedSolomon;
 use commonware_consensus::{
-    marshal::ancestry::Ancestry, Automaton, CertifiableAutomaton, Relay, Reporter, types::ViewDelta,
+    marshal::{
+        ancestry::Ancestry,
+        coding::{
+            types::{CodedBlock, StoredCodedBlock},
+            Coding,
+        },
+    },
+    Automaton, CertifiableAutomaton, Relay, Reporter,
+    types::ViewDelta,
 };
+use commonware_cryptography::{ed25519, Sha256};
 use commonware_glue::stateful::{db::SyncEngineConfig, PruneConfig};
 use commonware_runtime::{
+    buffer::paged::page_size,
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
     Clock, Metrics, Spawner,
 };
-use commonware_utils::{channel::oneshot, NZU16, NZU64, NZUsize};
+use commonware_utils::{channel::oneshot, NZU64, NZUsize};
 use futures::channel::oneshot as futures_oneshot;
 use rand::Rng;
 use std::{
@@ -32,17 +44,16 @@ pub const FREEZER_VALUE_TARGET_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
 pub const FREEZER_VALUE_COMPRESSION: Option<u8> = Some(3);
 pub const REPLAY_BUFFER: NonZero<usize> = NZUsize!(8 * 1024 * 1024); // 8MB
 pub const WRITE_BUFFER: NonZero<usize> = NZUsize!(1024 * 1024); // 1MB
-pub const PAGE_CACHE_PAGE_SIZE: NonZeroU16 = NZU16!(4_096); // 4KB
+pub const PAGE_CACHE_PAGE_SIZE: NonZeroU16 = page_size(4096);
 pub const PAGE_CACHE_CAPACITY: NonZero<usize> = NZUsize!(8_192); // 32MB
 pub const MAX_REPAIR: NonZero<usize> = NZUsize!(50);
 pub const DEFAULT_MAX_PENDING_ACKS: NonZero<usize> = NZUsize!(16);
 pub const STATE_SYNC_FETCH_BATCH_SIZE: NonZero<u64> = NZU64!(1_024);
-pub const STATE_SYNC_APPLY_BATCH_SIZE: usize = 4_096;
+pub const STATE_SYNC_APPLY_BATCH_SIZE: NonZero<u64> = NZU64!(4_096);
 pub const STATE_SYNC_MAX_OUTSTANDING_REQUESTS: usize = 8;
 pub const STATE_SYNC_UPDATE_CHANNEL_SIZE: NonZero<usize> = NZUsize!(256);
 pub const STATE_SYNC_MAX_RETAINED_ROOTS: usize = 32;
 pub const APPLICATION_VERIFY_CONCURRENCY: NonZeroUsize = NZUsize!(16);
-pub const STATE_SYNC_RESOLVER_INITIAL: Duration = Duration::from_secs(1);
 pub const STATE_SYNC_RESOLVER_TIMEOUT: Duration = Duration::from_secs(2);
 pub const STATE_SYNC_RESOLVER_RETRY: Duration = Duration::from_millis(100);
 /// Prune cadence in finalized heights (retention floors are independent of this).
@@ -51,6 +62,23 @@ pub const DEFAULT_PRUNE_MAINTENANCE_INTERVAL: NonZero<usize> = NZUsize!(32);
 pub const DEFAULT_PRUNE_RETAINED_MARSHAL_BLOCKS: usize = 200;
 /// Extra QMDB history beyond the ack window for serving lagging state-sync peers.
 pub const DEFAULT_PRUNE_RETAINED_QMDB_BLOCKS: usize = 200;
+pub const SHARD_BACKGROUND_CHANNEL_CAPACITY: NonZeroUsize = NZUsize!(1024);
+pub const SHARD_PEER_BUFFER_SIZE: NonZeroUsize = NZUsize!(64);
+pub const MAX_SHARD_SIZE: usize = 1024 * 1024;
+
+/// Application block consumed by the coding marshal.
+pub type EngineBlock<Tx, Ext = NoConsensusExtension> = CodingBlock<Tx, Ext>;
+/// Coding marshal variant used by DKG-backed engines.
+pub type EngineVariant<Tx, Ext = NoConsensusExtension> =
+    Coding<EngineBlock<Tx, Ext>, ReedSolomon<Sha256>, Sha256, ed25519::PublicKey>;
+/// Erasure-coded genesis/start block for marshal.
+pub type EngineCodedBlock<Tx, Ext = NoConsensusExtension> =
+    CodedBlock<EngineBlock<Tx, Ext>, ReedSolomon<Sha256>, Sha256>;
+/// Durable archive value stored by the coding marshal.
+pub type EngineStoredBlock<Tx, Ext = NoConsensusExtension> =
+    StoredCodedBlock<EngineBlock<Tx, Ext>, ReedSolomon<Sha256>, Sha256>;
+/// Simplex digest / marshal commitment for a coding engine.
+pub type EngineCommitment<Tx, Ext = NoConsensusExtension> = BlockCommitment<Tx, Ext>;
 
 /// Heap-boxes an automaton so large consensus application state does not inflate task futures.
 pub struct BoxedAutomaton<A> {
@@ -273,13 +301,15 @@ where
     type SigningScheme = A::SigningScheme;
     type Context = A::Context;
     type Block = A::Block;
+    type Input = A::Input;
 
     fn propose(
         &mut self,
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
+        input: Self::Input,
     ) -> impl Future<Output = Option<Self::Block>> + Send {
-        self.application.propose(context, ancestry)
+        self.application.propose(context, ancestry, input)
     }
 
     fn verify(
@@ -310,7 +340,6 @@ pub fn state_sync_config() -> SyncEngineConfig {
 /// Standard periodic marshal and QMDB pruning settings for generated configurations and tests.
 pub fn default_state_prune_config() -> PruneConfig {
     PruneConfig {
-        max_pending_acks: DEFAULT_MAX_PENDING_ACKS,
         maintenance_interval: DEFAULT_PRUNE_MAINTENANCE_INTERVAL,
         retained_marshal_blocks: DEFAULT_PRUNE_RETAINED_MARSHAL_BLOCKS,
         retained_qmdb_blocks: DEFAULT_PRUNE_RETAINED_QMDB_BLOCKS,
@@ -335,6 +364,7 @@ pub enum PruneConfigError {
 /// Validates the pruning arithmetic before Commonware constructs its pruning processor.
 pub fn validate_state_prune_config(
     config: PruneConfig,
+    max_pending_acks: NonZeroUsize,
 ) -> Result<PruneConfig, PruneConfigError> {
     if config.retained_qmdb_blocks > config.retained_marshal_blocks {
         return Err(PruneConfigError::RetentionOrder {
@@ -343,8 +373,7 @@ pub fn validate_state_prune_config(
         });
     }
 
-    let base = config
-        .max_pending_acks
+    let base = max_pending_acks
         .get()
         .checked_add(1)
         .ok_or(PruneConfigError::BaseWindowOverflow)?;
@@ -358,12 +387,13 @@ pub fn validate_state_prune_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::EmptyPayload;
     use commonware_consensus::{
         marshal::ancestry::{self, Ancestry},
         types::{Epoch, Round, View},
     };
     use commonware_cryptography::{ed25519, sha256, Digest as _, Signer as _};
-    use commonware_runtime::{Runner as _, Supervisor as _};
+    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
     use commonware_runtime::telemetry::metrics::{raw, Registered, Registration};
     use futures::{pin_mut, task::noop_waker};
     use nunchi_dkg::{Context as ConsensusContext, Scheme};
@@ -398,12 +428,14 @@ mod tests {
     {
         type SigningScheme = Scheme;
         type Context = ConsensusContext;
-        type Block = crate::Block<()>;
+        type Block = crate::Block<EmptyPayload>;
+        type Input = ();
 
         async fn propose(
             &mut self,
             _context: (E, Self::Context),
             _ancestry: impl Ancestry<Self::Block>,
+            _input: Self::Input,
         ) -> Option<Self::Block> {
             None
         }
@@ -453,6 +485,23 @@ mod tests {
     }
 
     #[test]
+    fn pending_application_propose_returns_none() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut application = PendingApplication {
+                pending_once: Arc::new(AtomicBool::new(false)),
+            };
+            assert!(commonware_consensus::Application::propose(
+                &mut application,
+                (context, consensus_context()),
+                ancestry::from_iter(Vec::<Arc<crate::Block<EmptyPayload>>>::new()),
+                (),
+            )
+            .await
+            .is_none());
+        });
+    }
+
+    #[test]
     fn verify_limiter_restores_permit_after_cancellation() {
         commonware_runtime::deterministic::Runner::default().start(|context| async move {
             let application = PendingApplication {
@@ -465,7 +514,7 @@ mod tests {
                 let verification = commonware_consensus::Application::verify(
                     &mut limiter,
                     (context.child("first"), consensus_context()),
-                    ancestry::from_iter(Vec::<Arc<crate::Block<()>>>::new()),
+                    ancestry::from_iter(Vec::<Arc<crate::Block<EmptyPayload>>>::new()),
                 );
                 pin_mut!(verification);
                 let waker = noop_waker();
@@ -497,7 +546,7 @@ mod tests {
                 commonware_consensus::Application::verify(
                     &mut limiter,
                     (context.child("second"), consensus_context()),
-                    ancestry::from_iter(Vec::<Arc<crate::Block<()>>>::new()),
+                    ancestry::from_iter(Vec::<Arc<crate::Block<EmptyPayload>>>::new()),
                 )
                 .await
             );
@@ -509,7 +558,6 @@ mod tests {
         assert_eq!(
             default_state_prune_config(),
             PruneConfig {
-                max_pending_acks: NZUsize!(16),
                 maintenance_interval: NZUsize!(32),
                 retained_marshal_blocks: 200,
                 retained_qmdb_blocks: 200,
@@ -520,12 +568,14 @@ mod tests {
     #[test]
     fn validates_prune_config() {
         let distinct = PruneConfig {
-            max_pending_acks: NZUsize!(3),
             maintenance_interval: NZUsize!(7),
             retained_marshal_blocks: 11,
             retained_qmdb_blocks: 5,
         };
-        assert_eq!(validate_state_prune_config(distinct), Ok(distinct));
+        assert_eq!(
+            validate_state_prune_config(distinct, NZUsize!(3)),
+            Ok(distinct)
+        );
 
         for retained in [0, 9] {
             let equal = PruneConfig {
@@ -533,20 +583,22 @@ mod tests {
                 retained_qmdb_blocks: retained,
                 ..distinct
             };
-            assert_eq!(validate_state_prune_config(equal), Ok(equal));
+            assert_eq!(
+                validate_state_prune_config(equal, NZUsize!(3)),
+                Ok(equal)
+            );
         }
     }
 
     #[test]
     fn rejects_invalid_prune_config() {
         let unordered = PruneConfig {
-            max_pending_acks: NZUsize!(1),
             maintenance_interval: NZUsize!(1),
             retained_marshal_blocks: 2,
             retained_qmdb_blocks: 3,
         };
         assert_eq!(
-            validate_state_prune_config(unordered),
+            validate_state_prune_config(unordered, NZUsize!(1)),
             Err(PruneConfigError::RetentionOrder {
                 retained_marshal_blocks: 2,
                 retained_qmdb_blocks: 3,
@@ -554,24 +606,22 @@ mod tests {
         );
 
         let base_overflow = PruneConfig {
-            max_pending_acks: NonZeroUsize::new(usize::MAX).unwrap(),
             retained_marshal_blocks: 0,
             retained_qmdb_blocks: 0,
             ..unordered
         };
         assert_eq!(
-            validate_state_prune_config(base_overflow),
+            validate_state_prune_config(base_overflow, NonZeroUsize::new(usize::MAX).unwrap()),
             Err(PruneConfigError::BaseWindowOverflow)
         );
 
         let window_overflow = PruneConfig {
-            max_pending_acks: NZUsize!(1),
             retained_marshal_blocks: usize::MAX - 1,
             retained_qmdb_blocks: 0,
             ..unordered
         };
         assert_eq!(
-            validate_state_prune_config(window_overflow),
+            validate_state_prune_config(window_overflow, NZUsize!(1)),
             Err(PruneConfigError::MarshalWindowOverflow)
         );
     }

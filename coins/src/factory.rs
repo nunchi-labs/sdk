@@ -22,12 +22,12 @@ impl TokenFactory {
     }
 
     pub fn derive_coin_id(issuer: &Address, nonce: u64, spec: &CoinSpec) -> CoinId {
-        let mut hasher = Sha256::new();
+        let mut hasher = Sha256::default();
         hasher.update(COINS_NAMESPACE);
         hasher.update(&issuer.encode());
         hasher.update(&nonce.encode());
         hasher.update(&spec.encode());
-        CoinId(hasher.finalize())
+        CoinId(hasher.finalize().1)
     }
 
     #[cfg(feature = "ledger")]

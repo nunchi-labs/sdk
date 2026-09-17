@@ -15,7 +15,7 @@ fn genesis_pins_local_chain_id() {
         // Unset before genesis.
         assert_eq!(local_chain_id(&state).await.expect("read"), None);
 
-        let chain_id = ChainId(Sha256::hash(b"local-chain"));
+        let chain_id = ChainId(Sha256::hash(&[b"local-chain"]));
         BridgeGenesis::new(chain_id).apply(&mut state);
         state.commit().await.expect("commit");
 

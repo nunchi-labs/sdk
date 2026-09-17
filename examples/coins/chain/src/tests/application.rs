@@ -33,7 +33,7 @@ fn spec() -> CoinSpec {
 }
 
 fn clob_asset(seed: &'static [u8]) -> AssetId {
-    AssetId(Sha256::hash(seed))
+    AssetId(Sha256::hash(&[seed]))
 }
 
 fn clob_market() -> nunchi_clob::MarketId {
@@ -45,7 +45,7 @@ fn committed_context(height: u64) -> RuntimeContext {
         epoch: 0,
         height,
         timestamp_ms: height * 1_000,
-        block_digest: Some(Sha256::hash(&height.to_be_bytes())),
+        block_digest: Some(Sha256::hash(&[height.to_be_bytes().as_slice()])),
     }
 }
 
@@ -105,7 +105,8 @@ fn proposal_skips_unregistered_multisig() {
             .merkleize()
             .await
             .expect("merkleize policy registration");
-        databases.finalize(merkleized).await;
+        databases.apply(merkleized).await;
+        let _ = databases.finalize().await;
 
         let batches = databases.new_batches().await;
         let (included, _) = app
@@ -190,7 +191,8 @@ fn profile_block_execution() {
                 .expect("mint");
         }
         let merkleized = ledger.into_inner().merkleize().await.expect("merkleize");
-        databases.finalize(merkleized).await;
+        databases.apply(merkleized).await;
+        let _ = databases.finalize().await;
 
         // A full block: 256 accounts x 16 sequential-nonce transfers.
         let mut candidates = Vec::with_capacity(ACCOUNTS * TXS_PER_ACCOUNT);

@@ -9,22 +9,23 @@ use commonware_consensus::{
     types::{Epoch, Height, Round, View},
 };
 use commonware_cryptography::{
-    bls12381::primitives::variant::MinSig, ed25519, sha256, Digest as _, Digestible as _, Hasher,
+    bls12381::primitives::variant::MinSig, ed25519, Digestible as _, Hasher,
     Sha256, Signer,
 };
-use commonware_glue::stateful::{db::DatabaseSet, Application as StatefulApplication};
+use commonware_consensus::marshal::ancestry;
+use commonware_glue::stateful::{db::DatabaseSet, Application as StatefulApplication, Input};
 use commonware_parallel::Sequential;
 use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
-use commonware_utils::{TestRng, NZU64};
+use commonware_utils::{non_empty, TestRng, NZU64};
 use nunchi_common::shared_database;
 use nunchi_bridge::{BridgeActor, BridgeExtension, BridgePayload, SubmitResult};
-use nunchi_chain::StateCommitment;
+use nunchi_chain::{dummy_genesis_parent, StateCommitment};
 use nunchi_common::{QmdbBackend, QmdbDatabaseSet, QmdbMerkleized, QmdbState};
-use nunchi_dkg::{Context, Finalization, Scheme};
+use nunchi_dkg::{Finalization, Scheme};
 use nunchi_mempool::PoolConfig;
 use std::sync::Arc;
 
-use crate::{application, Application, Block, TxPool};
+use crate::{application, Application, Block, Context, TxPool};
 
 const FOREIGN_NAMESPACE: &[u8] = b"_NUNCHI_BRIDGE_CHAIN_FOREIGN";
 const WRONG_NAMESPACE: &[u8] = b"_NUNCHI_BRIDGE_CHAIN_WRONG";
@@ -48,7 +49,7 @@ fn application_uses_configured_block_interval() {
 
         let (txpool, submitter) = TxPool::new(PoolConfig::default());
         txpool.start(context.child("txpool"));
-        let mut input = submitter.clone();
+        let input = submitter.clone();
 
         let db_context = context.child("state");
         let config =
@@ -66,7 +67,7 @@ fn application_uses_configured_block_interval() {
                 root: genesis_target.root,
                 range: genesis_target.range,
             },
-            Sha256::hash(b"bridge-chain production genesis"),
+            Sha256::hash(&[b"bridge-chain production genesis"]),
             NZU64!(500),
         );
         let genesis =
@@ -74,9 +75,12 @@ fn application_uses_configured_block_interval() {
         let proposed = <Application as StatefulApplication<deterministic::Context>>::propose(
             &mut app,
             (context.child("propose"), consensus_context(1)),
-            futures::stream::iter([Arc::new(genesis.clone())]),
+            ancestry::from_iter([Arc::new(genesis.clone())]),
             databases.new_batches().await,
-            &mut input,
+            Input {
+                upstream: (),
+                provider: input.clone(),
+            },
         )
         .await
         .expect("propose production bridge block");
@@ -97,14 +101,14 @@ fn finalization(schemes: &[Scheme], view: u64, payload: &[u8]) -> Finalization {
     let proposal = Proposal::new(
         Round::new(Epoch::zero(), View::new(view)),
         View::new(view.saturating_sub(1)),
-        Sha256::hash(payload),
+        Sha256::hash(&[payload]),
     );
     let finalizes: Vec<_> = schemes
         .iter()
         .take(3)
         .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("sign finalization"))
         .collect();
-    CFinalization::from_finalizes(&schemes[0], &finalizes, &Sequential)
+    CFinalization::from_finalizes(&schemes[0], non_empty![@finalizes.iter()], &Sequential)
         .expect("assemble finalization")
 }
 
@@ -112,7 +116,7 @@ fn consensus_context(view: u64) -> Context {
     Context {
         round: Round::new(Epoch::zero(), View::new(view)),
         leader: ed25519::PrivateKey::from_seed(view).public_key(),
-        parent: (View::new(view.saturating_sub(1)), sha256::Digest::EMPTY),
+        parent: (View::new(view.saturating_sub(1)), dummy_genesis_parent()),
     }
 }
 
@@ -146,7 +150,7 @@ fn chain_application_proposes_and_verifies_bridge_payload() {
 
         let (txpool, submitter) = TxPool::new(PoolConfig::default());
         let _txpool = txpool.start(context.child("txpool"));
-        let mut input = submitter.clone();
+        let input = submitter.clone();
 
         let db_context = context.child("state");
         let config = QmdbState::<deterministic::Context>::config(&db_context, "bridge-chain-e2e");
@@ -165,7 +169,7 @@ fn chain_application_proposes_and_verifies_bridge_payload() {
             bridge,
             applied_height,
             genesis_state,
-            Sha256::hash(b"bridge-chain genesis"),
+            Sha256::hash(&[b"bridge-chain genesis"]),
             NZU64!(1),
         );
 
@@ -174,9 +178,12 @@ fn chain_application_proposes_and_verifies_bridge_payload() {
         let proposed = <Application as StatefulApplication<deterministic::Context>>::propose(
             &mut app,
             (context.child("propose"), consensus_context(1)),
-            futures::stream::iter([Arc::new(genesis.clone())]),
+            ancestry::from_iter([Arc::new(genesis.clone())]),
             databases.new_batches().await,
-            &mut input,
+            Input {
+                upstream: (),
+                provider: input.clone(),
+            },
         )
         .await
         .expect("propose bridge block");
@@ -188,7 +195,7 @@ fn chain_application_proposes_and_verifies_bridge_payload() {
             <Application as StatefulApplication<deterministic::Context>>::verify(
                 &mut app,
                 (context.child("verify"), proposed.block.header.context.clone()),
-                futures::stream::iter([Arc::new(proposed.block.clone()), Arc::new(genesis.clone())]),
+                ancestry::from_iter([Arc::new(proposed.block.clone()), Arc::new(genesis.clone())]),
                 databases.new_batches().await,
             )
             .await;
@@ -229,7 +236,7 @@ fn chain_application_proposes_and_verifies_bridge_payload() {
             <Application as StatefulApplication<deterministic::Context>>::verify(
                 &mut app,
                 (context.child("verify_reject"), rejected.header.context.clone()),
-                futures::stream::iter([Arc::new(rejected), Arc::new(genesis)]),
+                ancestry::from_iter([Arc::new(rejected), Arc::new(genesis)]),
                 databases.new_batches().await,
             )
             .await;
@@ -239,9 +246,12 @@ fn chain_application_proposes_and_verifies_bridge_payload() {
         let proposed = <Application as StatefulApplication<deterministic::Context>>::propose(
             &mut app,
             (context.child("propose_empty"), consensus_context(2)),
-            futures::stream::iter([Arc::new(proposed.block)]),
+            ancestry::from_iter([Arc::new(proposed.block)]),
             databases.new_batches().await,
-            &mut input,
+            Input {
+                upstream: (),
+                provider: input.clone(),
+            },
         )
         .await
         .expect("propose empty bridge block");

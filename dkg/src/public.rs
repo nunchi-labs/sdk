@@ -9,7 +9,7 @@ use commonware_consensus::types::{Epoch, Epocher, FixedEpocher, Height};
 use commonware_cryptography::{
     bls12381::{
         dkg::feldman_desmedt::{
-            observe, DealerLog, Info, Logs, Output, SignedDealerLog,
+            observe, DealerLog, Info, Logs, Output, Reveal, SignedDealerLog,
         },
         primitives::{
             group::Share,
@@ -83,7 +83,7 @@ impl<V: Variant, P: PublicKey> DkgProtocolConfig<V, P> {
     /// Hash the canonical Commonware codec encoding.
     pub fn digest(&self) -> Result<Digest, Error> {
         self.validate()?;
-        Ok(Sha256::hash(&self.encode()))
+        Ok(Sha256::hash(&[self.encode().as_ref()]))
     }
 
     /// Return the maximum configured participant count.
@@ -124,6 +124,7 @@ impl<V: Variant, P: PublicKey> DkgProtocolConfig<V, P> {
             checkpoint.epoch.get(),
             Some(checkpoint.output.clone()),
             self.mode,
+            Reveal::V1,
             dealers,
             players,
         )

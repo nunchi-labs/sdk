@@ -10,7 +10,9 @@ use commonware_codec::{Encode, RangeCfg, ReadExt};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
     bls12381::{
-        dkg::feldman_desmedt::{DealerPrivMsg, DealerPubMsg, Info, Player, PlayerAck, Verdict},
+        dkg::feldman_desmedt::{
+            DealerPrivMsg, DealerPubMsg, Info, Player, PlayerAck, Reveal,
+        },
         primitives::{
             group::{Private, Scalar, Share},
             sharing::Mode,
@@ -25,13 +27,16 @@ use commonware_cryptography::{
 use commonware_macros::test_traced;
 use commonware_math::algebra::{Random, Ring};
 use commonware_runtime::{
-    deterministic, BufferPooler, Clock, Metrics, Runner, Storage as RuntimeStorage, Supervisor as _,
+    buffer::paged::{page_size, CacheRef},
+    deterministic, BufferPooler, Clock, Metrics, ReadOptions, Runner, Storage as RuntimeStorage,
+    Supervisor as _,
 };
 use commonware_storage::{
+    journal::segmented::variable::{Config as SVConfig, Journal as SVJournal},
     metadata::{Config as MetadataConfig, Metadata},
     Context as StorageContext,
 };
-use commonware_utils::{ordered::Set, test_rng, TestRng, N3f1, Participant, NZU32};
+use commonware_utils::{ordered::Set, test_rng, TestRng, N3f1, Participant, NZU32, NZUsize};
 use rand::CryptoRng;
 use std::collections::BTreeMap;
 
@@ -56,6 +61,7 @@ fn create_round_info(signers: &[ed25519::PrivateKey]) -> Info<MinPk, ed25519::Pu
         0,
         None,
         Mode::NonZeroCounter,
+            Reveal::V1,
         dealers,
         players,
     )
@@ -147,11 +153,10 @@ fn finalized_dealer_log(
             .expect("player signer should exist")
             .clone();
         let mut player = Player::new(round_info.clone(), player_signer).expect("valid player");
-        let Verdict::Valid(ack) =
-            player.dealer_message::<N3f1>(dealer_pk.clone(), pub_msg.clone(), priv_msg)
-        else {
-            panic!("valid dealing should be acknowledged");
-        };
+        let ack = player
+            .dealer_message::<N3f1>(dealer_pk.clone(), pub_msg.clone(), priv_msg)
+            .expect("valid dealing")
+            .expect("dealing should be acknowledged");
         dealer.receive_player_ack(player_pk, ack).unwrap();
     }
     let signed = dealer.finalize::<N3f1>();
@@ -182,7 +187,44 @@ where
         .expect("sealed record should have ciphertext");
     *byte ^= 1;
     record.ciphertext = Bytes::from(ciphertext);
-    metadata.sync().await.expect("metadata sync should succeed");
+    let _ = metadata.sync().await.expect("metadata sync should succeed");
+}
+
+async fn append_corrupt_journal_event<E>(context: E, partition: &str, epoch: Epoch)
+where
+    E: BufferPooler + Clock + RuntimeStorage + Metrics,
+{
+    let page_cache = CacheRef::from_pooler(&context, page_size(1 << 12), NZUsize!(1 << 13));
+    let msgs = SVJournal::init(
+        context,
+        SVConfig {
+            partition: format!("{partition}_msgs"),
+            compression: None,
+            codec_config: RangeCfg::from(..),
+            page_cache,
+            write_buffer: NZUsize!(1 << 12),
+        },
+    )
+    .await
+    .expect("journal init should succeed");
+    let mut replay = msgs
+        .replay(0, 0, NZUsize!(1 << 20), ReadOptions::default())
+        .await
+        .expect("journal replay should start");
+    while let Some(result) = replay.next().await {
+        result.expect("journal replay should succeed");
+    }
+    let msgs = replay.finish().expect("journal replay should finish");
+    let record = SealedRecord {
+        version: 0,
+        nonce: [0u8; 12],
+        ciphertext: Bytes::from_static(b"corrupt-dkg-event"),
+    };
+    let (msgs, _, _) = msgs
+        .append(epoch.get(), &record)
+        .await
+        .expect("append corrupt event");
+    let _ = msgs.sync(epoch.get()).await.expect("journal sync should succeed");
 }
 
 fn assert_open_failure<T>(result: Result<T, StorageError>, message: &str) {
@@ -392,6 +434,50 @@ fn storage_recovery_rejects_corrupted_record() {
 }
 
 #[test_traced]
+fn storage_recovery_rejects_corrupted_journal_event() {
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        let signers = create_test_signers(4);
+        let public_key = signers[0].public_key();
+        let partition = "corrupted_journal_recovery";
+        let epoch = Epoch::zero();
+        let (dealer, pub_msg, priv_msg) = test_dealing(&signers);
+
+        let mut storage = init_storage(
+            context.child("storage"),
+            partition,
+            TEST_STORAGE_KEY,
+            TEST_NAMESPACE.to_vec(),
+            public_key.clone(),
+        )
+        .await;
+        storage
+            .set_epoch(epoch, epoch_state(&mut context, 0, None))
+            .await
+            .expect("set epoch should succeed");
+        storage
+            .append_dealing(epoch, dealer, pub_msg, priv_msg)
+            .await
+            .expect("append dealing should succeed");
+        drop(storage);
+
+        append_corrupt_journal_event(context.child("journal"), partition, epoch).await;
+
+        let result = Storage::<_, MinPk, ed25519::PublicKey>::init(
+            context.child("corrupted_journal_storage"),
+            partition,
+            StorageProtector::new(TEST_STORAGE_KEY),
+            TEST_NAMESPACE.to_vec(),
+            public_key,
+            NZU32!(10),
+            crate::MAX_SUPPORTED_MODE,
+        )
+        .await;
+        assert_open_failure(result, "corrupted journal event should fail closed");
+    });
+}
+
+#[test_traced]
 fn storage_prune_removes_old_sealed_records_after_restart() {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -459,7 +545,7 @@ fn storage_recovers_no_share_observer_epoch() {
         let (output, _) =
             commonware_cryptography::bls12381::dkg::feldman_desmedt::deal::<MinPk, _, N3f1>(
                 &mut context,
-                Default::default(),
+                Mode::NonZeroCounter,
                 participants,
             )
             .expect("deal should succeed");
@@ -742,13 +828,14 @@ fn test_dealer_handle_returns_true_for_valid_ack() {
                 player_signer,
             )
             .expect("valid player");
-        let Verdict::Valid(ack) = crypto_player.dealer_message::<N3f1>(
-            dealer_signer.public_key(),
-            pub_msg,
-            player_priv_msg,
-        ) else {
-            panic!("valid ack");
-        };
+        let ack = crypto_player
+            .dealer_message::<N3f1>(
+                dealer_signer.public_key(),
+                pub_msg,
+                player_priv_msg,
+            )
+            .expect("valid dealing")
+            .expect("valid ack");
 
         let result = dealer
             .handle(&mut storage, Epoch::zero(), player_pk, ack)
@@ -802,13 +889,14 @@ fn test_dealer_handle_returns_false_for_duplicate_ack() {
                 player_signer,
             )
             .expect("valid player");
-        let Verdict::Valid(ack) = crypto_player.dealer_message::<N3f1>(
-            dealer_signer.public_key(),
-            pub_msg,
-            player_priv_msg,
-        ) else {
-            panic!("valid ack");
-        };
+        let ack = crypto_player
+            .dealer_message::<N3f1>(
+                dealer_signer.public_key(),
+                pub_msg,
+                player_priv_msg,
+            )
+            .expect("valid dealing")
+            .expect("valid ack");
 
         let result = dealer
             .handle(&mut storage, Epoch::zero(), player_pk.clone(), ack.clone())

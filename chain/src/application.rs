@@ -1,11 +1,12 @@
 use commonware_consensus::{
+    marshal::ancestry::Ancestry,
     types::{Epoch, Height, Round, View},
     Heightable,
 };
-use commonware_cryptography::{ed25519, sha256, Digest as _, Digestible, Signer};
+use commonware_cryptography::{ed25519, sha256, Digestible, Signer};
 use commonware_glue::stateful::{
     db::{DatabaseSet, Merkleized as _},
-    Application as StatefulApplication, Proposed,
+    Application as StatefulApplication, Input, Proposed,
 };
 use commonware_parallel::{Rayon, Strategy as _};
 use commonware_runtime::{
@@ -16,7 +17,7 @@ use commonware_storage::{mmr::Location, qmdb::sync::Target};
 use commonware_utils::{non_empty_range, range::NonEmptyRange, SystemTimeExt};
 use futures::{lock::Mutex as AsyncMutex, StreamExt};
 use nunchi_common::{Overlay, QmdbBatch, QmdbDatabaseSet, QmdbMerkleized, Runtime, RuntimeContext};
-use nunchi_dkg::{Context, Scheme};
+use nunchi_dkg::Scheme;
 use nunchi_mempool::{MempoolHandle, PoolTransaction};
 use rand::{CryptoRng, Rng};
 use std::{
@@ -29,8 +30,9 @@ use std::{
 use tracing::{debug, error};
 
 use crate::{
-    Block, ConsensusExtension, DkgMailbox, DkgState, EventConsumer, NoConsensusExtension,
-    NoopEventConsumer, StateCommitment, TransactionEventContext,
+    dummy_genesis_parent, BlockCommitment, CodingBlock, CodingContext, ConsensusExtension,
+    DkgMailbox, DkgState, EventConsumer, NoConsensusExtension, NoopEventConsumer, StateCommitment,
+    TransactionEventContext,
 };
 
 /// The height of the last finalized block applied to a node's ledger.
@@ -54,6 +56,7 @@ where
     pub applied_height: SharedAppliedHeight,
     pub genesis_state: StateCommitment,
     pub genesis_payload: sha256::Digest,
+    pub genesis_parent: BlockCommitment<Tx, Ext>,
 }
 
 /// The stateful consensus application for a generated runtime.
@@ -75,6 +78,7 @@ where
     applied_height: SharedAppliedHeight,
     genesis_state: StateCommitment,
     genesis_payload: sha256::Digest,
+    genesis_parent: BlockCommitment<R::Transaction, Ext>,
     metrics: Option<ApplicationMetrics>,
     strategy: Option<Rayon>,
     _runtime: PhantomData<R>,
@@ -135,13 +139,13 @@ where
     Events: EventConsumer,
 {
     /// The genesis block, committing to `genesis_state`.
-    pub fn genesis_block(&self) -> Block<R::Transaction, Ext> {
-        let genesis_context = Context {
+    pub fn genesis_block(&self) -> CodingBlock<R::Transaction, Ext> {
+        let genesis_context = CodingContext {
             round: Round::new(Epoch::zero(), View::zero()),
             leader: ed25519::PrivateKey::from_seed(0).public_key(),
-            parent: (View::zero(), sha256::Digest::EMPTY),
+            parent: (View::zero(), self.genesis_parent),
         };
-        Block::new(
+        CodingBlock::new(
             genesis_context,
             self.genesis_payload,
             Height::zero(),
@@ -151,6 +155,11 @@ where
             Ext::genesis_payload(),
             self.genesis_state.clone(),
         )
+    }
+
+    pub fn with_genesis_parent(mut self, genesis_parent: BlockCommitment<R::Transaction, Ext>) -> Self {
+        self.genesis_parent = genesis_parent;
+        self
     }
 
     pub fn with_consensus_and_events(
@@ -166,6 +175,7 @@ where
             applied_height,
             genesis_state,
             genesis_payload,
+            genesis_parent,
         } = config;
 
         Self {
@@ -179,6 +189,7 @@ where
             applied_height,
             genesis_state,
             genesis_payload,
+            genesis_parent,
             metrics: None,
             strategy: None,
             _runtime: PhantomData,
@@ -210,7 +221,7 @@ where
             .expect("application strategy initialized")
     }
 
-    fn minimum_timestamp(&self, parent: &Block<R::Transaction, Ext>) -> Option<u64> {
+    fn minimum_timestamp(&self, parent: &CodingBlock<R::Transaction, Ext>) -> Option<u64> {
         parent
             .header
             .timestamp
@@ -220,7 +231,7 @@ where
     fn timestamp<E: Clock>(
         &self,
         runtime_context: &E,
-        parent: &Block<R::Transaction, Ext>,
+        parent: &CodingBlock<R::Transaction, Ext>,
     ) -> Option<u64> {
         let minimum = self.minimum_timestamp(parent)?;
         let timestamp = runtime_context.current().epoch_millis().max(minimum);
@@ -229,7 +240,7 @@ where
 
     /// Execute txpool candidates in order, including the first `max_block_transactions` that
     /// apply cleanly against the parent state.
-    pub async fn build_valid_transactions<E: BufferPooler + Storage + Clock + Metrics>(
+    pub async fn build_valid_transactions<E: BufferPooler + Storage + Clock + Metrics + Spawner>(
         &self,
         batches: <QmdbDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
         context: RuntimeContext,
@@ -239,7 +250,7 @@ where
             .await
     }
 
-    async fn build_valid_transactions_inner<E: BufferPooler + Storage + Clock + Metrics>(
+    async fn build_valid_transactions_inner<E: BufferPooler + Storage + Clock + Metrics + Spawner>(
         &self,
         timing: Option<(&E, &ApplicationMetrics)>,
         batches: <QmdbDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
@@ -292,7 +303,7 @@ where
     }
 
     async fn build_proposal_state<
-        E: BufferPooler + Storage + Clock + Metrics + CryptoRng,
+        E: BufferPooler + Storage + Clock + Metrics + CryptoRng + Spawner,
     >(
         &mut self,
         timing: Option<&ApplicationMetrics>,
@@ -390,7 +401,7 @@ where
         commit_extension: bool,
     ) -> Option<QmdbMerkleized<E>>
     where
-        E: BufferPooler + Storage + Clock + Metrics + CryptoRng,
+        E: BufferPooler + Storage + Clock + Metrics + CryptoRng + Spawner,
         EventHandler: EventConsumer,
     {
         events.begin_block(context).await;
@@ -479,7 +490,7 @@ where
         }
     }
 
-    fn block_runtime_context(block: &Block<R::Transaction, Ext>) -> RuntimeContext {
+    fn block_runtime_context(block: &CodingBlock<R::Transaction, Ext>) -> RuntimeContext {
         RuntimeContext {
             epoch: block.header.context.round.epoch().get(),
             height: block.header.height.get(),
@@ -488,18 +499,18 @@ where
         }
     }
 
-    fn state_range<E: BufferPooler + Storage + Clock + Metrics>(
+    fn state_range<E: BufferPooler + Storage + Clock + Metrics + Spawner>(
         merkleized: &QmdbMerkleized<E>,
     ) -> NonEmptyRange<Location> {
         let bounds = merkleized.bounds();
-        non_empty_range!(bounds.inactivity_floor, Location::new(bounds.total_size))
+        non_empty_range!(bounds.inactivity_floor, bounds.tip.size)
     }
 
     async fn verify_timestamp<E: Clock>(
         &self,
         runtime_context: &E,
-        block: &Block<R::Transaction, Ext>,
-        parent: &Block<R::Transaction, Ext>,
+        block: &CodingBlock<R::Transaction, Ext>,
+        parent: &CodingBlock<R::Transaction, Ext>,
     ) -> bool {
         let Some(minimum) = self.minimum_timestamp(parent) else {
             return false;
@@ -543,6 +554,7 @@ where
                 applied_height,
                 genesis_state,
                 genesis_payload,
+                genesis_parent: dummy_genesis_parent(),
             },
             dkg,
         )
@@ -627,6 +639,7 @@ where
                 applied_height,
                 genesis_state,
                 genesis_payload,
+                genesis_parent: dummy_genesis_parent(),
             },
             None,
         )
@@ -637,7 +650,7 @@ impl<R> Application<R>
 where
     R: Runtime,
     R::Transaction: PoolTransaction,
-    Block<R::Transaction>: nunchi_dkg::ReshareBlock,
+    CodingBlock<R::Transaction>: nunchi_dkg::ReshareBlock,
 {
     pub fn with_dkg(
         submitter: MempoolHandle<R::Transaction>,
@@ -665,7 +678,7 @@ impl<R, Events> Application<R, NoConsensusExtension, Events>
 where
     R: Runtime,
     R::Transaction: PoolTransaction,
-    Block<R::Transaction>: nunchi_dkg::ReshareBlock,
+    CodingBlock<R::Transaction>: nunchi_dkg::ReshareBlock,
     Events: EventConsumer,
 {
     #[allow(clippy::too_many_arguments)]
@@ -689,6 +702,7 @@ where
                 applied_height,
                 genesis_state,
                 genesis_payload,
+                genesis_parent: dummy_genesis_parent(),
             },
             Some(dkg),
         )
@@ -704,10 +718,12 @@ where
     Events: EventConsumer,
 {
     type SigningScheme = Scheme;
-    type Context = Context;
-    type Block = Block<R::Transaction, Ext>;
+    type Context = CodingContext<R::Transaction, Ext>;
+    type Block = CodingBlock<R::Transaction, Ext>;
     type Databases = QmdbDatabaseSet<E>;
-    type InputProvider = MempoolHandle<R::Transaction>;
+    type Captured = ();
+    type Provider = MempoolHandle<R::Transaction>;
+    type Input = ();
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
         Target::new(block.header.state_root, block.header.state_range.clone())
@@ -720,16 +736,16 @@ where
     async fn propose(
         &mut self,
         (mut runtime_context, context): (E, Self::Context),
-        ancestry: impl futures::Stream<Item = std::sync::Arc<Self::Block>> + Send,
+        ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-        input: &mut Self::InputProvider,
+        input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
         let metrics = self.metrics(&runtime_context);
         let mut ancestry = Box::pin(ancestry);
         let parent = ancestry.next().await?;
         let timestamp = self.timestamp(&runtime_context, &parent)?;
         let selection_start = runtime_context.current();
-        let candidates = input.pending(self.max_block_transactions).await;
+        let candidates = input.provider.pending(self.max_block_transactions).await;
         metrics
             .candidate_selection_duration
             .observe_between(selection_start, runtime_context.current());
@@ -755,7 +771,7 @@ where
             )
             .await?;
         let state_range = Self::state_range(&merkleized);
-        let block = Block::new(
+        let block = CodingBlock::new(
             context,
             parent.digest(),
             parent.header.height.next(),
@@ -774,7 +790,7 @@ where
     async fn verify(
         &mut self,
         (mut runtime_context, _): (E, Self::Context),
-        ancestry: impl futures::Stream<Item = std::sync::Arc<Self::Block>> + Send,
+        ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         let metrics = self.metrics(&runtime_context);
@@ -837,7 +853,7 @@ where
         (mut runtime_context, _): (E, Self::Context),
         block: &Self::Block,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
+    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         let metrics = self.metrics(&runtime_context);
         let execution_context = Self::block_runtime_context(block);
         let events = self.events.clone();
@@ -865,14 +881,24 @@ where
             state_range, block.header.state_range,
             "certified block state range mismatch"
         );
-        merkleized
+        Some(merkleized)
+    }
+
+    async fn capture(
+        &mut self,
+        _context: (E, Self::Context),
+        _block: &Self::Block,
+        _batches: &<Self::Databases as DatabaseSet<E>>::Merkleized,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
+    ) -> Self::Captured {
     }
 
     async fn finalized(
         &mut self,
         _context: (E, Self::Context),
         block: &Self::Block,
-        _databases: &Self::Databases,
+        _captured: Self::Captured,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
     ) {
         let applied = block
             .transactions

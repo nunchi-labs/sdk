@@ -34,7 +34,12 @@ fn state_proof_roundtrips_and_rejects_wrong_root() {
         assert!(!proof.operations().is_empty());
 
         // Negative: an unrelated root must not verify.
-        assert!(!verify_state_proof(&proof, &Sha256::hash(b"not-the-root")));
+        assert!(!verify_state_proof(&proof, &Sha256::hash(&[b"not-the-root"])));
+
+        assert!(state
+            .proof(bounds.end, NonZeroU64::new(1).unwrap())
+            .await
+            .is_err());
 
         // Negative: once the state advances, the stale proof no longer verifies against the
         // new committed root; the proof is bound to the exact committed state.
@@ -123,7 +128,7 @@ fn verify_state_update_checks_operation_membership() {
         // Negative: a wrong root fails outright, regardless of membership.
         assert!(!verify_state_update(
             &proof,
-            &Sha256::hash(b"not-the-root"),
+            &Sha256::hash(&[b"not-the-root"]),
             &key,
             b"balance"
         ));

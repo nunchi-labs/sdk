@@ -117,6 +117,11 @@ fn generated_testnet_has_unique_ports_dirs_and_complete_peer_sets() {
         assert_eq!(config.maintenance_interval, NZUsize!(32));
         assert_eq!(config.retained_marshal_blocks, 200);
         assert_eq!(config.retained_qmdb_blocks, 200);
+        assert_eq!(
+            config.networking.channel_rate_per_second,
+            1_024,
+            "unbounded channel quotas OOM authenticated discovery mailboxes"
+        );
 
         // The threshold material must round-trip from the written config.
         let max_participants =
@@ -877,6 +882,7 @@ fn reconnect_config(
         listen,
         dialable,
         bootstrappers,
+        NZUsize!(4),
         1024 * 1024,
     );
     config.peer_connection_cooldown = Duration::from_millis(100);
@@ -911,7 +917,7 @@ fn run_dns_bootstrapper_redeployment(seed: u64, dns: Ingress) -> String {
             Network::new(context.child("b_initial").child("network"), config_b);
         oracle_b.track(0, peers.clone());
         let (mut sender_b, mut receiver_b) =
-            network_b.register(0, Quota::per_second(NZU32!(100)), 128);
+            network_b.register(0, Quota::per_second(NZU32!(100)));
         let handle_b = network_b.start();
 
         let config_a = reconnect_config(
@@ -925,7 +931,7 @@ fn run_dns_bootstrapper_redeployment(seed: u64, dns: Ingress) -> String {
             Network::new(context.child("a").child("network"), config_a);
         oracle_a.track(0, peers.clone());
         let (mut sender_a, mut receiver_a) =
-            network_a.register(0, Quota::per_second(NZU32!(100)), 128);
+            network_a.register(0, Quota::per_second(NZU32!(100)));
         let _handle_a = network_a.start();
 
         let initial_exchange = async {
@@ -979,7 +985,7 @@ fn run_dns_bootstrapper_redeployment(seed: u64, dns: Ingress) -> String {
             Network::new(context.child("b_restarted").child("network"), config_b);
         oracle_b.track(0, peers);
         let (_sender_b, mut receiver_b) =
-            network_b.register(0, Quota::per_second(NZU32!(100)), 128);
+            network_b.register(0, Quota::per_second(NZU32!(100)));
         let _handle_b = network_b.start();
 
         let reconnected = async {
@@ -1050,7 +1056,7 @@ fn run_discovered_dns_redeployment(seed: u64, dns: Ingress) -> String {
             Network::new(context.child("c").child("network"), config_c);
         oracle_c.track(0, peers.clone());
         let (_sender_c, _receiver_c) =
-            network_c.register(0, Quota::per_second(NZU32!(100)), 128);
+            network_c.register(0, Quota::per_second(NZU32!(100)));
         let _handle_c = network_c.start();
 
         let config_b = reconnect_config(
@@ -1063,7 +1069,7 @@ fn run_discovered_dns_redeployment(seed: u64, dns: Ingress) -> String {
             Network::new(context.child("b_initial").child("network"), config_b);
         oracle_b.track(0, peers.clone());
         let (mut sender_b, mut receiver_b) =
-            network_b.register(0, Quota::per_second(NZU32!(100)), 128);
+            network_b.register(0, Quota::per_second(NZU32!(100)));
         let handle_b = network_b.start();
 
         // A only knows C initially. It must learn B's DNS ingress through discovery.
@@ -1077,7 +1083,7 @@ fn run_discovered_dns_redeployment(seed: u64, dns: Ingress) -> String {
             Network::new(context.child("a").child("network"), config_a);
         oracle_a.track(0, peers.clone());
         let (mut sender_a, mut receiver_a) =
-            network_a.register(0, Quota::per_second(NZU32!(100)), 128);
+            network_a.register(0, Quota::per_second(NZU32!(100)));
         let _handle_a = network_a.start();
 
         let learned_and_connected = async {
@@ -1131,7 +1137,7 @@ fn run_discovered_dns_redeployment(seed: u64, dns: Ingress) -> String {
             Network::new(context.child("b_restarted").child("network"), config_b);
         oracle_b.track(0, peers);
         let (_sender_b, mut receiver_b) =
-            network_b.register(0, Quota::per_second(NZU32!(100)), 128);
+            network_b.register(0, Quota::per_second(NZU32!(100)));
         let _handle_b = network_b.start();
 
         let reconnected = async {
