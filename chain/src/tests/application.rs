@@ -241,10 +241,10 @@ fn block(
     state: StateCommitment,
 ) -> Block<TestTx> {
     Block::new(
-        test_context(parent.height.get() + 1, parent),
+        test_context(parent.header.height.get() + 1, parent),
         parent.digest(),
-        parent.height.next(),
-        parent.timestamp + 1,
+        parent.header.height.next(),
+        parent.header.timestamp + 1,
         transactions,
         None,
         (),
@@ -259,9 +259,9 @@ fn block_at(
     state: StateCommitment,
 ) -> Block<TestTx> {
     Block::new(
-        test_context(parent.height.get() + 1, parent),
+        test_context(parent.header.height.get() + 1, parent),
         parent.digest(),
-        parent.height.next(),
+        parent.header.height.next(),
         timestamp,
         transactions,
         None,
@@ -351,7 +351,7 @@ async fn propose(
     mempool.start(context.child("proposal_mempool"));
     <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::propose(
         app,
-        (context, test_context(parent.height.get() + 1, &parent)),
+        (context, test_context(parent.header.height.get() + 1, &parent)),
         futures::stream::iter([Arc::new(parent)]),
         databases.new_batches().await,
         &mut input,
@@ -368,7 +368,7 @@ async fn verify(
 ) -> bool {
     <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::verify(
         app,
-        (context, block.context.clone()),
+        (context, block.header.context.clone()),
         futures::stream::iter([Arc::new(block), Arc::new(parent)]),
         databases.new_batches().await,
     )
@@ -378,19 +378,19 @@ async fn verify(
 
 fn state_of(block: &Block<TestTx>) -> StateCommitment {
     StateCommitment {
-        root: block.state_root,
-        range: block.state_range.clone(),
+        root: block.header.state_root,
+        range: block.header.state_range.clone(),
     }
 }
 
 fn with_timestamp(block: &Block<TestTx>, timestamp: u64) -> Block<TestTx> {
     Block::new(
-        block.context.clone(),
-        block.parent,
-        block.height,
+        block.header.context.clone(),
+        block.header.parent,
+        block.header.height,
         timestamp,
         block.transactions.clone(),
-        block.reshare_log.clone(),
+        block.header.reshare_log.clone(),
         (),
         state_of(block),
     )
@@ -403,7 +403,7 @@ fn enforces_configured_minimum_block_interval() {
             application_with_interval(context.child("app"), NZU64!(500)).await;
         let state = merkleized_state(&databases, &[]).await.0;
 
-        let too_early = block_at(&parent, parent.timestamp + 499, Vec::new(), state.clone());
+        let too_early = block_at(&parent, parent.header.timestamp + 499, Vec::new(), state.clone());
         assert!(
             !verify(
                 &mut app,
@@ -415,7 +415,7 @@ fn enforces_configured_minimum_block_interval() {
             .await
         );
 
-        let exact = block_at(&parent, parent.timestamp + 500, Vec::new(), state.clone());
+        let exact = block_at(&parent, parent.header.timestamp + 500, Vec::new(), state.clone());
         assert!(
             verify(
                 &mut app,
@@ -427,7 +427,7 @@ fn enforces_configured_minimum_block_interval() {
             .await
         );
 
-        let later = block_at(&parent, parent.timestamp + 750, Vec::new(), state);
+        let later = block_at(&parent, parent.header.timestamp + 750, Vec::new(), state);
         assert!(
             verify(
                 &mut app,
@@ -448,7 +448,7 @@ fn timestamp_rejection_precedes_transaction_work() {
             application_with_interval(context.child("app"), NZU64!(500)).await;
         let block = block_at(
             &parent,
-            parent.timestamp + 499,
+            parent.header.timestamp + 499,
             vec![TestTx {
                 account: 1,
                 nonce: 0,
@@ -486,7 +486,7 @@ fn proposes_at_minimum_or_runtime_clock() {
         )
         .await
         .expect("proposal at minimum");
-        assert_eq!(proposed.block.timestamp, parent.timestamp + 500);
+        assert_eq!(proposed.block.header.timestamp, parent.header.timestamp + 500);
 
         context.sleep(Duration::from_secs(1)).await;
         let current = context.current().epoch_millis();
@@ -498,7 +498,7 @@ fn proposes_at_minimum_or_runtime_clock() {
         )
         .await
         .expect("proposal at runtime clock");
-        assert_eq!(proposed.block.timestamp, current);
+        assert_eq!(proposed.block.header.timestamp, current);
     });
 }
 
@@ -555,7 +555,7 @@ fn one_millisecond_interval_remains_available_for_focused_tests() {
         let current = context.current().epoch_millis();
         let parent = with_timestamp(&genesis, current + 10_000);
         let state = merkleized_state(&databases, &[]).await.0;
-        let exact = block_at(&parent, parent.timestamp + 1, Vec::new(), state);
+        let exact = block_at(&parent, parent.header.timestamp + 1, Vec::new(), state);
         assert!(
             verify(
                 &mut app,
@@ -570,7 +570,7 @@ fn one_millisecond_interval_remains_available_for_focused_tests() {
         let proposed = propose(&mut app, &databases, context.child("propose"), parent)
             .await
             .expect("proposal at one millisecond minimum");
-        assert_eq!(proposed.block.timestamp, current + 10_001);
+        assert_eq!(proposed.block.header.timestamp, current + 10_001);
     });
 }
 
@@ -586,7 +586,7 @@ fn timestamp_wait_is_cancellation_safe() {
             let verify =
                 <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::verify(
                     &mut app,
-                    (context.child("verify"), block.context.clone()),
+                    (context.child("verify"), block.header.context.clone()),
                     futures::stream::iter([Arc::new(block), Arc::new(parent)]),
                     batches,
                 );
@@ -617,7 +617,7 @@ fn verification_uses_noop_event_sink() {
         let verified =
             <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::verify(
                 &mut app,
-                (context.child("verify"), block.context.clone()),
+                (context.child("verify"), block.header.context.clone()),
                 futures::stream::iter([Arc::new(block), Arc::new(parent)]),
                 databases.new_batches().await,
             )
@@ -645,14 +645,14 @@ fn certified_apply_uses_default_noop_consumer() {
         let merkleized =
             <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::apply(
                 &mut app,
-                (context.child("apply"), block.context.clone()),
+                (context.child("apply"), block.header.context.clone()),
                 &block,
                 databases.new_batches().await,
             )
             .await;
 
-        assert_eq!(merkleized.root(), block.state_root);
-        assert_eq!(state_range(&merkleized), block.state_range);
+        assert_eq!(merkleized.root(), block.header.state_root);
+        assert_eq!(state_range(&merkleized), block.header.state_range);
     });
 }
 
@@ -679,7 +679,7 @@ fn certified_apply_discards_events_from_failed_transaction() {
 
         let apply = <ReportingApplication as StatefulApplication<deterministic::Context>>::apply(
             &mut app,
-            (context.child("apply"), block.context.clone()),
+            (context.child("apply"), block.header.context.clone()),
             &block,
             databases.new_batches().await,
         );
@@ -688,7 +688,7 @@ fn certified_apply_discards_events_from_failed_transaction() {
 
         <ReportingApplication as StatefulApplication<deterministic::Context>>::finalized(
             &mut app,
-            (context.child("finalized"), block.context.clone()),
+            (context.child("finalized"), block.header.context.clone()),
             &block,
             &databases,
         )
@@ -697,9 +697,9 @@ fn certified_apply_discards_events_from_failed_transaction() {
         let reports = consumer.reports();
         assert_eq!(reports.len(), 1);
         let report = &reports[0];
-        assert_eq!(report.height, block.height);
+        assert_eq!(report.height, block.header.height);
         assert_eq!(report.block_digest, block.digest());
-        assert_eq!(report.block_timestamp, block.timestamp);
+        assert_eq!(report.block_timestamp, block.header.timestamp);
         assert!(report.transactions.is_empty());
     });
 }
@@ -730,7 +730,7 @@ fn finalized_reports_collected_events_after_database_finalize() {
         let merkleized =
             <ReportingApplication as StatefulApplication<deterministic::Context>>::apply(
                 &mut app,
-                (context.child("apply"), block.context.clone()),
+                (context.child("apply"), block.header.context.clone()),
                 &block,
                 databases.new_batches().await,
             )
@@ -742,7 +742,7 @@ fn finalized_reports_collected_events_after_database_finalize() {
 
         <ReportingApplication as StatefulApplication<deterministic::Context>>::finalized(
             &mut app,
-            (context.child("finalized"), block.context.clone()),
+            (context.child("finalized"), block.header.context.clone()),
             &block,
             &databases,
         )
@@ -751,9 +751,9 @@ fn finalized_reports_collected_events_after_database_finalize() {
         let reports = consumer.reports();
         assert_eq!(reports.len(), 1);
         let report = &reports[0];
-        assert_eq!(report.height, block.height);
+        assert_eq!(report.height, block.header.height);
         assert_eq!(report.block_digest, block.digest());
-        assert_eq!(report.block_timestamp, block.timestamp);
+        assert_eq!(report.block_timestamp, block.header.timestamp);
         assert_eq!(report.transactions.len(), 2);
 
         let first = &report.transactions[0];
@@ -802,7 +802,7 @@ fn finalized_reports_empty_events_when_handoff_is_missing() {
         databases.finalize(merkleized).await;
         <ReportingApplication as StatefulApplication<deterministic::Context>>::finalized(
             &mut app,
-            (context.child("finalized"), block.context.clone()),
+            (context.child("finalized"), block.header.context.clone()),
             &block,
             &databases,
         )
@@ -811,9 +811,9 @@ fn finalized_reports_empty_events_when_handoff_is_missing() {
         let reports = consumer.reports();
         assert_eq!(reports.len(), 1);
         let report = &reports[0];
-        assert_eq!(report.height, block.height);
+        assert_eq!(report.height, block.header.height);
         assert_eq!(report.block_digest, block.digest());
-        assert_eq!(report.block_timestamp, block.timestamp);
+        assert_eq!(report.block_timestamp, block.header.timestamp);
         assert!(report.transactions.is_empty());
     });
 }

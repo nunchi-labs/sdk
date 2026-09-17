@@ -47,7 +47,7 @@ impl Entry {
     }
 
     pub fn height(&self) -> u64 {
-        self.finalized.block.height.get()
+        self.finalized.block.header.height.get()
     }
 
     pub fn digest(&self) -> Digest {
@@ -149,7 +149,7 @@ impl State {
 
     pub fn record(&mut self, block: &Block) -> Option<Candidate> {
         let entry = Candidate {
-            height: block.height.get(),
+            height: block.header.height.get(),
             digest: block.digest(),
         };
         self.observe_finalization(entry.height);
@@ -240,7 +240,7 @@ impl State {
             .cached_blocks
             .iter()
             .filter_map(|(digest, cached)| {
-                (cached.block.height.get() <= self.restart_watermark).then_some(*digest)
+                (cached.block.header.height.get() <= self.restart_watermark).then_some(*digest)
             })
             .collect::<Vec<_>>();
         for digest in &pruned {
@@ -365,14 +365,14 @@ impl State {
             let Some(cached) = self.cached_blocks.get(digest) else {
                 continue;
             };
-            cached_prune_before = cached_prune_before.min(cached.block.height.get());
+            cached_prune_before = cached_prune_before.min(cached.block.header.height.get());
         }
 
         let pruned = self
             .cached_blocks
             .iter()
             .filter_map(|(digest, cached)| {
-                (cached.block.height.get() < cached_prune_before).then_some(*digest)
+                (cached.block.header.height.get() < cached_prune_before).then_some(*digest)
             })
             .collect::<Vec<_>>();
         for digest in &pruned {
@@ -526,7 +526,7 @@ mod tests {
         assert!(matches!(state.should_upload(&digest), Decision::Wait));
         assert_eq!(state.cached_block(&digest).as_ref(), Some(&block));
 
-        state.finish_certificate_upload(&digest, Some(block.height.get()));
+        state.finish_certificate_upload(&digest, Some(block.header.height.get()));
 
         assert!(matches!(state.should_upload(&digest), Decision::Skip));
         assert!(state.cached_block(&digest).is_none());
@@ -591,8 +591,8 @@ mod tests {
             state.start_certificate_upload(digest);
             state.start_certificate_upload(digest);
             state.finish_certificate_upload(&digest, None);
-            state.finish_certificate_upload(&digest, Some(block.height.get()));
-            state.advance_queue_floor(block.height.get() + 1);
+            state.finish_certificate_upload(&digest, Some(block.header.height.get()));
+            state.advance_queue_floor(block.header.height.get() + 1);
 
             let encoded = context.encode();
             assert!(encoded.contains("indexer_shared_cached_blocks 0"));
@@ -645,7 +645,7 @@ mod tests {
                 "indexer_shared_cache_insert_total{source=\"producer_record\"} 1",
             ));
 
-            state.mark_uploaded(digest, first.height.get());
+            state.mark_uploaded(digest, first.header.height.get());
 
             let encoded = context.encode();
             assert!(encoded.contains("indexer_shared_cached_blocks 0"));
