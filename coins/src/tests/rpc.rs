@@ -66,7 +66,7 @@ impl crate::rpc::CoinQuery for MockQuery {
     }
 
     async fn state_root(&self) -> Result<commonware_cryptography::sha256::Digest, LedgerError> {
-        Ok(Sha256::hash(b"root"))
+        Ok(Sha256::hash(&[b"root"]))
     }
 }
 
@@ -134,6 +134,6 @@ fn coin_rpc_queries() {
             )
             .await
             .expect("root response");
-        assert_eq!(root.root, encode_hex(&Sha256::hash(b"root")));
+        assert_eq!(root.root, encode_hex(&Sha256::hash(&[b"root"])));
     });
 }

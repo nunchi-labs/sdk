@@ -10,7 +10,9 @@ use commonware_codec::{Encode, RangeCfg, ReadExt};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
     bls12381::{
-        dkg::feldman_desmedt::{DealerPrivMsg, DealerPubMsg, Info, Player, PlayerAck, Verdict},
+        dkg::feldman_desmedt::{
+            DealerPrivMsg, DealerPubMsg, Info, Player, PlayerAck, Reveal,
+        },
         primitives::{
             group::{Private, Scalar, Share},
             sharing::Mode,
@@ -56,6 +58,7 @@ fn create_round_info(signers: &[ed25519::PrivateKey]) -> Info<MinPk, ed25519::Pu
         0,
         None,
         Mode::NonZeroCounter,
+            Reveal::V1,
         dealers,
         players,
     )
@@ -147,11 +150,10 @@ fn finalized_dealer_log(
             .expect("player signer should exist")
             .clone();
         let mut player = Player::new(round_info.clone(), player_signer).expect("valid player");
-        let Verdict::Valid(ack) =
-            player.dealer_message::<N3f1>(dealer_pk.clone(), pub_msg.clone(), priv_msg)
-        else {
-            panic!("valid dealing should be acknowledged");
-        };
+        let ack = player
+            .dealer_message::<N3f1>(dealer_pk.clone(), pub_msg.clone(), priv_msg)
+            .expect("valid dealing")
+            .expect("dealing should be acknowledged");
         dealer.receive_player_ack(player_pk, ack).unwrap();
     }
     let signed = dealer.finalize::<N3f1>();
@@ -182,7 +184,7 @@ where
         .expect("sealed record should have ciphertext");
     *byte ^= 1;
     record.ciphertext = Bytes::from(ciphertext);
-    metadata.sync().await.expect("metadata sync should succeed");
+    let _ = metadata.sync().await.expect("metadata sync should succeed");
 }
 
 fn assert_open_failure<T>(result: Result<T, StorageError>, message: &str) {
@@ -459,7 +461,7 @@ fn storage_recovers_no_share_observer_epoch() {
         let (output, _) =
             commonware_cryptography::bls12381::dkg::feldman_desmedt::deal::<MinPk, _, N3f1>(
                 &mut context,
-                Default::default(),
+                Mode::NonZeroCounter,
                 participants,
             )
             .expect("deal should succeed");
@@ -742,13 +744,14 @@ fn test_dealer_handle_returns_true_for_valid_ack() {
                 player_signer,
             )
             .expect("valid player");
-        let Verdict::Valid(ack) = crypto_player.dealer_message::<N3f1>(
-            dealer_signer.public_key(),
-            pub_msg,
-            player_priv_msg,
-        ) else {
-            panic!("valid ack");
-        };
+        let ack = crypto_player
+            .dealer_message::<N3f1>(
+                dealer_signer.public_key(),
+                pub_msg,
+                player_priv_msg,
+            )
+            .expect("valid dealing")
+            .expect("valid ack");
 
         let result = dealer
             .handle(&mut storage, Epoch::zero(), player_pk, ack)
@@ -802,13 +805,14 @@ fn test_dealer_handle_returns_false_for_duplicate_ack() {
                 player_signer,
             )
             .expect("valid player");
-        let Verdict::Valid(ack) = crypto_player.dealer_message::<N3f1>(
-            dealer_signer.public_key(),
-            pub_msg,
-            player_priv_msg,
-        ) else {
-            panic!("valid ack");
-        };
+        let ack = crypto_player
+            .dealer_message::<N3f1>(
+                dealer_signer.public_key(),
+                pub_msg,
+                player_priv_msg,
+            )
+            .expect("valid dealing")
+            .expect("valid ack");
 
         let result = dealer
             .handle(&mut storage, Epoch::zero(), player_pk.clone(), ack.clone())

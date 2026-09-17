@@ -179,7 +179,7 @@ fn transaction_status_reports_lifecycle() {
         use commonware_cryptography::{Hasher, Sha256};
         let mut unknown_params = jsonrpsee::core::params::ObjectParams::new();
         unknown_params
-            .insert("hash", encode_hex(&Sha256::hash(b"missing")))
+            .insert("hash", encode_hex(&Sha256::hash(&[b"missing"])))
             .expect("serialize hash param");
         let response: TransactionStatusResponse = module
             .call("coins.transaction_status", unknown_params)

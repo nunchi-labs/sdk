@@ -25,12 +25,12 @@ impl ScopeId {
     }
 
     fn derive(kind: u8, module_namespace: &[u8], resource: &[u8]) -> Self {
-        let mut hasher = Sha256::new();
+        let mut hasher = Sha256::default();
         hasher.update(SCOPE_DOMAIN);
         hasher.update(&[kind]);
-        hasher.update(&Sha256::hash(module_namespace).0);
-        hasher.update(&Sha256::hash(resource).0);
-        Self(hasher.finalize())
+        hasher.update(&Sha256::hash(&[module_namespace]).0);
+        hasher.update(&Sha256::hash(&[resource]).0);
+        Self(hasher.finalize().1)
     }
 }
 

@@ -17,7 +17,7 @@ use commonware_cryptography::{
 use commonware_parallel::Sequential;
 use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
 use commonware_storage::mmr::Location;
-use commonware_utils::{non_empty_range, TestRng};
+use commonware_utils::{non_empty, non_empty_range, TestRng};
 use nunchi_chain::StateCommitment;
 use nunchi_dkg::{Context, Finalization, Scheme};
 
@@ -34,14 +34,14 @@ fn finalization(schemes: &[Scheme], view: u64, payload: &[u8]) -> Finalization {
     let proposal = Proposal::new(
         Round::new(Epoch::zero(), View::new(view)),
         View::new(view.saturating_sub(1)),
-        Sha256::hash(payload),
+        Sha256::hash(&[payload]),
     );
     let finalizes: Vec<_> = schemes
         .iter()
         .take(3)
         .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
         .collect();
-    CFinalization::from_finalizes(&schemes[0], &finalizes, &Sequential).unwrap()
+    CFinalization::from_finalizes(&schemes[0], non_empty![@finalizes.iter()], &Sequential).unwrap()
 }
 
 fn context() -> Context {

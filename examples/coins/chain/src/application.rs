@@ -15,5 +15,5 @@ pub type Application = nunchi_chain::Application<CoinsRuntime, ClobExtension>;
 pub type BasicApplication = nunchi_chain::Application<CoinsRuntime>;
 
 pub fn genesis_payload() -> sha256::Digest {
-    Sha256::hash(GENESIS)
+    Sha256::hash(&[GENESIS])
 }

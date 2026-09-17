@@ -1,11 +1,14 @@
 //! JSON-RPC surface for bridge finalization exchange.
 
+use commonware_codec::Encode;
 use commonware_consensus::{
-    marshal::{core::Mailbox as MarshalMailbox, standard::Standard, Identifier},
+    marshal::{
+        core::{Mailbox as MarshalMailbox, Variant},
+        Identifier,
+    },
     types::Height,
-    Block as ConsensusBlock, Viewable,
+    Viewable,
 };
-use commonware_cryptography::sha256::Digest;
 use jsonrpsee::{
     core::{async_trait, RegisterMethodError, RpcResult},
     proc_macros::rpc,
@@ -20,30 +23,34 @@ use crate::{BridgeMailbox, SubmitResult};
 /// Local finalization lookup required by the bridge RPC server.
 #[async_trait]
 pub trait LocalFinalizations: Clone + Send + Sync + 'static {
+    type Certificate: Encode + Send;
+
     async fn latest_height(&self) -> Option<u64>;
 
-    async fn finalization(&self, height: Height) -> Option<Finalization>;
+    async fn finalization(&self, height: Height) -> Option<Self::Certificate>;
 
-    async fn latest_finalization(&self) -> Result<Option<Finalization>, String>;
+    async fn latest_finalization(&self) -> Result<Option<Self::Certificate>, String>;
 }
 
 #[async_trait]
-impl<B> LocalFinalizations for MarshalMailbox<Scheme, Standard<B>>
+impl<V> LocalFinalizations for MarshalMailbox<Scheme, V>
 where
-    B: ConsensusBlock<Digest = Digest>,
+    V: Variant + Clone + Send + Sync + 'static,
 {
+    type Certificate = nunchi_dkg::Finalization<V::Commitment>;
+
     async fn latest_height(&self) -> Option<u64> {
-        self.get_info(Identifier::<Digest>::Latest)
+        self.get_info(Identifier::Latest)
             .await
             .map(|(height, _)| height.get())
     }
 
-    async fn finalization(&self, height: Height) -> Option<Finalization> {
+    async fn finalization(&self, height: Height) -> Option<Self::Certificate> {
         self.get_finalization(height).await
     }
 
-    async fn latest_finalization(&self) -> Result<Option<Finalization>, String> {
-        let Some((height, _)) = self.get_info(Identifier::<Digest>::Latest).await else {
+    async fn latest_finalization(&self) -> Result<Option<Self::Certificate>, String> {
+        let Some((height, _)) = self.get_info(Identifier::Latest).await else {
             return Ok(None);
         };
         let Some(finalization) = self.get_finalization(height).await else {

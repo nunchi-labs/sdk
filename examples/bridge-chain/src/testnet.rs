@@ -10,7 +10,7 @@ use commonware_consensus::marshal;
 use commonware_cryptography::{
     bls12381::{
         dkg::feldman_desmedt::{deal, Output},
-        primitives::{group, variant::MinSig},
+        primitives::{group, sharing::Mode, variant::MinSig},
     },
     ed25519, Signer,
 };
@@ -33,7 +33,8 @@ use nunchi_dkg::{
 };
 use nunchi_mempool::PoolConfig;
 use nunchi_chain::engine::{
-    default_state_prune_config, validate_state_prune_config, PruneConfigError,
+    default_state_prune_config, validate_state_prune_config, DEFAULT_MAX_PENDING_ACKS,
+    PruneConfigError,
 };
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
@@ -159,12 +160,14 @@ impl NodeConfig {
     }
 
     pub fn prune_config(&self) -> Result<PruneConfig, PruneConfigError> {
-        validate_state_prune_config(PruneConfig {
-            max_pending_acks: self.max_pending_acks,
-            maintenance_interval: self.maintenance_interval,
-            retained_marshal_blocks: self.retained_marshal_blocks,
-            retained_qmdb_blocks: self.retained_qmdb_blocks,
-        })
+        validate_state_prune_config(
+            PruneConfig {
+                maintenance_interval: self.maintenance_interval,
+                retained_marshal_blocks: self.retained_marshal_blocks,
+                retained_qmdb_blocks: self.retained_qmdb_blocks,
+            },
+            self.max_pending_acks,
+        )
     }
 }
 
@@ -500,7 +503,7 @@ fn material(validators: u32, seed: u64) -> Result<Material, Error> {
     let participants_set = Set::from_iter_dedup(participants.clone());
     let mut rng = StdRng::seed_from_u64(seed);
     let (output, shares) =
-        deal::<MinSig, _, N3f1>(&mut rng, Default::default(), participants_set.clone())
+        deal::<MinSig, _, N3f1>(&mut rng, Mode::NonZeroCounter, participants_set.clone())
             .map_err(Error::Deal)?;
     let peer_config = PeerConfig {
         num_participants_per_round: vec![validators],
@@ -582,7 +585,7 @@ fn write_chain(
             consensus: ConsensusConfig::default(),
             networking: NetworkConfig::default(),
             state_sync: false,
-            max_pending_acks: default_state_prune_config().max_pending_acks,
+            max_pending_acks: DEFAULT_MAX_PENDING_ACKS,
             maintenance_interval: default_state_prune_config().maintenance_interval,
             retained_marshal_blocks: default_state_prune_config().retained_marshal_blocks,
             retained_qmdb_blocks: default_state_prune_config().retained_qmdb_blocks,
@@ -730,12 +733,15 @@ async fn start_node(
         "starting bridge-chain validator"
     );
 
+    let max_peers_per_set = NonZeroUsize::new(config.peer_config.participants.len().max(2))
+        .expect("max_peers_per_set");
     let p2p_config = discovery::Config::local(
         private_key.clone(),
         config.namespace.as_bytes(),
         config.listen_address,
         config.dialable_address.clone(),
         bootstrappers,
+        max_peers_per_set,
         config.networking.max_message_size,
     );
     let (mut network, mut oracle) = Network::new(context.child("network"), p2p_config);
@@ -744,12 +750,11 @@ async fn start_node(
     let channel_rate = Quota::per_second(
         NonZeroU32::new(config.networking.channel_rate_per_second).unwrap_or(NZU32!(u32::MAX)),
     );
-    let mut register =
-        |channel| network.register(channel, channel_rate, config.networking.channel_backlog);
+    let mut register = |channel| network.register(channel, channel_rate);
     let pending = register(channels::PENDING);
     let recovered = register(channels::RECOVERED);
     let resolver = register(channels::RESOLVER);
-    let broadcast = register(channels::BROADCAST);
+    let marshal_shards = register(channels::MARSHAL);
     let dkg = register(channels::DKG);
     let backfill = register(channels::BACKFILL);
     let probe = register(channels::PROBE);
@@ -773,6 +778,7 @@ async fn start_node(
         certification_timeout: Duration::from_millis(config.consensus.certification_timeout_ms),
         strategy: Sequential,
         state_sync: config.state_sync,
+        max_pending_acks: config.max_pending_acks,
         prune_config,
         pool_config: PoolConfig::default(),
         bridge: bridge_mailbox,
@@ -784,7 +790,6 @@ async fn start_node(
         peer_provider: oracle.clone(),
         blocker: oracle,
         mailbox_size: NZUsize!(1024),
-        initial: Duration::from_secs(1),
         timeout: Duration::from_secs(2),
         fetch_retry_timeout: Duration::from_millis(100),
         priority_requests: false,
@@ -804,7 +809,7 @@ async fn start_node(
         pending,
         recovered,
         resolver,
-        broadcast,
+        marshal_shards,
         dkg,
         marshal_resolver,
         ContinueOnUpdate::boxed(),

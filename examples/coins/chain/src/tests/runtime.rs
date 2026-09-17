@@ -206,9 +206,9 @@ fn bridge_lock_escrows_funds_and_records_transfer() {
             .id;
 
         // Pin the bridge chain id, then lock 400 to a destination chain.
-        let local_chain = ChainId(Sha256::hash(b"local-chain"));
+        let local_chain = ChainId(Sha256::hash(&[b"local-chain"]));
         BridgeGenesis::new(local_chain).apply(&mut state);
-        let dest = ChainId(Sha256::hash(b"dest-chain"));
+        let dest = ChainId(Sha256::hash(&[b"dest-chain"]));
         let recipient = Address::external(&PrivateKey::ed25519_from_seed(2).public_key());
         let lock = Transaction::from(BridgeTransaction::sign(
             &alice,
@@ -289,9 +289,9 @@ fn bridge_lock_reverts_escrow_when_bridge_rejects() {
             .token
             .id;
 
-        let local_chain = ChainId(Sha256::hash(b"local-chain"));
+        let local_chain = ChainId(Sha256::hash(&[b"local-chain"]));
         BridgeGenesis::new(local_chain).apply(&mut state);
-        let dest = ChainId(Sha256::hash(b"dest-chain"));
+        let dest = ChainId(Sha256::hash(&[b"dest-chain"]));
         let recipient = Address::external(&PrivateKey::ed25519_from_seed(2).public_key());
 
         // Sufficient balance, but a wrong bridge nonce (expected 0, given 5).
@@ -405,9 +405,9 @@ fn bridge_lock_rejects_insufficient_balance_without_side_effects() {
             .token
             .id;
 
-        let local_chain = ChainId(Sha256::hash(b"local-chain"));
+        let local_chain = ChainId(Sha256::hash(&[b"local-chain"]));
         BridgeGenesis::new(local_chain).apply(&mut state);
-        let dest = ChainId(Sha256::hash(b"dest-chain"));
+        let dest = ChainId(Sha256::hash(&[b"dest-chain"]));
         let recipient = Address::external(&PrivateKey::ed25519_from_seed(2).public_key());
 
         // Lock more than alice holds: the escrow debit fails before any write.

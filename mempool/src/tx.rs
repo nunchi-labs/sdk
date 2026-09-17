@@ -29,9 +29,9 @@ impl NonceKey {
 ///
 /// Implemented for any [`nunchi_common::Transaction`] via the blanket impl
 /// below; chains with custom transaction types implement it directly.
-pub trait PoolTransaction: Clone + Send + 'static {
+pub trait PoolTransaction: Clone + Send + Sync + 'static {
     /// The exact committed nonce sequence this transaction belongs to.
-    type NonceKey: Clone + Ord + Hash + Debug + Send + 'static;
+    type NonceKey: Clone + Ord + Hash + Debug + Send + Sync + 'static;
     /// Failure of the stateless validity check.
     type VerifyError: std::error::Error + Send + 'static;
 
@@ -46,7 +46,7 @@ pub trait PoolTransaction: Clone + Send + 'static {
     fn verify(&self) -> Result<(), Self::VerifyError>;
 }
 
-impl<Op: Operation + Clone + Send + 'static> PoolTransaction for Transaction<Op> {
+impl<Op: Operation + Clone + Send + Sync + 'static> PoolTransaction for Transaction<Op> {
     type NonceKey = NonceKey;
     type VerifyError = SignatureError;
 

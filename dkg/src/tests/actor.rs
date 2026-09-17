@@ -8,7 +8,7 @@ use commonware_consensus::types::Epoch;
 use commonware_consensus::{types::Height, Heightable};
 use commonware_cryptography::{
     bls12381::{
-        dkg::feldman_desmedt::{deal, Dealer, DealerLog, Player, Verdict},
+        dkg::feldman_desmedt::{deal, Dealer, DealerLog, Player, Reveal},
         primitives::{sharing::Mode, variant::MinSig},
     },
     ed25519::{PrivateKey, PublicKey as Ed25519PublicKey},
@@ -173,6 +173,7 @@ fn finalized_dkg_log(
         epoch.get(),
         None,
         Mode::NonZeroCounter,
+            Reveal::V1,
         dealers,
         players,
     )
@@ -195,11 +196,10 @@ fn finalized_dkg_log(
             .cloned()
             .expect("player signer should exist");
         let mut player = Player::new(round.clone(), player_signer).expect("player should start");
-        let Verdict::Valid(ack) =
-            player.dealer_message::<N3f1>(dealer_pk.clone(), public.clone(), private)
-        else {
-            panic!("valid dealing should be acknowledged");
-        };
+        let ack = player
+            .dealer_message::<N3f1>(dealer_pk.clone(), public.clone(), private)
+            .expect("valid dealing")
+            .expect("dealing should be acknowledged");
         dealer.receive_player_ack(player_pk, ack).unwrap();
     }
 
@@ -228,7 +228,7 @@ fn assert_recovered_storage_controls_dkg_mode_on_restart(execution: Execution, s
             .expect("signer should exist");
         let (output, shares) = deal::<MinSig, _, N3f1>(
             &mut context,
-            Default::default(),
+            Mode::NonZeroCounter,
             peer_config.dealers(RECOVERED_ROUND),
         )
         .expect("deal should succeed");

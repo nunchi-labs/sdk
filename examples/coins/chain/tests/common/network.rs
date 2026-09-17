@@ -9,10 +9,12 @@ use commonware_cryptography::{
     Signer,
 };
 use commonware_glue::stateful::PruneConfig;
+use commonware_cryptography::bls12381::primitives::sharing::Mode;
 use commonware_p2p::{
     simulated::{self, Link, Network, Oracle, Receiver, Sender},
     Manager, TrackedPeers,
 };
+use commonware_utils::probability;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     deterministic::{self, Runner},
@@ -22,6 +24,7 @@ use commonware_utils::{
     ordered::{Map, Set},
     N3f1, NZUsize, NZU32, NZU64,
 };
+use std::num::NonZeroUsize;
 use governor::Quota;
 use nunchi_authority::AuthorityLedger;
 use nunchi_chain::engine::default_state_prune_config;
@@ -47,7 +50,7 @@ const MAX_BLOCK_TRANSACTIONS: usize = 256;
 const PENDING_CHANNEL: u64 = nunchi_coins_chain::channels::PENDING;
 const RECOVERED_CHANNEL: u64 = nunchi_coins_chain::channels::RECOVERED;
 const RESOLVER_CHANNEL: u64 = nunchi_coins_chain::channels::RESOLVER;
-const BROADCAST_CHANNEL: u64 = nunchi_coins_chain::channels::BROADCAST;
+const MARSHAL_CHANNEL: u64 = nunchi_coins_chain::channels::MARSHAL;
 const DKG_CHANNEL: u64 = nunchi_coins_chain::channels::DKG;
 const BACKFILL_CHANNEL: u64 = nunchi_coins_chain::channels::BACKFILL;
 const MEMPOOL_CHANNEL: u64 = nunchi_coins_chain::channels::MEMPOOL;
@@ -81,7 +84,7 @@ impl ThresholdFixture {
             .map(|signer| signer.public_key())
             .collect::<Vec<_>>();
         let participants_set = Set::from_iter_dedup(participants.clone());
-        let (output, shares) = deal::<MinSig, _, N3f1>(rng, Default::default(), participants_set)
+        let (output, shares) = deal::<MinSig, _, N3f1>(rng, Mode::NonZeroCounter, participants_set)
             .expect("trusted initial deal should succeed");
         Self {
             output,
@@ -96,7 +99,7 @@ pub(crate) fn reliable_link() -> Link {
     Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
-        success_rate: 1.0,
+        success_rate: probability!(1.0),
     }
 }
 
@@ -105,7 +108,7 @@ pub(crate) fn lossy_link() -> Link {
     Link {
         latency: Duration::from_millis(200),
         jitter: Duration::from_millis(150),
-        success_rate: 0.75,
+        success_rate: probability!(0.75),
     }
 }
 
@@ -134,7 +137,7 @@ struct ValidatorChannels {
     pending: Channel,
     recovered: Channel,
     resolver: Channel,
-    broadcast: Channel,
+    marshal_shards: Channel,
     dkg: Channel,
     backfill: Channel,
     mempool: Channel,
@@ -200,6 +203,8 @@ impl TestNetworkBuilder {
             context.child("network"),
             simulated::Config {
                 max_size: 1024 * 1024,
+                max_peers_per_set: NonZeroUsize::new((self.validators + self.secondaries).max(2) as usize)
+                    .expect("max_peers_per_set"),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
             },
@@ -559,7 +564,8 @@ impl TestNetwork<'_> {
                 node.marshal
                     .get_block(commonware_consensus::types::Height::new(height))
                     .await
-                    .expect("finalized block missing"),
+                    .expect("finalized block missing")
+                    .into_inner(),
             );
         }
         blocks
@@ -715,6 +721,7 @@ async fn start_validator(
         certification_timeout: cfg.certification_timeout,
         strategy: Sequential,
         state_sync,
+        max_pending_acks: NZUsize!(16),
         prune_config: cfg.prune_config,
         max_block_transactions: MAX_BLOCK_TRANSACTIONS,
         pool_config: PoolConfig::default(),
@@ -729,7 +736,6 @@ async fn start_validator(
         peer_provider: oracle.manager(),
         blocker: oracle.control(public_key.clone()),
         mailbox_size: NZUsize!(1024),
-        initial: Duration::from_secs(1),
         timeout: Duration::from_secs(2),
         fetch_retry_timeout: Duration::from_millis(100),
         priority_requests: false,
@@ -753,7 +759,7 @@ async fn start_validator(
         channels.pending,
         channels.recovered,
         channels.resolver,
-        channels.broadcast,
+        channels.marshal_shards,
         channels.dkg,
         channels.mempool,
         channels.clob,
@@ -805,8 +811,8 @@ async fn register_nodes(
             .await
             .unwrap();
         let resolver = oracle.register(RESOLVER_CHANNEL, TEST_QUOTA).await.unwrap();
-        let broadcast = oracle
-            .register(BROADCAST_CHANNEL, TEST_QUOTA)
+        let marshal_shards = oracle
+            .register(MARSHAL_CHANNEL, TEST_QUOTA)
             .await
             .unwrap();
         let dkg = oracle.register(DKG_CHANNEL, TEST_QUOTA).await.unwrap();
@@ -824,7 +830,7 @@ async fn register_nodes(
                 pending,
                 recovered,
                 resolver,
-                broadcast,
+                marshal_shards,
                 dkg,
                 backfill,
                 mempool,

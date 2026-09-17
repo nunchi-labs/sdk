@@ -5,7 +5,7 @@ use commonware_cryptography::{ed25519, sha256::Digest, Hasher, Sha256, Signer as
 use commonware_formatting::hex;
 use commonware_p2p::simulated::{self, Link, Network};
 use commonware_runtime::{deterministic, Clock, Runner as _, Supervisor};
-use commonware_utils::{NZUsize, NZU32};
+use commonware_utils::{probability, NZUsize, NZU32};
 use governor::Quota;
 use nunchi_common::{Address, CommitState, RuntimeContext, StateError, StateStore};
 use nunchi_crypto::PrivateKey;
@@ -41,7 +41,7 @@ impl CommitState for MemoryStore {
     }
 
     fn root(&self) -> Digest {
-        Sha256::hash(b"clob-test-root")
+        Sha256::hash(&[b"clob-test-root"])
     }
 }
 
@@ -63,7 +63,7 @@ fn context(height: u64) -> RuntimeContext {
 }
 
 fn asset(seed: &'static [u8]) -> AssetId {
-    AssetId(Sha256::hash(seed))
+    AssetId(Sha256::hash(&[seed]))
 }
 
 const MARKET_TICK: u128 = 5;
@@ -74,7 +74,7 @@ fn market() -> crate::MarketId {
 }
 
 fn fake_fill_id(seed: u64) -> FillId {
-    FillId(Sha256::hash(seed.encode().as_ref()))
+    FillId(Sha256::hash(&[seed.encode().as_ref()]))
 }
 
 fn encoded_id<T: Encode>(id: &T) -> String {
@@ -841,6 +841,7 @@ fn actor_p2p_gossips_submitted_orders_to_peer_books() {
             runtime.child("network"),
             simulated::Config {
                 max_size: 1024 * 1024,
+                max_peers_per_set: NZUsize!(2),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
             },
@@ -862,7 +863,7 @@ fn actor_p2p_gossips_submitted_orders_to_peer_books() {
         let link = Link {
             latency: Duration::from_millis(10),
             jitter: Duration::ZERO,
-            success_rate: 1.0,
+            success_rate: probability!(1.0),
         };
         oracle
             .add_link(peer_a.clone(), peer_b.clone(), link.clone())
@@ -1178,7 +1179,7 @@ fn rpc_queries_ledger_state() {
         assert_eq!(fill_response.taker_order, encoded_id(&bid_id));
 
         let root = rpc.state_root().await.unwrap();
-        assert_eq!(root.root, encoded_id(&Sha256::hash(b"clob-test-root")));
+        assert_eq!(root.root, encoded_id(&Sha256::hash(&[b"clob-test-root"])));
 
         assert!(rpc
             .book(encoded_id(&market), "crossed".to_string())

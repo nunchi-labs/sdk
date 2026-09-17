@@ -9,28 +9,30 @@ use std::{
 
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
-use commonware_consensus::types::{Epoch, Height, Round, View};
+use commonware_consensus::{
+    marshal::ancestry,
+    types::{Epoch, Height, Round, View},
+};
 use commonware_cryptography::{ed25519, sha256::Digest, Digestible as _, Hasher, Sha256, Signer};
 use commonware_glue::stateful::{
     db::{DatabaseSet as _, Merkleized as _},
-    Application as StatefulApplication,
+    Application as StatefulApplication, Input,
 };
 use commonware_runtime::{deterministic, Clock as _, Runner as _, Supervisor as _};
 use commonware_storage::mmr::Location;
 use commonware_utils::{non_empty_range, SystemTimeExt as _, NZU64};
-use nunchi_common::shared_database;
 use futures::{lock::Mutex as AsyncMutex, FutureExt};
 use nunchi_common::{
-    Event, EventSink, NoopEventSink, QmdbBackend, QmdbBatch, QmdbDatabaseSet, QmdbMerkleized,
-    QmdbState, Runtime, RuntimeContext, StateError, StateStore,
+    shared_database, Event, EventSink, NoopEventSink, QmdbBackend, QmdbBatch, QmdbDatabaseSet,
+    QmdbMerkleized, QmdbState, Runtime, RuntimeContext, StateError, StateStore,
 };
-use nunchi_dkg::Context;
 use nunchi_mempool::{Mempool, PoolConfig, PoolTransaction};
+
 use thiserror::Error;
 
 use crate::{
-    Application, Block, EventConsumer, InMemoryEventConsumer, NoConsensusExtension,
-    NoopEventConsumer, StateCommitment,
+    dummy_genesis_parent, Application, CodingBlock, CodingContext, EmptyPayload, EventConsumer,
+    InMemoryEventConsumer, NoConsensusExtension, NoopEventConsumer, StateCommitment,
 };
 
 // Keep this test runtime local to nunchi-chain so event reporting tests do not depend on
@@ -83,7 +85,7 @@ impl PoolTransaction for TestTx {
     type VerifyError = BadSignature;
 
     fn digest(&self) -> Digest {
-        Sha256::hash(&self.id.to_be_bytes())
+        Sha256::hash(&[self.id.to_be_bytes().as_slice()])
     }
 
     fn nonce_key(&self) -> Self::NonceKey {
@@ -178,23 +180,23 @@ impl Runtime for TestRuntime {
 
 fn write_transaction<S: StateStore>(state: &mut S, transaction: &TestTx) {
     state.set(
-        Sha256::hash(&transaction.id.to_be_bytes()),
+        Sha256::hash(&[transaction.id.to_be_bytes().as_slice()]),
         vec![transaction.value],
     );
 }
 
-fn state_range<E: commonware_storage::Context>(
+fn state_range<E: commonware_storage::Context + commonware_runtime::Spawner>(
     merkleized: &QmdbMerkleized<E>,
 ) -> commonware_utils::range::NonEmptyRange<Location> {
     let bounds = merkleized.bounds();
-    non_empty_range!(bounds.inactivity_floor, Location::new(bounds.total_size))
+    non_empty_range!(bounds.inactivity_floor, bounds.tip.size)
 }
 
-fn test_context(view: u64, parent: &Block<TestTx>) -> Context {
-    Context {
+fn test_context(view: u64, _parent: &CodingBlock<TestTx>) -> CodingContext<TestTx> {
+    CodingContext {
         round: Round::new(Epoch::zero(), View::new(view)),
         leader: ed25519::PrivateKey::from_seed(view).public_key(),
-        parent: (View::new(view - 1), parent.digest()),
+        parent: (View::new(view - 1), dummy_genesis_parent()),
     }
 }
 
@@ -203,7 +205,7 @@ async fn committed_state<E>(
     transactions: &[TestTx],
 ) -> StateCommitment
 where
-    E: commonware_storage::Context,
+    E: commonware_storage::Context + commonware_runtime::Spawner,
 {
     merkleized_state(databases, transactions).await.0
 }
@@ -213,7 +215,7 @@ async fn merkleized_state<E>(
     transactions: &[TestTx],
 ) -> (StateCommitment, QmdbMerkleized<E>)
 where
-    E: commonware_storage::Context,
+    E: commonware_storage::Context + commonware_runtime::Spawner,
 {
     let mut batch = QmdbBatch::new(databases.new_batches().await);
     let mut events = NoopEventSink;
@@ -236,36 +238,36 @@ where
 }
 
 fn block(
-    parent: &Block<TestTx>,
+    parent: &CodingBlock<TestTx>,
     transactions: Vec<TestTx>,
     state: StateCommitment,
-) -> Block<TestTx> {
-    Block::new(
+) -> CodingBlock<TestTx> {
+    CodingBlock::new(
         test_context(parent.header.height.get() + 1, parent),
         parent.digest(),
         parent.header.height.next(),
         parent.header.timestamp + 1,
         transactions,
         None,
-        (),
+        EmptyPayload,
         state,
     )
 }
 
 fn block_at(
-    parent: &Block<TestTx>,
+    parent: &CodingBlock<TestTx>,
     timestamp: u64,
     transactions: Vec<TestTx>,
     state: StateCommitment,
-) -> Block<TestTx> {
-    Block::new(
+) -> CodingBlock<TestTx> {
+    CodingBlock::new(
         test_context(parent.header.height.get() + 1, parent),
         parent.digest(),
         parent.header.height.next(),
         timestamp,
         transactions,
         None,
-        (),
+        EmptyPayload,
         state,
     )
 }
@@ -275,7 +277,7 @@ async fn application(
 ) -> (
     Application<TestRuntime>,
     QmdbDatabaseSet<deterministic::Context>,
-    Block<TestTx>,
+    CodingBlock<TestTx>,
 ) {
     application_with_interval(context, NZU64!(1)).await
 }
@@ -286,7 +288,7 @@ async fn application_with_interval(
 ) -> (
     Application<TestRuntime>,
     QmdbDatabaseSet<deterministic::Context>,
-    Block<TestTx>,
+    CodingBlock<TestTx>,
 ) {
     application_with_events_and_interval(context, NoopEventConsumer, min_block_interval_ms).await
 }
@@ -297,7 +299,7 @@ async fn application_with_events<Events>(
 ) -> (
     Application<TestRuntime, NoConsensusExtension, Events>,
     QmdbDatabaseSet<deterministic::Context>,
-    Block<TestTx>,
+    CodingBlock<TestTx>,
 )
 where
     Events: EventConsumer,
@@ -312,7 +314,7 @@ async fn application_with_events_and_interval<Events>(
 ) -> (
     Application<TestRuntime, NoConsensusExtension, Events>,
     QmdbDatabaseSet<deterministic::Context>,
-    Block<TestTx>,
+    CodingBlock<TestTx>,
 )
 where
     Events: EventConsumer,
@@ -335,7 +337,7 @@ where
         events,
         Arc::new(AsyncMutex::new(Height::zero())),
         genesis_state,
-        Sha256::hash(b"test genesis"),
+        Sha256::hash(&[b"test genesis"]),
     );
     let parent = app.genesis_block();
     (app, databases, parent)
@@ -345,16 +347,19 @@ async fn propose(
     app: &mut Application<TestRuntime>,
     databases: &QmdbDatabaseSet<deterministic::Context>,
     context: deterministic::Context,
-    parent: Block<TestTx>,
+    parent: CodingBlock<TestTx>,
 ) -> Option<commonware_glue::stateful::Proposed<Application<TestRuntime>, deterministic::Context>> {
-    let (mempool, mut input) = Mempool::new(PoolConfig::default());
+    let (mempool, input) = Mempool::new(PoolConfig::default());
     mempool.start(context.child("proposal_mempool"));
     <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::propose(
         app,
         (context, test_context(parent.header.height.get() + 1, &parent)),
-        futures::stream::iter([Arc::new(parent)]),
+        ancestry::from_iter([Arc::new(parent)]),
         databases.new_batches().await,
-        &mut input,
+        Input {
+            upstream: (),
+            provider: input,
+        },
     )
     .await
 }
@@ -363,35 +368,35 @@ async fn verify(
     app: &mut Application<TestRuntime>,
     databases: &QmdbDatabaseSet<deterministic::Context>,
     context: deterministic::Context,
-    block: Block<TestTx>,
-    parent: Block<TestTx>,
+    block: CodingBlock<TestTx>,
+    parent: CodingBlock<TestTx>,
 ) -> bool {
     <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::verify(
         app,
         (context, block.header.context.clone()),
-        futures::stream::iter([Arc::new(block), Arc::new(parent)]),
+        ancestry::from_iter([Arc::new(block), Arc::new(parent)]),
         databases.new_batches().await,
     )
     .await
     .is_some()
 }
 
-fn state_of(block: &Block<TestTx>) -> StateCommitment {
+fn state_of(block: &CodingBlock<TestTx>) -> StateCommitment {
     StateCommitment {
         root: block.header.state_root,
         range: block.header.state_range.clone(),
     }
 }
 
-fn with_timestamp(block: &Block<TestTx>, timestamp: u64) -> Block<TestTx> {
-    Block::new(
+fn with_timestamp(block: &CodingBlock<TestTx>, timestamp: u64) -> CodingBlock<TestTx> {
+    CodingBlock::new(
         block.header.context.clone(),
         block.header.parent,
         block.header.height,
         timestamp,
         block.transactions.clone(),
         block.header.reshare_log.clone(),
-        (),
+        EmptyPayload,
         state_of(block),
     )
 }
@@ -587,7 +592,7 @@ fn timestamp_wait_is_cancellation_safe() {
                 <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::verify(
                     &mut app,
                     (context.child("verify"), block.header.context.clone()),
-                    futures::stream::iter([Arc::new(block), Arc::new(parent)]),
+                    ancestry::from_iter([Arc::new(block), Arc::new(parent)]),
                     batches,
                 );
             futures::pin_mut!(verify);
@@ -618,7 +623,7 @@ fn verification_uses_noop_event_sink() {
             <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::verify(
                 &mut app,
                 (context.child("verify"), block.header.context.clone()),
-                futures::stream::iter([Arc::new(block), Arc::new(parent)]),
+                ancestry::from_iter([Arc::new(block), Arc::new(parent)]),
                 databases.new_batches().await,
             )
             .await;
@@ -649,7 +654,8 @@ fn certified_apply_uses_default_noop_consumer() {
                 &block,
                 databases.new_batches().await,
             )
-            .await;
+            .await
+            .expect("certified apply");
 
         assert_eq!(merkleized.root(), block.header.state_root);
         assert_eq!(state_range(&merkleized), block.header.state_range);
@@ -690,7 +696,8 @@ fn certified_apply_discards_events_from_failed_transaction() {
             &mut app,
             (context.child("finalized"), block.header.context.clone()),
             &block,
-            &databases,
+            (),
+            databases.readers(),
         )
         .await;
 
@@ -734,17 +741,20 @@ fn finalized_reports_collected_events_after_database_finalize() {
                 &block,
                 databases.new_batches().await,
             )
-            .await;
+            .await
+            .expect("certified apply");
 
         assert!(consumer.is_empty());
-        databases.finalize(merkleized).await;
+        databases.apply(merkleized).await;
+        let _ = databases.finalize().await;
         assert!(consumer.is_empty());
 
         <ReportingApplication as StatefulApplication<deterministic::Context>>::finalized(
             &mut app,
             (context.child("finalized"), block.header.context.clone()),
             &block,
-            &databases,
+            (),
+            databases.readers(),
         )
         .await;
 
@@ -758,7 +768,7 @@ fn finalized_reports_collected_events_after_database_finalize() {
 
         let first = &report.transactions[0];
         assert_eq!(first.tx_index, 0);
-        assert_eq!(first.tx_digest, Sha256::hash(&20u64.to_be_bytes()));
+        assert_eq!(first.tx_digest, Sha256::hash(&[20u64.to_be_bytes().as_slice()]));
         assert_eq!(first.events.len(), 2);
         assert_eq!(first.events[0].event_index, 0);
         assert_eq!(
@@ -778,7 +788,7 @@ fn finalized_reports_collected_events_after_database_finalize() {
 
         let second = &report.transactions[1];
         assert_eq!(second.tx_index, 1);
-        assert_eq!(second.tx_digest, Sha256::hash(&21u64.to_be_bytes()));
+        assert_eq!(second.tx_digest, Sha256::hash(&[21u64.to_be_bytes().as_slice()]));
         assert_eq!(second.events[0].event_index, 0);
         assert_eq!(second.events[1].event_index, 1);
     });
@@ -799,12 +809,14 @@ fn finalized_reports_empty_events_when_handoff_is_missing() {
         let (state, merkleized) = merkleized_state(&databases, &transactions).await;
         let block = block(&parent, transactions, state);
 
-        databases.finalize(merkleized).await;
+        databases.apply(merkleized).await;
+        let _ = databases.finalize().await;
         <ReportingApplication as StatefulApplication<deterministic::Context>>::finalized(
             &mut app,
             (context.child("finalized"), block.header.context.clone()),
             &block,
-            &databases,
+            (),
+            databases.readers(),
         )
         .await;
 

@@ -5,7 +5,7 @@ use commonware_consensus::types::{Epoch, Height, Round, View};
 use commonware_cryptography::{ed25519, sha256, Digest as _, Digestible as _, Signer};
 use commonware_storage::mmr::Location;
 use commonware_utils::{non_empty_range, NZU32};
-use nunchi_chain::{Block, BlockHeader, NoConsensusExtension, StateCommitment};
+use nunchi_chain::{Block, BlockHeader, EmptyPayload, NoConsensusExtension, StateCommitment};
 use nunchi_dkg::Context;
 
 fn context() -> Context {
@@ -35,7 +35,7 @@ fn block(transactions: Vec<u8>) -> Block<u8> {
         1,
         transactions,
         None,
-        (),
+        EmptyPayload,
         state(),
     )
 }
