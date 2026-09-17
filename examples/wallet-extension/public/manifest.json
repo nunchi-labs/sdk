@@ -2,10 +2,15 @@
   "manifest_version": 3,
   "name": "Nunchi Wallet",
   "version": "0.1.0",
-  "description": "Draft Chrome wallet for Nunchi coins. Ed25519 or P-256 keys, nch addresses. Not an EVM wallet.",
+  "description": "Chrome wallet for Nunchi coins. Ed25519 or P-256 keys, nch addresses. Not an EVM wallet.",
+  "homepage_url": "https://nunchi.trade",
+  "minimum_chrome_version": "120",
   "permissions": ["storage"],
   "host_permissions": ["http://localhost:*/", "http://127.0.0.1:*/"],
   "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"
+  },
   "background": {
     "service_worker": "background.js",
     "type": "module"
@@ -14,12 +19,14 @@
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icon-16.png",
+      "32": "icon-32.png",
       "48": "icon-48.png",
       "128": "icon-128.png"
     }
   },
   "icons": {
     "16": "icon-16.png",
+    "32": "icon-32.png",
     "48": "icon-48.png",
     "128": "icon-128.png"
   },

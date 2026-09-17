@@ -3,10 +3,13 @@ export const ALLOWED_PAGE_MESSAGES = new Set([
   "REQUEST_TRANSACTION",
   "REQUEST_SIGN",
   "GET_CHAIN_ID",
+  "GET_ACCOUNTS",
+  "DISCONNECT",
 ]);
 
 export const PAGE_REQUEST_TARGET = "nunchi-wallet-content";
 export const PAGE_RESPONSE_TARGET = "nunchi-wallet-inpage";
+export const PAGE_EVENT_TARGET = "nunchi-wallet-event";
 
 export function isAllowedPageMessage(type: string): boolean {
   return ALLOWED_PAGE_MESSAGES.has(type);
@@ -30,4 +33,16 @@ export function isTrustedPageResponse(
   token: string
 ): boolean {
   return !!token && data.target === PAGE_RESPONSE_TARGET && data.token === token;
+}
+
+export function isTrustedPageEvent(
+  data: { target?: unknown; token?: unknown; event?: unknown },
+  token: string
+): boolean {
+  return (
+    !!token &&
+    data.target === PAGE_EVENT_TARGET &&
+    data.token === token &&
+    typeof data.event === "string"
+  );
 }

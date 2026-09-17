@@ -1,8 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
   isAllowedPageMessage,
+  isTrustedPageEvent,
   isTrustedPageRequest,
   isTrustedPageResponse,
+  PAGE_EVENT_TARGET,
   PAGE_REQUEST_TARGET,
   PAGE_RESPONSE_TARGET,
 } from "./page-messages";
@@ -13,6 +15,8 @@ describe("isAllowedPageMessage", () => {
     expect(isAllowedPageMessage("REQUEST_TRANSACTION")).toBe(true);
     expect(isAllowedPageMessage("REQUEST_SIGN")).toBe(true);
     expect(isAllowedPageMessage("GET_CHAIN_ID")).toBe(true);
+    expect(isAllowedPageMessage("GET_ACCOUNTS")).toBe(true);
+    expect(isAllowedPageMessage("DISCONNECT")).toBe(true);
   });
 
   it("blocks privileged types", () => {
@@ -51,5 +55,17 @@ describe("isTrustedPageResponse", () => {
     expect(isTrustedPageResponse({ target: PAGE_RESPONSE_TARGET, token: "tok" }, "tok")).toBe(true);
     expect(isTrustedPageResponse({ target: PAGE_RESPONSE_TARGET, token: "tok" }, "other")).toBe(false);
     expect(isTrustedPageResponse({ target: PAGE_REQUEST_TARGET, token: "tok" }, "tok")).toBe(false);
+  });
+});
+
+describe("isTrustedPageEvent", () => {
+  it("requires the event target, token, and event name", () => {
+    expect(
+      isTrustedPageEvent({ target: PAGE_EVENT_TARGET, token: "tok", event: "accountsChanged" }, "tok")
+    ).toBe(true);
+    expect(isTrustedPageEvent({ target: PAGE_EVENT_TARGET, token: "tok" }, "tok")).toBe(false);
+    expect(
+      isTrustedPageEvent({ target: PAGE_EVENT_TARGET, token: "other", event: "accountsChanged" }, "tok")
+    ).toBe(false);
   });
 });

@@ -24,6 +24,8 @@ Private keys leave the browser only in two cases:
 1. User-approved signed transactions broadcast to configured RPC
 2. Explicit backup/export initiated by user from the extension page
 
+The password is never sent to Nunchi. If it is lost, the keystore cannot be recovered.
+
 ## Network
 - Default RPC: `http://localhost:8545` (local node)
 - Remote RPC: user-configured, extension does not recommend or endorse any service
@@ -33,7 +35,7 @@ Private keys leave the browser only in two cases:
 The content script:
 - Injects `window.nunchi` provider for dApp compatibility
 - Does NOT scrape or read DOM content
-- Only forwards allowlisted messages: `REQUEST_CONNECTION`, `REQUEST_TRANSACTION`, `REQUEST_SIGN`, `GET_CHAIN_ID`
+- Only forwards allowlisted messages: `REQUEST_CONNECTION`, `REQUEST_TRANSACTION`, `REQUEST_SIGN`, `GET_CHAIN_ID`, `GET_ACCOUNTS`, `DISCONNECT`
 
 ## Children
 This extension is not directed at children under 13.

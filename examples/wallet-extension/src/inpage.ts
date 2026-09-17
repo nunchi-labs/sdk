@@ -1,5 +1,5 @@
 import { randomRequestId } from "./ids";
-import { isTrustedPageResponse, PAGE_REQUEST_TARGET } from "./page-messages";
+import { isTrustedPageEvent, isTrustedPageResponse, PAGE_REQUEST_TARGET } from "./page-messages";
 
 const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -46,7 +46,6 @@ class NunchiWalletProvider extends EventEmitter implements NunchiProvider {
   readonly isNunchi = true;
   private pendingRequests: Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }> =
     new Map();
-  private connectedAddress: string | null = null;
 
   constructor() {
     super();
@@ -56,6 +55,13 @@ class NunchiWalletProvider extends EventEmitter implements NunchiProvider {
   private setupMessageListener(): void {
     window.addEventListener("message", (event) => {
       if (event.source !== window) return;
+      if (isTrustedPageEvent(event.data || {}, bridgeToken)) {
+        const accounts = Array.isArray(event.data.params) ? (event.data.params as string[]) : [];
+        if (event.data.event === "accountsChanged") {
+          this.emit("accountsChanged", accounts);
+        }
+        return;
+      }
       if (!isTrustedPageResponse(event.data || {}, bridgeToken)) return;
 
       const { requestId, response } = event.data;
@@ -106,13 +112,14 @@ class NunchiWalletProvider extends EventEmitter implements NunchiProvider {
         if (!result?.address) {
           throw new Error("No account returned");
         }
-        this.connectedAddress = result.address;
         this.emit("accountsChanged", [result.address]);
         return [result.address];
       }
 
       case "nunchi_accounts": {
-        return this.connectedAddress ? [this.connectedAddress] : [];
+        const result = (await this.sendMessage("GET_ACCOUNTS")) as { accounts?: string[] };
+        const accounts = Array.isArray(result?.accounts) ? result.accounts : [];
+        return accounts;
       }
 
       case "nunchi_chainId": {
@@ -128,6 +135,12 @@ class NunchiWalletProvider extends EventEmitter implements NunchiProvider {
       case "nunchi_sendTransaction": {
         const [txParams] = params as [{ coin: string; from: string; to: string; amount: string }];
         return this.sendMessage("REQUEST_TRANSACTION", txParams);
+      }
+
+      case "nunchi_disconnect": {
+        await this.sendMessage("DISCONNECT");
+        this.emit("accountsChanged", []);
+        return true;
       }
 
       default:
@@ -147,16 +160,18 @@ class CoinsProviderImpl implements CoinsProvider {
 const nunchiProvider = new NunchiWalletProvider();
 const coinsProvider = new CoinsProviderImpl(nunchiProvider);
 
-Object.defineProperty(window, "nunchi", {
-  value: nunchiProvider,
-  writable: false,
-  configurable: false,
-});
-
-Object.defineProperty((window as unknown as { nunchi: NunchiProvider }).nunchi, "coins", {
-  value: coinsProvider,
-  writable: false,
-  configurable: false,
-});
-
-window.dispatchEvent(new Event("nunchi#initialized"));
+try {
+  Object.defineProperty(window, "nunchi", {
+    value: nunchiProvider,
+    writable: false,
+    configurable: false,
+  });
+  Object.defineProperty((window as unknown as { nunchi: NunchiProvider }).nunchi, "coins", {
+    value: coinsProvider,
+    writable: false,
+    configurable: false,
+  });
+  window.dispatchEvent(new Event("nunchi#initialized"));
+} catch {
+  console.warn("[Nunchi Wallet] window.nunchi is already defined");
+}

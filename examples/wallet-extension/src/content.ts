@@ -1,7 +1,30 @@
 import { randomRequestId } from "./ids";
-import { isTrustedPageRequest, PAGE_RESPONSE_TARGET } from "./page-messages";
+import { isTrustedPageRequest, PAGE_EVENT_TARGET, PAGE_RESPONSE_TARGET } from "./page-messages";
 
 const bridgeToken = randomRequestId("tok");
+
+function connectPagePort(): void {
+  const port = chrome.runtime.connect({ name: "nunchi-page" });
+  port.onMessage.addListener((message: { event?: string; params?: unknown }) => {
+    if (typeof message?.event !== "string") {
+      return;
+    }
+    window.postMessage(
+      {
+        target: PAGE_EVENT_TARGET,
+        token: bridgeToken,
+        event: message.event,
+        params: message.params,
+      },
+      "*"
+    );
+  });
+  port.onDisconnect.addListener(() => {
+    setTimeout(connectPagePort, 1000);
+  });
+}
+
+connectPagePort();
 
 window.addEventListener("message", async (event) => {
   if (event.source !== window) return;

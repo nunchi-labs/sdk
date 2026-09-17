@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { Lock, Copy, Send as SendIcon, Activity, Settings as SettingsIcon, ArrowLeft, Check } from "lucide-react";
 import type { Settings, SubmittedTx } from "./types";
 import { rpcOriginPattern } from "./rpc";
+import { requireAddress, requireAmount, requireCoinHex } from "./validate";
 import "./popup.css";
 
 type View =
@@ -23,6 +24,13 @@ interface WalletInfo {
   address?: string;
   curve?: string;
   needsBackup?: boolean;
+}
+
+function errorMessage(err: unknown, fallback: string): string {
+  if (err instanceof Error && err.message) {
+    return err.message;
+  }
+  return fallback;
 }
 
 function App() {
@@ -46,27 +54,37 @@ function App() {
   async function loadState() {
     try {
       const response = await chrome.runtime.sendMessage({ type: "GET_STATE" });
-      if (response.success) {
-        setWalletInfo(response.data);
-        if (!response.data.hasWallet) {
-          setView("onboarding");
-        } else if (response.data.needsBackup) {
-          setView("backup");
-        } else if (!response.data.isUnlocked) {
-          setView("unlock");
-        } else {
-          setView("home");
-        }
+      if (!response?.success) {
+        setError(response?.error || "Failed to load wallet");
+        return;
+      }
+      setError("");
+      setWalletInfo(response.data);
+      if (!response.data.hasWallet) {
+        setView("onboarding");
+      } else if (response.data.needsBackup) {
+        setView("backup");
+      } else if (!response.data.isUnlocked) {
+        setView("unlock");
+      } else {
+        setView("home");
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err, "Failed to load wallet"));
     }
   }
 
   if (view === "loading") {
     return (
       <div className="container">
-        <div className="loading">Loading wallet...</div>
+        <div className="loading" data-testid="loading">
+          Loading wallet...
+        </div>
+        {error && (
+          <div className="error" data-testid="error">
+            {error}
+          </div>
+        )}
       </div>
     );
   }
@@ -105,7 +123,11 @@ function App() {
       {view === "send" && walletInfo && <Send address={walletInfo.address!} onBack={() => setView("home")} />}
       {view === "activity" && <ActivityView onBack={() => setView("home")} />}
       {view === "settings" && <SettingsView onBack={() => loadState()} />}
-      {error && <div className="error">{error}</div>}
+      {error && (
+        <div className="error" data-testid="error">
+          {error}
+        </div>
+      )}
     </div>
   );
 }
@@ -144,19 +166,23 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
         setError(response.error || "Failed to create wallet");
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err, "Failed to create wallet"));
     } finally {
       setLoading(false);
     }
   }
 
   async function handleImport() {
-    if (password.length < 8) {
-      setError("Password must be at least 8 characters");
-      return;
-    }
     if (!privateKeyInput.trim()) {
       setError("Private key is required");
+      return;
+    }
+    if (password !== confirmPassword) {
+      setError("Passwords do not match");
+      return;
+    }
+    if (password.length < 8) {
+      setError("Password must be at least 8 characters");
       return;
     }
 
@@ -175,7 +201,7 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
         setError(response.error || "Failed to import wallet");
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err, "Failed to import wallet"));
     } finally {
       setLoading(false);
     }
@@ -189,10 +215,14 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
           <p className="subtitle">Browser wallet for Nunchi chains</p>
         </div>
         <div className="content">
-          <button className="primary large" onClick={() => setMode("create")}>
+          <p className="disclosure" data-testid="security-disclosure">
+            Keys stay on this device, encrypted with your password. Nunchi cannot recover a lost password.
+            This software is unaudited; do not store funds you cannot afford to lose.
+          </p>
+          <button className="primary large" data-testid="create-wallet" onClick={() => setMode("create")}>
             Create New Wallet
           </button>
-          <button className="secondary large" onClick={() => setMode("import")}>
+          <button className="secondary large" data-testid="import-wallet" onClick={() => setMode("import")}>
             Import Wallet
           </button>
         </div>
@@ -204,7 +234,7 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
     return (
       <div className="container">
         <div className="header">
-          <button className="back" onClick={() => setMode("choice")}>
+          <button className="back" data-testid="back" onClick={() => setMode("choice")} aria-label="Back">
             <ArrowLeft size={20} />
           </button>
           <h2>Create Wallet</h2>
@@ -212,21 +242,42 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
         <div className="content">
           <label>
             <span>Curve</span>
-            <select value={curve} onChange={(e) => setCurve(e.target.value as "Ed25519" | "Secp256r1")}>
+            <select
+              data-testid="curve-select"
+              value={curve}
+              onChange={(e) => setCurve(e.target.value as "Ed25519" | "Secp256r1")}
+            >
               <option value="Ed25519">Ed25519</option>
               <option value="Secp256r1">Secp256r1 (P-256)</option>
             </select>
           </label>
           <label>
             <span>Password</span>
-            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+            <input
+              type="password"
+              data-testid="password"
+              autoComplete="new-password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
           </label>
           <label>
             <span>Confirm Password</span>
-            <input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} />
+            <input
+              type="password"
+              data-testid="confirm-password"
+              autoComplete="new-password"
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && void handleCreate()}
+            />
           </label>
-          {error && <div className="error">{error}</div>}
-          <button className="primary large" onClick={handleCreate} disabled={loading}>
+          {error && (
+            <div className="error" data-testid="error">
+              {error}
+            </div>
+          )}
+          <button className="primary large" data-testid="create-submit" onClick={handleCreate} disabled={loading}>
             {loading ? "Creating..." : "Create"}
           </button>
         </div>
@@ -237,7 +288,7 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
   return (
     <div className="container">
       <div className="header">
-        <button className="back" onClick={() => setMode("choice")}>
+        <button className="back" data-testid="back" onClick={() => setMode("choice")} aria-label="Back">
           <ArrowLeft size={20} />
         </button>
         <h2>Import Wallet</h2>
@@ -246,18 +297,41 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
         <label>
           <span>Private Key (hex)</span>
           <textarea
+            data-testid="import-key"
             value={privateKeyInput}
             onChange={(e) => setPrivateKeyInput(e.target.value)}
             placeholder="01..."
             rows={3}
+            spellCheck={false}
           />
         </label>
         <label>
           <span>Password</span>
-          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+          <input
+            type="password"
+            data-testid="password"
+            autoComplete="new-password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
         </label>
-        {error && <div className="error">{error}</div>}
-        <button className="primary large" onClick={handleImport} disabled={loading}>
+        <label>
+          <span>Confirm Password</span>
+          <input
+            type="password"
+            data-testid="confirm-password"
+            autoComplete="new-password"
+            value={confirmPassword}
+            onChange={(e) => setConfirmPassword(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && void handleImport()}
+          />
+        </label>
+        {error && (
+          <div className="error" data-testid="error">
+            {error}
+          </div>
+        )}
+        <button className="primary large" data-testid="import-submit" onClick={handleImport} disabled={loading}>
           {loading ? "Importing..." : "Import"}
         </button>
       </div>
@@ -289,7 +363,7 @@ function BackupView({ onComplete }: { onComplete: () => void }) {
         setError(response.error || "Failed to reveal backup");
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err, "Failed to reveal backup"));
     } finally {
       setLoading(false);
     }
@@ -309,7 +383,7 @@ function BackupView({ onComplete }: { onComplete: () => void }) {
         setError(response.error || "Failed to reveal backup");
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err, "Failed to reveal backup"));
     } finally {
       setLoading(false);
     }
@@ -325,28 +399,48 @@ function BackupView({ onComplete }: { onComplete: () => void }) {
         {privateKey ? (
           <label>
             <span>Private Key</span>
-            <textarea readOnly value={privateKey} rows={4} />
+            <textarea data-testid="backup-key" readOnly value={privateKey} rows={4} />
           </label>
         ) : (
           <label>
             <span>Password</span>
-            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+            <input
+              type="password"
+              data-testid="backup-password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
           </label>
         )}
-        {error && <div className="error">{error}</div>}
+        {error && (
+          <div className="error" data-testid="error">
+            {error}
+          </div>
+        )}
         {!privateKey && (
-          <button className="primary large" onClick={() => void revealWithPassword()} disabled={loading || !password}>
+          <button
+            className="primary large"
+            data-testid="reveal-key"
+            onClick={() => void revealWithPassword()}
+            disabled={loading || !password}
+          >
             {loading ? "Revealing..." : "Reveal key"}
           </button>
         )}
         {privateKey && (
           <>
             <label className="checkRow">
-              <input type="checkbox" checked={saved} onChange={(e) => setSaved(e.target.checked)} />
+              <input
+                type="checkbox"
+                data-testid="backup-saved"
+                checked={saved}
+                onChange={(e) => setSaved(e.target.checked)}
+              />
               <span>I saved this private key in a safe place</span>
             </label>
             <button
               className="primary large"
+              data-testid="backup-continue"
               disabled={!saved}
               onClick={async () => {
                 const response = await chrome.runtime.sendMessage({ type: "CONFIRM_BACKUP" });
@@ -387,7 +481,7 @@ function Unlock({ onUnlock }: { onUnlock: () => void }) {
         setError(response.error || "Failed to unlock wallet");
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err, "Failed to unlock wallet"));
     } finally {
       setLoading(false);
     }
@@ -404,14 +498,20 @@ function Unlock({ onUnlock }: { onUnlock: () => void }) {
           <span>Password</span>
           <input
             type="password"
+            data-testid="password"
+            autoComplete="current-password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleUnlock()}
             autoFocus
           />
         </label>
-        {error && <div className="error">{error}</div>}
-        <button className="primary large" onClick={handleUnlock} disabled={loading}>
+        {error && (
+          <div className="error" data-testid="error">
+            {error}
+          </div>
+        )}
+        <button className="primary large" data-testid="unlock-submit" onClick={handleUnlock} disabled={loading}>
           {loading ? "Unlocking..." : "Unlock"}
         </button>
       </div>
@@ -467,14 +567,20 @@ function Home({
   }
 
   async function copyAddress() {
-    await navigator.clipboard.writeText(address);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    try {
+      await navigator.clipboard.writeText(address);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setCopied(false);
+    }
   }
 
   async function handleLock() {
-    await chrome.runtime.sendMessage({ type: "LOCK_WALLET" });
-    onLock();
+    const response = await chrome.runtime.sendMessage({ type: "LOCK_WALLET" });
+    if (response?.success) {
+      onLock();
+    }
   }
 
   return (
@@ -482,23 +588,25 @@ function Home({
       <div className="header">
         <h1>Nunchi Wallet</h1>
         <div className="headerActions">
-          <button className="icon" onClick={handleLock}>
+          <button className="icon" data-testid="lock" onClick={handleLock} aria-label="Lock wallet">
             <Lock size={18} />
           </button>
-          <button className="icon" onClick={onSettings}>
+          <button className="icon" data-testid="settings" onClick={onSettings} aria-label="Settings">
             <SettingsIcon size={18} />
           </button>
         </div>
       </div>
       <div className="content">
         <div className="addressCard">
-          <div className="addressText">{compactAddress(address)}</div>
-          <button className="icon" onClick={copyAddress}>
+          <div className="addressText" data-testid="home-address" data-address={address} title={address}>
+            {compactAddress(address)}
+          </div>
+          <button className="icon" data-testid="copy-address" onClick={copyAddress} aria-label="Copy address">
             {copied ? <Check size={16} /> : <Copy size={16} />}
           </button>
         </div>
         {settings && (
-          <div className="networkBadge">
+          <div className="networkBadge" data-testid="network-badge">
             {settings.network} / {settings.chainId} ({settings.rpcUrl})
           </div>
         )}
@@ -506,20 +614,28 @@ function Home({
           <div className="balanceLabel">Balance</div>
           {settings?.displayCoin ? (
             <>
-              <div className="balanceValue">{balance ?? (balanceError ? "-" : "...")}</div>
+              <div className="balanceValue" data-testid="balance-value">
+                {balance ?? (balanceError ? "-" : "...")}
+              </div>
               <div className="subtitle">{compactAddress(settings.displayCoin, 8, 8)}</div>
             </>
           ) : (
-            <div className="subtitle">Set a display coin in Settings to load a balance</div>
+            <div className="subtitle" data-testid="balance-hint">
+              Set a display coin in Settings to load a balance
+            </div>
           )}
-          {balanceError && <div className="error">{balanceError}</div>}
+          {balanceError && (
+            <div className="error" data-testid="error">
+              {balanceError}
+            </div>
+          )}
         </div>
         <div className="actions">
-          <button className="primary" onClick={onSend}>
+          <button className="primary" data-testid="send" onClick={onSend}>
             <SendIcon size={16} />
             Send
           </button>
-          <button className="secondary" onClick={onActivity}>
+          <button className="secondary" data-testid="activity" onClick={onActivity}>
             <Activity size={16} />
             Activity
           </button>
@@ -551,6 +667,15 @@ function Send({ address, onBack }: { address: string; onBack: () => void }) {
       setError("All fields are required");
       return;
     }
+    try {
+      requireAddress(recipient);
+      requireCoinHex(coin);
+      requireAmount(amount);
+    } catch (err) {
+      setError(errorMessage(err, "Invalid transfer"));
+      setConfirming(false);
+      return;
+    }
     if (!confirming) {
       setConfirming(true);
       setError("");
@@ -573,7 +698,7 @@ function Send({ address, onBack }: { address: string; onBack: () => void }) {
         setError(response.error || "Transaction failed");
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err, "Transaction failed"));
     } finally {
       setLoading(false);
     }
@@ -586,7 +711,7 @@ function Send({ address, onBack }: { address: string; onBack: () => void }) {
           <h2>Transaction Sent</h2>
         </div>
         <div className="content">
-          <div className="success">
+          <div className="success" data-testid="send-success">
             <Check size={48} />
           </div>
         </div>
@@ -597,25 +722,29 @@ function Send({ address, onBack }: { address: string; onBack: () => void }) {
   return (
     <>
       <div className="header">
-        <button className="back" onClick={onBack}>
+        <button className="back" data-testid="back" onClick={onBack} aria-label="Back">
           <ArrowLeft size={20} />
         </button>
         <h2>Send</h2>
       </div>
       <div className="content">
         {confirming ? (
-          <div className="detailCard">
+          <div className="detailCard" data-testid="send-review">
             <div className="detailRow">
               <span>From</span>
               <div className="mono">{address}</div>
             </div>
             <div className="detailRow">
               <span>To</span>
-              <div className="mono">{recipient}</div>
+              <div className="mono" data-testid="review-to">
+                {recipient}
+              </div>
             </div>
             <div className="detailRow">
               <span>Amount</span>
-              <div className="mono">{amount}</div>
+              <div className="mono" data-testid="review-amount">
+                {amount}
+              </div>
             </div>
             <div className="detailRow">
               <span>Coin</span>
@@ -628,28 +757,55 @@ function Send({ address, onBack }: { address: string; onBack: () => void }) {
               <span>Recipient</span>
               <input
                 type="text"
+                data-testid="recipient"
                 value={recipient}
                 onChange={(e) => setRecipient(e.target.value)}
                 placeholder="nch1..."
+                spellCheck={false}
+                autoComplete="off"
               />
             </label>
             <label>
               <span>Coin (hex)</span>
-              <input type="text" value={coin} onChange={(e) => setCoin(e.target.value)} placeholder="a1b2c3..." />
+              <input
+                type="text"
+                data-testid="coin"
+                value={coin}
+                onChange={(e) => setCoin(e.target.value)}
+                placeholder="a1b2c3..."
+                spellCheck={false}
+                autoComplete="off"
+              />
             </label>
             <label>
               <span>Amount</span>
-              <input type="text" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="1000" />
+              <input
+                type="text"
+                data-testid="amount"
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+                placeholder="1000"
+                inputMode="numeric"
+              />
             </label>
           </>
         )}
-        {error && <div className="error">{error}</div>}
+        {error && (
+          <div className="error" data-testid="error">
+            {error}
+          </div>
+        )}
         {confirming && (
-          <button className="secondary large" onClick={() => setConfirming(false)} disabled={loading}>
+          <button
+            className="secondary large"
+            data-testid="send-edit"
+            onClick={() => setConfirming(false)}
+            disabled={loading}
+          >
             Edit
           </button>
         )}
-        <button className="primary large" onClick={handleSend} disabled={loading}>
+        <button className="primary large" data-testid="send-submit" onClick={handleSend} disabled={loading}>
           {loading ? "Sending..." : confirming ? "Confirm send" : "Review"}
         </button>
       </div>
@@ -674,18 +830,20 @@ function ActivityView({ onBack }: { onBack: () => void }) {
   return (
     <>
       <div className="header">
-        <button className="back" onClick={onBack}>
+        <button className="back" data-testid="back" onClick={onBack} aria-label="Back">
           <ArrowLeft size={20} />
         </button>
         <h2>Activity</h2>
       </div>
       <div className="content">
         {activity.length === 0 ? (
-          <div className="empty">No transactions yet</div>
+          <div className="empty" data-testid="activity-empty">
+            No transactions yet
+          </div>
         ) : (
-          <div className="activityList">
+          <div className="activityList" data-testid="activity-list">
             {activity.map((tx) => (
-              <div key={tx.hash} className="activityItem">
+              <div key={tx.hash} className="activityItem" data-testid="activity-item">
                 <div className="activityIcon">
                   <SendIcon size={16} />
                 </div>
@@ -741,7 +899,12 @@ function SettingsView({ onBack }: { onBack: () => void }) {
     try {
       const origin = rpcOriginPattern(settings.rpcUrl);
       if (chrome.permissions?.request) {
-        await chrome.permissions.request({ origins: [origin] });
+        const have = chrome.permissions.contains
+          ? await chrome.permissions.contains({ origins: [origin] })
+          : false;
+        if (!have) {
+          await chrome.permissions.request({ origins: [origin] });
+        }
       }
       const response = await chrome.runtime.sendMessage({ type: "UPDATE_SETTINGS", payload: settings });
       if (!response.success) {
@@ -750,7 +913,7 @@ function SettingsView({ onBack }: { onBack: () => void }) {
       }
       onBack();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err, "Failed to save settings"));
     }
   }
 
@@ -789,12 +952,18 @@ function SettingsView({ onBack }: { onBack: () => void }) {
     }
   }
 
-  if (loading) return <div className="container">Loading...</div>;
+  if (loading) {
+    return (
+      <div className="container" data-testid="settings-loading">
+        Loading...
+      </div>
+    );
+  }
 
   return (
     <>
       <div className="header">
-        <button className="back" onClick={onBack}>
+        <button className="back" data-testid="back" onClick={onBack} aria-label="Back">
           <ArrowLeft size={20} />
         </button>
         <h2>Settings</h2>
@@ -802,37 +971,57 @@ function SettingsView({ onBack }: { onBack: () => void }) {
       <div className="content">
         <label>
           <span>Network</span>
-          <input type="text" value={settings.network} onChange={(e) => setSettings({ ...settings, network: e.target.value })} />
+          <input
+            type="text"
+            data-testid="settings-network"
+            value={settings.network}
+            onChange={(e) => setSettings({ ...settings, network: e.target.value })}
+          />
         </label>
         <label>
           <span>Chain ID</span>
-          <input type="text" value={settings.chainId} onChange={(e) => setSettings({ ...settings, chainId: e.target.value })} />
+          <input
+            type="text"
+            data-testid="settings-chain-id"
+            value={settings.chainId}
+            onChange={(e) => setSettings({ ...settings, chainId: e.target.value })}
+          />
         </label>
         <label>
           <span>RPC URL</span>
-          <input type="text" value={settings.rpcUrl} onChange={(e) => setSettings({ ...settings, rpcUrl: e.target.value })} />
+          <input
+            type="text"
+            data-testid="settings-rpc"
+            value={settings.rpcUrl}
+            onChange={(e) => setSettings({ ...settings, rpcUrl: e.target.value })}
+            spellCheck={false}
+          />
         </label>
         <label>
           <span>Display coin (hex)</span>
           <input
             type="text"
+            data-testid="settings-display-coin"
             value={settings.displayCoin}
             onChange={(e) => setSettings({ ...settings, displayCoin: e.target.value })}
             placeholder="32-byte coin id"
+            spellCheck={false}
           />
         </label>
-        <button className="primary large" onClick={() => void saveSettings()}>
+        <button className="primary large" data-testid="settings-save" onClick={() => void saveSettings()}>
           Save
         </button>
 
         <h2>Connected Sites</h2>
         {sites.length === 0 ? (
-          <div className="empty">No connected sites</div>
+          <div className="empty" data-testid="connected-empty">
+            No connected sites
+          </div>
         ) : (
           sites.map((site) => (
-            <div className="detailRow" key={site}>
+            <div className="detailRow" key={site} data-testid="connected-site" data-origin={site}>
               <div className="mono">{site}</div>
-              <button className="danger" onClick={() => void disconnect(site)}>
+              <button className="danger" data-testid="disconnect-site" onClick={() => void disconnect(site)}>
                 Disconnect
               </button>
             </div>
@@ -842,31 +1031,60 @@ function SettingsView({ onBack }: { onBack: () => void }) {
         <h2>Export Key</h2>
         <label>
           <span>Password</span>
-          <input type="password" value={exportPassword} onChange={(e) => setExportPassword(e.target.value)} />
+          <input
+            type="password"
+            data-testid="export-password"
+            value={exportPassword}
+            onChange={(e) => setExportPassword(e.target.value)}
+          />
         </label>
         {exportedKey && (
           <label>
             <span>Private Key</span>
-            <textarea readOnly value={exportedKey} rows={3} />
+            <textarea data-testid="exported-key" readOnly value={exportedKey} rows={3} />
           </label>
         )}
-        <button className="secondary large" onClick={() => void exportKey()} disabled={!exportPassword}>
+        <button
+          className="secondary large"
+          data-testid="export-key"
+          onClick={() => void exportKey()}
+          disabled={!exportPassword}
+        >
           Export
         </button>
 
         <h2>Delete Wallet</h2>
         <label>
           <span>Password</span>
-          <input type="password" value={deletePassword} onChange={(e) => setDeletePassword(e.target.value)} />
+          <input
+            type="password"
+            data-testid="delete-password"
+            value={deletePassword}
+            onChange={(e) => setDeletePassword(e.target.value)}
+          />
         </label>
         <label>
           <span>Type DELETE</span>
-          <input type="text" value={deleteConfirm} onChange={(e) => setDeleteConfirm(e.target.value)} />
+          <input
+            type="text"
+            data-testid="delete-confirm"
+            value={deleteConfirm}
+            onChange={(e) => setDeleteConfirm(e.target.value)}
+          />
         </label>
-        <button className="danger large" onClick={() => void deleteWallet()} disabled={!deletePassword}>
+        <button
+          className="danger large"
+          data-testid="delete-wallet"
+          onClick={() => void deleteWallet()}
+          disabled={!deletePassword}
+        >
           Delete wallet
         </button>
-        {error && <div className="error">{error}</div>}
+        {error && (
+          <div className="error" data-testid="error">
+            {error}
+          </div>
+        )}
       </div>
     </>
   );
@@ -922,7 +1140,7 @@ function ApproveConnection({ requestId }: { requestId: string }) {
       }
       window.close();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err, "Request failed"));
       setLoading(false);
     }
   }
@@ -934,8 +1152,10 @@ function ApproveConnection({ requestId }: { requestId: string }) {
           <h2>Connection Request</h2>
         </div>
         <div className="content">
-          <div className="error">{error}</div>
-          <button className="secondary large" onClick={() => window.close()}>
+          <div className="error" data-testid="error">
+            {error}
+          </div>
+          <button className="secondary large" data-testid="close-request" onClick={() => window.close()}>
             Close
           </button>
         </div>
@@ -961,7 +1181,9 @@ function ApproveConnection({ requestId }: { requestId: string }) {
         <div className="detailCard">
           <div className="detailRow">
             <span>Site</span>
-            <div className="mono">{pending.origin}</div>
+            <div className="mono" data-testid="pending-origin">
+              {pending.origin}
+            </div>
           </div>
           {pending.address && (
             <div className="detailRow">
@@ -970,12 +1192,16 @@ function ApproveConnection({ requestId }: { requestId: string }) {
             </div>
           )}
         </div>
-        {error && <div className="error">{error}</div>}
+        {error && (
+          <div className="error" data-testid="error">
+            {error}
+          </div>
+        )}
         <div className="actions">
-          <button className="danger" onClick={() => decide("REJECT_CONNECTION")} disabled={loading}>
+          <button className="danger" data-testid="reject-connect" onClick={() => decide("REJECT_CONNECTION")} disabled={loading}>
             Reject
           </button>
-          <button className="primary" onClick={() => decide("APPROVE_CONNECTION")} disabled={loading}>
+          <button className="primary" data-testid="approve-connect" onClick={() => decide("APPROVE_CONNECTION")} disabled={loading}>
             {loading ? "Working..." : "Connect"}
           </button>
         </div>
@@ -1017,7 +1243,7 @@ function ApproveTransaction({ requestId }: { requestId: string }) {
       }
       window.close();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err, "Request failed"));
       setLoading(false);
     }
   }
@@ -1029,8 +1255,10 @@ function ApproveTransaction({ requestId }: { requestId: string }) {
           <h2>Transaction Request</h2>
         </div>
         <div className="content">
-          <div className="error">{error}</div>
-          <button className="secondary large" onClick={() => window.close()}>
+          <div className="error" data-testid="error">
+            {error}
+          </div>
+          <button className="secondary large" data-testid="close-request" onClick={() => window.close()}>
             Close
           </button>
         </div>
@@ -1060,7 +1288,9 @@ function ApproveTransaction({ requestId }: { requestId: string }) {
         <div className="detailCard">
           <div className="detailRow">
             <span>Site</span>
-            <div className="mono">{pending.origin}</div>
+            <div className="mono" data-testid="pending-origin">
+              {pending.origin}
+            </div>
           </div>
           <div className="detailRow">
             <span>From</span>
@@ -1068,23 +1298,31 @@ function ApproveTransaction({ requestId }: { requestId: string }) {
           </div>
           <div className="detailRow">
             <span>To</span>
-            <div className="mono">{pending.to}</div>
+            <div className="mono" data-testid="pending-to">
+              {pending.to}
+            </div>
           </div>
           <div className="detailRow">
             <span>Amount</span>
-            <div className="mono">{pending.amount}</div>
+            <div className="mono" data-testid="pending-amount">
+              {pending.amount}
+            </div>
           </div>
           <div className="detailRow">
             <span>Coin</span>
             <div className="mono">{pending.coin}</div>
           </div>
         </div>
-        {error && <div className="error">{error}</div>}
+        {error && (
+          <div className="error" data-testid="error">
+            {error}
+          </div>
+        )}
         <div className="actions">
-          <button className="danger" onClick={() => decide("REJECT_TRANSACTION")} disabled={loading}>
+          <button className="danger" data-testid="reject-tx" onClick={() => decide("REJECT_TRANSACTION")} disabled={loading}>
             Reject
           </button>
-          <button className="primary" onClick={() => decide("APPROVE_TRANSACTION")} disabled={loading}>
+          <button className="primary" data-testid="approve-tx" onClick={() => decide("APPROVE_TRANSACTION")} disabled={loading}>
             {loading ? "Working..." : submit ? "Confirm" : "Sign"}
           </button>
         </div>

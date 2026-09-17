@@ -34,11 +34,13 @@ The extension does NOT automatically request broad network access.
 **Justified for dApp compatibility.**  
 - Injects `window.nunchi` provider into all pages (including iframes)
 - Allows dApps to detect wallet and request connection
-- Content script allowlists only four message types from pages:
+- Content script allowlists only these message types from pages:
   - `REQUEST_CONNECTION`
   - `REQUEST_TRANSACTION`
   - `REQUEST_SIGN`
   - `GET_CHAIN_ID`
+  - `GET_ACCOUNTS`
+  - `DISCONNECT`
 - All privileged operations (CREATE_WALLET, UNLOCK, APPROVE, etc.) require sender origin to be the extension itself
 
 The content script does NOT:

@@ -60,6 +60,12 @@ body {
   margin-top: 4px;
 }
 
+.disclosure {
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .headerActions {
   display: flex;
   gap: 8px;
@@ -208,6 +214,7 @@ textarea {
   font-size: 12px;
   color: var(--text-dim);
   text-align: center;
+  overflow-wrap: anywhere;
 }
 
 .balanceSection {

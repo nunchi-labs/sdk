@@ -77,6 +77,8 @@ export type MessageType =
   | "GET_SETTINGS"
   | "UPDATE_SETTINGS"
   | "GET_CHAIN_ID"
+  | "GET_ACCOUNTS"
+  | "DISCONNECT"
   | "GET_NONCE"
   | "GET_BALANCE"
   | "GET_ACTIVITY"

@@ -17,6 +17,8 @@ const PAGE_ORIGIN = "https://dapp.example";
 const PASSWORD = "correct-password";
 const GENERATED_KEY = "aa".repeat(32);
 const IMPORTED_KEY = "cc".repeat(32);
+const COIN = "aa".repeat(32);
+const NCH_ZERO = "nch1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqf5f4ay";
 
 const popup = { origin: EXTENSION_ORIGIN };
 const page = { origin: PAGE_ORIGIN, tab: { url: `${PAGE_ORIGIN}/` } };
@@ -226,9 +228,19 @@ describe("wallet message table", () => {
     const chain = await send(wallet, "GET_CHAIN_ID", page);
     expect(chain).toEqual({ success: true, data: { chainId: "nunchi-local" } });
 
+    const accounts = await send(wallet, "GET_ACCOUNTS", page);
+    expect(accounts).toEqual({ success: true, data: { accounts: [] } });
+
     const connection = await send(wallet, "REQUEST_CONNECTION", page);
     expect(connection.success).toBe(false);
     expect(connection.error).toBe("Wallet is locked");
+  });
+
+  it("rejects an unsupported curve", async () => {
+    const { wallet } = createHarness();
+    const created = await send(wallet, "CREATE_WALLET", popup, { curve: "secp256k1", password: PASSWORD });
+    expect(created.success).toBe(false);
+    expect(created.error).toBe("Unsupported curve");
   });
 
   it("rejects dApp requests with an empty sender origin", async () => {
@@ -305,14 +317,14 @@ describe("coin operations", () => {
     });
 
     const minted = await send(harness.wallet, "MINT", popup, {
-      coin: "aa".repeat(32),
-      to: "nch1to",
+      coin: COIN,
+      to: NCH_ZERO,
       amount: "10",
     });
     expect(minted.success, minted.error).toBe(true);
     expect(minted.data).toMatchObject({ hash: "0xabc" });
 
-    const burned = await send(harness.wallet, "BURN", popup, { coin: "aa".repeat(32), amount: "3" });
+    const burned = await send(harness.wallet, "BURN", popup, { coin: COIN, amount: "3" });
     expect(burned.success, burned.error).toBe(true);
 
     const registered = await send(harness.wallet, "REGISTER_ACCOUNT_POLICY", popup, {});
@@ -341,7 +353,7 @@ describe("sign versus submit", () => {
     harness.setNonce(3);
     const seen = harness.approvalPaths.length;
     const signPending = harness.wallet.handleMessage(
-      { type: "REQUEST_SIGN", payload: { coin: "nunchi", to: "addr-to", amount: "1" } },
+      { type: "REQUEST_SIGN", payload: { coin: COIN, to: NCH_ZERO, amount: "1" } },
       page
     );
     const signId = await waitForApproval(harness.approvalPaths, seen);
@@ -365,7 +377,7 @@ describe("sign versus submit", () => {
 
     const seen = harness.approvalPaths.length;
     const sendPending = harness.wallet.handleMessage(
-      { type: "REQUEST_TRANSACTION", payload: { coin: "nunchi", to: "addr-to", amount: "2" } },
+      { type: "REQUEST_TRANSACTION", payload: { coin: COIN, to: NCH_ZERO, amount: "2" } },
       page
     );
     const requestId = await waitForApproval(harness.approvalPaths, seen);
@@ -444,7 +456,7 @@ describe("persisted sites and pending requests", () => {
 
     const seen = harness.approvalPaths.length;
     void harness.wallet.handleMessage(
-      { type: "REQUEST_TRANSACTION", payload: { coin: "nunchi", to: "addr-to", amount: "3" } },
+      { type: "REQUEST_TRANSACTION", payload: { coin: COIN, to: NCH_ZERO, amount: "3" } },
       page
     );
     const requestId = await waitForApproval(harness.approvalPaths, seen);
@@ -478,6 +490,80 @@ describe("persisted sites and pending requests", () => {
   });
 });
 
+describe("accounts, disconnect, and validation", () => {
+  it("returns connected accounts only while unlocked", async () => {
+    const events: Array<{ origin: string; event: string; params: unknown }> = [];
+    const harness = createHarness();
+    harness.host.broadcast = (origin, event, params) => {
+      events.push({ origin, event, params });
+    };
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+
+    const before = await send(harness.wallet, "GET_ACCOUNTS", page);
+    expect(before).toEqual({ success: true, data: { accounts: [] } });
+
+    await connectSite(harness);
+    const connected = await send(harness.wallet, "GET_ACCOUNTS", page);
+    expect(connected).toEqual({
+      success: true,
+      data: { accounts: [keyPair(GENERATED_KEY).address] },
+    });
+    expect(events).toContainEqual({
+      origin: PAGE_ORIGIN,
+      event: "accountsChanged",
+      params: [keyPair(GENERATED_KEY).address],
+    });
+
+    expect((await send(harness.wallet, "LOCK_WALLET", popup)).success).toBe(true);
+    const locked = await send(harness.wallet, "GET_ACCOUNTS", page);
+    expect(locked).toEqual({ success: true, data: { accounts: [] } });
+    expect(events).toContainEqual({ origin: PAGE_ORIGIN, event: "accountsChanged", params: [] });
+
+    expect((await send(harness.wallet, "UNLOCK_WALLET", popup, { password: PASSWORD })).success).toBe(true);
+    expect((await send(harness.wallet, "GET_ACCOUNTS", page)).data).toEqual({
+      accounts: [keyPair(GENERATED_KEY).address],
+    });
+
+    expect((await send(harness.wallet, "DISCONNECT", page)).success).toBe(true);
+    expect((await send(harness.wallet, "GET_ACCOUNTS", page)).data).toEqual({ accounts: [] });
+    const sites = await send(harness.wallet, "GET_CONNECTED_SITES", popup);
+    expect(sites.data).toEqual([]);
+  });
+
+  it("rejects invalid transfer fields before opening approval", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    await connectSite(harness);
+
+    const invalid = await send(harness.wallet, "REQUEST_TRANSACTION", page, {
+      coin: "aa".repeat(16),
+      to: "not-an-address",
+      amount: "1",
+    });
+    expect(invalid.success).toBe(false);
+    expect(invalid.error).toBe("Coin id must be 32 bytes hex");
+    expect(harness.approvalPaths).toHaveLength(1);
+
+    const badAmount = await send(harness.wallet, "SEND_TRANSACTION", popup, {
+      from: keyPair(GENERATED_KEY).address,
+      to: NCH_ZERO,
+      coin: COIN,
+      amount: "1.5",
+    });
+    expect(badAmount.success).toBe(false);
+    expect(badAmount.error).toBe("Amount must be a whole number");
+  });
+
+  it("normalizes display coin hex when saving settings", async () => {
+    const { wallet } = createHarness();
+    const updated = await send(wallet, "UPDATE_SETTINGS", popup, {
+      displayCoin: `0x${"AB".repeat(32)}`,
+    });
+    expect(updated.success).toBe(true);
+    expect(updated.data).toMatchObject({ displayCoin: "ab".repeat(32) });
+  });
+});
+
 describe("import", () => {
   it("imports a key without a pending backup", async () => {
     const { wallet } = createHarness();
@@ -489,5 +575,170 @@ describe("import", () => {
       success: true,
       data: { address: keyPair(IMPORTED_KEY).address, curve: "ed25519", needsBackup: false },
     });
+  });
+});
+
+describe("security hardening", () => {
+  it("does not let a page confirm backup, export, or send", async () => {
+    const { wallet } = createHarness();
+    expect((await createWallet(wallet)).success).toBe(true);
+    for (const type of ["CONFIRM_BACKUP", "EXPORT_PRIVATE_KEY", "SEND_TRANSACTION", "GET_BALANCE"] as MessageType[]) {
+      const response = await send(wallet, type, page, { password: PASSWORD });
+      expect(response.error, type).toBe("Unauthorized: privileged operation");
+    }
+  });
+
+  it("rejects opaque and file origins for page messages", async () => {
+    const { wallet } = createHarness();
+    for (const origin of ["null", "file://", ""]) {
+      const response = await send(wallet, "GET_CHAIN_ID", { origin });
+      expect(response.success, origin).toBe(false);
+      expect(response.error, origin).toBe("Missing sender origin");
+    }
+  });
+
+  it("rejects a second create and parallel creates", async () => {
+    const { wallet } = createHarness();
+    const first = wallet.handleMessage(
+      { type: "CREATE_WALLET", payload: { curve: "Ed25519", password: PASSWORD } },
+      popup
+    );
+    const second = wallet.handleMessage(
+      { type: "CREATE_WALLET", payload: { curve: "Ed25519", password: PASSWORD } },
+      popup
+    );
+    const results = await Promise.all([
+      first.then((response) => ({ ok: true, response })).catch((error) => ({
+        ok: false,
+        response: { success: false, error: error instanceof Error ? error.message : String(error) },
+      })),
+      second.then((response) => ({ ok: true, response })).catch((error) => ({
+        ok: false,
+        response: { success: false, error: error instanceof Error ? error.message : String(error) },
+      })),
+    ]);
+    const errors = results.filter((result) => !result.response.success).map((result) => result.response.error);
+    const successes = results.filter((result) => result.response.success);
+    expect(successes).toHaveLength(1);
+    expect(errors.some((error) => error === "Wallet is busy" || error?.includes("already exists"))).toBe(true);
+
+    const again = await send(wallet, "CREATE_WALLET", popup, { curve: "Ed25519", password: PASSWORD });
+    expect(again.success).toBe(false);
+    expect(again.error).toMatch(/already exists/);
+  });
+
+  it("does not confirm a backup that was never revealed", async () => {
+    const { wallet } = createHarness();
+    expect((await createWallet(wallet)).success).toBe(true);
+    const confirmed = await send(wallet, "CONFIRM_BACKUP", popup);
+    expect(confirmed.success).toBe(false);
+    expect(confirmed.error).toBe("Backup has not been revealed");
+  });
+
+  it("shares lockout across unlock and export", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    expect((await send(harness.wallet, "LOCK_WALLET", popup)).success).toBe(true);
+    for (let i = 0; i < MAX_UNLOCK_ATTEMPTS; i++) {
+      const failed = await send(harness.wallet, "UNLOCK_WALLET", popup, { password: "wrong-password" });
+      expect(failed.error).toBe("Invalid password");
+    }
+    const exported = await send(harness.wallet, "EXPORT_PRIVATE_KEY", popup, { password: PASSWORD });
+    expect(exported.success).toBe(false);
+    expect(exported.error).toMatch(/Too many failed attempts/);
+  });
+
+  it("rejects a transfer from address that is not the unlocked wallet", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    await connectSite(harness);
+    const mismatch = await send(harness.wallet, "REQUEST_TRANSACTION", page, {
+      coin: COIN,
+      from: NCH_ZERO,
+      to: NCH_ZERO,
+      amount: "1",
+    });
+    expect(mismatch.success).toBe(false);
+    expect(mismatch.error).toBe("from address must match unlocked wallet");
+    expect(harness.approvalPaths).toHaveLength(1);
+  });
+
+  it("rejects page transfers before the site is connected", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    const response = await send(harness.wallet, "REQUEST_TRANSACTION", page, {
+      coin: COIN,
+      to: NCH_ZERO,
+      amount: "1",
+    });
+    expect(response.success).toBe(false);
+    expect(response.error).toMatch(/not connected/);
+    expect(harness.approvalPaths).toHaveLength(0);
+  });
+
+  it("ignores unknown settings fields", async () => {
+    const { wallet } = createHarness();
+    const updated = await send(wallet, "UPDATE_SETTINGS", popup, {
+      displayCoin: COIN,
+      encrypted: "steal-the-keystore",
+    });
+    expect(updated.success).toBe(true);
+    expect(updated.data).not.toHaveProperty("encrypted");
+    expect(updated.data).toMatchObject({ displayCoin: COIN, rpcUrl: "http://localhost:8545" });
+  });
+
+  it("rejects whitespace passwords at the wallet boundary", async () => {
+    const { wallet } = createHarness();
+    const created = await send(wallet, "CREATE_WALLET", popup, { curve: "Ed25519", password: "        " });
+    expect(created.success).toBe(false);
+    expect(created.error).toBe("Password contains invalid characters");
+  });
+
+  it("rejects empty token metadata before touching RPC", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    const created = await send(harness.wallet, "CREATE_TOKEN", popup, {
+      symbol: "",
+      name: "Wallet",
+      decimals: 6,
+      initial_supply: "1000",
+    });
+    expect(created.success).toBe(false);
+    expect(created.error).toBe("Token symbol is required");
+    expect(harness.rpcCalls).toEqual([]);
+  });
+
+  it("rejects a policy threshold of zero", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    const registered = await send(harness.wallet, "REGISTER_ACCOUNT_POLICY", popup, { threshold: 0 });
+    expect(registered.success).toBe(false);
+    expect(registered.error).toBe("Threshold must be a positive integer");
+  });
+
+  it("broadcasts accountsChanged when auto-lock fires", async () => {
+    const events: Array<{ origin: string; event: string; params: unknown }> = [];
+    const harness = createHarness();
+    harness.host.broadcast = (origin, event, params) => {
+      events.push({ origin, event, params });
+    };
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    await connectSite(harness);
+    harness.clock.advance(AUTO_LOCK_MS + 1);
+    const chain = await send(harness.wallet, "GET_CHAIN_ID", page);
+    expect(chain.success).toBe(true);
+    expect(events).toContainEqual({ origin: PAGE_ORIGIN, event: "accountsChanged", params: [] });
+    const accounts = await send(harness.wallet, "GET_ACCOUNTS", page);
+    expect(accounts.data).toEqual({ accounts: [] });
+  });
+
+  it("does not extend auto-lock when a page reads chain id", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    harness.clock.advance(AUTO_LOCK_MS - 1);
+    expect((await send(harness.wallet, "GET_CHAIN_ID", page)).success).toBe(true);
+    harness.clock.advance(2);
+    const state = await send(harness.wallet, "GET_STATE", popup);
+    expect(state.data).toMatchObject({ isUnlocked: false });
   });
 });

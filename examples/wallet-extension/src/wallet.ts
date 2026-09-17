@@ -11,13 +11,31 @@ import type {
 } from "./types";
 import { encryptPrivateKey, decryptPrivateKey } from "./crypto";
 import { randomRequestId } from "./ids";
-import { senderOrigin } from "./origin";
+import { requirePageOrigin, senderOrigin } from "./origin";
+import { isAllowedPageMessage } from "./page-messages";
 import { isPrivilegedSender as originIsPrivileged } from "./privilege";
 import { parseRpcUrl } from "./rpc";
+import {
+  MIN_PASSWORD_LENGTH,
+  requireAddress,
+  requireAmount,
+  requireCoinHex,
+  requireCurve,
+  requireDecimals,
+  requireLabel,
+  requirePassword,
+  requirePrivateKeyHex,
+  requireRequestId,
+  requireSignerPubKeys,
+  requireThreshold,
+  requireTokenName,
+  requireTokenSymbol,
+} from "./validate";
+
+export { MIN_PASSWORD_LENGTH };
 
 export const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;
 export const AUTO_LOCK_MS = 15 * 60 * 1000;
-export const MIN_PASSWORD_LENGTH = 8;
 export const LOCKOUT_STORAGE = "unlockLockout";
 export const MAX_UNLOCK_ATTEMPTS = 5;
 export const LOCKOUT_DURATION = 5 * 60 * 1000;
@@ -121,6 +139,7 @@ export interface WalletHost {
   rpc(url: string, body: unknown): Promise<{ error?: { message: string }; result?: unknown }>;
   wasm(): Promise<WalletWasm>;
   approvalTimeoutMs?: number;
+  broadcast?(origin: string, event: string, params: unknown): void;
 }
 
 type PendingConnection = ConnectionRequest & {
@@ -150,6 +169,8 @@ export class Wallet {
   private pendingTransactions: Map<string, PendingTransaction> = new Map();
   private hydrated = false;
   private lastActive: number;
+  private busy = false;
+  private backupRevealed = false;
   private approvalTimers: Set<ReturnType<typeof setTimeout>> = new Set();
 
   constructor(private readonly host: WalletHost) {
@@ -188,77 +209,86 @@ export class Wallet {
     const origin = senderOrigin(sender);
     if (isPrivileged) {
       this.markActive();
-    }
-
-    if (PRIVILEGED_TYPES.has(type) && !isPrivileged) {
-      console.warn(`[Nunchi Wallet] Blocked privileged message ${type} from ${origin}`);
-      throw new Error("Unauthorized: privileged operation");
+    } else {
+      if (PRIVILEGED_TYPES.has(type) || !isAllowedPageMessage(type)) {
+        console.warn(`[Nunchi Wallet] Blocked privileged message ${type} from ${origin}`);
+        throw new Error("Unauthorized: privileged operation");
+      }
+      requirePageOrigin(origin);
     }
 
     switch (type) {
       case "CREATE_WALLET": {
-        const existingWallet = await this.getWalletState();
-        if (existingWallet) {
-          throw new Error("Wallet already exists. Delete it in Settings before creating a new one.");
-        }
+        return this.withBusy(async () => {
+          const existingWallet = await this.getWalletState();
+          if (existingWallet) {
+            throw new Error("Wallet already exists. Delete it in Settings before creating a new one.");
+          }
 
-        const { curve, password: rawPassword } = payload as {
-          curve: "Ed25519" | "Secp256r1";
-          password: string;
-        };
-        const password = requirePassword(rawPassword);
-        const wasm = await this.host.wasm();
-        const keyPair =
-          curve === "Ed25519" ? wasm.generate_ed25519_keypair() : wasm.generate_secp256r1_keypair();
-        const verifyKeyPair = wasm.import_private_key(keyPair.private_key_hex);
-        if (verifyKeyPair.address !== keyPair.address) {
-          throw new Error("Address mismatch: key derivation failed");
-        }
+          const { curve: rawCurve, password: rawPassword } = (payload || {}) as {
+            curve: "Ed25519" | "Secp256r1";
+            password: string;
+          };
+          const curve = requireCurve(rawCurve);
+          const password = requirePassword(rawPassword);
+          const wasm = await this.host.wasm();
+          const keyPair =
+            curve === "Ed25519" ? wasm.generate_ed25519_keypair() : wasm.generate_secp256r1_keypair();
+          const verifyKeyPair = wasm.import_private_key(keyPair.private_key_hex);
+          if (verifyKeyPair.address !== keyPair.address) {
+            throw new Error("Address mismatch: key derivation failed");
+          }
 
-        const { encrypted, salt } = await encryptPrivateKey(keyPair.private_key_hex, password);
-        await this.setWalletState({
-          encrypted,
-          salt,
-          address: keyPair.address,
-          curve: keyPair.curve,
-          needsBackup: true,
+          const { encrypted, salt } = await encryptPrivateKey(keyPair.private_key_hex, password);
+          await this.setWalletState({
+            encrypted,
+            salt,
+            address: keyPair.address,
+            curve: keyPair.curve,
+            needsBackup: true,
+          });
+          this.backupRevealed = false;
+          this.unlockedWallet = {
+            privateKeyHex: keyPair.private_key_hex,
+            publicKeyHex: keyPair.public_key_hex,
+            address: keyPair.address,
+            curve: keyPair.curve,
+          };
+          return { success: true, data: { address: keyPair.address, curve: keyPair.curve, needsBackup: true } };
         });
-        this.unlockedWallet = {
-          privateKeyHex: keyPair.private_key_hex,
-          publicKeyHex: keyPair.public_key_hex,
-          address: keyPair.address,
-          curve: keyPair.curve,
-        };
-        return { success: true, data: { address: keyPair.address, curve: keyPair.curve, needsBackup: true } };
       }
 
       case "IMPORT_WALLET": {
-        const existingWallet = await this.getWalletState();
-        if (existingWallet) {
-          throw new Error("Wallet already exists. Delete it in Settings before importing another.");
-        }
-        const { private_key_hex, password: rawPassword } = payload as {
-          private_key_hex: string;
-          password: string;
-        };
-        const password = requirePassword(rawPassword);
-        const wasm = await this.host.wasm();
-        const keyPair = wasm.import_private_key(private_key_hex);
-        const { encrypted, salt } = await encryptPrivateKey(private_key_hex, password);
-        await this.setWalletState({
-          encrypted,
-          salt,
-          address: keyPair.address,
-          curve: keyPair.curve,
-          needsBackup: false,
+        return this.withBusy(async () => {
+          const existingWallet = await this.getWalletState();
+          if (existingWallet) {
+            throw new Error("Wallet already exists. Delete it in Settings before importing another.");
+          }
+          const { private_key_hex, password: rawPassword } = (payload || {}) as {
+            private_key_hex: string;
+            password: string;
+          };
+          const password = requirePassword(rawPassword);
+          const privateKeyHex = requirePrivateKeyHex(private_key_hex);
+          const wasm = await this.host.wasm();
+          const keyPair = wasm.import_private_key(privateKeyHex);
+          const { encrypted, salt } = await encryptPrivateKey(privateKeyHex, password);
+          await this.setWalletState({
+            encrypted,
+            salt,
+            address: keyPair.address,
+            curve: keyPair.curve,
+            needsBackup: false,
+          });
+          this.backupRevealed = false;
+          this.unlockedWallet = {
+            privateKeyHex,
+            publicKeyHex: keyPair.public_key_hex,
+            address: keyPair.address,
+            curve: keyPair.curve,
+          };
+          return { success: true, data: { address: keyPair.address, curve: keyPair.curve, needsBackup: false } };
         });
-        this.unlockedWallet = {
-          privateKeyHex: private_key_hex,
-          publicKeyHex: keyPair.public_key_hex,
-          address: keyPair.address,
-          curve: keyPair.curve,
-        };
-        return { success: true, data: { address: keyPair.address, curve: keyPair.curve, needsBackup: false } };
       }
 
       case "REVEAL_BACKUP": {
@@ -272,38 +302,45 @@ export class Wallet {
           if (!password) {
             throw new Error("Password required to reveal backup");
           }
-          privateKeyHex = await decryptPrivateKey(wallet.encrypted, wallet.salt, password);
+          privateKeyHex = await this.decryptWithLockout(wallet, password);
         }
+        this.backupRevealed = true;
         return { success: true, data: { private_key_hex: privateKeyHex } };
       }
 
       case "CONFIRM_BACKUP": {
         const wallet = await this.getWalletState();
-        if (!wallet) {
-          throw new Error("No wallet found");
+        if (!wallet?.needsBackup) {
+          throw new Error("No pending backup");
+        }
+        if (!this.backupRevealed) {
+          throw new Error("Backup has not been revealed");
         }
         await this.setWalletState({ ...wallet, needsBackup: false });
+        this.backupRevealed = false;
         return { success: true };
       }
 
       case "EXPORT_PRIVATE_KEY": {
-        const { password } = payload as { password: string };
+        const { password } = (payload || {}) as { password: string };
         const wallet = await this.getWalletState();
         if (!wallet) {
           throw new Error("No wallet found");
         }
-        const privateKeyHex = await decryptPrivateKey(wallet.encrypted, wallet.salt, password);
+        const privateKeyHex = await this.decryptWithLockout(wallet, password);
         return { success: true, data: { private_key_hex: privateKeyHex } };
       }
 
       case "DELETE_WALLET": {
-        const { password } = payload as { password: string };
+        const { password } = (payload || {}) as { password: string };
         const wallet = await this.getWalletState();
         if (!wallet) {
           throw new Error("No wallet found");
         }
-        await decryptPrivateKey(wallet.encrypted, wallet.salt, password);
+        await this.decryptWithLockout(wallet, password);
+        this.notifyAllAccounts([]);
         this.unlockedWallet = null;
+        this.backupRevealed = false;
         this.connectedSites.clear();
         this.pendingConnections.clear();
         this.pendingTransactions.clear();
@@ -320,48 +357,30 @@ export class Wallet {
       }
 
       case "UNLOCK_WALLET": {
-        const { password } = payload as { password: string };
+        const { password } = (payload || {}) as { password: string };
         const wallet = await this.getWalletState();
         if (!wallet) {
           throw new Error("No wallet found");
         }
-        const now = this.host.now();
-        const attempts = await this.readLockout(origin);
-        if (attempts.count >= MAX_UNLOCK_ATTEMPTS) {
-          const timeSinceLastAttempt = now - attempts.lastAttempt;
-          if (timeSinceLastAttempt < LOCKOUT_DURATION) {
-            const remainingMs = LOCKOUT_DURATION - timeSinceLastAttempt;
-            throw new Error(`Too many failed attempts. Try again in ${Math.ceil(remainingMs / 1000)}s`);
-          }
-          await this.writeLockout(origin, null);
-          attempts.count = 0;
-          attempts.lastAttempt = 0;
+        const privateKeyHex = await this.decryptWithLockout(wallet, password);
+        const wasm = await this.host.wasm();
+        const keyPair = wasm.import_private_key(privateKeyHex);
+        if (keyPair.address !== wallet.address) {
+          throw new Error("Address mismatch: stored address does not match derived address");
         }
-        try {
-          const privateKeyHex = await decryptPrivateKey(wallet.encrypted, wallet.salt, password);
-          const wasm = await this.host.wasm();
-          const keyPair = wasm.import_private_key(privateKeyHex);
-          if (keyPair.address !== wallet.address) {
-            throw new Error("Address mismatch: stored address does not match derived address");
-          }
-          this.unlockedWallet = {
-            privateKeyHex,
-            publicKeyHex: keyPair.public_key_hex,
-            address: keyPair.address,
-            curve: wallet.curve,
-          };
-          await this.writeLockout(origin, null);
-          this.markActive();
-          return { success: true, data: { address: wallet.address, needsBackup: !!wallet.needsBackup } };
-        } catch (error) {
-          attempts.count++;
-          attempts.lastAttempt = now;
-          await this.writeLockout(origin, attempts);
-          throw error;
-        }
+        this.unlockedWallet = {
+          privateKeyHex,
+          publicKeyHex: keyPair.public_key_hex,
+          address: keyPair.address,
+          curve: wallet.curve,
+        };
+        this.markActive();
+        this.notifyAllAccounts([wallet.address]);
+        return { success: true, data: { address: wallet.address, needsBackup: !!wallet.needsBackup } };
       }
 
       case "LOCK_WALLET": {
+        this.notifyAllAccounts([]);
         this.unlockedWallet = null;
         return { success: true };
       }
@@ -381,7 +400,8 @@ export class Wallet {
       }
 
       case "GET_PENDING_REQUEST": {
-        const { requestId } = payload as { requestId: string };
+        const { requestId: rawId } = (payload || {}) as { requestId: string };
+        const requestId = requireRequestId(rawId);
         const connection = this.pendingConnections.get(requestId);
         if (connection) {
           return {
@@ -415,7 +435,6 @@ export class Wallet {
       }
 
       case "REQUEST_CONNECTION": {
-        requireOrigin(origin);
         if (this.connectedSites.has(origin)) {
           if (!this.unlockedWallet) {
             throw new Error("Wallet is locked");
@@ -435,7 +454,8 @@ export class Wallet {
       }
 
       case "APPROVE_CONNECTION": {
-        const { requestId } = payload as { requestId: string };
+        const { requestId: rawId } = (payload || {}) as { requestId: string };
+        const requestId = requireRequestId(rawId);
         const request = this.pendingConnections.get(requestId);
         if (!request) {
           throw new Error("Connection request not found or expired");
@@ -446,12 +466,14 @@ export class Wallet {
         this.connectedSites.add(request.origin);
         await this.persistConnectedSites();
         const address = this.unlockedWallet.address;
+        this.notifyAccounts(request.origin, [address]);
         this.settlePending(this.pendingConnections, requestId, { success: true, data: { address } });
         return { success: true, data: { address } };
       }
 
       case "REJECT_CONNECTION": {
-        const { requestId } = payload as { requestId: string };
+        const { requestId: rawId } = (payload || {}) as { requestId: string };
+        const requestId = requireRequestId(rawId);
         if (!this.settlePending(this.pendingConnections, requestId, { success: false, error: "User rejected" })) {
           throw new Error("Connection request not found or expired");
         }
@@ -460,14 +482,24 @@ export class Wallet {
 
       case "REQUEST_TRANSACTION":
       case "REQUEST_SIGN": {
-        requireOrigin(origin);
-        if (!isPrivileged && !this.connectedSites.has(origin)) {
+        if (!this.connectedSites.has(origin)) {
           throw new Error("Site not connected. Call nunchi_requestAccounts first.");
         }
-        const { coin, to, amount } = payload as { coin: string; to: string; amount: string };
+        const { coin: rawCoin, to: rawTo, amount: rawAmount, from: rawFrom } = (payload || {}) as {
+          coin: string;
+          to: string;
+          amount: string;
+          from?: string;
+        };
         if (!this.unlockedWallet) {
           throw new Error("Wallet is locked");
         }
+        if (rawFrom !== undefined && rawFrom !== this.unlockedWallet.address) {
+          throw new Error("from address must match unlocked wallet");
+        }
+        const coin = requireCoinHex(rawCoin);
+        const to = requireAddress(rawTo);
+        const amount = requireAmount(rawAmount);
         const requestId = randomRequestId("tx");
         return this.waitForApproval(
           requestId,
@@ -489,7 +521,8 @@ export class Wallet {
       }
 
       case "APPROVE_TRANSACTION": {
-        const { requestId } = payload as { requestId: string };
+        const { requestId: rawId } = (payload || {}) as { requestId: string };
+        const requestId = requireRequestId(rawId);
         const request = this.pendingTransactions.get(requestId);
         if (!request) {
           throw new Error("Transaction request not found or expired");
@@ -497,6 +530,9 @@ export class Wallet {
         if (!this.unlockedWallet) {
           throw new Error("Wallet is locked");
         }
+        const coin = requireCoinHex(request.coin);
+        const to = requireAddress(request.to);
+        const amount = requireAmount(request.amount);
         if (request.from !== this.unlockedWallet.address) {
           this.settlePending(this.pendingTransactions, requestId, {
             success: false,
@@ -508,8 +544,8 @@ export class Wallet {
           const settings = await this.getSettings();
           const nonce = await this.fetchNonce(settings.rpcUrl, this.unlockedWallet.address);
           const result = request.submit
-            ? await this.signAndSubmit(this.unlockedWallet, nonce, request.coin, request.from, request.to, request.amount)
-            : await this.signOnly(this.unlockedWallet, nonce, request.coin, request.from, request.to, request.amount);
+            ? await this.signAndSubmit(this.unlockedWallet, nonce, coin, request.from, to, amount)
+            : await this.signOnly(this.unlockedWallet, nonce, coin, request.from, to, amount);
           this.settlePending(this.pendingTransactions, requestId, { success: true, data: result });
           return { success: true, data: result };
         } catch (error) {
@@ -520,7 +556,8 @@ export class Wallet {
       }
 
       case "REJECT_TRANSACTION": {
-        const { requestId } = payload as { requestId: string };
+        const { requestId: rawId } = (payload || {}) as { requestId: string };
+        const requestId = requireRequestId(rawId);
         if (!this.settlePending(this.pendingTransactions, requestId, { success: false, error: "User rejected" })) {
           throw new Error("Transaction request not found or expired");
         }
@@ -531,7 +568,7 @@ export class Wallet {
         if (!this.unlockedWallet) {
           throw new Error("Wallet is locked");
         }
-        const { from, to, amount, coin } = payload as {
+        const { from, to: rawTo, amount: rawAmount, coin: rawCoin } = payload as {
           from: string;
           to: string;
           amount: string;
@@ -540,6 +577,9 @@ export class Wallet {
         if (from !== this.unlockedWallet.address) {
           throw new Error("from address must match unlocked wallet");
         }
+        const to = requireAddress(rawTo);
+        const amount = requireAmount(rawAmount);
+        const coin = requireCoinHex(rawCoin);
         const settings = await this.getSettings();
         const nonce = await this.fetchNonce(settings.rpcUrl, this.unlockedWallet.address);
         return { success: true, data: await this.signAndSubmit(this.unlockedWallet, nonce, coin, from, to, amount) };
@@ -549,37 +589,41 @@ export class Wallet {
         if (!this.unlockedWallet) {
           throw new Error("Wallet is locked");
         }
-        const { symbol, name, decimals, initial_supply, max_supply } = payload as {
+        const { symbol, name, decimals, initial_supply, max_supply } = (payload || {}) as {
           symbol: string;
           name: string;
           decimals: number;
           initial_supply: string;
           max_supply?: string;
         };
+        const tokenSymbol = requireTokenSymbol(symbol);
+        const tokenName = requireTokenName(name);
+        const tokenDecimals = requireDecimals(decimals);
+        const initialSupply = requireAmount(initial_supply);
+        const maxSupply = max_supply ? requireAmount(max_supply) : "";
         const settings = await this.getSettings();
         const nonce = await this.fetchNonce(settings.rpcUrl, this.unlockedWallet.address);
         const factoryNonce = await this.fetchFactoryNonce(settings.rpcUrl);
         const wasm = await this.host.wasm();
-        const maxSupply = max_supply ?? "";
         const signed = wasm.sign_create_token(
           this.unlockedWallet.privateKeyHex,
           BigInt(nonce),
-          symbol,
-          name,
-          decimals,
-          initial_supply,
+          tokenSymbol,
+          tokenName,
+          tokenDecimals,
+          initialSupply,
           maxSupply
         );
         const coin = wasm.derive_coin_id(
           this.unlockedWallet.address,
           BigInt(factoryNonce),
-          symbol,
-          name,
-          decimals,
-          initial_supply,
+          tokenSymbol,
+          tokenName,
+          tokenDecimals,
+          initialSupply,
           maxSupply
         );
-        const submitted = await this.submitSigned(signed, { coin, to: this.unlockedWallet.address, amount: initial_supply });
+        const submitted = await this.submitSigned(signed, { coin, to: this.unlockedWallet.address, amount: initialSupply });
         return { success: true, data: { ...submitted, coin, factoryNonce } };
       }
 
@@ -587,7 +631,14 @@ export class Wallet {
         if (!this.unlockedWallet) {
           throw new Error("Wallet is locked");
         }
-        const { coin, to, amount } = payload as { coin: string; to: string; amount: string };
+        const { coin: rawCoin, to: rawTo, amount: rawAmount } = payload as {
+          coin: string;
+          to: string;
+          amount: string;
+        };
+        const coin = requireCoinHex(rawCoin);
+        const to = requireAddress(rawTo);
+        const amount = requireAmount(rawAmount);
         const settings = await this.getSettings();
         const nonce = await this.fetchNonce(settings.rpcUrl, this.unlockedWallet.address);
         const wasm = await this.host.wasm();
@@ -599,7 +650,9 @@ export class Wallet {
         if (!this.unlockedWallet) {
           throw new Error("Wallet is locked");
         }
-        const { coin, amount } = payload as { coin: string; amount: string };
+        const { coin: rawCoin, amount: rawAmount } = payload as { coin: string; amount: string };
+        const coin = requireCoinHex(rawCoin);
+        const amount = requireAmount(rawAmount);
         const settings = await this.getSettings();
         const nonce = await this.fetchNonce(settings.rpcUrl, this.unlockedWallet.address);
         const wasm = await this.host.wasm();
@@ -623,8 +676,12 @@ export class Wallet {
         };
         const settings = await this.getSettings();
         const wasm = await this.host.wasm();
-        const keys = signer_pub_keys ?? this.unlockedWallet.publicKeyHex;
-        const required = threshold ?? 1;
+        const keys =
+          signer_pub_keys === undefined || signer_pub_keys === ""
+            ? this.unlockedWallet.publicKeyHex
+            : requireSignerPubKeys(signer_pub_keys);
+        const signerCount = Math.max(1, keys.split(",").filter(Boolean).length);
+        const required = requireThreshold(threshold ?? 1, signerCount);
         const account = wasm.derive_multisig_account(required, keys);
         const nonce = await this.fetchNonce(settings.rpcUrl, account);
         const signed = wasm.sign_register_account_policy(
@@ -645,10 +702,26 @@ export class Wallet {
         return { success: true, data: Array.from(this.connectedSites) };
       }
 
+      case "GET_ACCOUNTS": {
+        if (!this.connectedSites.has(origin) || !this.unlockedWallet) {
+          return { success: true, data: { accounts: [] } };
+        }
+        return { success: true, data: { accounts: [this.unlockedWallet.address] } };
+      }
+
+      case "DISCONNECT": {
+        this.connectedSites.delete(origin);
+        await this.persistConnectedSites();
+        this.notifyAccounts(origin, []);
+        return { success: true };
+      }
+
       case "DISCONNECT_SITE": {
-        const { origin: siteOrigin } = payload as { origin: string };
+        const { origin: rawOrigin } = (payload || {}) as { origin: string };
+        const siteOrigin = requirePageOrigin(rawOrigin);
         this.connectedSites.delete(siteOrigin);
         await this.persistConnectedSites();
+        this.notifyAccounts(siteOrigin, []);
         return { success: true };
       }
 
@@ -657,12 +730,25 @@ export class Wallet {
       }
 
       case "UPDATE_SETTINGS": {
-        const incoming = payload as Partial<Settings>;
+        const incoming = (payload || {}) as Partial<Settings>;
         const current = await this.getSettings();
-        const settings: Settings = { ...current, ...incoming };
+        const settings: Settings = {
+          rpcUrl: typeof incoming.rpcUrl === "string" ? incoming.rpcUrl : current.rpcUrl,
+          network: requireLabel(
+            typeof incoming.network === "string" ? incoming.network : current.network,
+            "Network"
+          ),
+          chainId: requireLabel(
+            typeof incoming.chainId === "string" ? incoming.chainId : current.chainId,
+            "Chain ID"
+          ),
+          displayCoin: current.displayCoin,
+        };
         parseRpcUrl(settings.rpcUrl);
-        if (!settings.chainId) {
-          settings.chainId = settings.network || DEFAULT_SETTINGS.chainId;
+        if (incoming.displayCoin) {
+          settings.displayCoin = requireCoinHex(incoming.displayCoin);
+        } else if (incoming.displayCoin === "") {
+          settings.displayCoin = "";
         }
         await this.host.storageSet({ settings });
         return { success: true, data: settings };
@@ -676,13 +762,21 @@ export class Wallet {
       case "GET_NONCE": {
         const { address } = payload as { address: string };
         const settings = await this.getSettings();
-        return { success: true, data: { nonce: await this.fetchNonce(settings.rpcUrl, address) } };
+        return {
+          success: true,
+          data: { nonce: await this.fetchNonce(settings.rpcUrl, requireAddress(address)) },
+        };
       }
 
       case "GET_BALANCE": {
         const { address, coin } = payload as { address: string; coin: string };
         const settings = await this.getSettings();
-        return { success: true, data: { balance: await this.fetchBalance(settings.rpcUrl, address, coin) } };
+        return {
+          success: true,
+          data: {
+            balance: await this.fetchBalance(settings.rpcUrl, requireAddress(address), requireCoinHex(coin)),
+          },
+        };
       }
 
       case "GET_ACTIVITY": {
@@ -696,12 +790,23 @@ export class Wallet {
 
   private applyAutoLock(): void {
     if (this.unlockedWallet && this.host.now() - this.lastActive > AUTO_LOCK_MS) {
+      this.notifyAllAccounts([]);
       this.unlockedWallet = null;
     }
   }
 
   private markActive(): void {
     this.lastActive = this.host.now();
+  }
+
+  private notifyAccounts(origin: string, accounts: string[]): void {
+    this.host.broadcast?.(origin, "accountsChanged", accounts);
+  }
+
+  private notifyAllAccounts(accounts: string[]): void {
+    for (const origin of this.connectedSites) {
+      this.notifyAccounts(origin, accounts);
+    }
   }
 
   private async hydrate(): Promise<void> {
@@ -723,6 +828,12 @@ export class Wallet {
         if (!item?.id || !item.origin) {
           continue;
         }
+        try {
+          requireRequestId(item.id);
+          requirePageOrigin(item.origin);
+        } catch {
+          continue;
+        }
         this.pendingConnections.set(item.id, {
           origin: item.origin,
           timestamp: item.timestamp,
@@ -734,6 +845,15 @@ export class Wallet {
     if (Array.isArray(stored.pendingTransactions)) {
       for (const item of stored.pendingTransactions as StoredTransaction[]) {
         if (!item?.id) {
+          continue;
+        }
+        try {
+          requireRequestId(item.id);
+          requirePageOrigin(item.origin);
+          requireCoinHex(item.coin);
+          requireAddress(item.to);
+          requireAmount(item.amount);
+        } catch {
           continue;
         }
         this.pendingTransactions.set(item.id, {
@@ -797,21 +917,59 @@ export class Wallet {
     await this.host.storageSet({ activity: activity.slice(0, 50) });
   }
 
-  private async readLockout(origin: string): Promise<{ count: number; lastAttempt: number }> {
+  private async readLockout(): Promise<{ count: number; lastAttempt: number }> {
     const stored = await this.host.storageGet(LOCKOUT_STORAGE);
-    const map = (stored[LOCKOUT_STORAGE] as Record<string, { count: number; lastAttempt: number }>) || {};
-    return map[origin] || { count: 0, lastAttempt: 0 };
+    const value = stored[LOCKOUT_STORAGE] as { count?: number; lastAttempt?: number } | undefined;
+    if (value && typeof value.count === "number") {
+      return { count: value.count, lastAttempt: value.lastAttempt || 0 };
+    }
+    return { count: 0, lastAttempt: 0 };
   }
 
-  private async writeLockout(origin: string, value: { count: number; lastAttempt: number } | null): Promise<void> {
-    const stored = await this.host.storageGet(LOCKOUT_STORAGE);
-    const map = { ...((stored[LOCKOUT_STORAGE] as Record<string, { count: number; lastAttempt: number }>) || {}) };
-    if (value) {
-      map[origin] = value;
-    } else {
-      delete map[origin];
+  private async writeLockout(value: { count: number; lastAttempt: number } | null): Promise<void> {
+    if (!value) {
+      await this.host.storageRemove([LOCKOUT_STORAGE]);
+      return;
     }
-    await this.host.storageSet({ [LOCKOUT_STORAGE]: map });
+    await this.host.storageSet({ [LOCKOUT_STORAGE]: value });
+  }
+
+  private async decryptWithLockout(wallet: WalletState, password: unknown): Promise<string> {
+    const secret = requirePassword(password);
+    const now = this.host.now();
+    const attempts = await this.readLockout();
+    if (attempts.count >= MAX_UNLOCK_ATTEMPTS) {
+      const timeSinceLastAttempt = now - attempts.lastAttempt;
+      if (timeSinceLastAttempt < LOCKOUT_DURATION) {
+        const remainingMs = LOCKOUT_DURATION - timeSinceLastAttempt;
+        throw new Error(`Too many failed attempts. Try again in ${Math.ceil(remainingMs / 1000)}s`);
+      }
+      await this.writeLockout(null);
+      attempts.count = 0;
+      attempts.lastAttempt = 0;
+    }
+    try {
+      const privateKeyHex = await decryptPrivateKey(wallet.encrypted, wallet.salt, secret);
+      await this.writeLockout(null);
+      return privateKeyHex;
+    } catch (error) {
+      attempts.count += 1;
+      attempts.lastAttempt = now;
+      await this.writeLockout(attempts);
+      throw error;
+    }
+  }
+
+  private async withBusy<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.busy) {
+      throw new Error("Wallet is busy");
+    }
+    this.busy = true;
+    try {
+      return await fn();
+    } finally {
+      this.busy = false;
+    }
   }
 
   private settlePending<T extends { resolve: (response: Response) => void }>(
@@ -977,18 +1135,4 @@ export class Wallet {
     }
     return (data.result as { hash: string }).hash;
   }
-}
-
-function requirePassword(password: unknown): string {
-  if (typeof password !== "string" || password.length < MIN_PASSWORD_LENGTH) {
-    throw new Error(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`);
-  }
-  return password;
-}
-
-function requireOrigin(origin: string): string {
-  if (!origin) {
-    throw new Error("Missing sender origin");
-  }
-  return origin;
 }
