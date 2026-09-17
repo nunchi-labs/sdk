@@ -326,10 +326,10 @@ fn coding_block_decode_rejects_exceeding_max_transactions() {
 
     let header_size = block.header.encode_size();
     let count_position = header_size;
-    
+
     encoded[count_position] = 0x88;
     encoded[count_position + 1] = 0x27;
-    
+
     let result = CodingBlock::<u8>::decode_cfg(encoded.as_slice(), &header_cfg());
     assert!(matches!(
         result,
@@ -360,7 +360,7 @@ fn coding_block_with_tamperedtransaction_root_rejects() {
 #[test]
 fn coding_context_wraps_block_commitment() {
     let ctx = coding_context();
-    let genesis_parent = dummy_genesis_parent::<u8>();
+    let genesis_parent = dummy_genesis_parent::<u8, NoConsensusExtension>();
 
     assert_eq!(ctx.parent.1, genesis_parent);
 }
@@ -390,7 +390,7 @@ fn state_range_must_be_nonempty() {
         range: non_empty_range!(Location::new(0), Location::new(1)),
     };
 
-    assert!(valid_state.range.start < valid_state.range.end);
+    assert!(valid_state.range.start() < valid_state.range.end());
 }
 
 #[test]
