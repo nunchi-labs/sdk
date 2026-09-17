@@ -1,11 +1,11 @@
 use std::num::NonZeroU64;
 
-use commonware_codec::{DecodeExt, Encode};
+use commonware_codec::{DecodeExt, Encode, EncodeSize};
 use commonware_cryptography::{sha256, Hasher, Sha256};
 use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
 use nunchi_common::{
-    state_db::{verify_state_update, CommitState, StateProof},
-    Address, NoopEventSink, QmdbState, VecEventSink,
+    state_db::{verify_state_update, StateError, StateProof},
+    Address, CommitState, NoopEventSink, QmdbState, VecEventSink,
 };
 use nunchi_crypto::PrivateKey;
 
@@ -17,7 +17,7 @@ use crate::ledger::{BridgeError, BridgeLedger, BridgeReceipt};
 use crate::record::{
     is_consumed, put_transfer_record, transfer_record_key, AssetId, BridgeTransferRecord, ChainId,
 };
-use crate::transaction::{BridgeOperation, Transaction};
+use crate::transaction::{BridgeOperation, BridgeOperationId, Transaction};
 
 fn signer(seed: u64) -> PrivateKey {
     PrivateKey::from_seed(seed)
@@ -59,7 +59,7 @@ async fn source_root_and_proof(
         .expect("init source");
     put_transfer_record(&mut source, record);
     let root = source.commit().await.expect("commit source");
-    let bounds = source.operation_bounds().await;
+    let bounds = source.operation_bounds();
     let proof = source
         .proof(bounds.start, NonZeroU64::new(1024).unwrap())
         .await
@@ -153,7 +153,7 @@ fn lock_produces_a_claimable_record_proof() {
 
         let mut source = ledger.into_inner();
         let root = source.commit().await.expect("commit source");
-        let bounds = source.operation_bounds().await;
+        let bounds = source.operation_bounds();
         let proof = source
             .proof(bounds.start, NonZeroU64::new(1024).unwrap())
             .await
@@ -536,6 +536,99 @@ fn anchor_and_claim_codec_round_trip() {
         assert_eq!(
             Transaction::decode(tx.encode().as_ref()).expect("decode claim tx"),
             tx
+        );
+        let encoded = tx.encode();
+        assert_eq!(encoded.len(), tx.encode_size());
+        assert!(Transaction::decode(&encoded[..encoded.len() - 1]).is_err());
+    });
+}
+
+#[test]
+fn operation_ids_round_trip_and_reject_unknown() {
+    assert_eq!(
+        BridgeOperationId::try_from(0).expect("lock"),
+        BridgeOperationId::Lock
+    );
+    assert_eq!(
+        BridgeOperationId::try_from(1).expect("anchor"),
+        BridgeOperationId::AnchorForeignRoot
+    );
+    assert_eq!(
+        BridgeOperationId::try_from(2).expect("claim"),
+        BridgeOperationId::Claim
+    );
+    assert!(BridgeOperationId::try_from(3).is_err());
+    assert!(BridgeOperation::decode(&[3u8][..]).is_err());
+    assert!(BridgeOperation::decode(&[][..]).is_err());
+
+    let anchor = BridgeOperation::AnchorForeignRoot {
+        source_chain_id: source_chain(),
+        view: 1,
+        state_root: Sha256::hash(b"root"),
+    };
+    let encoded = anchor.encode();
+    assert_eq!(encoded.len(), anchor.encode_size());
+    assert!(BridgeOperation::decode(&encoded[..encoded.len() - 1]).is_err());
+}
+
+#[test]
+fn claim_rejects_when_chain_not_configured() {
+    deterministic::Runner::default().start(|context| async move {
+        let recipient = addr(&signer(2));
+        let record = sample_record(recipient);
+        let (_root, proof) = source_root_and_proof(&context, &record).await;
+
+        let dest = QmdbState::init(context.child("dst"), "unconfigured-claim")
+            .await
+            .expect("init dest");
+        let mut ledger = BridgeLedger::new(dest);
+        let err = ledger
+            .apply_transaction(
+                &claim_tx(&signer(3), 0, source_chain(), 7, record, proof),
+                NoopEventSink,
+            )
+            .await
+            .expect_err("unconfigured");
+        assert_eq!(err, BridgeError::ChainNotConfigured);
+    });
+}
+
+#[test]
+fn storage_error_wraps_state_backend_failure() {
+    let err = BridgeError::from(StateError::Backend("disk".into()));
+    assert_eq!(err, BridgeError::Storage("state backend error: disk".into()));
+    assert_eq!(
+        BridgeError::from(StateError::ValueTooLarge { size: 8, max: 4 }),
+        BridgeError::Storage("state value is too large: size 8, maximum 4".into())
+    );
+}
+
+#[test]
+fn anchor_rejects_view_below_latest() {
+    deterministic::Runner::default().start(|context| async move {
+        let attestor = signer(1);
+        let mut ledger = dest_ledger(&context, &addr(&attestor)).await;
+        ledger
+            .apply_transaction(
+                &anchor_tx(&attestor, 0, source_chain(), 9, Sha256::hash(b"root-9")),
+                NoopEventSink,
+            )
+            .await
+            .expect("anchor view 9");
+
+        let err = ledger
+            .apply_transaction(
+                &anchor_tx(&attestor, 1, source_chain(), 4, Sha256::hash(b"root-4")),
+                NoopEventSink,
+            )
+            .await
+            .expect_err("older view");
+        assert_eq!(
+            err,
+            BridgeError::StaleAnchor {
+                latest: 9,
+                submitted: 4
+            }
         );
     });
 }

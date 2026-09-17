@@ -138,14 +138,16 @@ let key = PrivateKey::random(&mut rng);
 ```
 
 When you need multiple independent RNG streams in the same test (e.g., to generate
-non-overlapping keys), use `test_rng_seeded(seed)`:
+non-overlapping keys), use `TestRng::new(seed)`:
 ```rust
-let mut rng1 = test_rng();           // Stream 1: seed 0
-let mut rng2 = test_rng_seeded(1);   // Stream 2: seed 1
+let mut rng1 = test_rng();       // Stream 1: seed 0
+let mut rng2 = TestRng::new(1);  // Stream 2: seed 1
 ```
 
-Avoid `OsRng`, `StdRng::from_entropy()`, or raw `StdRng::seed_from_u64()`.
-Exceptions: fuzz tests deriving seed from input, or loops testing multiple seeds.
+Prefer `commonware_utils::sys_rng()` for OS entropy and `TestRng` / `test_rng()` for
+deterministic tests. Avoid `OsRng`, `StdRng::from_entropy()`, or raw
+`StdRng::seed_from_u64()` except in fuzz tests deriving seed from input, or loops
+testing multiple seeds.
 
 ### Simulated Network Testing
 
@@ -310,7 +312,7 @@ pub trait PublicKey: Verifier + Sized + ReadExt + Encode + PartialEq + Array {}
 
 // Extension traits for additional functionality
 pub trait PrivateKeyExt: PrivateKey {
-    fn from_rng<R: CryptoRngCore>(rng: &mut R) -> Self;
+    fn from_rng<R: CryptoRng>(rng: &mut R) -> Self;
 }
 ```
 

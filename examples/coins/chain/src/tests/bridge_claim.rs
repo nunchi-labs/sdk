@@ -8,9 +8,7 @@ use nunchi_bridge::{
     BridgeTransferRecord, ChainId,
 };
 use nunchi_coins::{CoinOperation, CoinSpec, Ledger, TokenCreated, TokenName, TokenSymbol};
-use nunchi_common::{
-    state_db::CommitState, Address, QmdbState, Runtime, RuntimeContext, VecEventSink,
-};
+use nunchi_common::{Address, CommitState, QmdbState, Runtime, RuntimeContext, VecEventSink};
 use nunchi_crypto::PrivateKey;
 
 use crate::bridge_assets::set_asset_coin;
@@ -64,7 +62,7 @@ fn bridge_claim_verifies_proof_and_mints_mapped_asset() {
         };
         put_transfer_record(&mut source, &record);
         let source_root = source.commit().await.unwrap();
-        let bounds = source.operation_bounds().await;
+        let bounds = source.operation_bounds();
         let proof = source
             .proof(bounds.start, NonZeroU64::new(1024).unwrap())
             .await
@@ -178,7 +176,7 @@ fn bridge_claim_rejects_unmapped_asset_without_minting() {
             .unwrap();
         put_transfer_record(&mut source, &record);
         let source_root = source.commit().await.unwrap();
-        let bounds = source.operation_bounds().await;
+        let bounds = source.operation_bounds();
         let proof = source
             .proof(bounds.start, NonZeroU64::new(1024).unwrap())
             .await
@@ -262,7 +260,7 @@ fn bridge_claim_settlement_failure_leaves_no_event_or_consumption() {
             .unwrap();
         put_transfer_record(&mut source, &record);
         let source_root = source.commit().await.unwrap();
-        let bounds = source.operation_bounds().await;
+        let bounds = source.operation_bounds();
         let proof = source
             .proof(bounds.start, NonZeroU64::new(1024).unwrap())
             .await

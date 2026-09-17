@@ -1,13 +1,15 @@
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{deterministic, Runner as _};
-use nunchi_common::{state_db::CommitState, Address, QmdbState};
+use nunchi_common::{state_db::Namespace, Address, CommitState, QmdbState, StateStore};
 use nunchi_crypto::PrivateKey;
 
 use crate::record::{
-    attestor, consumed_record_key, foreign_root, is_consumed, latest_foreign_view, mark_consumed,
-    put_foreign_root, put_transfer_record, set_attestor, set_latest_foreign_view, transfer_record,
-    transfer_record_key, AssetId, BridgeTransferRecord, ChainId, ForeignRoot, TransferRecordId,
+    attestor, bridge_nonce, consumed_record_key, foreign_root, foreign_root_key, is_consumed,
+    latest_foreign_view, local_chain_id, mark_consumed, nonce_key, put_foreign_root,
+    put_transfer_record, set_attestor, set_bridge_nonce, set_latest_foreign_view, set_local_chain_id,
+    transfer_record, transfer_record_key, AssetId, BridgeTransferRecord, ChainId, ForeignRoot,
+    TransferRecordId, BRIDGE_NAMESPACE,
 };
 
 fn addr(seed: u64) -> Address {
@@ -226,5 +228,53 @@ fn foreign_root_and_config_accessors_roundtrip() {
         );
         assert_eq!(latest_foreign_view(&state, &other).await.expect("read"), None);
         assert_eq!(attestor(&state).await.expect("read"), Some(signer));
+    });
+}
+
+#[test]
+fn foreign_root_codec_round_trips_and_rejects_truncation() {
+    let root = ForeignRoot {
+        state_root: Sha256::hash(b"root"),
+    };
+    assert_eq!(ForeignRoot::decode(root.encode().as_ref()).unwrap(), root);
+    let encoded = root.encode();
+    assert!(ForeignRoot::decode(&encoded[..encoded.len() - 1]).is_err());
+}
+
+#[test]
+fn corrupt_state_values_surface_as_backend_errors() {
+    deterministic::Runner::default().start(|context| async move {
+        let mut state = QmdbState::init(context, "bridge-corrupt-state")
+            .await
+            .expect("init state");
+        let source = ChainId(Sha256::hash(b"foreign-chain"));
+        let garbage = vec![0xff];
+
+        state.set(foreign_root_key(&source, 5), garbage.clone());
+        assert!(foreign_root(&state, &source, 5).await.is_err());
+
+        let record = record();
+        state.set(transfer_record_key(&record.record_id()), garbage.clone());
+        assert!(transfer_record(&state, &record.record_id()).await.is_err());
+
+        let account = addr(1);
+        state.set(nonce_key(&account), garbage.clone());
+        assert!(bridge_nonce(&state, &account).await.is_err());
+        set_bridge_nonce(&mut state, &account, 4);
+        assert_eq!(bridge_nonce(&state, &account).await.expect("nonce"), 4);
+
+        // Config table discriminant 3 matches `Table::Config`.
+        let ns = Namespace::new(BRIDGE_NAMESPACE);
+        state.set(ns.key(3u8, b"local_chain_id"), garbage.clone());
+        assert!(local_chain_id(&state).await.is_err());
+        set_local_chain_id(&mut state, &source);
+        assert_eq!(local_chain_id(&state).await.expect("chain"), Some(source));
+
+        state.set(ns.key(3u8, b"attestor"), garbage.clone());
+        assert!(attestor(&state).await.is_err());
+
+        // Latest-view table discriminant 5 matches `Table::ForeignLatestView`.
+        state.set(ns.key(5u8, source.encode().as_ref()), garbage);
+        assert!(latest_foreign_view(&state, &source).await.is_err());
     });
 }

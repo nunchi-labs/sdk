@@ -8,7 +8,6 @@ use crate::{
 use commonware_codec::DecodeExt;
 use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
 use nunchi_common::{NoopEventSink, QmdbState, VecEventSink};
-use nunchi_crypto::SignatureError;
 
 async fn ledger(context: deterministic::Context) -> Ledger<QmdbState<deterministic::Context>> {
     let db = QmdbState::init(context, "coins-test")
@@ -218,11 +217,7 @@ fn rejects_transaction_with_bad_signature() {
             amount: 1,
         };
 
-        let err = ledger.apply_transaction(&tx, NoopEventSink).await.unwrap_err();
-        assert_eq!(
-            err,
-            LedgerError::BadSignature(SignatureError::InvalidSignature)
-        );
+        assert!(tx.verify().is_err());
     });
 }
 
@@ -330,10 +325,7 @@ fn rejects_multisig_transaction_below_threshold() {
             },
         );
 
-        assert_eq!(
-            ledger.apply_transaction(&tx, NoopEventSink).await.unwrap_err(),
-            LedgerError::BadSignature(SignatureError::InvalidSignature)
-        );
+        assert!(tx.verify().is_err());
     });
 }
 
@@ -572,10 +564,9 @@ fn rejects_cross_account_multisig_replay() {
         );
         tx.account_id = account_b;
 
-        assert_eq!(
-            ledger.apply_transaction(&tx, NoopEventSink).await.unwrap_err(),
-            LedgerError::BadSignature(SignatureError::InvalidSignature)
-        );
+        // The replayed signatures commit to account_a's id, so stateless
+        // verification rejects the transaction before execution.
+        assert!(tx.verify().is_err());
     });
 }
 
@@ -1180,5 +1171,67 @@ fn charge_fee_of_zero_stages_no_writes() {
             .expect("zero fee");
         assert!(events.is_empty());
         assert_eq!(ledger.balance(&alice, &coin).await.unwrap(), 100);
+    });
+}
+
+#[test]
+fn bridge_mint_credits_recipient_and_increases_supply() {
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let mut ledger = ledger(context).await;
+        let issuer = address(&PrivateKey::ed25519_from_seed(1));
+        let recipient = address(&PrivateKey::ed25519_from_seed(2));
+
+        let coin = ledger
+            .create_token(issuer, spec(0, None).expect("valid coin spec"))
+            .await
+            .expect("create token");
+
+        ledger
+            .bridge_mint(&recipient, coin, 50)
+            .await
+            .expect("bridge mint");
+        assert_eq!(ledger.balance(&recipient, &coin).await.unwrap(), 50);
+        assert_eq!(
+            ledger.token(&coin).await.unwrap().unwrap().total_supply,
+            50
+        );
+    });
+}
+
+#[test]
+fn bridge_mint_rejects_unknown_token_and_max_supply() {
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let mut ledger = ledger(context).await;
+        let issuer = address(&PrivateKey::ed25519_from_seed(1));
+        let recipient = address(&PrivateKey::ed25519_from_seed(2));
+        let unknown = crate::TokenFactory::derive_coin_id(
+            &issuer,
+            1,
+            &spec(1, None).expect("valid coin spec"),
+        );
+
+        assert_eq!(
+            ledger.bridge_mint(&recipient, unknown, 1).await.unwrap_err(),
+            LedgerError::UnknownToken(unknown)
+        );
+
+        let coin = ledger
+            .create_token(issuer, spec(0, Some(10)).expect("valid coin spec"))
+            .await
+            .expect("create token");
+        assert_eq!(
+            ledger.bridge_mint(&recipient, coin, 11).await.unwrap_err(),
+            LedgerError::MaxSupplyExceeded {
+                max: 10,
+                attempted: 11,
+            }
+        );
+        assert_eq!(ledger.balance(&recipient, &coin).await.unwrap(), 0);
+        assert_eq!(
+            ledger.token(&coin).await.unwrap().unwrap().total_supply,
+            0
+        );
     });
 }

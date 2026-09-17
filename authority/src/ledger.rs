@@ -77,13 +77,17 @@ impl<D: AuthorityDB> AuthorityLedger<D> {
         self.db
     }
 
+    /// Validate and apply a signed authority transaction.
+    ///
+    /// Does not re-check the transaction signature: callers must only pass
+    /// transactions that already passed stateless verification
+    /// ([`Transaction::verify`]), which the chain guarantees at mempool
+    /// admission and block verification.
     pub async fn apply_transaction(
         &mut self,
         tx: &Transaction,
         current_epoch: EpochNumber,
     ) -> Result<(), AuthorityError> {
-        tx.verify()?;
-
         // Authority approvals are collected on-chain through Propose/Approve/Execute, so each
         // transaction must carry a single owner signature; account-level multisig authorization
         // is not part of this module's model.

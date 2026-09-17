@@ -2,7 +2,7 @@ use clap::Parser;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
-#[command(about = "Run a standalone coins-chain validator node")]
+#[command(about = "Run a standalone coins-chain node")]
 struct Cli {
     #[arg(long)]
     config: PathBuf,

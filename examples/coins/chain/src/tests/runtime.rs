@@ -1,14 +1,15 @@
 use nunchi_authority::AuthorityError;
 use nunchi_bridge::{
-    escrow_address, transfer_record, AssetId, BridgeGenesis, BridgeOperation, BridgeTransaction,
-    BridgeTransferRecord, ChainId,
+    escrow_address, transfer_record, AssetId, BridgeGenesis, BridgeError, BridgeOperation,
+    BridgeTransaction, BridgeTransferRecord, ChainId,
 };
+use nunchi_clob::ClobError;
 use nunchi_coins::{
     CoinDB, CoinOperation, CoinSpec, CoinsGenesis, FeeCharged, FeeGenesis, Ledger, LedgerError,
     TokenCreated, TokenFactory, TokenGenesis, TokenName, TokenSymbol, FEE_CHARGED_EVENT,
     TOKEN_CREATED_EVENT, TRANSFERRED_EVENT,
 };
-use nunchi_common::{Address, QmdbState, Runtime, RuntimeContext, VecEventSink};
+use nunchi_common::{state_db::StateError, Address, QmdbState, Runtime, RuntimeContext, VecEventSink};
 use nunchi_crypto::PrivateKey;
 use nunchi_oracle::OracleError;
 
@@ -22,11 +23,18 @@ use commonware_runtime::{deterministic, Runner as _};
 fn runtime_error_classifies_storage_errors() {
     assert!(RuntimeError::Coins(LedgerError::Storage("disk".into())).is_storage());
     assert!(RuntimeError::Authority(AuthorityError::Storage("disk".into())).is_storage());
+    assert!(RuntimeError::Clob(ClobError::Storage("disk".into())).is_storage());
     assert!(RuntimeError::Oracle(OracleError::Storage("disk".into())).is_storage());
+    assert!(RuntimeError::Bridge(BridgeError::Storage("disk".into())).is_storage());
+    assert!(RuntimeError::Storage("disk".into()).is_storage());
+    assert!(RuntimeError::from(StateError::Backend("disk".into())).is_storage());
 
     assert!(!RuntimeError::Authority(AuthorityError::NotConfigured).is_storage());
     assert!(!RuntimeError::Coins(LedgerError::InvalidTokenSpec("bad")).is_storage());
+    assert!(!RuntimeError::Clob(ClobError::OffchainOnly).is_storage());
     assert!(!RuntimeError::Oracle(OracleError::PayloadTooLarge).is_storage());
+    assert!(!RuntimeError::Bridge(BridgeError::ChainNotConfigured).is_storage());
+    assert!(!RuntimeError::UnmappedAsset.is_storage());
 }
 
 #[test]

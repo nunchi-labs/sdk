@@ -9,7 +9,7 @@ use commonware_actor::{
 };
 use commonware_consensus::{marshal::Update, Reporter};
 use commonware_utils::{acknowledgement::Exact, channel::oneshot, Acknowledgement};
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Arc};
 use tracing::error;
 
 /// A message that can be sent to the [Actor].
@@ -27,7 +27,7 @@ where
     },
 
     /// A new block has been finalized.
-    Finalized { block: B, response: A },
+    Finalized { block: Arc<B>, response: A },
 }
 
 impl<B, A> Policy for Message<B, A>

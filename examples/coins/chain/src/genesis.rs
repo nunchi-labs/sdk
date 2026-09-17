@@ -1,12 +1,21 @@
 use crate::StateCommitment;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+use commonware_cryptography::{
+    bls12381::{
+        dkg::feldman_desmedt::Output,
+        primitives::variant::MinSig,
+    },
+    ed25519,
+};
 use commonware_storage::{mmr::Family, qmdb::sync::Target, Context};
 use nunchi_authority::{AuthorityGenesis, AuthorityLedger};
+use nunchi_clob::{ClobGenesis, ClobLedger};
 use nunchi_coins::{CoinsGenesis, Ledger};
 use nunchi_common::{
     CommitState, Namespace, Overlay, QmdbConfig, QmdbState, StateError, StateStore,
 };
+use nunchi_chain::DkgState;
 use nunchi_oracle::{OracleGenesis, OracleLedger};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
@@ -34,6 +43,8 @@ pub struct ChainGenesis {
     pub coins: Option<CoinsGenesis>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle: Option<OracleGenesis>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clob: Option<ClobGenesis>,
 }
 
 #[derive(Debug, Error)]
@@ -48,12 +59,16 @@ pub enum GenesisError {
     Coins(#[from] nunchi_coins::LedgerError),
     #[error("oracle genesis error: {0}")]
     Oracle(#[from] nunchi_oracle::OracleError),
+    #[error("clob genesis error: {0}")]
+    Clob(#[from] nunchi_clob::ClobError),
     #[error("state error: {0}")]
     State(#[from] StateError),
     #[error("existing chain state was initialized with a different genesis")]
     MismatchedGenesis,
     #[error("existing chain state is non-empty but has no genesis marker")]
     UnmarkedState,
+    #[error("authenticated DKG genesis error: {0}")]
+    Dkg(#[from] nunchi_chain::DkgStateError),
 }
 
 impl ChainGenesis {
@@ -105,6 +120,11 @@ impl ChainGenesis {
             ledger.apply_genesis(oracle).await?;
             overlay = ledger.into_inner();
         }
+        if let Some(clob) = &self.clob {
+            let mut ledger = ClobLedger::new(overlay);
+            ledger.apply_genesis(clob).await?;
+            overlay = ledger.into_inner();
+        }
         set_genesis_marker(&mut overlay, fingerprint);
         overlay.commit();
         state.commit().await?;
@@ -123,7 +143,30 @@ where
 {
     let mut state = QmdbState::init_with_config(context, config).await?;
     genesis.apply_to_state(&mut state, empty).await?;
-    Ok(state_commitment(state.sync_target().await))
+    Ok(state_commitment(state.sync_target()))
+}
+
+/// Initialize the mandatory authenticated DKG checkpoint and optional
+/// application genesis in one canonical order.
+pub async fn authenticated_genesis_target<E>(
+    context: E,
+    config: QmdbConfig,
+    dkg: &DkgState,
+    initial_output: Output<MinSig, ed25519::PublicKey>,
+    genesis: Option<&ChainGenesis>,
+    empty: &StateCommitment,
+) -> Result<StateCommitment, GenesisError>
+where
+    E: Context + commonware_runtime::BufferPooler,
+{
+    let mut state = QmdbState::init_with_config(context, config).await?;
+    dkg.seed(&mut state, empty.root, initial_output).await?;
+    state.commit().await?;
+    let dkg_baseline = state_commitment(state.sync_target());
+    if let Some(genesis) = genesis {
+        genesis.apply_to_state(&mut state, &dkg_baseline).await?;
+    }
+    Ok(state_commitment(state.sync_target()))
 }
 
 pub fn state_commitment(target: Target<Family, Digest>) -> StateCommitment {

@@ -13,7 +13,7 @@ pub use nunchi_chain::SharedAppliedHeight;
 #[derive(Clone)]
 pub struct NodeHandle<E>
 where
-    E: Context + Spawner + Metrics + Clock + rand::Rng,
+    E: Context + Spawner + Metrics + Clock + rand::Rng + rand::CryptoRng,
 {
     pub bridge: BridgeMailbox,
     pub stateful: StatefulMailbox<E, Application>,
@@ -23,7 +23,7 @@ where
 
 impl<E> NodeHandle<E>
 where
-    E: Context + Spawner + Metrics + Clock + rand::Rng,
+    E: Context + Spawner + Metrics + Clock + rand::Rng + rand::CryptoRng,
 {
     pub fn new(
         bridge: BridgeMailbox,

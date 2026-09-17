@@ -1,4 +1,5 @@
 mod claim;
+mod events;
 mod genesis;
 mod ledger;
 mod record;
@@ -18,7 +19,7 @@ use commonware_cryptography::{
 use commonware_parallel::Sequential;
 use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
 use commonware_storage::mmr::Location;
-use commonware_utils::{non_empty_range, test_rng_seeded};
+use commonware_utils::{non_empty_range, TestRng};
 use nunchi_chain::StateCommitment;
 use nunchi_dkg::{Context, Finalization, Scheme};
 
@@ -27,7 +28,7 @@ use crate::{BridgeActor, BridgeBlock, BridgePayload, SubmitResult};
 const NAMESPACE: &[u8] = b"_NUNCHI_BRIDGE_TEST";
 
 fn schemes(seed: u64) -> Vec<Scheme> {
-    let mut rng = test_rng_seeded(seed);
+    let mut rng = TestRng::new(seed);
     vrf::fixture::<MinSig, _>(&mut rng, NAMESPACE, 4).schemes
 }
 

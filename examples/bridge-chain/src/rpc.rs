@@ -21,7 +21,8 @@ where
         + commonware_runtime::Spawner
         + commonware_runtime::Metrics
         + commonware_runtime::Clock
-        + rand::Rng,
+        + rand::Rng
+        + rand::CryptoRng,
 {
     node: NodeHandle<E>,
 }
@@ -32,7 +33,8 @@ where
         + commonware_runtime::Spawner
         + commonware_runtime::Metrics
         + commonware_runtime::Clock
-        + rand::Rng,
+        + rand::Rng
+        + rand::CryptoRng,
 {
     pub const fn new(node: NodeHandle<E>) -> Self {
         Self { node }
@@ -74,6 +76,7 @@ where
         + commonware_runtime::Metrics
         + commonware_runtime::Clock
         + rand::Rng
+        + rand::CryptoRng
         + Send
         + Sync
         + 'static,
@@ -91,6 +94,7 @@ where
         + commonware_runtime::Metrics
         + commonware_runtime::Clock
         + rand::Rng
+        + rand::CryptoRng
         + Send
         + Sync
         + 'static,

@@ -1,0 +1,11 @@
+target
+.git
+.agents
+.codex
+.claude
+.github
+.idea
+*.swp
+*.DS_Store
+testnet
+.local

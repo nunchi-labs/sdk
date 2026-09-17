@@ -54,7 +54,7 @@ impl<P: PublicKey> PeerConfig<P> {
         }
         let mut rng = StdRng::seed_from_u64(round);
         p_iter
-            .choose_multiple(&mut rng, to_choose)
+            .sample(&mut rng, to_choose)
             .into_iter()
             .try_collect()
             .unwrap()

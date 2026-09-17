@@ -1,0 +1,11 @@
+[package]
+name = "fixture-gen"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nunchi-crypto = { path = "../../../crypto" }
+nunchi-common = { path = "../../../common" }
+commonware-codec = "2026.7.0"
+commonware-cryptography = "2026.7.0"
+hex = "0.4"

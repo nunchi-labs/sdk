@@ -1,0 +1,25 @@
+[package]
+name = "nunchi-access-control"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Optional role membership and scope ownership for Nunchi modules."
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+bytes = { workspace = true }
+commonware-codec = { workspace = true }
+commonware-cryptography = { workspace = true }
+commonware-formatting = { workspace = true }
+commonware-macros = { workspace = true }
+nunchi-common = { workspace = true }
+nunchi-crypto = { workspace = true }
+serde = { workspace = true }
+serde_with = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+commonware-runtime = { workspace = true }

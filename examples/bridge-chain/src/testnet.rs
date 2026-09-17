@@ -15,6 +15,7 @@ use commonware_cryptography::{
     ed25519, Signer,
 };
 use commonware_formatting::{from_hex, hex};
+use commonware_glue::stateful::PruneConfig;
 use commonware_p2p::{
     authenticated::discovery::{self, Network},
     Ingress, Manager,
@@ -23,7 +24,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{tokio, Handle, Runner as _, Supervisor as _};
 use commonware_utils::{
     ordered::{Map, Set},
-    union, N3f1, NZUsize, NZU32,
+    union, Hostname, N3f1, NZUsize, NZU32,
 };
 use governor::Quota;
 use nunchi_bridge::BridgeActor;
@@ -31,13 +32,18 @@ use nunchi_dkg::{
     ContinueOnUpdate, EpochProvider, PeerConfig, Provider, StorageKey, MAX_SUPPORTED_MODE,
 };
 use nunchi_mempool::PoolConfig;
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use nunchi_chain::engine::{
+    default_state_prune_config, validate_state_prune_config, PruneConfigError,
+};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use std::{
+    fmt::{self, Display},
     fs,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    num::{NonZeroU32, TryFromIntError},
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize, TryFromIntError},
     path::{Path, PathBuf},
+    str::FromStr,
     time::Duration,
 };
 use tracing::info;
@@ -112,30 +118,228 @@ pub struct NodeConfig {
     pub share: String,
     pub peer_config: PeerConfig<PublicKey>,
     pub listen_address: SocketAddr,
-    pub dialable_address: SocketAddr,
+    /// Address advertised to peers. IP literals use socket syntax (with brackets around IPv6),
+    /// while DNS names use `hostname:port` without a URL scheme or path. DNS is resolved again
+    /// whenever a disconnected peer retries this node, so operators should use a stable hostname
+    /// and an appropriate TTL.
+    #[serde(with = "ingress_serde")]
+    pub dialable_address: Ingress,
     pub rpc_address: SocketAddr,
     pub bootstrappers: Vec<BootstrapperConfig>,
     pub storage_dir: PathBuf,
+    /// Minimum timestamp delta between a block and its parent.
+    #[serde(default = "default_min_block_interval_ms")]
+    pub min_block_interval_ms: NonZeroU64,
     pub consensus: ConsensusConfig,
     pub networking: NetworkConfig,
+    /// Enable one-time peer QMDB state sync for a fresh joining node.
+    #[serde(default)]
+    pub state_sync: bool,
+    /// Maximum number of marshal acknowledgements that may remain pending.
+    pub max_pending_acks: NonZeroUsize,
+    /// Finalized-height cadence for marshal and QMDB pruning maintenance.
+    pub maintenance_interval: NonZeroUsize,
+    /// Blocks retained by marshal beyond the mandatory acknowledgement window.
+    pub retained_marshal_blocks: usize,
+    /// Operation-history blocks retained by QMDB beyond the mandatory acknowledgement window.
+    pub retained_qmdb_blocks: usize,
 }
 
 impl NodeConfig {
     pub fn read(path: impl AsRef<Path>) -> Result<Self, Error> {
         let raw = fs::read_to_string(path).map_err(Error::Io)?;
-        toml::from_str(&raw).map_err(Error::TomlDeserialize)
+        let config: Self = toml::from_str(&raw).map_err(Error::TomlDeserialize)?;
+        config.prune_config()?;
+        Ok(config)
     }
 
     pub fn write(&self, path: impl AsRef<Path>) -> Result<(), Error> {
         let raw = toml::to_string_pretty(self).map_err(Error::TomlSerialize)?;
         fs::write(path, raw).map_err(Error::Io)
     }
+
+    pub fn prune_config(&self) -> Result<PruneConfig, PruneConfigError> {
+        validate_state_prune_config(PruneConfig {
+            max_pending_acks: self.max_pending_acks,
+            maintenance_interval: self.maintenance_interval,
+            retained_marshal_blocks: self.retained_marshal_blocks,
+            retained_qmdb_blocks: self.retained_qmdb_blocks,
+        })
+    }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+fn default_min_block_interval_ms() -> NonZeroU64 {
+    nunchi_chain::DEFAULT_MIN_BLOCK_INTERVAL_MS
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BootstrapperConfig {
-    pub public_key: String,
-    pub address: SocketAddr,
+    pub public_key: PublicKey,
+    /// Address used to dial the bootstrapper. IP literals use socket syntax (with brackets around
+    /// IPv6), while DNS names use `hostname:port` without a URL scheme or path. DNS is resolved on
+    /// each reconnect attempt rather than continuously while a connection is healthy.
+    pub address: Ingress,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum BootstrapperConfigError {
+    #[error("bootstrapper is missing the '@' separator")]
+    MissingSeparator,
+    #[error("bootstrapper contains multiple '@' separators")]
+    MultipleSeparators,
+    #[error("bootstrapper is missing a public key")]
+    MissingPublicKey,
+    #[error("bootstrapper public key must be exactly 64 lowercase hexadecimal characters")]
+    InvalidPublicKeyHex,
+    #[error("invalid bootstrapper public key: {0}")]
+    InvalidPublicKey(#[source] commonware_codec::Error),
+    #[error("bootstrapper is missing an address")]
+    MissingAddress,
+    #[error("invalid bootstrapper address: {0}")]
+    InvalidAddress(String),
+}
+
+impl FromStr for BootstrapperConfig {
+    type Err = BootstrapperConfigError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (public_key, address) = value
+            .split_once('@')
+            .ok_or(BootstrapperConfigError::MissingSeparator)?;
+        if address.contains('@') {
+            return Err(BootstrapperConfigError::MultipleSeparators);
+        }
+        if public_key.is_empty() {
+            return Err(BootstrapperConfigError::MissingPublicKey);
+        }
+        if address.is_empty() {
+            return Err(BootstrapperConfigError::MissingAddress);
+        }
+
+        Ok(Self {
+            public_key: parse_bootstrapper_public_key(public_key)?,
+            address: parse_ingress(address)
+                .map_err(|error| BootstrapperConfigError::InvalidAddress(error.to_string()))?,
+        })
+    }
+}
+
+impl Display for BootstrapperConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{}@{}",
+            self.public_key,
+            format_ingress(&self.address)
+        )
+    }
+}
+
+impl Serialize for BootstrapperConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for BootstrapperConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(D::Error::custom)
+    }
+}
+
+fn parse_bootstrapper_public_key(
+    value: &str,
+) -> Result<PublicKey, BootstrapperConfigError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(BootstrapperConfigError::InvalidPublicKeyHex);
+    }
+    let bytes = from_hex(value).ok_or(BootstrapperConfigError::InvalidPublicKeyHex)?;
+    PublicKey::decode(bytes.as_slice()).map_err(BootstrapperConfigError::InvalidPublicKey)
+}
+
+#[derive(Debug, thiserror::Error)]
+enum PeerAddressError {
+    #[error("peer address must not contain a URL scheme or path")]
+    SchemeOrPath,
+    #[error("peer address is missing a port")]
+    MissingPort,
+    #[error("peer address is missing a host")]
+    MissingHost,
+    #[error("IPv6 peer addresses must use bracketed socket syntax")]
+    UnbracketedIpv6,
+    #[error("invalid peer address port: {0}")]
+    InvalidPort(String),
+    #[error("invalid peer address hostname: {0}")]
+    InvalidHostname(String),
+}
+
+fn parse_ingress(value: &str) -> Result<Ingress, PeerAddressError> {
+    if let Ok(address) = SocketAddr::from_str(value) {
+        return Ok(Ingress::Socket(address));
+    }
+    if value.contains("://") {
+        return Err(PeerAddressError::SchemeOrPath);
+    }
+
+    let (host, port) = value
+        .rsplit_once(':')
+        .ok_or(PeerAddressError::MissingPort)?;
+    if host.is_empty() {
+        return Err(PeerAddressError::MissingHost);
+    }
+    if port.is_empty() {
+        return Err(PeerAddressError::MissingPort);
+    }
+    if host.contains(':') {
+        return Err(PeerAddressError::UnbracketedIpv6);
+    }
+    let port = port
+        .parse::<u16>()
+        .map_err(|error| PeerAddressError::InvalidPort(error.to_string()))?;
+    let host = Hostname::new(host.to_ascii_lowercase())
+        .map_err(|error| PeerAddressError::InvalidHostname(error.to_string()))?;
+    Ok(Ingress::Dns { host, port })
+}
+
+fn format_ingress(ingress: &Ingress) -> String {
+    match ingress {
+        Ingress::Socket(address) => address.to_string(),
+        Ingress::Dns { host, port } => format!("{host}:{port}"),
+    }
+}
+
+mod ingress_serde {
+    use super::*;
+    use serde::{de::Error as _, Deserializer, Serializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Ingress, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        parse_ingress(&value).map_err(D::Error::custom)
+    }
+
+    pub fn serialize<S>(ingress: &Ingress, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&format_ingress(ingress))
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -204,8 +408,12 @@ pub enum Error {
     TomlSerialize(#[from] toml::ser::Error),
     #[error("failed to parse toml: {0}")]
     TomlDeserialize(#[from] toml::de::Error),
+    #[error("invalid prune configuration: {0}")]
+    PruneConfig(#[from] PruneConfigError),
     #[error("engine stopped unexpectedly: {0}")]
     Engine(commonware_runtime::Error),
+    #[error("engine startup failed: {0}")]
+    EngineStartup(#[from] crate::engine::StartupError),
 }
 
 struct Material {
@@ -342,11 +550,11 @@ fn write_chain(
             .filter(|(candidate, _)| *candidate != index)
             .map(|(candidate, public_key)| {
                 Ok(BootstrapperConfig {
-                    public_key: encode(public_key),
-                    address: SocketAddr::new(
+                    public_key: public_key.clone(),
+                    address: Ingress::Socket(SocketAddr::new(
                         IpAddr::V4(Ipv4Addr::LOCALHOST),
                         local.base_port + u16::try_from(candidate)?,
-                    ),
+                    )),
                 })
             })
             .collect::<Result<Vec<_>, Error>>()?;
@@ -366,12 +574,18 @@ fn write_chain(
             share: encode(share),
             peer_config: material.peer_config.clone(),
             listen_address,
-            dialable_address: listen_address,
+            dialable_address: Ingress::Socket(listen_address),
             rpc_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), rpc_port),
             bootstrappers,
             storage_dir: storage_dir.clone(),
+            min_block_interval_ms: default_min_block_interval_ms(),
             consensus: ConsensusConfig::default(),
             networking: NetworkConfig::default(),
+            state_sync: false,
+            max_pending_acks: default_state_prune_config().max_pending_acks,
+            maintenance_interval: default_state_prune_config().maintenance_interval,
+            retained_marshal_blocks: default_state_prune_config().retained_marshal_blocks,
+            retained_qmdb_blocks: default_state_prune_config().retained_qmdb_blocks,
         };
         node_config.write(&config_path)?;
         nodes.push(ManifestNode {
@@ -476,6 +690,7 @@ async fn start_node(
     context: tokio::Context,
     config: NodeConfig,
 ) -> Result<(nunchi_rpc::ServerHandle, Handle<()>), Error> {
+    let prune_config = config.prune_config()?;
     let private_key = decode_unit::<ed25519::PrivateKey>(&config.private_key, "private_key")?;
     let dkg_storage_key = decode_storage_key(&config.dkg_storage_key)?;
     let public_key = private_key.public_key();
@@ -498,18 +713,19 @@ async fn start_node(
         .bootstrappers
         .iter()
         .map(|bootstrapper| {
-            Ok((
-                decode_unit::<PublicKey>(&bootstrapper.public_key, "bootstrapper.public_key")?,
-                Ingress::from(bootstrapper.address),
-            ))
+            (
+                bootstrapper.public_key.clone(),
+                bootstrapper.address.clone(),
+            )
         })
-        .collect::<Result<Vec<_>, Error>>()?;
+        .collect();
 
     info!(
         node = %config.name,
         chain = %config.chain,
         public_key = %public_key,
         listen = %config.listen_address,
+        dialable = ?config.dialable_address,
         rpc = %config.rpc_address,
         "starting bridge-chain validator"
     );
@@ -518,7 +734,7 @@ async fn start_node(
         private_key.clone(),
         config.namespace.as_bytes(),
         config.listen_address,
-        config.dialable_address,
+        config.dialable_address.clone(),
         bootstrappers,
         config.networking.max_message_size,
     );
@@ -536,6 +752,8 @@ async fn start_node(
     let broadcast = register(channels::BROADCAST);
     let dkg = register(channels::DKG);
     let backfill = register(channels::BACKFILL);
+    let probe = register(channels::PROBE);
+    let state_sync = register(channels::STATE_SYNC);
     network.start();
 
     let engine_config: EngineConfig<_, _, _> = EngineConfig {
@@ -550,9 +768,12 @@ async fn start_node(
         output,
         share: Some(share),
         peer_config: config.peer_config.clone(),
+        min_block_interval_ms: config.min_block_interval_ms,
         leader_timeout: Duration::from_millis(config.consensus.leader_timeout_ms),
         certification_timeout: Duration::from_millis(config.consensus.certification_timeout_ms),
         strategy: Sequential,
+        state_sync: config.state_sync,
+        prune_config,
         pool_config: PoolConfig::default(),
         bridge: bridge_mailbox,
         bridge_handle,
@@ -572,7 +793,13 @@ async fn start_node(
     let marshal_resolver =
         marshal::resolver::p2p::init(context.child("backfill"), resolver_config, backfill);
 
-    let (engine, node_handle) = Engine::new(context.child("engine"), engine_config).await;
+    let (engine, node_handle) = Engine::new(
+        context.child("engine"),
+        engine_config,
+        probe,
+        state_sync,
+    )
+    .await?;
     let engine_handle = engine.start(
         pending,
         recovered,
@@ -644,6 +871,7 @@ fn storage_key(seed: u64, index: usize) -> StorageKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_utils::NZUsize;
     use std::collections::HashSet;
 
     #[test]
@@ -717,6 +945,14 @@ mod tests {
             let config = NodeConfig::read(&node.config_path).expect("read node config");
             assert_eq!(config.peer_config.participants.len(), 4);
             assert_eq!(config.bootstrappers.len(), 3);
+            assert_eq!(config.max_pending_acks, NZUsize!(16));
+            assert_eq!(config.maintenance_interval, NZUsize!(32));
+            assert_eq!(config.retained_marshal_blocks, 200);
+            assert_eq!(config.retained_qmdb_blocks, 200);
+            assert_eq!(
+                config.min_block_interval_ms,
+                nunchi_chain::DEFAULT_MIN_BLOCK_INTERVAL_MS
+            );
             assert!(!config
                 .bootstrappers
                 .iter()
@@ -740,6 +976,85 @@ mod tests {
         manifest.write(&manifest_path).expect("write manifest");
         let read = LocalBridgePairManifest::read(&manifest_path).expect("read manifest");
         assert_eq!(read.nodes.len(), manifest.nodes.len());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn prune_config_is_required_and_validated() {
+        let dir =
+            std::env::temp_dir().join(format!("bridge-chain-prune-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let manifest = generate_bridge_pair(LocalBridgePairConfig {
+            validators: 1,
+            base_port_a: 44_000,
+            base_rpc_port_a: 44_100,
+            base_port_b: 44_200,
+            base_rpc_port_b: 44_300,
+            base_data_dir: dir.clone(),
+            seed_a: 13,
+            seed_b: 14,
+        })
+        .expect("generate bridge pair");
+        let generated_path = &manifest.nodes[0].config_path;
+        let raw = fs::read_to_string(generated_path).expect("read generated config");
+
+        for field in [
+            "max_pending_acks",
+            "maintenance_interval",
+            "retained_marshal_blocks",
+            "retained_qmdb_blocks",
+        ] {
+            let path = dir.join(format!("missing-{field}.toml"));
+            let filtered = raw
+                .lines()
+                .filter(|line| !line.starts_with(&format!("{field} = ")))
+                .collect::<Vec<_>>()
+                .join("\n");
+            fs::write(&path, filtered).expect("write incomplete config");
+            assert!(matches!(
+                NodeConfig::read(path),
+                Err(Error::TomlDeserialize(_))
+            ));
+        }
+
+        let mut asymmetric = NodeConfig::read(generated_path).expect("read generated config");
+        asymmetric.max_pending_acks = NZUsize!(1);
+        asymmetric.maintenance_interval = NZUsize!(3);
+        asymmetric.retained_marshal_blocks = 5;
+        asymmetric.retained_qmdb_blocks = 1;
+        let path = dir.join("asymmetric.toml");
+        asymmetric.write(&path).expect("write asymmetric config");
+        assert_eq!(
+            NodeConfig::read(&path)
+                .expect("read asymmetric config")
+                .prune_config()
+                .unwrap(),
+            asymmetric.prune_config().unwrap()
+        );
+
+        asymmetric.retained_qmdb_blocks = 6;
+        asymmetric.write(&path).expect("write unordered config");
+        assert!(matches!(
+            NodeConfig::read(&path),
+            Err(Error::PruneConfig(_))
+        ));
+
+        asymmetric.max_pending_acks = NZUsize!(1);
+        asymmetric.retained_marshal_blocks = usize::MAX - 1;
+        asymmetric.retained_qmdb_blocks = 0;
+        asymmetric.write(&path).expect("write overflowing window");
+        assert!(matches!(
+            NodeConfig::read(&path),
+            Err(Error::PruneConfig(_))
+        ));
+
+        let zero = raw.replace("maintenance_interval = 32", "maintenance_interval = 0");
+        fs::write(&path, zero).expect("write zero config");
+        assert!(matches!(
+            NodeConfig::read(&path),
+            Err(Error::TomlDeserialize(_))
+        ));
 
         let _ = fs::remove_dir_all(dir);
     }

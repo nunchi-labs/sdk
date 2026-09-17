@@ -2,7 +2,7 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{sha256, Hasher, Sha256};
 use commonware_runtime::{deterministic, Runner as _};
 use nunchi_common::{
-    state_db::CommitState, Address, MultisigPolicy, NoopEventSink, QmdbState, VecEventSink,
+    Address, CommitState, MultisigPolicy, NoopEventSink, QmdbState, VecEventSink,
 };
 use nunchi_crypto::PrivateKey;
 

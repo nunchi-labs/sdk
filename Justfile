@@ -8,6 +8,14 @@ test:
     @echo "Running tests..."
     @cargo nextest run --workspace
 
+wallet-test:
+    @echo "Running wallet extension tests..."
+    cd examples/wallet-extension && npm test
+
+wallet-live:
+    @echo "Running wallet live-chain tests..."
+    ./examples/wallet-extension/scripts/run-live-tests.sh
+
 coverage:
     @echo "Running tests with coverage..."
     @cargo llvm-cov nextest --workspace

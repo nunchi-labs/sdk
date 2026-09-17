@@ -1,13 +1,16 @@
 use crate::{
     protector::{ProtectionError, SealedRecord, StorageProtector},
-    state::{Dealer, Epoch as EpochState, Error as StorageError, Storage},
+    state::{
+        CreatePlayerError, Dealer, Epoch as EpochState, Error as StorageError, Reconciliation,
+        ReconciliationPhase, Storage,
+    },
 };
 use bytes::Bytes;
 use commonware_codec::{Encode, RangeCfg, ReadExt};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
     bls12381::{
-        dkg::feldman_desmedt::{DealerPrivMsg, DealerPubMsg, Info, PlayerAck},
+        dkg::feldman_desmedt::{DealerPrivMsg, DealerPubMsg, Info, Player, PlayerAck, Verdict},
         primitives::{
             group::{Private, Scalar, Share},
             sharing::Mode,
@@ -15,6 +18,7 @@ use commonware_cryptography::{
         },
     },
     ed25519::{self},
+    sha256::Digest,
     transcript::Summary,
     Signer,
 };
@@ -27,8 +31,8 @@ use commonware_storage::{
     metadata::{Config as MetadataConfig, Metadata},
     Context as StorageContext,
 };
-use commonware_utils::{ordered::Set, test_rng, test_rng_seeded, N3f1, Participant, NZU32};
-use rand_core::CryptoRngCore;
+use commonware_utils::{ordered::Set, test_rng, TestRng, N3f1, Participant, NZU32};
+use rand::CryptoRng;
 use std::collections::BTreeMap;
 
 const TEST_NAMESPACE: &[u8] = b"test_dkg";
@@ -38,7 +42,7 @@ const WRONG_STORAGE_KEY: [u8; 32] = [8u8; 32];
 fn create_test_signers(n: usize) -> Vec<ed25519::PrivateKey> {
     (0..n)
         .map(|i| {
-            let mut rng = test_rng_seeded(i as u64);
+            let mut rng = TestRng::new(i as u64);
             ed25519::PrivateKey::random(&mut rng)
         })
         .collect()
@@ -66,7 +70,7 @@ async fn init_storage<E>(
     public_key: ed25519::PublicKey,
 ) -> Storage<E, MinPk, ed25519::PublicKey>
 where
-    E: BufferPooler + Clock + RuntimeStorage + Metrics + CryptoRngCore,
+    E: BufferPooler + Clock + RuntimeStorage + Metrics + CryptoRng,
 {
     Storage::<_, MinPk, ed25519::PublicKey>::init(
         context,
@@ -87,7 +91,7 @@ fn epoch_state<E>(
     share: Option<Share>,
 ) -> EpochState<MinPk, ed25519::PublicKey>
 where
-    E: CryptoRngCore,
+    E: CryptoRng,
 {
     EpochState {
         round,
@@ -115,6 +119,45 @@ fn test_dealing(
         .map(|(_, priv_msg)| priv_msg)
         .expect("player should have a share");
     (dealer_signer.public_key(), pub_msg, priv_msg)
+}
+
+fn finalized_dealer_log(
+    signers: &[ed25519::PrivateKey],
+    dealer_index: usize,
+) -> (
+    ed25519::PublicKey,
+    commonware_cryptography::bls12381::dkg::feldman_desmedt::DealerLog<
+        MinPk,
+        ed25519::PublicKey,
+    >,
+) {
+    let round_info = create_round_info(signers);
+    let dealer_signer = signers[dealer_index].clone();
+    let dealer_pk = dealer_signer.public_key();
+    let mut rng = test_rng();
+    let (mut dealer, pub_msg, priv_msgs) =
+        commonware_cryptography::bls12381::dkg::feldman_desmedt::Dealer::<MinPk, _>::start::<
+            N3f1,
+        >(&mut rng, round_info.clone(), dealer_signer, None)
+        .expect("valid dealer");
+    for (player_pk, priv_msg) in priv_msgs {
+        let player_signer = signers
+            .iter()
+            .find(|candidate| candidate.public_key() == player_pk)
+            .expect("player signer should exist")
+            .clone();
+        let mut player = Player::new(round_info.clone(), player_signer).expect("valid player");
+        let Verdict::Valid(ack) =
+            player.dealer_message::<N3f1>(dealer_pk.clone(), pub_msg.clone(), priv_msg)
+        else {
+            panic!("valid dealing should be acknowledged");
+        };
+        dealer.receive_player_ack(player_pk, ack).unwrap();
+    }
+    let signed = dealer.finalize::<N3f1>();
+    signed
+        .check(&round_info)
+        .expect("finalized log should check")
 }
 
 async fn corrupt_epoch_record<E>(context: E, partition: &str, epoch: Epoch)
@@ -459,6 +502,107 @@ fn storage_recovers_no_share_observer_epoch() {
 }
 
 #[test_traced]
+fn storage_recovers_reconciliation_phase_from_separate_partition() {
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        let signers = create_test_signers(4);
+        let public_key = signers[0].public_key();
+        let partition = "reconciliation_marker";
+        let marker = Reconciliation {
+            format_version: crate::STATE_FORMAT_VERSION,
+            checkpoint_digest: Digest([9; 32]),
+            target_epoch: Epoch::new(15),
+            phase: ReconciliationPhase::Importing,
+        };
+
+        let mut storage = init_storage(
+            context.child("storage"),
+            partition,
+            TEST_STORAGE_KEY,
+            TEST_NAMESPACE.to_vec(),
+            public_key.clone(),
+        )
+        .await;
+        storage
+            .set_reconciliation(marker.clone())
+            .await
+            .expect("reconciliation marker should persist");
+        drop(storage);
+
+        let mut recovered = init_storage(
+            context.child("recovered_storage"),
+            partition,
+            TEST_STORAGE_KEY,
+            TEST_NAMESPACE.to_vec(),
+            public_key,
+        )
+        .await;
+        assert_eq!(recovered.reconciliation(), Some(marker.clone()));
+
+        let complete = Reconciliation {
+            phase: ReconciliationPhase::Complete,
+            ..marker
+        };
+        recovered
+            .set_reconciliation(complete.clone())
+            .await
+            .expect("completed marker should persist");
+        drop(recovered);
+
+        let recovered = init_storage(
+            context.child("completed_storage"),
+            partition,
+            TEST_STORAGE_KEY,
+            TEST_NAMESPACE.to_vec(),
+            signers[0].public_key(),
+        )
+        .await;
+        assert_eq!(recovered.reconciliation(), Some(complete));
+    });
+}
+
+#[test_traced]
+fn create_player_returns_missing_dealing_for_imported_public_logs() {
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        let signers = create_test_signers(4);
+        let player_signer = signers[1].clone();
+        let player_pk = player_signer.public_key();
+        let partition = "missing_player_dealing";
+        let epoch = Epoch::zero();
+        let round_info = create_round_info(&signers);
+        let (dealer_pk, log) = finalized_dealer_log(&signers, 0);
+
+        let mut storage = init_storage(
+            context.child("storage"),
+            partition,
+            TEST_STORAGE_KEY,
+            TEST_NAMESPACE.to_vec(),
+            player_pk,
+        )
+        .await;
+        storage
+            .set_epoch(epoch, epoch_state(&mut context, 0, None))
+            .await
+            .expect("set epoch should succeed");
+        storage
+            .append_log(epoch, dealer_pk, log)
+            .await
+            .expect("append log should succeed");
+
+        match storage.create_player::<ed25519::PrivateKey, N3f1>(
+            epoch,
+            player_signer,
+            round_info,
+        ) {
+            Err(CreatePlayerError::MissingPlayerDealing) => {}
+            Err(err) => panic!("expected missing private dealing, got {err}"),
+            Ok(_) => panic!("missing private dealing should be reported"),
+        }
+    });
+}
+
+#[test_traced]
 fn test_dealer_handle_returns_false_when_player_not_in_unsent() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
@@ -489,7 +633,7 @@ fn test_dealer_handle_returns_false_when_player_not_in_unsent() {
         let mut dealer = Dealer::new(Some(crypto_dealer), pub_msg, unsent);
 
         let unknown_player = {
-            let mut rng = test_rng_seeded(100);
+            let mut rng = TestRng::new(100);
             ed25519::PrivateKey::random(&mut rng).public_key()
         };
         let fake_ack = PlayerAck::read(&mut signers[1].sign(b"ns", b"msg").encode().as_ref())
@@ -598,9 +742,13 @@ fn test_dealer_handle_returns_true_for_valid_ack() {
                 player_signer,
             )
             .expect("valid player");
-        let ack = crypto_player
-            .dealer_message::<N3f1>(dealer_signer.public_key(), pub_msg, player_priv_msg)
-            .expect("valid ack");
+        let Verdict::Valid(ack) = crypto_player.dealer_message::<N3f1>(
+            dealer_signer.public_key(),
+            pub_msg,
+            player_priv_msg,
+        ) else {
+            panic!("valid ack");
+        };
 
         let result = dealer
             .handle(&mut storage, Epoch::zero(), player_pk, ack)
@@ -654,9 +802,13 @@ fn test_dealer_handle_returns_false_for_duplicate_ack() {
                 player_signer,
             )
             .expect("valid player");
-        let ack = crypto_player
-            .dealer_message::<N3f1>(dealer_signer.public_key(), pub_msg, player_priv_msg)
-            .expect("valid ack");
+        let Verdict::Valid(ack) = crypto_player.dealer_message::<N3f1>(
+            dealer_signer.public_key(),
+            pub_msg,
+            player_priv_msg,
+        ) else {
+            panic!("valid ack");
+        };
 
         let result = dealer
             .handle(&mut storage, Epoch::zero(), player_pk.clone(), ack.clone())

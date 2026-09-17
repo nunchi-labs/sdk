@@ -1,5 +1,6 @@
 use commonware_codec::Encode;
 use nunchi_authority::{AuthorityOperation, Transaction as AuthorityTransaction};
+use nunchi_clob::{AssetId, ClobOperation, Transaction as ClobTransaction};
 use nunchi_coins::{CoinOperation, Transaction as CoinTransaction};
 use nunchi_common::Operation;
 use nunchi_mempool::PoolTransaction;
@@ -59,22 +60,40 @@ fn oracle_transaction(seed: u64, nonce: u64) -> OracleTransaction {
     )
 }
 
+fn clob_transaction(seed: u64, nonce: u64) -> ClobTransaction {
+    let signer = nunchi_crypto::PrivateKey::ed25519_from_seed(seed);
+    ClobTransaction::sign(
+        &signer,
+        nonce,
+        ClobOperation::CreateMarket {
+            base_asset: AssetId(Sha256::hash(b"base")),
+            quote_asset: AssetId(Sha256::hash(b"quote")),
+            tick_size: 1,
+            lot_size: 1,
+        },
+    )
+}
+
 #[test]
 fn transaction_codec_uses_stable_tags() {
     let coin = Transaction::from(coin_transaction(1, 3));
     let authority = Transaction::from(authority_transaction(2, 4));
     let oracle = Transaction::from(oracle_transaction(3, 5));
+    let clob = Transaction::from(clob_transaction(4, 6));
 
     let coin_encoded = coin.encode();
     let authority_encoded = authority.encode();
     let oracle_encoded = oracle.encode();
+    let clob_encoded = clob.encode();
 
     assert_eq!(coin_encoded[0], TX_COIN);
     assert_eq!(authority_encoded[0], TX_AUTHORITY);
     assert_eq!(oracle_encoded[0], TX_ORACLE);
+    assert_eq!(clob_encoded[0], TX_CLOB);
     assert_eq!(Transaction::decode(coin_encoded).unwrap(), coin);
     assert_eq!(Transaction::decode(authority_encoded).unwrap(), authority);
     assert_eq!(Transaction::decode(oracle_encoded).unwrap(), oracle);
+    assert_eq!(Transaction::decode(clob_encoded).unwrap(), clob);
     assert!(Transaction::decode([99].as_slice()).is_err());
 }
 
@@ -94,6 +113,7 @@ fn pool_transaction_nonce_key_uses_operation_namespace() {
     let coin = Transaction::from(coin_transaction(1, 0));
     let authority = Transaction::from(authority_transaction(1, 0));
     let oracle = Transaction::from(oracle_transaction(1, 0));
+    let clob = Transaction::from(clob_transaction(1, 0));
 
     assert_eq!(
         PoolTransaction::nonce_key(&coin).namespace(),
@@ -107,6 +127,10 @@ fn pool_transaction_nonce_key_uses_operation_namespace() {
         PoolTransaction::nonce_key(&oracle).namespace(),
         OracleOperation::NAMESPACE
     );
+    assert_eq!(
+        PoolTransaction::nonce_key(&clob).namespace(),
+        ClobOperation::NAMESPACE
+    );
 
     assert_ne!(
         PoolTransaction::nonce_key(&coin),
@@ -115,5 +139,9 @@ fn pool_transaction_nonce_key_uses_operation_namespace() {
     assert_ne!(
         PoolTransaction::nonce_key(&coin),
         PoolTransaction::nonce_key(&oracle)
+    );
+    assert_ne!(
+        PoolTransaction::nonce_key(&coin),
+        PoolTransaction::nonce_key(&clob)
     );
 }
