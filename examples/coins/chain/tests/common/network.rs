@@ -1,4 +1,5 @@
 use commonware_consensus::marshal;
+use commonware_cryptography::bls12381::primitives::sharing::Mode;
 use commonware_cryptography::{
     bls12381::{
         dkg::feldman_desmedt::{deal, Output},
@@ -9,22 +10,20 @@ use commonware_cryptography::{
     Signer,
 };
 use commonware_glue::stateful::PruneConfig;
-use commonware_cryptography::bls12381::primitives::sharing::Mode;
 use commonware_p2p::{
     simulated::{self, Link, Network, Oracle, Receiver, Sender},
     Manager, TrackedPeers,
 };
-use commonware_utils::probability;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     deterministic::{self, Runner},
     Clock, Error as RuntimeError, Metrics, Runner as _, Storage, Supervisor,
 };
+use commonware_utils::probability;
 use commonware_utils::{
     ordered::{Map, Set},
     N3f1, NZUsize, NZU32, NZU64,
 };
-use std::num::NonZeroUsize;
 use governor::Quota;
 use nunchi_authority::AuthorityLedger;
 use nunchi_chain::engine::default_state_prune_config;
@@ -38,6 +37,7 @@ use nunchi_common::QmdbReader;
 use nunchi_dkg::{ContinueOnUpdate, PeerConfig};
 use nunchi_mempool::{MempoolHandle, PoolConfig};
 use nunchi_oracle::OracleLedger;
+use std::num::NonZeroUsize;
 use std::{
     collections::{HashMap, HashSet},
     num::NonZeroU64,
@@ -203,8 +203,10 @@ impl TestNetworkBuilder {
             context.child("network"),
             simulated::Config {
                 max_size: 1024 * 1024,
-                max_peers_per_set: NonZeroUsize::new((self.validators + self.secondaries).max(2) as usize)
-                    .expect("max_peers_per_set"),
+                max_peers_per_set: NonZeroUsize::new(
+                    (self.validators + self.secondaries).max(2) as usize
+                )
+                .expect("max_peers_per_set"),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
             },
@@ -811,10 +813,7 @@ async fn register_nodes(
             .await
             .unwrap();
         let resolver = oracle.register(RESOLVER_CHANNEL, TEST_QUOTA).await.unwrap();
-        let marshal_shards = oracle
-            .register(MARSHAL_CHANNEL, TEST_QUOTA)
-            .await
-            .unwrap();
+        let marshal_shards = oracle.register(MARSHAL_CHANNEL, TEST_QUOTA).await.unwrap();
         let dkg = oracle.register(DKG_CHANNEL, TEST_QUOTA).await.unwrap();
         let backfill = oracle.register(BACKFILL_CHANNEL, TEST_QUOTA).await.unwrap();
         let mempool = oracle.register(MEMPOOL_CHANNEL, TEST_QUOTA).await.unwrap();

@@ -751,7 +751,9 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_consensus::marshal::coding::types::{coding_config_for_participants, CodedBlock};
+    use commonware_consensus::marshal::coding::types::{
+        coding_config_for_participants, CodedBlock,
+    };
     use commonware_consensus::simplex::{
         scheme::bls12381_threshold::vrf as bls12381_threshold,
         types::{
@@ -768,7 +770,9 @@ mod tests {
         Committable, Hasher, Signer,
     };
     use commonware_storage::mmr::Location;
-    use commonware_utils::{non_empty, ordered::Set, range::NonEmptyRange, test_rng, N3f1, TestRng, NZU32};
+    use commonware_utils::{
+        non_empty, ordered::Set, range::NonEmptyRange, test_rng, N3f1, TestRng, NZU32,
+    };
     use nunchi_coins_chain::{dummy_genesis_parent, Context, Seedable, StateCommitment};
 
     fn schemes() -> Vec<Scheme> {
@@ -781,14 +785,22 @@ mod tests {
 
     fn seed(schemes: &[Scheme], epoch: u64, view: u64) -> Seed {
         let round = Round::new(Epoch::new(epoch), View::new(view));
-        let proposal = Proposal::new(round, View::zero(), Sha256::hash(&[round.encode().as_ref()]));
+        let proposal = Proposal::new(
+            round,
+            View::zero(),
+            Sha256::hash(&[round.encode().as_ref()]),
+        );
         let notarizes = schemes
             .iter()
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).expect("sign notarize"))
             .collect::<Vec<_>>();
-        ConsensusNotarization::from_notarizes(&schemes[0], non_empty![@notarizes.iter()], &Sequential)
-            .expect("build notarization")
-            .seed()
+        ConsensusNotarization::from_notarizes(
+            &schemes[0],
+            non_empty![@notarizes.iter()],
+            &Sequential,
+        )
+        .expect("build notarization")
+        .seed()
     }
 
     fn output(seed: u64) -> DkgOutput {
@@ -832,8 +844,12 @@ mod tests {
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("sign finalize"))
             .collect::<Vec<_>>();
         Finalized::new(
-            ConsensusFinalization::from_finalizes(&schemes[0], non_empty![@finalizes.iter()], &Sequential)
-                .expect("build finalization"),
+            ConsensusFinalization::from_finalizes(
+                &schemes[0],
+                non_empty![@finalizes.iter()],
+                &Sequential,
+            )
+            .expect("build finalization"),
             block,
         )
     }

@@ -47,7 +47,7 @@ mod tests {
         );
         
         let official_bytes = official_tx.encode();
-        let official_digest = commonware_cryptography::Sha256::hash(&official_bytes);
+        let official_digest = commonware_cryptography::Sha256::hash(&[official_bytes.as_ref()]);
         
         let from_wasm_addr = Address::external(&nunchi_key.public_key());
         let to_wasm_addr = Address::external(&to_key.public_key());
@@ -92,7 +92,7 @@ mod tests {
         );
         
         let official_bytes = official_tx.encode();
-        let official_digest = commonware_cryptography::Sha256::hash(&official_bytes);
+        let official_digest = commonware_cryptography::Sha256::hash(&[official_bytes.as_ref()]);
         
         let from_wasm_addr = Address::external(&nunchi_key.public_key());
         let to_wasm_addr = Address::external(&to_key.public_key());
