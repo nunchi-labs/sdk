@@ -26,5 +26,8 @@
     "typescript": "^5.2.2",
     "vite": "^6.4.3",
     "vitest": "^4.1.11"
+  },
+  "overrides": {
+    "vite": "^6.4.3"
   }
 }
