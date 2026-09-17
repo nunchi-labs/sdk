@@ -112,7 +112,6 @@ class NunchiWalletProvider extends EventEmitter implements NunchiProvider {
         if (!result?.address) {
           throw new Error("No account returned");
         }
-        this.emit("accountsChanged", [result.address]);
         return [result.address];
       }
 
@@ -139,7 +138,6 @@ class NunchiWalletProvider extends EventEmitter implements NunchiProvider {
 
       case "nunchi_disconnect": {
         await this.sendMessage("DISCONNECT");
-        this.emit("accountsChanged", []);
         return true;
       }
 

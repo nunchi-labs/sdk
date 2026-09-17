@@ -4,6 +4,7 @@ import { isTrustedPageRequest, PAGE_EVENT_TARGET, PAGE_RESPONSE_TARGET } from ".
 const bridgeToken = randomRequestId("tok");
 
 function connectPagePort(): void {
+  const connectTime = Date.now();
   const port = chrome.runtime.connect({ name: "nunchi-page" });
   port.onMessage.addListener((message: { event?: string; params?: unknown }) => {
     if (typeof message?.event !== "string") {
@@ -20,6 +21,10 @@ function connectPagePort(): void {
     );
   });
   port.onDisconnect.addListener(() => {
+    const disconnectTime = Date.now();
+    if (disconnectTime - connectTime < 100) {
+      return;
+    }
     setTimeout(connectPagePort, 1000);
   });
 }

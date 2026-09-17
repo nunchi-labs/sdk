@@ -255,6 +255,7 @@ export class Wallet {
             needsBackup: true,
           });
           this.backupRevealed = false;
+          await this.host.storageSet({ backupRevealed: false });
           this.unlockedWallet = {
             privateKeyHex: keyPair.private_key_hex,
             publicKeyHex: keyPair.public_key_hex,
@@ -288,6 +289,7 @@ export class Wallet {
             needsBackup: false,
           });
           this.backupRevealed = false;
+          await this.host.storageSet({ backupRevealed: false });
           this.unlockedWallet = {
             privateKeyHex,
             publicKeyHex: keyPair.public_key_hex,
@@ -312,6 +314,7 @@ export class Wallet {
           privateKeyHex = await this.decryptWithLockout(wallet, password);
         }
         this.backupRevealed = true;
+        await this.host.storageSet({ backupRevealed: true });
         return { success: true, data: { private_key_hex: privateKeyHex } };
       }
 
@@ -325,6 +328,7 @@ export class Wallet {
         }
         await this.setWalletState({ ...wallet, needsBackup: false });
         this.backupRevealed = false;
+        await this.host.storageSet({ backupRevealed: false });
         return { success: true };
       }
 
@@ -357,6 +361,7 @@ export class Wallet {
           "connectedSites",
           "pendingConnections",
           "pendingTransactions",
+          "backupRevealed",
           LOCKOUT_STORAGE,
         ]);
         await this.persistPending();
@@ -827,7 +832,7 @@ export class Wallet {
       return;
     }
     this.hydrated = true;
-    const stored = await this.host.storageGet(["connectedSites", "pendingConnections", "pendingTransactions"]);
+    const stored = await this.host.storageGet(["connectedSites", "pendingConnections", "pendingTransactions", "backupRevealed"]);
     if (Array.isArray(stored.connectedSites)) {
       this.connectedSites.clear();
       for (const site of stored.connectedSites) {
@@ -835,6 +840,9 @@ export class Wallet {
           this.connectedSites.add(site);
         }
       }
+    }
+    if (typeof stored.backupRevealed === "boolean") {
+      this.backupRevealed = stored.backupRevealed;
     }
     if (Array.isArray(stored.pendingConnections)) {
       for (const item of stored.pendingConnections as StoredConnection[]) {

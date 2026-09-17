@@ -1497,7 +1497,7 @@ function Send({
 
   // ---- 2. Recipient and amount --------------------------------------------
   if (step === "form") {
-    const ready = Boolean(recipient.trim()) && Boolean(amountBase) && amountBase !== "0" && !overBalance;
+    const ready = Boolean(coin.trim()) && Boolean(recipient.trim()) && Boolean(amountBase) && amountBase !== "0" && !overBalance;
     return (
       <div className="container">
         <div className="pageHeader">
