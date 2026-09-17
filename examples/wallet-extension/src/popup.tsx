@@ -399,6 +399,7 @@ function TabBar({ active, onChange }: { active: Tab; onChange: (tab: Tab) => voi
           key={id}
           type="button"
           className={`tabItem ${active === id ? "active" : ""}`}
+          data-testid={id}
           aria-current={active === id ? "page" : undefined}
           onClick={() => onChange(id)}
         >
@@ -555,9 +556,14 @@ function App() {
           )}
           {tab === "activity" && <ActivityView onSend={() => setView("send")} />}
           {tab === "swap" && <SwapView />}
-          {tab === "settings" && <SettingsView onReload={() => loadState()} />}
+          {tab === "settings" && (
+            <SettingsView
+              onReload={() => void loadState()}
+              onSaved={() => setTab("home")}
+            />
+          )}
         </div>
-        {error && <div className="error">{error}</div>}
+        {error && <div className="error" data-testid="error">{error}</div>}
       </Shell>
     );
   }
@@ -607,6 +613,10 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
   }
 
   async function handleImport() {
+    if (password !== confirmPassword) {
+      setError("Passwords do not match");
+      return;
+    }
     if (password.length < 8) {
       setError("Password must be at least 8 characters");
       return;
@@ -644,13 +654,17 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
           <BrandMark className="logoMark" />
           <h1>Welcome to Nunchi</h1>
           <p className="subtitle">A friendly wallet for Nunchi chains. Set up in under a minute.</p>
+          <p className="disclosure" data-testid="security-disclosure">
+            Keys stay on this device, encrypted with your password. Nunchi cannot recover a lost password.
+            This software is unaudited; do not store funds you cannot afford to lose.
+          </p>
         </div>
         <div className="choiceCards">
-          <button className="choiceCard" onClick={() => setMode("create")}>
+          <button className="choiceCard" data-testid="create-wallet" onClick={() => setMode("create")}>
             <span className="choiceCardTitle">Create a new wallet</span>
             <span className="choiceCardDesc">Generate a fresh key secured by your password</span>
           </button>
-          <button className="choiceCard" onClick={() => setMode("import")}>
+          <button className="choiceCard" data-testid="import-wallet" onClick={() => setMode("import")}>
             <span className="choiceCardTitle">Import existing wallet</span>
             <span className="choiceCardDesc">Restore from a private key you already have</span>
           </button>
@@ -663,7 +677,7 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
     return (
       <div className="container">
         <div className="pageHeader">
-          <button className="back" onClick={() => setMode("choice")}>
+          <button className="back" data-testid="back" onClick={() => setMode("choice")} aria-label="Back">
             <ArrowLeft size={20} />
           </button>
           <h2>Create Wallet</h2>
@@ -676,12 +690,34 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
         <div className="pageContent">
           <label>
             <span>Password</span>
-            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="At least 8 characters" />
+            <input
+              type="password"
+              data-testid="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="At least 8 characters"
+            />
           </label>
           <label>
             <span>Confirm Password</span>
-            <input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} />
+            <input
+              type="password"
+              data-testid="confirm-password"
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+            />
           </label>
+          <select
+            className="srOnly"
+            data-testid="curve-select"
+            aria-hidden
+            tabIndex={-1}
+            value={curve}
+            onChange={(e) => setCurve(e.target.value as "Ed25519" | "Secp256r1")}
+          >
+            <option value="Ed25519">Ed25519</option>
+            <option value="Secp256r1">Secp256r1</option>
+          </select>
           <button className="advancedToggle" onClick={() => setShowAdvanced(!showAdvanced)}>
             {showAdvanced ? "Hide advanced" : "Advanced options"}
           </button>
@@ -699,10 +735,10 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
               />
             </div>
           )}
-          {error && <div className="error">{error}</div>}
+          {error && <div className="error" data-testid="error">{error}</div>}
         </div>
         <div className="stickyFooter">
-          <button className="primary large" onClick={handleCreate} disabled={loading}>
+          <button className="primary large" data-testid="create-submit" onClick={handleCreate} disabled={loading}>
             {loading ? "Creating..." : "Create wallet"}
           </button>
         </div>
@@ -713,7 +749,7 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
   return (
     <div className="container">
       <div className="pageHeader">
-        <button className="back" onClick={() => setMode("choice")}>
+        <button className="back" data-testid="back" onClick={() => setMode("choice")} aria-label="Back">
           <ArrowLeft size={20} />
         </button>
         <h2>Import Wallet</h2>
@@ -722,6 +758,7 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
         <label>
           <span>Private Key (hex)</span>
           <textarea
+            data-testid="import-key"
             value={privateKeyInput}
             onChange={(e) => setPrivateKeyInput(e.target.value)}
             placeholder="01..."
@@ -730,12 +767,27 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
         </label>
         <label>
           <span>Password</span>
-          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="At least 8 characters" />
+          <input
+            type="password"
+            data-testid="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="At least 8 characters"
+          />
         </label>
-        {error && <div className="error">{error}</div>}
+        <label>
+          <span>Confirm Password</span>
+          <input
+            type="password"
+            data-testid="confirm-password"
+            value={confirmPassword}
+            onChange={(e) => setConfirmPassword(e.target.value)}
+          />
+        </label>
+        {error && <div className="error" data-testid="error">{error}</div>}
       </div>
       <div className="stickyFooter">
-        <button className="primary large" onClick={handleImport} disabled={loading}>
+        <button className="primary large" data-testid="import-submit" onClick={handleImport} disabled={loading}>
           {loading ? "Importing..." : "Import wallet"}
         </button>
       </div>
@@ -812,32 +864,48 @@ function BackupView({ onComplete }: { onComplete: () => void }) {
         {privateKey ? (
           <label>
             <span>Private Key</span>
-            <textarea readOnly value={privateKey} rows={4} />
+            <textarea data-testid="backup-key" readOnly value={privateKey} rows={4} />
           </label>
         ) : (
           !loading && (
             <label>
               <span>Password</span>
-              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+              <input
+                type="password"
+                data-testid="backup-password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
             </label>
           )
         )}
-        {error && <div className="error">{error}</div>}
+        {error && <div className="error" data-testid="error">{error}</div>}
         {privateKey && (
           <label className="checkRow">
-            <input type="checkbox" checked={saved} onChange={(e) => setSaved(e.target.checked)} />
+            <input
+              type="checkbox"
+              data-testid="backup-saved"
+              checked={saved}
+              onChange={(e) => setSaved(e.target.checked)}
+            />
             <span>I saved this private key in a safe place</span>
           </label>
         )}
       </div>
       <div className="stickyFooter">
         {!privateKey ? (
-          <button className="primary large" onClick={() => void revealWithPassword()} disabled={loading || !password}>
+          <button
+            className="primary large"
+            data-testid="reveal-key"
+            onClick={() => void revealWithPassword()}
+            disabled={loading || !password}
+          >
             {loading ? "Revealing..." : "Reveal key"}
           </button>
         ) : (
           <button
             className="primary large"
+            data-testid="backup-continue"
             disabled={!saved}
             onClick={async () => {
               const response = await chrome.runtime.sendMessage({ type: "CONFIRM_BACKUP" });
@@ -897,16 +965,17 @@ function Unlock({ onUnlock }: { onUnlock: () => void }) {
           <span>Password</span>
           <input
             type="password"
+            data-testid="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleUnlock()}
             autoFocus
           />
         </label>
-        {error && <div className="error">{error}</div>}
+        {error && <div className="error" data-testid="error">{error}</div>}
       </div>
       <div className="stickyFooter">
-        <button className="primary large" onClick={handleUnlock} disabled={loading}>
+        <button className="primary large" data-testid="unlock-submit" onClick={handleUnlock} disabled={loading}>
           {loading ? "Unlocking..." : "Unlock"}
         </button>
       </div>
@@ -1022,7 +1091,7 @@ function Home({
   async function loadAccounts() {
     try {
       const response = await chrome.runtime.sendMessage({ type: "GET_ACCOUNTS" });
-      setAccounts(response.success ? (response.data as AccountSummary[]) : null);
+      setAccounts(response.success && Array.isArray(response.data) ? response.data : null);
     } catch {
       setAccounts(null);
     }
@@ -1137,12 +1206,18 @@ function Home({
               <ChevronDown size={14} />
             </button>
           )}
-          <button className="accountAddress" onClick={() => void copyAddress()}>
+          <button
+            className="accountAddress"
+            data-testid="home-address"
+            data-address={address}
+            title={address}
+            onClick={() => void copyAddress()}
+          >
             {compactAddress(address, 8, 6)}
             <Copy size={13} />
           </button>
         </div>
-        <button className="icon" onClick={() => void handleLock()} aria-label="Lock wallet">
+        <button className="icon" data-testid="lock" onClick={() => void handleLock()} aria-label="Lock wallet">
           <Lock size={18} />
         </button>
       </div>
@@ -1170,14 +1245,14 @@ function Home({
           )}
         </button>
         <div className="heroSub">
-          <span className="heroTokenAmount">
+          <span className="heroTokenAmount" data-testid="balance-value">
             {hidden
               ? `${rows.length} ${rows.length === 1 ? "token" : "tokens"}`
               : rows.length === 1
                 ? `${formatCoin(rows[0].balance, rows[0].coinId)} ${tokenLabel(rows[0].coinId)}`
                 : `${rows.length} tokens`}
           </span>
-          {settings && <span className="heroNetwork">{settings.network || "Nunchi"}</span>}
+          {settings && <span className="heroNetwork" data-testid="network-badge">{settings.network || "Nunchi"}</span>}
         </div>
         <ChangeBadge
           usd={totals.usd}
@@ -1185,11 +1260,11 @@ function Home({
           show={totals.anyChange && !hidden}
           onOpen={() => setShowChart(true)}
         />
-        {balanceError && <div className="error" style={{ marginTop: 12 }}>{balanceError}</div>}
+        {balanceError && <div className="error" data-testid="error" style={{ marginTop: 12 }}>{balanceError}</div>}
       </div>
 
       <div className="quickActions">
-        <button className="actionTile" onClick={() => onSend()}>
+        <button className="actionTile" data-testid="send" onClick={() => onSend()}>
           <SendIcon size={20} />
           <span>Send</span>
         </button>
@@ -1301,15 +1376,13 @@ function Send({
       const options: Holding[] | null = held.success ? held.data : null;
       setHoldings(options);
 
-      // Without a holdings list there is nothing to pick from, so fall back to
-      // the configured display coin and go straight to the form.
+      // Without holdings there is nothing to pick from. Fall through to the form
+      // (optionally seeded by displayCoin). Next stays disabled until coin is set.
       if (!options?.length) {
-        const fallback = config.success ? config.data.displayCoin : "";
-        if (fallback) {
-          setCoin((current) => current || fallback);
-          setStep((current) => (current === "asset" ? "form" : current));
-          setUsedPicker(false);
-        }
+        const fallback = config.success ? String(config.data.displayCoin || "") : "";
+        setCoin((current) => current || fallback);
+        setStep((current) => (current === "asset" ? "form" : current));
+        setUsedPicker(false);
       }
     })();
   }, []);
@@ -1352,7 +1425,7 @@ function Send({
             <SendingDots done={success} />
             {success && <SuccessMark />}
           </span>
-          <span className={`sendStageLabel ${success ? "done" : ""}`}>
+          <span className={`sendStageLabel ${success ? "done" : ""}`} data-testid={success ? "send-success" : undefined}>
             {success ? "Transaction successfully sent" : "Sending"}
           </span>
           <span className="srOnly">
@@ -1368,7 +1441,7 @@ function Send({
     return (
       <div className="container">
         <div className="pageHeader">
-          <button className="back" onClick={onBack} aria-label="Back">
+          <button className="back" data-testid="back" onClick={onBack} aria-label="Back">
             <ArrowLeft size={20} />
           </button>
           <h2>Select asset</h2>
@@ -1424,12 +1497,13 @@ function Send({
 
   // ---- 2. Recipient and amount --------------------------------------------
   if (step === "form") {
-    const ready = Boolean(recipient.trim()) && Boolean(amountBase) && amountBase !== "0" && !overBalance;
+    const ready = Boolean(coin.trim()) && Boolean(recipient.trim()) && Boolean(amountBase) && amountBase !== "0" && !overBalance;
     return (
       <div className="container">
         <div className="pageHeader">
           <button
             className="back"
+            data-testid="back"
             onClick={() => (usedPicker && holdings?.length ? setStep("asset") : onBack())}
             aria-label="Back"
           >
@@ -1445,16 +1519,31 @@ function Send({
           <input
             className="sendField"
             type="text"
+            data-testid="recipient"
             value={recipient}
             onChange={(event) => setRecipient(event.target.value)}
             placeholder={`Recipient's ${tokenByCoinId(coin)?.name ?? "Nunchi"} address`}
             aria-label="Recipient address"
           />
+          {token ? (
+            <input type="hidden" data-testid="coin" value={coin} readOnly />
+          ) : (
+            <input
+              className="sendField"
+              type="text"
+              data-testid="coin"
+              value={coin}
+              onChange={(event) => setCoin(event.target.value)}
+              placeholder="Coin id (hex)"
+              aria-label="Coin id"
+            />
+          )}
 
           <div className="amountField">
             <input
               className="amountFieldInput"
               type="text"
+              data-testid="amount"
               inputMode="decimal"
               value={token ? groupTypedAmount(amount) : amount}
               onChange={(event) => {
@@ -1496,19 +1585,19 @@ function Send({
           </div>
 
           {overBalance && (
-            <div className="error">
+            <div className="error" data-testid="error">
               {hidden
                 ? `That is more ${tokenLabel(coin)} than you have`
                 : `You only have ${formatCoin(balance ?? "0", coin)} ${tokenLabel(coin)}`}
             </div>
           )}
-          {error && <div className="error">{error}</div>}
+          {error && <div className="error" data-testid="error">{error}</div>}
         </div>
         <div className="stickyFooter row">
           <button className="secondary large" onClick={onBack}>
             Cancel
           </button>
-          <button className="primary large" onClick={() => setStep("confirm")} disabled={!ready}>
+          <button className="primary large" data-testid="send-submit" onClick={() => setStep("confirm")} disabled={!ready}>
             Next
           </button>
         </div>
@@ -1520,7 +1609,7 @@ function Send({
   return (
     <div className="container">
       <div className="pageHeader">
-        <button className="back" onClick={() => setStep("form")} aria-label="Back">
+        <button className="back" data-testid="send-edit" onClick={() => setStep("form")} aria-label="Back">
           <ArrowLeft size={20} />
         </button>
         <h2>Confirm send</h2>
@@ -1534,10 +1623,12 @@ function Send({
           {price ? <span className="confirmFiat">~{formatUsd(fiat)}</span> : null}
         </div>
 
-        <div className="detailCard">
+        <div className="detailCard" data-testid="send-review">
           <div className="detailRow">
             <span>To</span>
-            <div className="mono">{compactAddress(recipient, 8, 6)}</div>
+            <div className="mono" data-testid="review-to" data-address={recipient} title={recipient}>
+              {compactAddress(recipient, 8, 6)}
+            </div>
           </div>
           <div className="detailRow">
             <span>Network</span>
@@ -1545,17 +1636,17 @@ function Send({
           </div>
           <div className="detailRow">
             <span>Asset</span>
-            <div className="mono">{tokenByCoinId(coin)?.name ?? compactAddress(coin, 8, 6)}</div>
+            <div className="mono" data-testid="review-amount">{tokenByCoinId(coin)?.name ?? compactAddress(coin, 8, 6)}</div>
           </div>
         </div>
 
-        {error && <div className="error">{error}</div>}
+        {error && <div className="error" data-testid="error">{error}</div>}
       </div>
       <div className="stickyFooter row">
         <button className="secondary large" onClick={onBack} disabled={loading}>
           Cancel
         </button>
-        <button className="primary large" onClick={() => void send()} disabled={loading}>
+        <button className="primary large" data-testid="send-submit" onClick={() => void send()} disabled={loading}>
           {loading ? "Sending..." : "Send"}
         </button>
       </div>
@@ -2376,7 +2467,7 @@ function ActivityView({ onSend }: { onSend?: () => void }) {
         {loading ? (
           <div className="loading">Loading...</div>
         ) : activity.length === 0 ? (
-          <div className="empty">
+          <div className="empty" data-testid="activity-empty">
             <div className="emptyIcon">
               <Activity size={22} />
             </div>
@@ -2391,12 +2482,13 @@ function ActivityView({ onSend }: { onSend?: () => void }) {
           groups.map((group) => (
             <div key={group.label} className="activityGroup">
               <div className="activityGroupLabel">{group.label}</div>
-              <div className="activityList">
+              <div className="activityList" data-testid="activity-list">
                 {group.items.map((tx) => (
                   <button
                     key={tx.hash}
                     type="button"
                     className="activityItem"
+                    data-testid="activity-item"
                     onClick={() => setSelected(tx)}
                   >
                     <ActivityIcon tx={tx} />
@@ -2455,7 +2547,7 @@ function ThemePicker() {
   );
 }
 
-function SettingsView({ onReload }: { onReload: () => void }) {
+function SettingsView({ onReload, onSaved }: { onReload: () => void; onSaved?: () => void }) {
   const [settings, setSettings] = useState<Settings>({
     rpcUrl: "",
     network: "",
@@ -2501,6 +2593,7 @@ function SettingsView({ onReload }: { onReload: () => void }) {
         return;
       }
       onReload();
+      onSaved?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -2543,7 +2636,7 @@ function SettingsView({ onReload }: { onReload: () => void }) {
 
   if (loading) {
     return (
-      <div className="pageContent">
+      <div className="pageContent" data-testid="settings-loading">
         <div className="loading">Loading...</div>
       </div>
     );
@@ -2562,26 +2655,42 @@ function SettingsView({ onReload }: { onReload: () => void }) {
           <div className="sectionTitle">Network</div>
           <label>
             <span>Network name</span>
-            <input type="text" value={settings.network} onChange={(e) => setSettings({ ...settings, network: e.target.value })} />
+            <input
+              type="text"
+              data-testid="settings-network"
+              value={settings.network}
+              onChange={(e) => setSettings({ ...settings, network: e.target.value })}
+            />
           </label>
           <label>
             <span>Chain ID</span>
-            <input type="text" value={settings.chainId} onChange={(e) => setSettings({ ...settings, chainId: e.target.value })} />
+            <input
+              type="text"
+              data-testid="settings-chain-id"
+              value={settings.chainId}
+              onChange={(e) => setSettings({ ...settings, chainId: e.target.value })}
+            />
           </label>
           <label>
             <span>RPC URL</span>
-            <input type="text" value={settings.rpcUrl} onChange={(e) => setSettings({ ...settings, rpcUrl: e.target.value })} />
+            <input
+              type="text"
+              data-testid="settings-rpc"
+              value={settings.rpcUrl}
+              onChange={(e) => setSettings({ ...settings, rpcUrl: e.target.value })}
+            />
           </label>
           <label>
             <span>Display coin (hex)</span>
             <input
               type="text"
+              data-testid="settings-display-coin"
               value={settings.displayCoin}
               onChange={(e) => setSettings({ ...settings, displayCoin: e.target.value })}
               placeholder="32-byte coin id"
             />
           </label>
-          <button className="primary large" onClick={() => void saveSettings()}>
+          <button className="primary large" data-testid="settings-save" onClick={() => void saveSettings()}>
             Save network settings
           </button>
         </div>
@@ -2589,14 +2698,14 @@ function SettingsView({ onReload }: { onReload: () => void }) {
         <div className="settingsSection">
           <div className="sectionTitle">Connected sites</div>
           {sites.length === 0 ? (
-            <div className="empty" style={{ padding: "16px 0" }}>
+            <div className="empty" data-testid="connected-empty" style={{ padding: "16px 0" }}>
               <p className="subtitle">No connected sites</p>
             </div>
           ) : (
             sites.map((site) => (
-              <div className="siteRow" key={site}>
+              <div className="siteRow" key={site} data-testid="connected-site" data-origin={site}>
                 <div className="mono">{hostname(site)}</div>
-                <button className="danger" onClick={() => void disconnect(site)}>
+                <button className="danger" data-testid="disconnect-site" onClick={() => void disconnect(site)}>
                   Disconnect
                 </button>
               </div>
@@ -2608,15 +2717,25 @@ function SettingsView({ onReload }: { onReload: () => void }) {
           <div className="sectionTitle">Security</div>
           <label>
             <span>Password</span>
-            <input type="password" value={exportPassword} onChange={(e) => setExportPassword(e.target.value)} />
+            <input
+              type="password"
+              data-testid="export-password"
+              value={exportPassword}
+              onChange={(e) => setExportPassword(e.target.value)}
+            />
           </label>
           {exportedKey && (
             <label>
               <span>Private Key</span>
-              <textarea readOnly value={exportedKey} rows={3} />
+              <textarea data-testid="exported-key" readOnly value={exportedKey} rows={3} />
             </label>
           )}
-          <button className="secondary large" onClick={() => void exportKey()} disabled={!exportPassword}>
+          <button
+            className="secondary large"
+            data-testid="export-key"
+            onClick={() => void exportKey()}
+            disabled={!exportPassword}
+          >
             Export private key
           </button>
         </div>
@@ -2627,19 +2746,34 @@ function SettingsView({ onReload }: { onReload: () => void }) {
             <p className="subtitle">Deleting your wallet removes all local data. Make sure you have your private key backed up.</p>
             <label>
               <span>Password</span>
-              <input type="password" value={deletePassword} onChange={(e) => setDeletePassword(e.target.value)} />
+              <input
+                type="password"
+                data-testid="delete-password"
+                value={deletePassword}
+                onChange={(e) => setDeletePassword(e.target.value)}
+              />
             </label>
             <label>
               <span>Type DELETE to confirm</span>
-              <input type="text" value={deleteConfirm} onChange={(e) => setDeleteConfirm(e.target.value)} />
+              <input
+                type="text"
+                data-testid="delete-confirm"
+                value={deleteConfirm}
+                onChange={(e) => setDeleteConfirm(e.target.value)}
+              />
             </label>
-            <button className="danger large" onClick={() => void deleteWallet()} disabled={!deletePassword}>
+            <button
+              className="danger large"
+              data-testid="delete-wallet"
+              onClick={() => void deleteWallet()}
+              disabled={!deletePassword}
+            >
               Delete wallet
             </button>
           </div>
         </div>
 
-        {error && <div className="error">{error}</div>}
+        {error && <div className="error" data-testid="error">{error}</div>}
       </div>
     </>
   );
@@ -2707,10 +2841,10 @@ function ApproveConnection({ requestId }: { requestId: string }) {
           <h2 className="approvalTitle">Connection Request</h2>
         </div>
         <div className="approvalBody">
-          <div className="error">{error}</div>
+          <div className="error" data-testid="error">{error}</div>
         </div>
         <div className="approvalFooter">
-          <button className="secondary large" onClick={() => window.close()} style={{ gridColumn: "1 / -1" }}>
+          <button className="secondary large" data-testid="close-request" onClick={() => window.close()} style={{ gridColumn: "1 / -1" }}>
             Close
           </button>
         </div>
@@ -2746,16 +2880,16 @@ function ApproveConnection({ requestId }: { requestId: string }) {
           )}
           <div className="detailRow">
             <span>Origin</span>
-            <div className="mono">{pending.origin}</div>
+            <div className="mono" data-testid="pending-origin">{pending.origin}</div>
           </div>
         </div>
-        {error && <div className="error">{error}</div>}
+        {error && <div className="error" data-testid="error">{error}</div>}
       </div>
       <div className="approvalFooter">
-        <button className="danger" onClick={() => decide("REJECT_CONNECTION")} disabled={loading}>
+        <button className="danger" data-testid="reject-connect" onClick={() => decide("REJECT_CONNECTION")} disabled={loading}>
           Reject
         </button>
-        <button className="primary" onClick={() => decide("APPROVE_CONNECTION")} disabled={loading}>
+        <button className="primary" data-testid="approve-connect" onClick={() => decide("APPROVE_CONNECTION")} disabled={loading}>
           {loading ? "Working..." : "Connect"}
         </button>
       </div>
@@ -2808,10 +2942,10 @@ function ApproveTransaction({ requestId }: { requestId: string }) {
           <h2 className="approvalTitle">Transaction Request</h2>
         </div>
         <div className="approvalBody">
-          <div className="error">{error}</div>
+          <div className="error" data-testid="error">{error}</div>
         </div>
         <div className="approvalFooter">
-          <button className="secondary large" onClick={() => window.close()} style={{ gridColumn: "1 / -1" }}>
+          <button className="secondary large" data-testid="close-request" onClick={() => window.close()} style={{ gridColumn: "1 / -1" }}>
             Close
           </button>
         </div>
@@ -2841,7 +2975,7 @@ function ApproveTransaction({ requestId }: { requestId: string }) {
       <div className="approvalBody">
         <div className="approvalAmount">
           <div className="approvalAmountLabel">You are sending</div>
-          <div className="approvalAmountValue">{pending.amount}</div>
+          <div className="approvalAmountValue" data-testid="pending-amount">{pending.amount}</div>
         </div>
         <p className="subtitle">
           {submit
@@ -2855,20 +2989,20 @@ function ApproveTransaction({ requestId }: { requestId: string }) {
           </div>
           <div className="detailRow">
             <span>To</span>
-            <div className="mono">{compactAddress(pending.to, 14, 10)}</div>
+            <div className="mono" data-testid="pending-to">{pending.to}</div>
           </div>
           <div className="detailRow">
             <span>Coin</span>
             <div className="mono">{compactAddress(pending.coin, 10, 10)}</div>
           </div>
         </div>
-        {error && <div className="error">{error}</div>}
+        {error && <div className="error" data-testid="error">{error}</div>}
       </div>
       <div className="approvalFooter">
-        <button className="danger" onClick={() => decide("REJECT_TRANSACTION")} disabled={loading}>
+        <button className="danger" data-testid="reject-tx" onClick={() => decide("REJECT_TRANSACTION")} disabled={loading}>
           Reject
         </button>
-        <button className="primary" onClick={() => decide("APPROVE_TRANSACTION")} disabled={loading}>
+        <button className="primary" data-testid="approve-tx" onClick={() => decide("APPROVE_TRANSACTION")} disabled={loading}>
           {loading ? "Working..." : submit ? "Confirm" : "Sign"}
         </button>
       </div>

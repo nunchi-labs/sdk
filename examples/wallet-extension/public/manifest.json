@@ -2,20 +2,15 @@
   "manifest_version": 3,
   "name": "Nunchi Wallet",
   "version": "0.1.0",
-  "description": "Browser wallet for Nunchi chains",
-  "permissions": [
-    "storage",
-    "unlimitedStorage"
-  ],
-  "host_permissions": [
-    "http://localhost:*/",
-    "http://127.0.0.1:*/",
-    "https://api.coingecko.com/*"
-  ],
-  "optional_host_permissions": [
-    "http://*/*",
-    "https://*/*"
-  ],
+  "description": "Chrome wallet for Nunchi coins. Ed25519 or P-256 keys, nch addresses. Not an EVM wallet.",
+  "homepage_url": "https://nunchi.trade",
+  "minimum_chrome_version": "120",
+  "permissions": ["storage", "alarms"],
+  "host_permissions": ["http://localhost:*/", "http://127.0.0.1:*/"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"
+  },
   "background": {
     "service_worker": "background.js",
     "type": "module"
@@ -37,24 +32,16 @@
   },
   "content_scripts": [
     {
-      "matches": [
-        "<all_urls>"
-      ],
-      "js": [
-        "content.js"
-      ],
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
       "run_at": "document_start",
       "all_frames": true
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": [
-        "inpage.js"
-      ],
-      "matches": [
-        "<all_urls>"
-      ]
+      "resources": ["inpage.js"],
+      "matches": ["<all_urls>"]
     }
   ]
 }

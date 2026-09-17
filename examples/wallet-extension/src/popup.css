@@ -882,6 +882,13 @@ textarea {
   gap: 12px;
 }
 
+.disclosure {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+  max-width: 280px;
+}
+
 /* The mark is a transparent vector, so it needs no tile or rounded corners.
    Sizing is by height; width follows the 80:90 aspect ratio on its own. */
 .logoMark {

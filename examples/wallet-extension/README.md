@@ -5,7 +5,7 @@ A Manifest V3 Chrome extension wallet for Nunchi chains.
 ## Features
 
 - **Key Management**: Create or import Ed25519 and Secp256r1 (P-256) keys
-- **Secure Storage**: Private keys encrypted at rest with password and PBKDF2-SHA256 (100k iterations)
+- **Secure Storage**: Private keys encrypted at rest with password and PBKDF2-SHA256 (210,000 iterations)
 - **Address Derivation**: Byte-identical `nch...` Bech32 addresses matching `Address::external`
 - **Transaction Signing**: Sign and submit coin transfers with proper namespace and codec
 - **In-Page Provider**: `window.nunchi` and `window.nunchi.coins` API for dApps
@@ -44,6 +44,29 @@ npm run build
 ```
 
 The built extension will be in `dist/`.
+
+### Tests
+
+```bash
+# Unit tests (wallet, validation, privilege, crypto)
+npm test
+
+# Headless Chromium popup + in-page provider
+npm run build
+npm run test:selenium
+```
+
+Selenium covers onboarding, backup, send validation, mock-RPC transfers, export/lock, connection and transaction approval, disconnect, delete, and import.
+
+### Chrome Web Store package
+
+```bash
+cd examples/wallet-extension
+npm install
+npm run build:store
+```
+
+This resizes store PNG icons, builds release WASM, bundles the MV3 extension, and writes `store/nunchi-wallet-<version>.zip` with `manifest.json` at the zip root. Upload that zip in the Chrome Web Store developer dashboard. Listing copy, permission justifications, and the privacy policy are in `store/`.
 
 ## Load Extension
 
@@ -108,7 +131,7 @@ const accounts = await window.nunchi.request({
   method: 'nunchi_requestAccounts' 
 });
 
-// Get connected accounts
+// Get connected accounts for this origin (empty if locked or not connected)
 const accounts = await window.nunchi.request({ 
   method: 'nunchi_accounts' 
 });
@@ -129,7 +152,10 @@ const { hash } = await window.nunchi.request({
   }]
 });
 
-// Listen for account changes
+// Disconnect this origin
+await window.nunchi.request({ method: 'nunchi_disconnect' });
+
+// Listen for account changes (connect, disconnect, lock, unlock)
 window.nunchi.on('accountsChanged', (accounts) => {
   console.log('Accounts changed:', accounts);
 });
@@ -165,10 +191,10 @@ console.log('Address:', keyPair.address);
 ## Security Notes
 
 - **Private Keys**: Never shared outside the extension. Encrypted at rest with AES-GCM.
-- **Passwords**: Derived with PBKDF2-SHA256 (100k iterations) for encryption keys.
+- **Passwords**: Derived with PBKDF2-SHA256 (210,000 iterations) for encryption keys.
 - **Site Isolation**: Each site requires explicit user approval to connect.
 - **No Remote Code**: All crypto operations use local WASM, no external dependencies.
-- **Audit Needed**: This is demo code. Production use requires a security audit.
+- **Audit**: Unaudited software. Do not store significant value until it has been independently reviewed.
 
 ## Development
 

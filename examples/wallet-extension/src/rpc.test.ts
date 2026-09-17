@@ -11,6 +11,14 @@ describe("parseRpcUrl", () => {
     expect(() => parseRpcUrl("file:///tmp/rpc")).toThrow("http or https");
     expect(() => parseRpcUrl("javascript:alert(1)")).toThrow();
   });
+
+  it("rejects embedded credentials", () => {
+    expect(() => parseRpcUrl("https://user:pass@rpc.example")).toThrow("credentials");
+  });
+
+  it("rejects malformed URLs", () => {
+    expect(() => parseRpcUrl("not a url")).toThrow("RPC URL is invalid");
+  });
 });
 
 describe("rpcOriginPattern", () => {
