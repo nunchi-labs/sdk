@@ -2,12 +2,16 @@
 
 use commonware_codec::EncodeSize;
 use nunchi_authority::{AuthorityError, AuthorityLedger};
-use nunchi_bridge::{escrow_address, BridgeError, BridgeLedger, BridgeOperation};
+use nunchi_bridge::{escrow_address, BridgeError, BridgeLedger, BridgeOperation, BridgeReceipt};
 use nunchi_clob::{ClobError, ClobLedger};
 use nunchi_coins::{CoinId, Ledger, LedgerError};
-use nunchi_common::{EventSink, NoopEventSink, Overlay, Runtime, RuntimeContext, StateStore};
+use nunchi_common::{
+    state_db::StateError, EventSink, NoopEventSink, Overlay, Runtime, RuntimeContext, StateStore,
+    VecEventSink,
+};
 use nunchi_oracle::{OracleError, OracleLedger};
 
+use crate::bridge_assets::asset_coin;
 use crate::Transaction;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -25,6 +29,16 @@ pub enum RuntimeError {
     Bridge(#[from] BridgeError),
     #[error("clob module error: {0}")]
     Clob(#[from] ClobError),
+    #[error("bridge asset is not mapped to a local coin")]
+    UnmappedAsset,
+    #[error("state storage error: {0}")]
+    Storage(String),
+}
+
+impl From<StateError> for RuntimeError {
+    fn from(err: StateError) -> Self {
+        Self::Storage(err.to_string())
+    }
 }
 
 impl RuntimeError {
@@ -36,6 +50,7 @@ impl RuntimeError {
                 | Self::Oracle(OracleError::Storage(_))
                 | Self::Bridge(BridgeError::Storage(_))
                 | Self::Clob(ClobError::Storage(_))
+                | Self::Storage(_)
         )
     }
 }
@@ -107,18 +122,20 @@ where
             ledger.apply_transaction(transaction, context).await?;
         }
         Transaction::Bridge(transaction) => {
-            // Escrow the locked source coins and record the transfer atomically. Both writes go
-            // into an inner overlay that is committed only if the whole lock succeeds, so a bridge
-            // validation failure after the escrow move (bad nonce, unconfigured chain, self-bridge,
-            // unsupported authorization, ...) reverts everything, without relying on the caller to
-            // discard partial writes. The bridge crate itself stays decoupled from coins.
+            // Lock, anchor, and claim all commit into one inner overlay so their bridge-state
+            // effects and the matching coins settlement are atomic: a failure at any step reverts
+            // everything, without relying on the caller to discard partial writes. The bridge crate
+            // stays decoupled from coins; escrow (on lock) and mint (on claim) happen here.
             let mut overlay = Overlay::new(&mut *state);
+
+            // Preconditions before any bridge-state change.
             match &transaction.payload.operation {
                 BridgeOperation::Lock {
                     local_asset,
                     amount,
                     ..
                 } => {
+                    // Move the locked coins into the bridge escrow.
                     let mut coins = Ledger::new(&mut overlay);
                     coins
                         .transfer(
@@ -129,10 +146,43 @@ where
                         )
                         .await?;
                 }
+                BridgeOperation::Claim { record, .. } => {
+                    // The mapped destination coin must exist before we consume the record or mint.
+                    if asset_coin(&overlay, &record.source_asset).await?.is_none() {
+                        return Err(RuntimeError::UnmappedAsset);
+                    }
+                }
+                BridgeOperation::AnchorForeignRoot { .. } => {}
             }
-            let mut ledger = BridgeLedger::new(&mut overlay);
-            ledger.apply_transaction(transaction, events).await?;
+
+            // Apply the bridge operation (verify, replay guard, consume, ...). Buffer its events
+            // locally so they are emitted only if the whole operation — including settlement —
+            // succeeds; a later settlement failure reverts state and drops these events with it.
+            let mut bridge_events = VecEventSink::new();
+            let receipt = {
+                let mut ledger = BridgeLedger::new(&mut overlay);
+                ledger.apply_transaction(transaction, &mut bridge_events).await?
+            };
+
+            // Settle a successful claim by minting the mapped asset to the recipient.
+            if let BridgeReceipt::Claimed {
+                source_asset,
+                recipient,
+                amount,
+            } = receipt
+            {
+                let coin = asset_coin(&overlay, &source_asset)
+                    .await?
+                    .ok_or(RuntimeError::UnmappedAsset)?;
+                let mut coins = Ledger::new(&mut overlay);
+                coins.bridge_mint(&recipient, coin, amount).await?;
+            }
+
             overlay.commit();
+            // Now that state has committed, forward the buffered bridge events.
+            for event in bridge_events.into_events() {
+                events.emit(event);
+            }
         }
         Transaction::Clob(transaction) => {
             let mut ledger = ClobLedger::new(state);
@@ -145,15 +195,19 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nunchi_clob::ClobError;
 
     #[test]
     fn runtime_error_classifies_storage_errors() {
         assert!(RuntimeError::Coins(LedgerError::Storage("disk".into())).is_storage());
         assert!(RuntimeError::Authority(AuthorityError::Storage("disk".into())).is_storage());
         assert!(RuntimeError::Oracle(OracleError::Storage("disk".into())).is_storage());
+        assert!(RuntimeError::Clob(ClobError::Storage("disk".into())).is_storage());
+        assert!(RuntimeError::Storage("disk".into()).is_storage());
 
         assert!(!RuntimeError::Authority(AuthorityError::NotConfigured).is_storage());
         assert!(!RuntimeError::Coins(LedgerError::InvalidTokenSpec("bad")).is_storage());
         assert!(!RuntimeError::Oracle(OracleError::PayloadTooLarge).is_storage());
+        assert!(!RuntimeError::UnmappedAsset.is_storage());
     }
 }

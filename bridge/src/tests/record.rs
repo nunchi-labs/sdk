@@ -1,12 +1,15 @@
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::{Hasher, Sha256};
+use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_runtime::{deterministic, Runner as _};
-use nunchi_common::{state_db::CommitState, Address, QmdbState};
+use nunchi_common::{state_db::Namespace, Address, CommitState, QmdbState, StateError, StateStore};
 use nunchi_crypto::PrivateKey;
 
 use crate::record::{
-    consumed_record_key, is_consumed, mark_consumed, put_transfer_record, transfer_record,
-    transfer_record_key, AssetId, BridgeTransferRecord, ChainId, TransferRecordId,
+    attestor, bridge_nonce, consumed_record_key, foreign_root, foreign_root_key, is_consumed,
+    latest_foreign_view, local_chain_id, mark_consumed, nonce_key, put_foreign_root,
+    put_transfer_record, set_attestor, set_bridge_nonce, set_latest_foreign_view, set_local_chain_id,
+    transfer_record, transfer_record_key, AssetId, BridgeTransferRecord, ChainId, ForeignRoot,
+    TransferRecordId, BRIDGE_NAMESPACE,
 };
 
 fn addr(seed: u64) -> Address {
@@ -185,5 +188,127 @@ fn consumed_marker_is_set_and_checked() {
         // A different record id from the same chain is independent.
         let other = TransferRecordId(Sha256::hash(&[b"other-record"]));
         assert!(!is_consumed(&state, &chain, &other).await.expect("read"));
+    });
+}
+
+#[test]
+fn foreign_root_and_config_accessors_roundtrip() {
+    deterministic::Runner::default().start(|context| async move {
+        let mut state = QmdbState::init(context, "bridge-anchor-state-test")
+            .await
+            .expect("init state");
+
+        let source = ChainId(Sha256::hash(b"foreign-chain"));
+        let other = ChainId(Sha256::hash(b"other-chain"));
+
+        // Absent until anchored/configured.
+        assert_eq!(foreign_root(&state, &source, 5).await.expect("read"), None);
+        assert_eq!(latest_foreign_view(&state, &source).await.expect("read"), None);
+        assert_eq!(attestor(&state).await.expect("read"), None);
+
+        let root = ForeignRoot {
+            state_root: Sha256::hash(b"root-5"),
+        };
+        put_foreign_root(&mut state, &source, 5, &root);
+        set_latest_foreign_view(&mut state, &source, 5);
+        let signer = addr(1);
+        set_attestor(&mut state, &signer);
+        state.commit().await.expect("commit");
+
+        // Everything reads back, scoped by (source chain, view).
+        assert_eq!(
+            foreign_root(&state, &source, 5).await.expect("read"),
+            Some(root)
+        );
+        assert_eq!(foreign_root(&state, &source, 6).await.expect("read"), None);
+        assert_eq!(foreign_root(&state, &other, 5).await.expect("read"), None);
+        assert_eq!(
+            latest_foreign_view(&state, &source).await.expect("read"),
+            Some(5)
+        );
+        assert_eq!(latest_foreign_view(&state, &other).await.expect("read"), None);
+        assert_eq!(attestor(&state).await.expect("read"), Some(signer));
+    });
+}
+
+#[test]
+fn foreign_root_codec_round_trips_and_rejects_truncation() {
+    let root = ForeignRoot {
+        state_root: Sha256::hash(b"root"),
+    };
+    assert_eq!(ForeignRoot::decode(root.encode().as_ref()).unwrap(), root);
+    let encoded = root.encode();
+    assert!(ForeignRoot::decode(&encoded[..encoded.len() - 1]).is_err());
+}
+
+#[test]
+fn corrupt_state_values_surface_as_backend_errors() {
+    deterministic::Runner::default().start(|context| async move {
+        let mut state = QmdbState::init(context, "bridge-corrupt-state")
+            .await
+            .expect("init state");
+        let source = ChainId(Sha256::hash(b"foreign-chain"));
+        let garbage = vec![0xff];
+
+        state.set(foreign_root_key(&source, 5), garbage.clone());
+        assert!(foreign_root(&state, &source, 5).await.is_err());
+
+        let record = record();
+        state.set(transfer_record_key(&record.record_id()), garbage.clone());
+        assert!(transfer_record(&state, &record.record_id()).await.is_err());
+
+        let account = addr(1);
+        state.set(nonce_key(&account), garbage.clone());
+        assert!(bridge_nonce(&state, &account).await.is_err());
+        set_bridge_nonce(&mut state, &account, 4);
+        assert_eq!(bridge_nonce(&state, &account).await.expect("nonce"), 4);
+
+        // Config table discriminant 3 matches `Table::Config`.
+        let ns = Namespace::new(BRIDGE_NAMESPACE);
+        state.set(ns.key(3u8, b"local_chain_id"), garbage.clone());
+        assert!(local_chain_id(&state).await.is_err());
+        set_local_chain_id(&mut state, &source);
+        assert_eq!(local_chain_id(&state).await.expect("chain"), Some(source));
+
+        state.set(ns.key(3u8, b"attestor"), garbage.clone());
+        assert!(attestor(&state).await.is_err());
+
+        // Latest-view table discriminant 5 matches `Table::ForeignLatestView`.
+        state.set(ns.key(5u8, source.encode().as_ref()), garbage);
+        assert!(latest_foreign_view(&state, &source).await.is_err());
+    });
+}
+
+struct FailStore;
+
+impl StateStore for FailStore {
+    async fn get(&self, _: &Digest) -> Result<Option<Vec<u8>>, StateError> {
+        Err(StateError::Backend("fail".into()))
+    }
+
+    fn set(&mut self, _: Digest, _: Vec<u8>) {}
+
+    fn remove(&mut self, _: Digest) {}
+}
+
+#[test]
+fn foreign_root_rejects_every_truncated_prefix() {
+    let root = ForeignRoot {
+        state_root: Sha256::hash(b"root"),
+    };
+    let encoded = root.encode();
+    for i in 0..encoded.len() {
+        assert!(ForeignRoot::decode(&encoded[..i]).is_err());
+    }
+}
+
+#[test]
+fn destination_accessors_propagate_storage_errors() {
+    deterministic::Runner::default().start(|_context| async move {
+        let source = ChainId(Sha256::hash(b"foreign-chain"));
+        let store = FailStore;
+        assert!(foreign_root(&store, &source, 1).await.is_err());
+        assert!(latest_foreign_view(&store, &source).await.is_err());
+        assert!(attestor(&store).await.is_err());
     });
 }

@@ -1,6 +1,6 @@
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{deterministic, Runner as _};
-use nunchi_common::{state_db::CommitState, QmdbState};
+use nunchi_common::{CommitState, QmdbState};
 
 use crate::genesis::BridgeGenesis;
 use crate::record::{local_chain_id, ChainId};

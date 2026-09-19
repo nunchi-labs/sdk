@@ -10,18 +10,23 @@ pub mod rpc;
 
 pub mod record;
 pub use record::{
-    escrow_address, transfer_record, AssetId, BridgeTransferRecord, ChainId, TransferRecordId,
-    BRIDGE_NAMESPACE,
+    attestor, escrow_address, foreign_root, is_consumed, mark_consumed, put_foreign_root,
+    transfer_record, transfer_record_key, AssetId, BridgeTransferRecord, ChainId, ForeignRoot,
+    TransferRecordId, BRIDGE_NAMESPACE,
 };
 
 pub mod events;
-pub use events::{transfer_locked_event, TransferLocked, TRANSFER_LOCKED_EVENT};
+pub use events::{
+    foreign_root_anchored_event, transfer_claimed_event, transfer_locked_event, ForeignRootAnchored,
+    TransferClaimed, TransferLocked, FOREIGN_ROOT_ANCHORED_EVENT, TRANSFER_CLAIMED_EVENT,
+    TRANSFER_LOCKED_EVENT,
+};
 
 pub mod genesis;
 pub use genesis::BridgeGenesis;
 
 pub mod ledger;
-pub use ledger::{BridgeError, BridgeLedger};
+pub use ledger::{BridgeError, BridgeLedger, BridgeReceipt};
 
 pub mod transaction;
 pub use transaction::{
