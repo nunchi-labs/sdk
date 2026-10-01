@@ -39,6 +39,11 @@ pub enum AccessControlError {
         role: RoleId,
         account: Box<Address>,
     },
+    #[error("account {owner:?} already owns access-control scope {scope:?}")]
+    SameOwner {
+        scope: ScopeId,
+        owner: Box<Address>,
+    },
     #[error("invalid access-control genesis: {0}")]
     InvalidGenesis(String),
     #[error("state storage error: {0}")]
@@ -167,6 +172,17 @@ impl<D: AccessControlDB> AccessControlLedger<D> {
                     });
                 }
                 self.db.remove_role(account, scope, *role);
+                Ok(())
+            }
+            AccessControlOperation::TransferScopeOwner { scope, new_owner } => {
+                self.require_owner(actor, scope).await?;
+                if new_owner == actor {
+                    return Err(AccessControlError::SameOwner {
+                        scope: *scope,
+                        owner: Box::new(new_owner.clone()),
+                    });
+                }
+                self.db.set_scope_owner(scope, new_owner);
                 Ok(())
             }
         }

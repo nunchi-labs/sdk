@@ -7,6 +7,7 @@ use nunchi_common::{Address, Operation};
 pub enum OperationID {
     GrantRole = 0,
     RevokeRole = 1,
+    TransferScopeOwner = 2,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -20,6 +21,7 @@ impl TryFrom<u8> for OperationID {
         match value {
             0 => Ok(Self::GrantRole),
             1 => Ok(Self::RevokeRole),
+            2 => Ok(Self::TransferScopeOwner),
             _ => Err(InvalidAccessControlOperationId(value)),
         }
     }
@@ -56,6 +58,10 @@ pub enum AccessControlOperation {
         role: RoleId,
         account: Address,
     },
+    TransferScopeOwner {
+        scope: ScopeId,
+        new_owner: Address,
+    },
 }
 
 impl Write for AccessControlOperation {
@@ -81,6 +87,11 @@ impl Write for AccessControlOperation {
                 role.write(buf);
                 account.write(buf);
             }
+            Self::TransferScopeOwner { scope, new_owner } => {
+                OperationID::TransferScopeOwner.write(buf);
+                scope.write(buf);
+                new_owner.write(buf);
+            }
         }
     }
 }
@@ -100,6 +111,10 @@ impl Read for AccessControlOperation {
                 role: RoleId::read(buf)?,
                 account: Address::read(buf)?,
             }),
+            OperationID::TransferScopeOwner => Ok(Self::TransferScopeOwner {
+                scope: ScopeId::read(buf)?,
+                new_owner: Address::read(buf)?,
+            }),
         }
     }
 }
@@ -117,6 +132,9 @@ impl EncodeSize for AccessControlOperation {
                 role,
                 account,
             } => scope.encode_size() + role.encode_size() + account.encode_size(),
+            Self::TransferScopeOwner { scope, new_owner } => {
+                scope.encode_size() + new_owner.encode_size()
+            }
         }
     }
 }
