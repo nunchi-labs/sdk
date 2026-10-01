@@ -1,5 +1,5 @@
 use crate::{AccessControlOperation, RoleId, ScopeId};
-use commonware_codec::{DecodeExt, Encode};
+use commonware_codec::{DecodeExt, Encode, EncodeSize};
 use nunchi_common::Address;
 use nunchi_crypto::PrivateKey;
 
@@ -21,11 +21,16 @@ fn operation_codec_uses_stable_tags() {
             role: RoleId::new(1),
             account: account(1),
         },
+        AccessControlOperation::TransferScopeOwner {
+            scope,
+            new_owner: account(2),
+        },
     ];
 
     for (tag, operation) in operations.into_iter().enumerate() {
         let encoded = operation.encode();
         assert_eq!(encoded[0], tag as u8);
+        assert_eq!(encoded.len(), operation.encode_size());
         assert_eq!(AccessControlOperation::decode(encoded).unwrap(), operation);
     }
     assert!(AccessControlOperation::decode([99].as_slice()).is_err());
