@@ -39,7 +39,7 @@ use commonware_storage::{
         sync::Target,
         verify_proof, Error as QmdbError,
     },
-    translator::TwoCap,
+    translator::EightCap,
     Context,
 };
 use commonware_utils::{NZUsize, NZU64};
@@ -154,13 +154,18 @@ impl<T: CommitState + Send + ?Sized> CommitState for &mut T {
 }
 
 /// The concrete authenticated backend: an unordered, variable-value QMDB keyed by SHA-256 digests.
-pub type QmdbBackend<E> = AnyDb<Family, E, Digest, Vec<u8>, Sha256, TwoCap, Sequential>;
+///
+/// The index keys each entry by the first 8 bytes of the digest (`EightCap`). With `TwoCap`
+/// (65,536 buckets) a 4.3M-key state averaged ~10 log reads per `get` and a full bucket scan
+/// (~66 reads) for an absent key. The index lives in memory and is rebuilt from the log on open,
+/// so the translator does not change the on-disk format or the state root.
+pub type QmdbBackend<E> = AnyDb<Family, E, Digest, Vec<u8>, Sha256, EightCap, Sequential>;
 pub type QmdbOperation = AnyOperation<Family, Digest, Vec<u8>>;
 pub type QmdbUpdate = AnyUpdate<Digest, Vec<u8>>;
 pub type QmdbOperationCfg = <QmdbOperation as Read>::Cfg;
 pub type QmdbJournal<E> = VariableJournal<E, QmdbOperation>;
-pub type QmdbIndex = UnorderedIndex<TwoCap, Location<Family>>;
-pub type QmdbConfig = VariableConfig<TwoCap, <QmdbOperation as Read>::Cfg, Sequential>;
+pub type QmdbIndex = UnorderedIndex<EightCap, Location<Family>>;
+pub type QmdbConfig = VariableConfig<EightCap, <QmdbOperation as Read>::Cfg, Sequential>;
 pub type QmdbDatabaseSet<E> = Shared<QmdbBackend<E>>;
 
 /// Wrap an opened backend in the shared lock type expected by `commonware-glue`.
@@ -238,7 +243,7 @@ impl<E: Context + BufferPooler + Spawner> QmdbState<E> {
                 write_buffer: NZUsize!(65536),
                 replay_buffer: NZUsize!(65536),
             },
-            translator: TwoCap,
+            translator: EightCap,
             // Bounded location-to-key cache during snapshot rebuild on open/recovery.
             // Matches commonware's sync examples (`1 << 16`).
             init_cache_size: Some(NZUsize!(1 << 16)),
