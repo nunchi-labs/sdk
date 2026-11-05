@@ -1479,7 +1479,7 @@ fn fill_budget_rests_only_after_crossing_liquidity_is_gone() {
     );
     let limited = MatchEngine::replay_limited(
         &resting_orders,
-        &[gtc.clone()],
+        std::slice::from_ref(&gtc),
         &markets,
         sequences.clone(),
         context(3),
@@ -1504,7 +1504,7 @@ fn fill_budget_rests_only_after_crossing_liquidity_is_gone() {
     );
     let limited = MatchEngine::replay_limited(
         &resting_orders,
-        &[ioc.clone()],
+        std::slice::from_ref(&ioc),
         &markets,
         sequences,
         context(3),
