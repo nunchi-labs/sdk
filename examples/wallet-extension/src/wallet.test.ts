@@ -478,6 +478,66 @@ describe("persisted sites and pending requests", () => {
   });
 });
 
+describe("concurrent submissions", () => {
+  it("reserves the next nonce while an earlier submit is still in flight", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    const address = keyPair(GENERATED_KEY).address;
+    let releaseNonce: () => void = () => undefined;
+    const nonceGate = new Promise<void>((resolve) => {
+      releaseNonce = resolve;
+    });
+    let nonceCalls = 0;
+    const originalRpc = harness.host.rpc;
+    harness.host.rpc = async (url, body) => {
+      const request = body as { method: string };
+      if (request.method === "coins.nonce") {
+        nonceCalls += 1;
+        if (nonceCalls === 1) {
+          await nonceGate;
+        }
+      }
+      return originalRpc(url, body);
+    };
+    harness.setNonce(7);
+
+    const first = send(harness.wallet, "SEND_TRANSACTION", popup, {
+      from: address,
+      to: "nch1to",
+      amount: "1",
+      coin: "aa",
+    });
+    for (let i = 0; i < 50 && nonceCalls === 0; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(nonceCalls).toBe(1);
+    const second = send(harness.wallet, "SEND_TRANSACTION", popup, {
+      from: address,
+      to: "nch1to",
+      amount: "2",
+      coin: "bb",
+    });
+    releaseNonce();
+
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    expect(firstResult.success, firstResult.error).toBe(true);
+    expect(secondResult.success, secondResult.error).toBe(true);
+    expect(harness.wasm.signed.map((item) => item.nonce)).toEqual([7n, 8n]);
+  });
+});
+
+describe("delete wallet", () => {
+  it("rejects an in-flight connection instead of leaving it pending", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    const pending = harness.wallet.handleMessage({ type: "REQUEST_CONNECTION" }, page);
+    await waitForApproval(harness.approvalPaths);
+    const deleted = await send(harness.wallet, "DELETE_WALLET", popup, { password: PASSWORD });
+    expect(deleted.success).toBe(true);
+    await expect(pending).resolves.toMatchObject({ success: false, error: "Wallet deleted" });
+  });
+});
+
 describe("import", () => {
   it("imports a key without a pending backup", async () => {
     const { wallet } = createHarness();

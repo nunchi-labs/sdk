@@ -7,7 +7,7 @@
 //! # Usage
 //!
 //! ```text
-//! nunchi-mcp --rpc-url http://127.0.0.1:9090
+//! nunchi-mcp --rpc-url http://127.0.0.1:8545
 //! ```
 
 mod client;
@@ -29,7 +29,9 @@ use tracing_subscriber::{fmt, EnvFilter};
 )]
 struct Cli {
     /// HTTP(S) URL of the Nunchi node's JSON-RPC endpoint.
-    #[arg(long, default_value = "http://127.0.0.1:9090")]
+    ///
+    /// Coins-chain serves JSON-RPC on 8545 by default. 9090 is the Prometheus metrics port.
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc_url: String,
 
     /// Path to the root of the Nunchi SDK repository.

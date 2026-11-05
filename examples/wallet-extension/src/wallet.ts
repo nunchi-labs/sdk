@@ -151,6 +151,11 @@ export class Wallet {
   private hydrated = false;
   private lastActive: number;
   private approvalTimers: Set<ReturnType<typeof setTimeout>> = new Set();
+  private submissionTail: Promise<unknown> = Promise.resolve();
+  private storageTail: Promise<void> = Promise.resolve();
+  /** Next nonce to use after a successful submit, before the chain nonce advances. */
+  private reservedNonce = new Map<string, number>();
+  private reservedFactoryNonce: number | undefined;
 
   constructor(private readonly host: WalletHost) {
     this.lastActive = host.now();
@@ -305,17 +310,19 @@ export class Wallet {
         await decryptPrivateKey(wallet.encrypted, wallet.salt, password);
         this.unlockedWallet = null;
         this.connectedSites.clear();
-        this.pendingConnections.clear();
-        this.pendingTransactions.clear();
-        await this.host.storageRemove([
-          "wallet",
-          "activity",
-          "connectedSites",
-          "pendingConnections",
-          "pendingTransactions",
-          LOCKOUT_STORAGE,
-        ]);
-        await this.persistPending();
+        this.reservedNonce.clear();
+        this.reservedFactoryNonce = undefined;
+        this.rejectOutstanding("Wallet deleted");
+        await this.enqueueStorage(async () => {
+          await this.host.storageRemove([
+            "wallet",
+            "activity",
+            "connectedSites",
+            "pendingConnections",
+            "pendingTransactions",
+            LOCKOUT_STORAGE,
+          ]);
+        });
         return { success: true };
       }
 
@@ -505,13 +512,19 @@ export class Wallet {
           throw new Error("Transaction from address must match unlocked wallet");
         }
         try {
+          const wallet = this.unlockedWallet;
           const settings = await this.getSettings();
-          const nonce = await this.fetchNonce(settings.rpcUrl, this.unlockedWallet.address);
-          const result = request.submit
-            ? await this.signAndSubmit(this.unlockedWallet, nonce, request.coin, request.from, request.to, request.amount)
-            : await this.signOnly(this.unlockedWallet, nonce, request.coin, request.from, request.to, request.amount);
-          this.settlePending(this.pendingTransactions, requestId, { success: true, data: result });
-          return { success: true, data: result };
+          return await this.enqueueSubmission(async () => {
+            const nonce = await this.allocateNonce(settings.rpcUrl, wallet.address);
+            const result = request.submit
+              ? await this.signAndSubmit(wallet, nonce, request.coin, request.from, request.to, request.amount)
+              : await this.signOnly(wallet, nonce, request.coin, request.from, request.to, request.amount);
+            if (request.submit) {
+              this.noteSubmittedNonce(wallet.address, nonce);
+            }
+            this.settlePending(this.pendingTransactions, requestId, { success: true, data: result });
+            return { success: true, data: result };
+          });
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           this.settlePending(this.pendingTransactions, requestId, { success: false, error: message });
@@ -540,9 +553,14 @@ export class Wallet {
         if (from !== this.unlockedWallet.address) {
           throw new Error("from address must match unlocked wallet");
         }
+        const wallet = this.unlockedWallet;
         const settings = await this.getSettings();
-        const nonce = await this.fetchNonce(settings.rpcUrl, this.unlockedWallet.address);
-        return { success: true, data: await this.signAndSubmit(this.unlockedWallet, nonce, coin, from, to, amount) };
+        return this.enqueueSubmission(async () => {
+          const nonce = await this.allocateNonce(settings.rpcUrl, wallet.address);
+          const result = await this.signAndSubmit(wallet, nonce, coin, from, to, amount);
+          this.noteSubmittedNonce(wallet.address, nonce);
+          return { success: true, data: result };
+        });
       }
 
       case "CREATE_TOKEN": {
@@ -556,31 +574,36 @@ export class Wallet {
           initial_supply: string;
           max_supply?: string;
         };
+        const wallet = this.unlockedWallet;
         const settings = await this.getSettings();
-        const nonce = await this.fetchNonce(settings.rpcUrl, this.unlockedWallet.address);
-        const factoryNonce = await this.fetchFactoryNonce(settings.rpcUrl);
-        const wasm = await this.host.wasm();
         const maxSupply = max_supply ?? "";
-        const signed = wasm.sign_create_token(
-          this.unlockedWallet.privateKeyHex,
-          BigInt(nonce),
-          symbol,
-          name,
-          decimals,
-          initial_supply,
-          maxSupply
-        );
-        const coin = wasm.derive_coin_id(
-          this.unlockedWallet.address,
-          BigInt(factoryNonce),
-          symbol,
-          name,
-          decimals,
-          initial_supply,
-          maxSupply
-        );
-        const submitted = await this.submitSigned(signed, { coin, to: this.unlockedWallet.address, amount: initial_supply });
-        return { success: true, data: { ...submitted, coin, factoryNonce } };
+        return this.enqueueSubmission(async () => {
+          const nonce = await this.allocateNonce(settings.rpcUrl, wallet.address);
+          const factoryNonce = await this.allocateFactoryNonce(settings.rpcUrl);
+          const wasm = await this.host.wasm();
+          const signed = wasm.sign_create_token(
+            wallet.privateKeyHex,
+            BigInt(nonce),
+            symbol,
+            name,
+            decimals,
+            initial_supply,
+            maxSupply
+          );
+          const coin = wasm.derive_coin_id(
+            wallet.address,
+            BigInt(factoryNonce),
+            symbol,
+            name,
+            decimals,
+            initial_supply,
+            maxSupply
+          );
+          const submitted = await this.submitSigned(signed, { coin, to: wallet.address, amount: initial_supply });
+          this.noteSubmittedNonce(wallet.address, nonce);
+          this.noteSubmittedFactoryNonce(factoryNonce);
+          return { success: true, data: { ...submitted, coin, factoryNonce } };
+        });
       }
 
       case "MINT": {
@@ -588,11 +611,16 @@ export class Wallet {
           throw new Error("Wallet is locked");
         }
         const { coin, to, amount } = payload as { coin: string; to: string; amount: string };
+        const wallet = this.unlockedWallet;
         const settings = await this.getSettings();
-        const nonce = await this.fetchNonce(settings.rpcUrl, this.unlockedWallet.address);
-        const wasm = await this.host.wasm();
-        const signed = wasm.sign_mint(this.unlockedWallet.privateKeyHex, BigInt(nonce), coin, to, amount);
-        return { success: true, data: await this.submitSigned(signed, { coin, to, amount }) };
+        return this.enqueueSubmission(async () => {
+          const nonce = await this.allocateNonce(settings.rpcUrl, wallet.address);
+          const wasm = await this.host.wasm();
+          const signed = wasm.sign_mint(wallet.privateKeyHex, BigInt(nonce), coin, to, amount);
+          const result = await this.submitSigned(signed, { coin, to, amount });
+          this.noteSubmittedNonce(wallet.address, nonce);
+          return { success: true, data: result };
+        });
       }
 
       case "BURN": {
@@ -600,17 +628,16 @@ export class Wallet {
           throw new Error("Wallet is locked");
         }
         const { coin, amount } = payload as { coin: string; amount: string };
+        const wallet = this.unlockedWallet;
         const settings = await this.getSettings();
-        const nonce = await this.fetchNonce(settings.rpcUrl, this.unlockedWallet.address);
-        const wasm = await this.host.wasm();
-        const signed = wasm.sign_burn(
-          this.unlockedWallet.privateKeyHex,
-          BigInt(nonce),
-          coin,
-          this.unlockedWallet.address,
-          amount
-        );
-        return { success: true, data: await this.submitSigned(signed, { coin, to: this.unlockedWallet.address, amount }) };
+        return this.enqueueSubmission(async () => {
+          const nonce = await this.allocateNonce(settings.rpcUrl, wallet.address);
+          const wasm = await this.host.wasm();
+          const signed = wasm.sign_burn(wallet.privateKeyHex, BigInt(nonce), coin, wallet.address, amount);
+          const result = await this.submitSigned(signed, { coin, to: wallet.address, amount });
+          this.noteSubmittedNonce(wallet.address, nonce);
+          return { success: true, data: result };
+        });
       }
 
       case "REGISTER_ACCOUNT_POLICY": {
@@ -621,24 +648,28 @@ export class Wallet {
           threshold?: number;
           signer_pub_keys?: string;
         };
+        const wallet = this.unlockedWallet;
         const settings = await this.getSettings();
         const wasm = await this.host.wasm();
-        const keys = signer_pub_keys ?? this.unlockedWallet.publicKeyHex;
+        const keys = signer_pub_keys ?? wallet.publicKeyHex;
         const required = threshold ?? 1;
         const account = wasm.derive_multisig_account(required, keys);
-        const nonce = await this.fetchNonce(settings.rpcUrl, account);
-        const signed = wasm.sign_register_account_policy(
-          this.unlockedWallet.privateKeyHex,
-          BigInt(nonce),
-          required,
-          keys
-        );
-        const submitted = await this.submitSigned(signed, {
-          coin: "",
-          to: signed.account,
-          amount: "0",
+        return this.enqueueSubmission(async () => {
+          const nonce = await this.allocateNonce(settings.rpcUrl, account);
+          const signed = wasm.sign_register_account_policy(
+            wallet.privateKeyHex,
+            BigInt(nonce),
+            required,
+            keys
+          );
+          const submitted = await this.submitSigned(signed, {
+            coin: "",
+            to: signed.account,
+            amount: "0",
+          });
+          this.noteSubmittedNonce(account, nonce);
+          return { success: true, data: { ...submitted, account: signed.account ?? account } };
         });
-        return { success: true, data: { ...submitted, account: signed.account ?? account } };
       }
 
       case "GET_CONNECTED_SITES": {
@@ -745,31 +776,90 @@ export class Wallet {
     }
   }
 
-  private async persistConnectedSites(): Promise<void> {
-    await this.host.storageSet({ connectedSites: Array.from(this.connectedSites) });
+  private enqueueSubmission<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.submissionTail.then(work, work);
+    this.submissionTail = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
   }
 
-  private async persistPending(): Promise<void> {
-    const connections: StoredConnection[] = [];
-    for (const [id, request] of this.pendingConnections) {
-      connections.push({ id, origin: request.origin, timestamp: request.timestamp, windowId: request.windowId });
+  private enqueueStorage(work: () => Promise<void>): Promise<void> {
+    const run = this.storageTail.then(work, work);
+    this.storageTail = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  }
+
+  private async allocateNonce(rpcUrl: string, address: string): Promise<number> {
+    const chainNonce = await this.fetchNonce(rpcUrl, address);
+    const reserved = this.reservedNonce.get(address);
+    return reserved === undefined ? chainNonce : Math.max(chainNonce, reserved);
+  }
+
+  private noteSubmittedNonce(address: string, nonce: number): void {
+    const next = nonce + 1;
+    const reserved = this.reservedNonce.get(address);
+    if (reserved === undefined || next > reserved) {
+      this.reservedNonce.set(address, next);
     }
-    const transactions: StoredTransaction[] = [];
-    for (const request of this.pendingTransactions.values()) {
-      transactions.push({
-        id: request.id,
-        origin: request.origin,
-        nonce: request.nonce,
-        coin: request.coin,
-        from: request.from,
-        to: request.to,
-        amount: request.amount,
-        timestamp: request.timestamp,
-        submit: request.submit,
-        windowId: request.windowId,
-      });
+  }
+
+  private async allocateFactoryNonce(rpcUrl: string): Promise<number> {
+    const chainNonce = await this.fetchFactoryNonce(rpcUrl);
+    return this.reservedFactoryNonce === undefined
+      ? chainNonce
+      : Math.max(chainNonce, this.reservedFactoryNonce);
+  }
+
+  private noteSubmittedFactoryNonce(nonce: number): void {
+    const next = nonce + 1;
+    if (this.reservedFactoryNonce === undefined || next > this.reservedFactoryNonce) {
+      this.reservedFactoryNonce = next;
     }
-    await this.host.storageSet({ pendingConnections: connections, pendingTransactions: transactions });
+  }
+
+  private rejectOutstanding(reason: string): void {
+    for (const requestId of [...this.pendingConnections.keys()]) {
+      this.settlePending(this.pendingConnections, requestId, { success: false, error: reason });
+    }
+    for (const requestId of [...this.pendingTransactions.keys()]) {
+      this.settlePending(this.pendingTransactions, requestId, { success: false, error: reason });
+    }
+  }
+
+  private persistConnectedSites(): Promise<void> {
+    return this.enqueueStorage(async () => {
+      await this.host.storageSet({ connectedSites: Array.from(this.connectedSites) });
+    });
+  }
+
+  private persistPending(): Promise<void> {
+    return this.enqueueStorage(async () => {
+      const connections: StoredConnection[] = [];
+      for (const [id, request] of this.pendingConnections) {
+        connections.push({ id, origin: request.origin, timestamp: request.timestamp, windowId: request.windowId });
+      }
+      const transactions: StoredTransaction[] = [];
+      for (const request of this.pendingTransactions.values()) {
+        transactions.push({
+          id: request.id,
+          origin: request.origin,
+          nonce: request.nonce,
+          coin: request.coin,
+          from: request.from,
+          to: request.to,
+          amount: request.amount,
+          timestamp: request.timestamp,
+          submit: request.submit,
+          windowId: request.windowId,
+        });
+      }
+      await this.host.storageSet({ pendingConnections: connections, pendingTransactions: transactions });
+    });
   }
 
   private async getWalletState(): Promise<WalletState | null> {
