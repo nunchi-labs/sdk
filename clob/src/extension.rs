@@ -44,7 +44,8 @@ impl ConsensusExtension for ClobExtension {
     where
         S: StateStore + Send + Sync,
     {
-        match load_book_snapshot(state).await {
+        let known = self.mailbox.known_accounts().await;
+        match load_book_snapshot(state, &known).await {
             Ok(snapshot) => {
                 if let Err(error) = self.mailbox.hydrate(snapshot).await {
                     warn!(?error, "clob actor unavailable while hydrating the committed book");
@@ -65,7 +66,8 @@ impl ConsensusExtension for ClobExtension {
     {
         // The preview is consumed by the following `propose`. It is not installed
         // on the actor, so ingress keeps serving the committed book from `prepare`.
-        self.preview_book = match load_book_snapshot(state).await {
+        let known = self.mailbox.known_accounts().await;
+        self.preview_book = match load_book_snapshot(state, &known).await {
             Ok(snapshot) => Some(snapshot),
             Err(error) => {
                 warn!(?error, "failed to read the clob book staged for this proposal");
@@ -187,7 +189,10 @@ fn accepted_order_ids(payload: &MatchBatch) -> Vec<OrderId> {
     orders.into_iter().collect()
 }
 
-async fn load_book_snapshot<S>(state: &mut S) -> Result<BookSnapshot, crate::ClobError>
+async fn load_book_snapshot<S>(
+    state: &mut S,
+    extra_accounts: &[Address],
+) -> Result<BookSnapshot, crate::ClobError>
 where
     S: StateStore + Send + Sync,
 {
@@ -217,11 +222,24 @@ where
     for account in ledger.tracked_accounts().await? {
         accounts.insert(account);
     }
+    let mut listed = BTreeSet::new();
     for account in accounts {
         let nonce = ledger.nonce(&account).await?;
         if nonce > 0 {
+            listed.insert(account.clone());
             snapshot.nonces.push((account, nonce));
         }
+    }
+    // Pending orders and nonces the actor already holds may belong to accounts
+    // that have left the book and the fill index. Read those nonces explicitly
+    // so hydration does not replace them with zero.
+    for account in extra_accounts {
+        if listed.contains(account) {
+            continue;
+        }
+        let nonce = ledger.nonce(account).await?;
+        listed.insert(account.clone());
+        snapshot.nonces.push((account.clone(), nonce));
     }
     Ok(snapshot)
 }

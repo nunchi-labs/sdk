@@ -1532,6 +1532,70 @@ fn prepare_hydrates_nonce_after_the_account_leaves_the_book() {
 }
 
 #[test]
+fn prepare_keeps_nonce_when_fills_and_the_account_index_are_gone() {
+    deterministic::Runner::default().start(|runtime| async move {
+        let creator = PrivateKey::from_seed(1);
+        let maker = PrivateKey::from_seed(2);
+        let taker = PrivateKey::from_seed(3);
+        let maker_addr = Address::external(&maker.public_key());
+        let mut state = {
+            let mut ledger = ClobLedger::new(MemoryStore::default());
+            seed_market(&mut ledger, &creator).await;
+            let ask = place_tx(&maker, 0, Side::Ask, 100, 2, TimeInForce::GoodTilCancelled);
+            let bid = place_tx(&taker, 0, Side::Bid, 100, 2, TimeInForce::ImmediateOrCancel);
+            let batch = batch_from_orders(&ledger, vec![ask, bid], context(2)).await;
+            ledger.apply_match_batch(&batch, context(2)).await.unwrap();
+            ledger.into_inner()
+        };
+
+        let (actor, mailbox) = ClobActor::new(ClobConfig::default());
+        let _actor = actor.start(runtime.child("clob"));
+        let mut extension = ClobExtension::new(mailbox.clone());
+        extension.prepare(&mut state).await;
+
+        {
+            let ledger = ClobLedger::new(&mut state);
+            let fills = ledger.market_fills(&market()).await.unwrap();
+            for fill in &fills {
+                ledger.db.remove_fill(&fill.id);
+            }
+            ledger.db.set_market_fills(&market(), &[]);
+        }
+        testing_clear_tracked_account_count(&mut state);
+
+        extension.prepare(&mut state).await;
+        let stale = place_tx(&maker, 0, Side::Bid, 100, 2, TimeInForce::ImmediateOrCancel);
+        assert_eq!(
+            mailbox.submit_order(stale.clone()).await.unwrap_err(),
+            ClobError::NonceMismatch {
+                account: Box::new(maker_addr.clone()),
+                expected: 1,
+                actual: 0,
+            }
+        );
+
+        let (restarted, restarted_mailbox) = ClobActor::new(ClobConfig::default());
+        let _restarted = restarted.start(runtime.child("restarted"));
+        restarted_mailbox.submit_order(stale).await.unwrap();
+        let mut restarted_extension = ClobExtension::new(restarted_mailbox.clone());
+        restarted_extension.prepare(&mut state).await;
+        let payload = restarted_extension.propose(context(5)).await;
+        assert!(payload.is_empty());
+        restarted_mailbox
+            .submit_order(place_tx(
+                &maker,
+                1,
+                Side::Ask,
+                100,
+                2,
+                TimeInForce::GoodTilCancelled,
+            ))
+            .await
+            .unwrap();
+    });
+}
+
+#[test]
 fn track_account_rejects_a_new_account_when_the_index_is_full() {
     run_test(|| async {
         let signer = PrivateKey::from_seed(7);

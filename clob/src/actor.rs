@@ -69,6 +69,9 @@ enum Message {
         snapshot: BookSnapshot,
         responder: oneshot::Sender<Result<(), ClobError>>,
     },
+    KnownAccounts {
+        responder: oneshot::Sender<Vec<Address>>,
+    },
 }
 
 /// Cloneable ingress handle for a running validator-local CLOB actor.
@@ -183,6 +186,23 @@ impl ClobMailbox {
             .is_err()
         {
             return MatchBatch::default();
+        }
+        receiver.await.unwrap_or_default()
+    }
+
+    /// Accounts the matcher already has a nonce for, or a pending order from.
+    ///
+    /// Hydration uses this so a snapshot that cannot see an account (pruned
+    /// fills, missing index) does not forget a nonce this process already learned.
+    pub async fn known_accounts(&self) -> Vec<Address> {
+        let (responder, receiver) = oneshot::channel();
+        let mut sender = self.sender.clone();
+        if sender
+            .send(Message::KnownAccounts { responder })
+            .await
+            .is_err()
+        {
+            return Vec::new();
         }
         receiver.await.unwrap_or_default()
     }
@@ -332,6 +352,9 @@ impl ClobActor {
                 self.hydrate_snapshot(snapshot);
                 let _ = responder.send(Ok(()));
             }
+            Message::KnownAccounts { responder } => {
+                let _ = responder.send(self.known_account_ids());
+            }
         }
     }
 
@@ -368,7 +391,27 @@ impl ClobActor {
         }
     }
 
-    fn hydrate_snapshot(&mut self, snapshot: BookSnapshot) {
+    fn known_account_ids(&self) -> Vec<Address> {
+        let mut accounts = BTreeSet::new();
+        accounts.extend(self.nonces.keys().cloned());
+        accounts.extend(self.pending_orders.iter().map(|tx| tx.account_id.clone()));
+        accounts.into_iter().collect()
+    }
+
+    fn hydrate_snapshot(&mut self, mut snapshot: BookSnapshot) {
+        // The snapshot is authoritative for accounts it lists. Accounts it
+        // cannot see keep the nonce this process already has, so a missing
+        // index does not wipe `sync_accepted`.
+        let listed = snapshot
+            .nonces
+            .iter()
+            .map(|(account, _)| account.clone())
+            .collect::<BTreeSet<_>>();
+        for (account, nonce) in &self.nonces {
+            if !listed.contains(account) {
+                snapshot.nonces.push((account.clone(), *nonce));
+            }
+        }
         let _ = self.install_book(snapshot);
         self.drop_stale_pending_orders();
     }
