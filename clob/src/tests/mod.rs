@@ -21,7 +21,7 @@ use crate::{
     MAX_FILLS_PER_MARKET, MAX_MATCH_BATCH_ORDERS,
 };
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct MemoryStore {
     values: BTreeMap<Digest, Option<Vec<u8>>>,
 }
@@ -126,15 +126,53 @@ fn place_tx(
     base_quantity: u128,
     time_in_force: TimeInForce,
 ) -> Transaction {
+    place_tx_on(
+        signer,
+        nonce,
+        market(),
+        side,
+        price,
+        base_quantity,
+        time_in_force,
+    )
+}
+
+fn place_tx_on(
+    signer: &PrivateKey,
+    nonce: u64,
+    market: crate::MarketId,
+    side: Side,
+    price: u128,
+    base_quantity: u128,
+    time_in_force: TimeInForce,
+) -> Transaction {
     Transaction::sign(
         signer,
         nonce,
         ClobOperation::PlaceOrder {
-            market: market(),
+            market,
             side,
             price,
             base_quantity,
             time_in_force,
+        },
+    )
+}
+
+fn create_market_tx_sized(
+    signer: &PrivateKey,
+    nonce: u64,
+    tick_size: u128,
+    lot_size: u128,
+) -> Transaction {
+    Transaction::sign(
+        signer,
+        nonce,
+        ClobOperation::CreateMarket {
+            base_asset: asset(b"base"),
+            quote_asset: asset(b"quote"),
+            tick_size,
+            lot_size,
         },
     )
 }
@@ -2012,4 +2050,286 @@ fn resting_order(id: OrderId, price: u128, sequence: u64, owner: Address) -> Ord
         created_at_height: 1,
         created_at_ms: 1,
     }
+}
+
+#[test]
+fn prepare_hydrates_a_restarted_matcher_from_the_ledger() {
+    deterministic::Runner::default().start(|runtime| async move {
+        let creator = PrivateKey::from_seed(1);
+        let maker = PrivateKey::from_seed(2);
+        let taker = PrivateKey::from_seed(3);
+        let next_taker = PrivateKey::from_seed(4);
+        let mut state = {
+            let mut ledger = ClobLedger::new(MemoryStore::default());
+            seed_market(&mut ledger, &creator).await;
+            let ask = place_tx(
+                &maker,
+                0,
+                Side::Ask,
+                100,
+                6,
+                TimeInForce::GoodTilCancelled,
+            );
+            let bid = place_tx(
+                &taker,
+                0,
+                Side::Bid,
+                100,
+                2,
+                TimeInForce::ImmediateOrCancel,
+            );
+            let batch = batch_from_orders(&ledger, vec![ask.clone(), bid], context(2)).await;
+            ledger.apply_match_batch(&batch, context(2)).await.unwrap();
+            ledger.into_inner()
+        };
+        let ask = place_tx(
+            &maker,
+            0,
+            Side::Ask,
+            100,
+            6,
+            TimeInForce::GoodTilCancelled,
+        );
+
+        let (actor, mailbox) = ClobActor::new(ClobConfig::default());
+        let _actor = actor.start(runtime.child("clob"));
+        let mut extension = ClobExtension::new(mailbox.clone());
+        extension.prepare(&mut state).await;
+        let bid = place_tx(
+            &next_taker,
+            0,
+            Side::Bid,
+            100,
+            4,
+            TimeInForce::ImmediateOrCancel,
+        );
+        mailbox.submit_order(bid.clone()).await.unwrap();
+        let proposal_context = context(3);
+        let payload = extension.propose(proposal_context).await;
+        assert_eq!(payload.fills.len(), 1);
+        assert_eq!(payload.fills[0].written_at_height, proposal_context.height);
+        assert_eq!(payload.fills[0].written_at_ms, proposal_context.timestamp_ms);
+        assert!(extension
+            .apply_payload(&mut state, proposal_context, &payload)
+            .await);
+        let ledger = ClobLedger::new(&mut state);
+        let fills = ledger.market_fills(&market()).await.unwrap();
+        assert_eq!(fills.len(), 2);
+        assert_eq!(fills[1].maker_order, OrderId(ask.digest()));
+        assert_eq!(fills[1].taker_order, OrderId(bid.digest()));
+    });
+}
+
+#[test]
+fn prepare_hydrates_nonce_after_the_account_leaves_the_book() {
+    deterministic::Runner::default().start(|runtime| async move {
+        let creator = PrivateKey::from_seed(1);
+        let maker = PrivateKey::from_seed(2);
+        let taker = PrivateKey::from_seed(3);
+        let maker_addr = Address::external(&maker.public_key());
+        let mut state = {
+            let mut ledger = ClobLedger::new(MemoryStore::default());
+            seed_market(&mut ledger, &creator).await;
+            let ask = place_tx(&maker, 0, Side::Ask, 100, 2, TimeInForce::GoodTilCancelled);
+            let bid = place_tx(&taker, 0, Side::Bid, 100, 2, TimeInForce::ImmediateOrCancel);
+            let batch = batch_from_orders(&ledger, vec![ask, bid], context(2)).await;
+            ledger.apply_match_batch(&batch, context(2)).await.unwrap();
+            assert!(ledger.book(&market(), Side::Ask).await.unwrap().is_empty());
+            assert!(ledger.book(&market(), Side::Bid).await.unwrap().is_empty());
+            assert_eq!(ledger.nonce(&maker_addr).await.unwrap(), 1);
+            ledger.db.set_nonce_accounts(&[]);
+            ledger.into_inner()
+        };
+
+        let (actor, mailbox) = ClobActor::new(ClobConfig::default());
+        let _actor = actor.start(runtime.child("clob"));
+        let mut extension = ClobExtension::new(mailbox.clone());
+        extension.prepare(&mut state).await;
+
+        let stale = place_tx(&maker, 0, Side::Bid, 100, 2, TimeInForce::ImmediateOrCancel);
+        assert_eq!(
+            mailbox.submit_order(stale).await.unwrap_err(),
+            ClobError::NonceMismatch {
+                account: Box::new(maker_addr.clone()),
+                expected: 1,
+                actual: 0,
+            }
+        );
+        let ask = place_tx(&maker, 1, Side::Ask, 100, 2, TimeInForce::GoodTilCancelled);
+        let bid = place_tx(&taker, 1, Side::Bid, 100, 2, TimeInForce::ImmediateOrCancel);
+        mailbox.submit_order(ask).await.unwrap();
+        mailbox.submit_order(bid).await.unwrap();
+        let proposal_context = context(4);
+        let payload = extension.propose(proposal_context).await;
+        assert_eq!(payload.fills.len(), 1);
+        assert!(extension
+            .apply_payload(&mut state, proposal_context, &payload)
+            .await);
+        assert_eq!(
+            ClobLedger::new(&mut state).nonce(&maker_addr).await.unwrap(),
+            2
+        );
+    });
+}
+
+#[test]
+fn prepare_keeps_nonce_when_fills_and_the_account_index_are_gone() {
+    deterministic::Runner::default().start(|runtime| async move {
+        let creator = PrivateKey::from_seed(1);
+        let maker = PrivateKey::from_seed(2);
+        let taker = PrivateKey::from_seed(3);
+        let maker_addr = Address::external(&maker.public_key());
+        let mut state = {
+            let mut ledger = ClobLedger::new(MemoryStore::default());
+            seed_market(&mut ledger, &creator).await;
+            let ask = place_tx(&maker, 0, Side::Ask, 100, 2, TimeInForce::GoodTilCancelled);
+            let bid = place_tx(&taker, 0, Side::Bid, 100, 2, TimeInForce::ImmediateOrCancel);
+            let batch = batch_from_orders(&ledger, vec![ask, bid], context(2)).await;
+            ledger.apply_match_batch(&batch, context(2)).await.unwrap();
+            ledger.into_inner()
+        };
+
+        let (actor, mailbox) = ClobActor::new(ClobConfig::default());
+        let _actor = actor.start(runtime.child("clob"));
+        let mut extension = ClobExtension::new(mailbox.clone());
+        extension.prepare(&mut state).await;
+
+        {
+            let ledger = ClobLedger::new(&mut state);
+            let fills = ledger.market_fills(&market()).await.unwrap();
+            for fill in &fills {
+                ledger.db.remove_fill(&fill.id);
+            }
+            ledger.db.set_market_fills(&market(), &[]);
+            ledger.db.set_nonce_accounts(&[]);
+        }
+
+        extension.prepare(&mut state).await;
+        let stale = place_tx(&maker, 0, Side::Bid, 100, 2, TimeInForce::ImmediateOrCancel);
+        assert_eq!(
+            mailbox.submit_order(stale.clone()).await.unwrap_err(),
+            ClobError::NonceMismatch {
+                account: Box::new(maker_addr.clone()),
+                expected: 1,
+                actual: 0,
+            }
+        );
+
+        let (restarted, restarted_mailbox) = ClobActor::new(ClobConfig::default());
+        let _restarted = restarted.start(runtime.child("restarted"));
+        restarted_mailbox.submit_order(stale).await.unwrap();
+        let mut restarted_extension = ClobExtension::new(restarted_mailbox.clone());
+        restarted_extension.prepare(&mut state).await;
+        let payload = restarted_extension.propose(context(5)).await;
+        assert!(payload.is_empty());
+        restarted_mailbox
+            .submit_order(place_tx(
+                &maker,
+                1,
+                Side::Ask,
+                100,
+                2,
+                TimeInForce::GoodTilCancelled,
+            ))
+            .await
+            .unwrap();
+    });
+}
+
+#[test]
+fn preview_matches_same_block_markets_without_mutating_ingress() {
+    deterministic::Runner::default().start(|runtime| async move {
+        let creator = PrivateKey::from_seed(1);
+        let alt_maker = PrivateKey::from_seed(4);
+        let alt_taker = PrivateKey::from_seed(5);
+        let probe = PrivateKey::from_seed(6);
+        let mut state = {
+            let mut ledger = ClobLedger::new(MemoryStore::default());
+            seed_market(&mut ledger, &creator).await;
+            ledger.into_inner()
+        };
+        let (actor, mailbox) = ClobActor::new(ClobConfig::default());
+        let _actor = actor.start(runtime.child("clob"));
+        let mut extension = ClobExtension::new(mailbox.clone());
+        extension.prepare(&mut state).await;
+
+        let creator_order = place_tx(
+            &creator,
+            1,
+            Side::Bid,
+            100,
+            2,
+            TimeInForce::ImmediateOrCancel,
+        );
+        mailbox.submit_order(creator_order.clone()).await.unwrap();
+
+        let mut preview_state = state.clone();
+        ClobLedger::new(&mut preview_state)
+            .apply_transaction(&create_market_tx_sized(&creator, 1, 7, MARKET_LOT), context(2))
+            .await
+            .unwrap();
+        let alt_market = market_id(&asset(b"base"), &asset(b"quote"), 7, MARKET_LOT);
+        extension.preview(&mut preview_state).await;
+
+        assert!(matches!(
+            mailbox.submit_order(creator_order.clone()).await.unwrap_err(),
+            ClobError::NonceMismatch {
+                expected: 2,
+                actual: 1,
+                ..
+            }
+        ));
+
+        let ask = place_tx_on(
+            &alt_maker,
+            0,
+            alt_market,
+            Side::Ask,
+            7,
+            2,
+            TimeInForce::GoodTilCancelled,
+        );
+        let bid = place_tx_on(
+            &alt_taker,
+            0,
+            alt_market,
+            Side::Bid,
+            7,
+            2,
+            TimeInForce::ImmediateOrCancel,
+        );
+        mailbox.submit_order(ask).await.unwrap();
+        mailbox.submit_order(bid).await.unwrap();
+
+        let proposal_context = context(3);
+        let payload = extension.propose(proposal_context).await;
+        assert_eq!(payload.fills.len(), 1);
+        assert_eq!(payload.fills[0].market, alt_market);
+        assert!(payload
+            .orders
+            .iter()
+            .all(|tx| tx.digest() != creator_order.digest()));
+        assert!(extension
+            .apply_payload(&mut preview_state, proposal_context, &payload)
+            .await);
+
+        assert!(matches!(
+            mailbox.submit_order(creator_order).await.unwrap_err(),
+            ClobError::NonceMismatch {
+                expected: 2,
+                actual: 1,
+                ..
+            }
+        ));
+        let off_tick = place_tx_on(
+            &probe,
+            0,
+            alt_market,
+            Side::Bid,
+            1,
+            2,
+            TimeInForce::ImmediateOrCancel,
+        );
+        mailbox.submit_order(off_tick).await.unwrap();
+    });
 }

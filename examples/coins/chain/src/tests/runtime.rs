@@ -196,21 +196,60 @@ fn runtime_reverts_fee_when_transaction_fails() {
                 amount: 100,
             },
         ));
-        let error = CoinsRuntime::apply(
-            &mut state,
-            RuntimeContext::default(),
-            &tx,
-            &mut VecEventSink::new(),
-        )
-        .await
-        .unwrap_err();
+        let mut events = VecEventSink::new();
+        let error = CoinsRuntime::apply(&mut state, RuntimeContext::default(), &tx, &mut events)
+            .await
+            .unwrap_err();
         assert!(matches!(
             error,
             RuntimeError::Coins(LedgerError::NonceMismatch { .. })
         ));
+        assert!(events.is_empty());
         assert_eq!(state.balance(&alice, &coin).await.unwrap(), 1_000);
         assert_eq!(state.balance(&bob, &coin).await.unwrap(), 0);
         assert_eq!(state.balance(&collector, &coin).await.unwrap(), 0);
+    });
+}
+
+#[test]
+fn failed_dispatch_reverts_the_fee() {
+    deterministic::Runner::default().start(|context| async move {
+        let alice_key = PrivateKey::ed25519_from_seed(1);
+        let alice = Address::external(&alice_key.public_key());
+        let bob = Address::external(&PrivateKey::ed25519_from_seed(2).public_key());
+        let collector = Address::external(&PrivateKey::ed25519_from_seed(9).public_key());
+        let genesis = fee_genesis(alice.clone(), collector.clone(), 7, 3);
+        let mut state = fee_state(context, "coins-runtime-fee-revert-balance", &genesis).await;
+        let spec = &genesis.tokens[0].spec;
+        let coin = TokenFactory::derive_coin_id(&alice, 0, spec);
+
+        let tx = Transaction::from(nunchi_coins::Transaction::sign(
+            &alice_key,
+            0,
+            CoinOperation::Transfer {
+                coin,
+                from: alice.clone(),
+                to: bob,
+                amount: 1_000,
+            },
+        ));
+        let mut events = VecEventSink::new();
+        let err = CoinsRuntime::apply(&mut state, RuntimeContext::default(), &tx, &mut events)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            RuntimeError::Coins(LedgerError::InsufficientBalance { .. })
+        ));
+        assert!(
+            events.is_empty(),
+            "a reverted transaction must not emit the fee it charged"
+        );
+
+        let ledger = Ledger::new(&mut state);
+        assert_eq!(ledger.balance(&alice, &coin).await.unwrap(), 1_000);
+        assert_eq!(ledger.balance(&collector, &coin).await.unwrap(), 0);
+        assert_eq!(ledger.nonce(&alice).await.unwrap(), 0);
     });
 }
 
