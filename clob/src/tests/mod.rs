@@ -7,14 +7,16 @@ use commonware_p2p::simulated::{self, Link, Network};
 use commonware_runtime::{deterministic, Clock, Runner as _, Supervisor};
 use commonware_utils::{probability, NZUsize, NZU32};
 use governor::Quota;
+use nunchi_chain::ConsensusExtension;
 use nunchi_common::{
     Address, CommitState, MultisigPolicy, RuntimeContext, StateError, StateStore,
 };
 use nunchi_crypto::PrivateKey;
 
 use crate::{
-    market_id, AssetId, ClobActor, ClobConfig, ClobDB, ClobError, ClobGenesis, ClobLedger,
-    ClobMailbox, ClobMarketGenesis, ClobOperation, FillId, Market, MatchBatch, MatchEngine,
+    market_id, AssetId, ClobActor, ClobConfig, ClobDB, ClobError, ClobExtension, ClobGenesis,
+    ClobLedger, ClobMailbox, ClobMarketGenesis, ClobOperation, FillId, Market, MatchBatch,
+    MatchEngine,
     OrderId, Side, TimeInForce, Transaction, MAX_FILLS_PER_MARKET,
 };
 
@@ -1327,6 +1329,68 @@ fn clob_actor_rejects_multisig_order_for_another_account() {
             .unwrap_err();
         assert_eq!(err, ClobError::UnsupportedAuthorization);
         assert!(mailbox.propose().await.is_empty());
+    });
+}
+
+#[test]
+fn extension_verify_payload_rejects_multisig_and_bad_signatures() {
+    deterministic::Runner::default().start(|context| async move {
+        let (actor, mailbox) = ClobActor::new(ClobConfig::default());
+        let _actor_handle = actor.start(context);
+        let mut extension = ClobExtension::new(mailbox);
+
+        assert!(extension.verify_payload(&MatchBatch::default()).await);
+
+        let honest = place_tx(
+            &PrivateKey::from_seed(1),
+            0,
+            Side::Bid,
+            100,
+            4,
+            TimeInForce::GoodTilCancelled,
+        );
+        assert!(
+            extension
+                .verify_payload(&MatchBatch {
+                    orders: vec![honest],
+                    fills: Vec::new(),
+                })
+                .await
+        );
+
+        let victim = Address::external(&PrivateKey::from_seed(9).public_key());
+        let forged = forged_multisig_order(victim, 0);
+        assert!(forged.verify().is_ok());
+        assert!(
+            !extension
+                .verify_payload(&MatchBatch {
+                    orders: vec![forged],
+                    fills: Vec::new(),
+                })
+                .await
+        );
+
+        let mut tampered = place_tx(
+            &PrivateKey::from_seed(1),
+            0,
+            Side::Bid,
+            100,
+            4,
+            TimeInForce::GoodTilCancelled,
+        );
+        let ClobOperation::PlaceOrder { price, .. } = &mut tampered.payload.operation else {
+            panic!("expected place order");
+        };
+        *price += MARKET_TICK;
+        assert!(tampered.verify().is_err());
+        assert!(
+            !extension
+                .verify_payload(&MatchBatch {
+                    orders: vec![tampered],
+                    fills: Vec::new(),
+                })
+                .await
+        );
     });
 }
 
