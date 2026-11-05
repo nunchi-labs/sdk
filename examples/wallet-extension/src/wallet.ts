@@ -136,14 +136,20 @@ type PendingTransaction = TransactionRequest & {
 type StoredConnection = { id: string; origin: string; timestamp: number; windowId?: number };
 type StoredTransaction = Omit<TransactionRequest, "id"> & { id: string; windowId?: number };
 
+/** One wallet submit that may still occupy its nonce. */
+type SubmittedNonce = {
+  nonce: number;
+  hash: string;
+};
+
 /** In-flight nonce for one account or the factory on a single RPC endpoint. */
 type NonceCursor = {
   /** Next nonce to assign while a live submit or a dapp signature still reserves one. */
   next: number;
   /** Highest chain nonce observed for this cursor. */
   seen: number;
-  /** Latest wallet submit. Empty when the reservation is only a local signature. */
-  hash: string;
+  /** Wallet submits still occupying a nonce. Absent when the reservation is only a local signature. */
+  submits?: SubmittedNonce[];
   /** Nonces signed for a dapp and not yet consumed by the chain. */
   held?: number[];
 };
@@ -884,16 +890,30 @@ export class Wallet {
     } else {
       cursor.held = held;
     }
-    const submitLive = cursor.hash !== "" && (await this.submissionOnChain(rpcUrl, cursor.hash));
-    if (submitLive) {
-      return cursor.next;
+    const live: SubmittedNonce[] = [];
+    for (const submit of cursor.submits ?? []) {
+      if (submit.nonce < chainNonce) {
+        continue;
+      }
+      if (await this.submissionOnChain(rpcUrl, submit.hash)) {
+        live.push(submit);
+      }
     }
-    if (held.length === 0) {
+    if (live.length === 0) {
+      delete cursor.submits;
+    } else {
+      cursor.submits = live;
+    }
+    if (live.length === 0 && held.length === 0) {
       cursors.delete(key);
       return chainNonce;
     }
+    const reserved = held.slice();
+    for (const submit of live) {
+      reserved.push(submit.nonce);
+    }
     let nonce = chainNonce;
-    while (held.includes(nonce)) {
+    while (reserved.includes(nonce)) {
       nonce += 1;
     }
     return Math.min(nonce, cursor.next);
@@ -908,13 +928,15 @@ export class Wallet {
     const next = nonce + 1;
     const cursor = cursors.get(key);
     if (!cursor) {
-      cursors.set(key, { next, seen: nonce, hash });
+      cursors.set(key, { next, seen: nonce, submits: [{ nonce, hash }] });
       return;
     }
     if (next > cursor.next) {
       cursor.next = next;
     }
-    cursor.hash = hash;
+    const submits = (cursor.submits ?? []).filter((submit) => submit.nonce !== nonce);
+    submits.push({ nonce, hash });
+    cursor.submits = submits;
     if (cursor.held) {
       cursor.held = cursor.held.filter((reserved) => reserved !== nonce);
       if (cursor.held.length === 0) {
@@ -927,7 +949,7 @@ export class Wallet {
     const next = nonce + 1;
     const cursor = cursors.get(key);
     if (!cursor) {
-      cursors.set(key, { next, seen: nonce, hash: "", held: [nonce] });
+      cursors.set(key, { next, seen: nonce, held: [nonce] });
       return;
     }
     if (next > cursor.next) {

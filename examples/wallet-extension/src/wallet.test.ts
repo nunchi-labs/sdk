@@ -331,6 +331,7 @@ describe("coin operations", () => {
       "coins.submit_transaction",
       "coins.nonce",
       "coins.transaction_status",
+      "coins.transaction_status",
       "coins.submit_transaction",
       "coins.nonce",
       "coins.submit_transaction",
@@ -674,6 +675,40 @@ describe("nonce reservations follow the chain", () => {
     expect(first.success, first.error).toBe(true);
     expect(second.success, second.error).toBe(true);
     expect(harness.wasm.signed.map((item) => item.nonce)).toEqual([7n, 8n]);
+  });
+
+  it("keeps an earlier pending nonce when a later submit is dropped", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    harness.setNonce(7);
+    const statuses = new Map<string, string>();
+    let submitted = 0;
+    const original = harness.host.rpc;
+    harness.host.rpc = async (url, body) => {
+      const request = body as { method: string; params: { hash?: string } };
+      if (request.method === "coins.submit_transaction") {
+        submitted += 1;
+        const hash = `0x${submitted}`;
+        statuses.set(hash, "pending");
+        harness.rpcCalls.push(request);
+        return { result: { hash } };
+      }
+      if (request.method === "coins.transaction_status") {
+        harness.rpcCalls.push(request);
+        const hash = request.params.hash ?? "";
+        return { result: { hash, status: statuses.get(hash) ?? "unknown" } };
+      }
+      return original(url, body);
+    };
+
+    const first = await sendTransfer(harness.wallet, "1", "aa");
+    const second = await sendTransfer(harness.wallet, "2", "bb");
+    expect(first.success, first.error).toBe(true);
+    expect(second.success, second.error).toBe(true);
+    statuses.set("0x2", "dropped");
+    const third = await sendTransfer(harness.wallet, "3", "cc");
+    expect(third.success, third.error).toBe(true);
+    expect(harness.wasm.signed.map((item) => item.nonce)).toEqual([7n, 8n, 8n]);
   });
 
   it("does not reuse a nonce that was signed for a dapp", async () => {
