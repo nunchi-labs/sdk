@@ -122,6 +122,7 @@ function createHarness(options?: { storage?: MemoryStorage; clock?: FakeClock })
   let nextWindowId = 100;
   let lastWindowId = 0;
   let nonce = 7;
+  let factoryNonce = 1;
   const rpcCalls: Array<{ method: string; params: unknown }> = [];
 
   const host: WalletHost = {
@@ -143,7 +144,7 @@ function createHarness(options?: { storage?: MemoryStorage; clock?: FakeClock })
         return { result: { nonce } };
       }
       if (request.method === "coins.factory_nonce") {
-        return { result: { nonce: 1 } };
+        return { result: { nonce: factoryNonce } };
       }
       if (request.method === "coins.balance") {
         return { result: { amount: "42" } };
@@ -166,6 +167,9 @@ function createHarness(options?: { storage?: MemoryStorage; clock?: FakeClock })
     rpcCalls,
     setNonce: (value: number) => {
       nonce = value;
+    },
+    setFactoryNonce: (value: number) => {
+      factoryNonce = value;
     },
     restart(): Wallet {
       return new Wallet(host);
@@ -323,8 +327,10 @@ describe("coin operations", () => {
       "coins.factory_nonce",
       "coins.submit_transaction",
       "coins.nonce",
+      "coins.transaction_status",
       "coins.submit_transaction",
       "coins.nonce",
+      "coins.transaction_status",
       "coins.submit_transaction",
       "coins.nonce",
       "coins.submit_transaction",
@@ -522,6 +528,121 @@ describe("concurrent submissions", () => {
     const [firstResult, secondResult] = await Promise.all([first, second]);
     expect(firstResult.success, firstResult.error).toBe(true);
     expect(secondResult.success, secondResult.error).toBe(true);
+    expect(harness.wasm.signed.map((item) => item.nonce)).toEqual([7n, 8n]);
+  });
+});
+
+function stubTxStatus(harness: ReturnType<typeof createHarness>, status: string): void {
+  const original = harness.host.rpc;
+  harness.host.rpc = async (url, body) => {
+    const request = body as { method: string; params: unknown };
+    if (request.method === "coins.transaction_status") {
+      harness.rpcCalls.push(request);
+      return { result: { hash: "0xstatus", status } };
+    }
+    return original(url, body);
+  };
+}
+
+async function sendTransfer(wallet: Wallet, amount: string, coin: string): Promise<Response> {
+  return send(wallet, "SEND_TRANSACTION", popup, {
+    from: keyPair(GENERATED_KEY).address,
+    to: "nch1to",
+    amount,
+    coin,
+  });
+}
+
+describe("nonce reservations follow the chain", () => {
+  it("drops a reserved nonce when the chain nonce moves backward", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    stubTxStatus(harness, "pending");
+    harness.setNonce(4);
+
+    const first = await sendTransfer(harness.wallet, "1", "aa");
+    expect(first.success, first.error).toBe(true);
+    harness.setNonce(0);
+    const second = await sendTransfer(harness.wallet, "2", "bb");
+    expect(second.success, second.error).toBe(true);
+    expect(harness.wasm.signed.map((item) => item.nonce)).toEqual([4n, 0n]);
+  });
+
+  it("drops a reserved nonce when a restarted chain reports the same nonce", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    stubTxStatus(harness, "unknown");
+    harness.setNonce(0);
+    harness.setFactoryNonce(0);
+
+    const first = await send(harness.wallet, "CREATE_TOKEN", popup, {
+      symbol: "WLT",
+      name: "Wallet",
+      decimals: 6,
+      initial_supply: "1000",
+      max_supply: "5000",
+    });
+    expect(first.success, first.error).toBe(true);
+    expect(first.data).toMatchObject({ factoryNonce: 0 });
+
+    const second = await send(harness.wallet, "CREATE_TOKEN", popup, {
+      symbol: "WLT",
+      name: "Wallet",
+      decimals: 6,
+      initial_supply: "1000",
+      max_supply: "5000",
+    });
+    expect(second.success, second.error).toBe(true);
+    expect(second.data).toMatchObject({ factoryNonce: 0 });
+    const submitted = harness.rpcCalls.filter((call) => call.method === "coins.submit_transaction");
+    expect(submitted.map((call) => (call.params as { transaction: string }).transaction)).toEqual([
+      "create:0",
+      "create:0",
+    ]);
+  });
+
+  it("does not reuse a nonce reserved for another RPC", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    stubTxStatus(harness, "pending");
+    harness.setNonce(5);
+
+    const first = await sendTransfer(harness.wallet, "1", "aa");
+    expect(first.success, first.error).toBe(true);
+    const updated = await send(harness.wallet, "UPDATE_SETTINGS", popup, {
+      rpcUrl: "http://127.0.0.1:9545",
+    });
+    expect(updated.success, updated.error).toBe(true);
+    const second = await sendTransfer(harness.wallet, "2", "bb");
+    expect(second.success, second.error).toBe(true);
+    expect(harness.wasm.signed.map((item) => item.nonce)).toEqual([5n, 5n]);
+  });
+
+  it("keeps the next nonce while the previous submit is still pending", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    stubTxStatus(harness, "pending");
+    harness.setNonce(7);
+
+    const first = await sendTransfer(harness.wallet, "1", "aa");
+    const second = await sendTransfer(harness.wallet, "2", "bb");
+    expect(first.success, first.error).toBe(true);
+    expect(second.success, second.error).toBe(true);
+    expect(harness.wasm.signed.map((item) => item.nonce)).toEqual([7n, 8n]);
+  });
+
+  it("keeps a pending nonce when settings do not change the chain", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    stubTxStatus(harness, "pending");
+    harness.setNonce(7);
+
+    const first = await sendTransfer(harness.wallet, "1", "aa");
+    expect(first.success, first.error).toBe(true);
+    const updated = await send(harness.wallet, "UPDATE_SETTINGS", popup, { displayCoin: "nunchi" });
+    expect(updated.success, updated.error).toBe(true);
+    const second = await sendTransfer(harness.wallet, "2", "bb");
+    expect(second.success, second.error).toBe(true);
     expect(harness.wasm.signed.map((item) => item.nonce)).toEqual([7n, 8n]);
   });
 });
