@@ -31,13 +31,19 @@ fn vec_event_sink_starts_empty() {
 }
 
 #[test]
-fn noop_event_sink_accepts_events() {
+fn noop_event_sink_discards_events() {
     let mut sink = NoopEventSink;
 
     sink.emit(Event::new(
         Bytes::from_static(b"coins.burned.v1"),
         Bytes::from_static(b"burn"),
     ));
+    sink.emit(Event::new(
+        Bytes::from_static(b"coins.burned.v1"),
+        Bytes::from_static(b"again"),
+    ));
+
+    assert_eq!(sink, NoopEventSink);
 }
 
 #[test]
