@@ -7,20 +7,18 @@ use commonware_p2p::simulated::{self, Link, Network};
 use commonware_runtime::{deterministic, Clock, Runner as _, Supervisor};
 use commonware_utils::{probability, NZUsize, NZU32};
 use governor::Quota;
+use nunchi_chain::ConsensusExtension;
 use nunchi_common::{
     Address, CommitState, MultisigPolicy, RuntimeContext, StateError, StateStore,
     MAX_STATE_VALUE_SIZE,
 };
 use nunchi_crypto::PrivateKey;
 
-use nunchi_chain::ConsensusExtension;
-
-use crate::db::{testing_clear_tracked_account_count, testing_set_tracked_account_count};
 use crate::{
-    market_id, types::TRACKED_ACCOUNT_SHARD, AssetId, ClobActor, ClobConfig, ClobDB, ClobError,
-    ClobExtension, ClobGenesis, ClobLedger, ClobMailbox, ClobMarketGenesis, ClobOperation, Fill,
-    FillId, Market, MatchBatch, MatchEngine, OrderId, Side, TimeInForce, Transaction,
-    MAX_FILLS_PER_MARKET, MAX_TRACKED_ACCOUNTS,
+    market_id, AssetId, ClobActor, ClobConfig, ClobDB, ClobError, ClobExtension, ClobGenesis,
+    ClobLedger, ClobMailbox, ClobMarketGenesis, ClobOperation, FillId, Market, MatchBatch,
+    MatchEngine, Order, OrderId, OrderStatus, Side, TimeInForce, Transaction, MAX_BOOK_ORDERS,
+    MAX_FILLS_PER_MARKET, MAX_MATCH_BATCH_ORDERS,
 };
 
 #[derive(Clone, Default)]
@@ -78,6 +76,25 @@ const MARKET_LOT: u128 = 2;
 
 fn market() -> crate::MarketId {
     market_id(&asset(b"base"), &asset(b"quote"), MARKET_TICK, MARKET_LOT)
+}
+
+fn test_markets() -> BTreeMap<crate::MarketId, Market> {
+    let creator = PrivateKey::from_seed(1);
+    let mut markets = BTreeMap::new();
+    markets.insert(
+        market(),
+        Market {
+            id: market(),
+            base_asset: asset(b"base"),
+            quote_asset: asset(b"quote"),
+            tick_size: MARKET_TICK,
+            lot_size: MARKET_LOT,
+            created_by: Address::external(&creator.public_key()),
+            created_at_height: 0,
+            created_at_ms: 0,
+        },
+    );
+    markets
 }
 
 fn fake_fill_id(seed: u64) -> FillId {
@@ -1402,6 +1419,640 @@ fn clob_mailbox_reports_stopped_actor() {
 }
 
 #[test]
+fn max_fill_index_fits_in_state_value_limit() {
+    let fills = (0..MAX_FILLS_PER_MARKET as u64)
+        .map(fake_fill_id)
+        .collect::<Vec<_>>();
+    let size = fills.encode_size();
+    assert!(
+        size <= MAX_STATE_VALUE_SIZE,
+        "fill index encodes to {size}, cap is {MAX_STATE_VALUE_SIZE}"
+    );
+}
+
+#[test]
+fn create_market_rejects_multisig_for_another_account() {
+    run_test(|| async {
+        let victim_key = PrivateKey::from_seed(1);
+        let attacker = PrivateKey::from_seed(2);
+        let victim = Address::external(&victim_key.public_key());
+        let policy = MultisigPolicy::new(1, vec![attacker.public_key()]).unwrap();
+        let tx = Transaction::sign_multisig(
+            victim,
+            policy,
+            &[&attacker],
+            0,
+            ClobOperation::CreateMarket {
+                base_asset: asset(b"base"),
+                quote_asset: asset(b"quote"),
+                tick_size: MARKET_TICK,
+                lot_size: MARKET_LOT,
+            },
+        );
+        assert!(tx.verify().is_err());
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        let err = ledger
+            .apply_transaction(&tx, context(1))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ClobError::BadSignature(_)));
+        assert!(ledger.db.market_index().await.unwrap().is_empty());
+    });
+}
+
+#[test]
+fn fill_budget_rejects_a_sweep_that_still_crosses() {
+    let maker_a = PrivateKey::from_seed(2);
+    let maker_b = PrivateKey::from_seed(3);
+    let taker = PrivateKey::from_seed(4);
+    let markets = test_markets();
+    let mut sequences = BTreeMap::new();
+    sequences.insert(market(), 0);
+    let first = place_tx(
+        &maker_a,
+        0,
+        Side::Ask,
+        100,
+        2,
+        TimeInForce::GoodTilCancelled,
+    );
+    let second = place_tx(
+        &maker_b,
+        0,
+        Side::Ask,
+        100,
+        2,
+        TimeInForce::GoodTilCancelled,
+    );
+    let resting = MatchEngine::replay(
+        &[first, second],
+        &markets,
+        sequences.clone(),
+        context(2),
+    )
+    .unwrap();
+    let resting_orders = resting.orders.values().cloned().collect::<Vec<_>>();
+    sequences.insert(market(), resting.sequences[&market()]);
+
+    for time_in_force in [TimeInForce::GoodTilCancelled, TimeInForce::ImmediateOrCancel] {
+        let bid = place_tx(&taker, 0, Side::Bid, 100, 4, time_in_force);
+        let err = MatchEngine::replay_limited(
+            &resting_orders,
+            &[bid],
+            &markets,
+            sequences.clone(),
+            context(3),
+            1,
+        )
+        .unwrap_err();
+        assert_eq!(err, ClobError::FillBudgetExceeded);
+    }
+
+    let bid = place_tx(
+        &taker,
+        0,
+        Side::Bid,
+        100,
+        4,
+        TimeInForce::GoodTilCancelled,
+    );
+    let complete = MatchEngine::replay_limited(
+        &resting_orders,
+        &[bid],
+        &markets,
+        sequences,
+        context(3),
+        2,
+    )
+    .unwrap();
+    assert_eq!(complete.fills.len(), 2);
+    let taker_order = complete
+        .orders
+        .values()
+        .find(|order| order.side == Side::Bid)
+        .unwrap();
+    assert_eq!(taker_order.status, OrderStatus::Filled);
+}
+
+#[test]
+fn fill_budget_rests_only_after_crossing_liquidity_is_gone() {
+    let maker_a = PrivateKey::from_seed(2);
+    let maker_b = PrivateKey::from_seed(3);
+    let taker = PrivateKey::from_seed(4);
+    let markets = test_markets();
+    let mut sequences = BTreeMap::new();
+    sequences.insert(market(), 0);
+    let crossing = place_tx(
+        &maker_a,
+        0,
+        Side::Ask,
+        100,
+        2,
+        TimeInForce::GoodTilCancelled,
+    );
+    let behind = place_tx(
+        &maker_b,
+        0,
+        Side::Ask,
+        110,
+        2,
+        TimeInForce::GoodTilCancelled,
+    );
+    let resting = MatchEngine::replay(
+        &[crossing, behind],
+        &markets,
+        sequences.clone(),
+        context(2),
+    )
+    .unwrap();
+    let resting_orders = resting.orders.values().cloned().collect::<Vec<_>>();
+    sequences.insert(market(), resting.sequences[&market()]);
+
+    let gtc = place_tx(
+        &taker,
+        0,
+        Side::Bid,
+        100,
+        4,
+        TimeInForce::GoodTilCancelled,
+    );
+    let limited = MatchEngine::replay_limited(
+        &resting_orders,
+        std::slice::from_ref(&gtc),
+        &markets,
+        sequences.clone(),
+        context(3),
+        1,
+    )
+    .unwrap();
+    assert_eq!(limited.fills.len(), 1);
+    let taker_order = &limited.orders[&OrderId(gtc.digest())];
+    assert_eq!(taker_order.status, OrderStatus::PartiallyFilled);
+    assert_eq!(taker_order.remaining_base, 2);
+    assert!(limited.orders.values().all(|order| {
+        order.side != Side::Ask || !order.status.is_open() || order.price > taker_order.price
+    }));
+
+    let ioc = place_tx(
+        &taker,
+        0,
+        Side::Bid,
+        100,
+        4,
+        TimeInForce::ImmediateOrCancel,
+    );
+    let limited = MatchEngine::replay_limited(
+        &resting_orders,
+        std::slice::from_ref(&ioc),
+        &markets,
+        sequences,
+        context(3),
+        1,
+    )
+    .unwrap();
+    assert_eq!(limited.fills.len(), 1);
+    assert_eq!(
+        limited.orders[&OrderId(ioc.digest())].status,
+        OrderStatus::Expired
+    );
+}
+
+#[test]
+fn bounded_selection_skips_a_sweep_that_would_leave_a_crossed_book() {
+    let maker_a = PrivateKey::from_seed(2);
+    let maker_b = PrivateKey::from_seed(3);
+    let large = PrivateKey::from_seed(4);
+    let small = PrivateKey::from_seed(5);
+    let markets = test_markets();
+    let mut sequences = BTreeMap::new();
+    sequences.insert(market(), 0);
+    let asks = [
+        place_tx(
+            &maker_a,
+            0,
+            Side::Ask,
+            100,
+            2,
+            TimeInForce::GoodTilCancelled,
+        ),
+        place_tx(
+            &maker_b,
+            0,
+            Side::Ask,
+            100,
+            2,
+            TimeInForce::GoodTilCancelled,
+        ),
+    ];
+    let resting = MatchEngine::replay(&asks, &markets, sequences.clone(), context(2)).unwrap();
+    let resting_orders = resting.orders.values().cloned().collect::<Vec<_>>();
+    let sequences = resting.sequences.clone();
+    let oversized = place_tx(
+        &large,
+        0,
+        Side::Bid,
+        100,
+        4,
+        TimeInForce::GoodTilCancelled,
+    );
+    let fits = place_tx(&small, 0, Side::Bid, 100, 2, TimeInForce::GoodTilCancelled);
+    let selected = crate::actor::select_bounded_orders(
+        &[oversized, fits.clone()],
+        |batch| {
+            MatchEngine::replay_limited(
+                &resting_orders,
+                batch,
+                &markets,
+                sequences.clone(),
+                context(3),
+                1,
+            )
+            .map(|result| result.fills.len())
+        },
+        8,
+        1,
+    );
+    assert_eq!(selected, vec![fits]);
+}
+
+#[test]
+fn bounded_proposal_keeps_a_slot_for_a_later_crossing_order() {
+    let maker = PrivateKey::from_seed(2);
+    let taker = PrivateKey::from_seed(3);
+    let mut orders = (0..MAX_MATCH_BATCH_ORDERS)
+        .map(|nonce| {
+            place_tx(
+                &maker,
+                nonce as u64,
+                Side::Ask,
+                100,
+                2,
+                TimeInForce::GoodTilCancelled,
+            )
+        })
+        .collect::<Vec<_>>();
+    let bid = place_tx(
+        &taker,
+        0,
+        Side::Bid,
+        100,
+        2,
+        TimeInForce::ImmediateOrCancel,
+    );
+    orders.push(bid.clone());
+    let selected = crate::actor::select_bounded_orders(
+        &orders,
+        |batch| {
+            let fills = batch
+                .iter()
+                .filter(|tx| {
+                    matches!(
+                        tx.payload.operation,
+                        ClobOperation::PlaceOrder {
+                            side: Side::Bid,
+                            ..
+                        }
+                    )
+                })
+                .count();
+            Ok(fills)
+        },
+        MAX_MATCH_BATCH_ORDERS,
+        MAX_MATCH_BATCH_ORDERS,
+    );
+    assert!(selected.len() <= MAX_MATCH_BATCH_ORDERS);
+    assert!(selected.iter().any(|tx| tx.digest() == bid.digest()));
+    assert!(selected.len() < orders.len());
+}
+
+#[test]
+fn incremental_fill_counts_match_a_full_replay() {
+    let maker = PrivateKey::from_seed(2);
+    let filler = PrivateKey::from_seed(3);
+    let taker = PrivateKey::from_seed(4);
+    let markets = test_markets();
+    let mut sequences = BTreeMap::new();
+    sequences.insert(market(), 0);
+    let ask = place_tx(
+        &maker,
+        0,
+        Side::Ask,
+        100,
+        2,
+        TimeInForce::GoodTilCancelled,
+    );
+    let resting = MatchEngine::replay(std::slice::from_ref(&ask), &markets, sequences, context(2))
+        .unwrap();
+    let resting_orders = resting.orders.values().cloned().collect::<Vec<_>>();
+    let mut orders = (0..8)
+        .map(|nonce| {
+            place_tx(
+                &filler,
+                nonce,
+                Side::Bid,
+                50,
+                2,
+                TimeInForce::GoodTilCancelled,
+            )
+        })
+        .collect::<Vec<_>>();
+    orders.push(place_tx(
+        &taker,
+        0,
+        Side::Bid,
+        100,
+        2,
+        TimeInForce::ImmediateOrCancel,
+    ));
+    let mut counter = crate::actor::ProposalFillCount::new(
+        &resting_orders,
+        &markets,
+        resting.sequences.clone(),
+        context(3),
+    )
+    .unwrap();
+    let selected = crate::actor::select_bounded_orders(
+        &orders,
+        |batch| {
+            let incremental = counter.fill_count(batch)?;
+            let full = MatchEngine::replay_with_resting(
+                &resting_orders,
+                batch,
+                &markets,
+                resting.sequences.clone(),
+                context(3),
+            )?
+            .fills
+            .len();
+            assert_eq!(incremental, full);
+            Ok(incremental)
+        },
+        8,
+        8,
+    );
+    let replay = MatchEngine::replay_with_resting(
+        &resting_orders,
+        &selected,
+        &markets,
+        resting.sequences,
+        context(3),
+    )
+    .unwrap();
+    assert_eq!(replay.fills.len(), 1);
+    assert!(selected.iter().any(|tx| tx.digest() == orders.last().unwrap().digest()));
+}
+
+#[test]
+fn full_book_applies_removals_before_inserts() {
+    run_test(|| async {
+        let creator = PrivateKey::from_seed(1);
+        let seller = PrivateKey::from_seed(3);
+        let buyer = PrivateKey::from_seed(4);
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        seed_market(&mut ledger, &creator).await;
+
+        let fresh_bid = place_tx(
+            &buyer,
+            0,
+            Side::Bid,
+            MARKET_TICK,
+            MARKET_LOT,
+            TimeInForce::GoodTilCancelled,
+        );
+        let fresh_id = OrderId(fresh_bid.digest());
+        let victim_id = order_id_above(&fresh_id);
+        let owner = Address::external(&PrivateKey::from_seed(8).public_key());
+        let mut ids = Vec::with_capacity(MAX_BOOK_ORDERS);
+        for index in 0..MAX_BOOK_ORDERS - 1 {
+            let id = OrderId(Sha256::hash(&[b"resting", (index as u64).encode().as_ref()]));
+            if id == victim_id || id == fresh_id {
+                continue;
+            }
+            ids.push(id);
+        }
+        ids.push(victim_id);
+        assert_eq!(ids.len(), MAX_BOOK_ORDERS);
+
+        for (index, id) in ids.iter().enumerate() {
+            let price = if *id == victim_id { 100 } else { MARKET_TICK };
+            ledger.db.set_order(&resting_order(*id, price, index as u64, owner.clone()));
+        }
+        ledger.db.set_side_book(&market(), Side::Bid, &ids);
+
+        let ask = place_tx(
+            &seller,
+            0,
+            Side::Ask,
+            MARKET_TICK,
+            MARKET_LOT,
+            TimeInForce::ImmediateOrCancel,
+        );
+        let market_info = ledger.market(&market()).await.unwrap().unwrap();
+        let mut markets = BTreeMap::new();
+        markets.insert(market(), market_info);
+        let mut sequences = BTreeMap::new();
+        sequences.insert(market(), 0);
+        let resting = ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| {
+                let price = if *id == victim_id { 100 } else { MARKET_TICK };
+                resting_order(*id, price, index as u64, owner.clone())
+            })
+            .collect::<Vec<_>>();
+        let replay = MatchEngine::replay_with_resting(
+            &resting,
+            &[fresh_bid.clone(), ask.clone()],
+            &markets,
+            sequences,
+            context(2),
+        )
+        .unwrap();
+        let batch = MatchBatch {
+            orders: vec![fresh_bid, ask],
+            fills: replay.fills,
+        };
+        ledger
+            .apply_match_batch(&batch, context(2))
+            .await
+            .expect("a full book can replace one order in the same batch");
+        let book = ledger.db.side_book(&market(), Side::Bid).await.unwrap();
+        assert_eq!(book.len(), MAX_BOOK_ORDERS);
+        assert!(book.contains(&fresh_id));
+        assert!(!book.contains(&victim_id));
+    });
+}
+
+#[test]
+fn restored_actor_proposes_against_committed_resting_liquidity() {
+    deterministic::Runner::default().start(|runtime| async move {
+        let creator = PrivateKey::from_seed(1);
+        let maker = PrivateKey::from_seed(2);
+        let first_taker = PrivateKey::from_seed(3);
+        let second_taker = PrivateKey::from_seed(4);
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        seed_market(&mut ledger, &creator).await;
+
+        let ask = place_tx(
+            &maker,
+            0,
+            Side::Ask,
+            100,
+            4,
+            TimeInForce::GoodTilCancelled,
+        );
+        let bid = place_tx(
+            &first_taker,
+            0,
+            Side::Bid,
+            100,
+            2,
+            TimeInForce::ImmediateOrCancel,
+        );
+        let batch = batch_from_orders(&ledger, vec![ask, bid], context(2)).await;
+        ledger.apply_match_batch(&batch, context(2)).await.unwrap();
+        let snapshot = ledger.actor_snapshot().await.unwrap();
+        assert_eq!(snapshot.orders.len(), 1);
+        assert!(!snapshot.nonces.is_empty());
+
+        let (mut actor, mailbox) = ClobActor::new(ClobConfig::default());
+        actor.restore_snapshot(snapshot);
+        let _actor_handle = actor.start(runtime);
+
+        let next = place_tx(
+            &second_taker,
+            0,
+            Side::Bid,
+            100,
+            2,
+            TimeInForce::ImmediateOrCancel,
+        );
+        mailbox.submit_order(next.clone()).await.unwrap();
+        let proposed = mailbox.propose().await;
+        assert_eq!(proposed.orders, vec![next]);
+        assert_eq!(proposed.fills.len(), 1);
+        ledger
+            .apply_match_batch(&proposed, context(3))
+            .await
+            .expect("restored proposer matches validator replay");
+    });
+}
+
+#[test]
+fn match_engine_default_uses_the_fill_cap() {
+    assert_eq!(MatchEngine::default(), MatchEngine::new());
+}
+
+#[test]
+fn extension_rejects_unbound_multisig_and_bad_signatures() {
+    deterministic::Runner::default().start(|runtime| async move {
+        let (actor, mailbox) = ClobActor::new(ClobConfig::default());
+        let _actor_handle = actor.start(runtime);
+        let mut extension = ClobExtension::new(mailbox);
+
+        let honest = place_tx(
+            &PrivateKey::from_seed(2),
+            0,
+            Side::Bid,
+            100,
+            2,
+            TimeInForce::GoodTilCancelled,
+        );
+        assert!(extension
+            .verify_payload(&MatchBatch {
+                orders: vec![honest.clone()],
+                fills: Vec::new(),
+            })
+            .await);
+
+        let mut tampered = honest;
+        tampered.payload.nonce = 9;
+        assert!(!extension
+            .verify_payload(&MatchBatch {
+                orders: vec![tampered],
+                fills: Vec::new(),
+            })
+            .await);
+
+        let attacker = PrivateKey::from_seed(3);
+        let policy = MultisigPolicy::new(1, vec![attacker.public_key()]).unwrap();
+        let forged = Transaction::sign_multisig(
+            Address::external(&PrivateKey::from_seed(2).public_key()),
+            policy,
+            &[&attacker],
+            0,
+            ClobOperation::PlaceOrder {
+                market: market(),
+                side: Side::Bid,
+                price: 100,
+                base_quantity: 2,
+                time_in_force: TimeInForce::GoodTilCancelled,
+            },
+        );
+        assert!(forged.verify().is_err());
+        assert!(!extension
+            .verify_payload(&MatchBatch {
+                orders: vec![forged.clone()],
+                fills: Vec::new(),
+            })
+            .await);
+
+        let err = extension
+            .mailbox()
+            .submit_order(forged)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ClobError::BadSignature(_)));
+    });
+}
+
+#[test]
+fn corrupt_nonce_account_index_is_a_storage_error() {
+    run_test(|| async {
+        let creator = PrivateKey::from_seed(1);
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        seed_market(&mut ledger, &creator).await;
+        assert!(ledger.db.nonce_accounts().await.unwrap().len() == 1);
+
+        for value in ledger.db.values.values_mut() {
+            if value.is_some() {
+                *value = Some(b"not-an-index".to_vec());
+            }
+        }
+        let err = ledger.db.nonce_accounts().await.unwrap_err();
+        assert!(matches!(err, ClobError::Storage(_)));
+    });
+}
+
+fn order_id_above(floor: &OrderId) -> OrderId {
+    let mut index = 0u64;
+    loop {
+        let candidate = OrderId(Sha256::hash(&[b"above", index.encode().as_ref()]));
+        if candidate > *floor {
+            return candidate;
+        }
+        index += 1;
+    }
+}
+
+fn resting_order(id: OrderId, price: u128, sequence: u64, owner: Address) -> Order {
+    Order {
+        id,
+        owner,
+        market: market(),
+        side: Side::Bid,
+        price,
+        original_base: MARKET_LOT,
+        remaining_base: MARKET_LOT,
+        filled_base: 0,
+        status: OrderStatus::Open,
+        sequence,
+        created_at_height: 1,
+        created_at_ms: 1,
+    }
+}
+
+#[test]
 fn prepare_hydrates_a_restarted_matcher_from_the_ledger() {
     deterministic::Runner::default().start(|runtime| async move {
         let creator = PrivateKey::from_seed(1);
@@ -1443,8 +2094,6 @@ fn prepare_hydrates_a_restarted_matcher_from_the_ledger() {
         let (actor, mailbox) = ClobActor::new(ClobConfig::default());
         let _actor = actor.start(runtime.child("clob"));
         let mut extension = ClobExtension::new(mailbox.clone());
-        // A restarted actor has no book. Without hydration this bid cannot see
-        // the resting ask, so the proposal is empty and the order never matches.
         extension.prepare(&mut state).await;
         let bid = place_tx(
             &next_taker,
@@ -1472,13 +2121,6 @@ fn prepare_hydrates_a_restarted_matcher_from_the_ledger() {
 }
 
 #[test]
-fn tracked_account_shard_fits_in_one_state_value() {
-    let account = Address::external(&PrivateKey::from_seed(1).public_key());
-    let shard = vec![account; TRACKED_ACCOUNT_SHARD];
-    assert!(shard.encode_size() <= MAX_STATE_VALUE_SIZE);
-}
-
-#[test]
 fn prepare_hydrates_nonce_after_the_account_leaves_the_book() {
     deterministic::Runner::default().start(|runtime| async move {
         let creator = PrivateKey::from_seed(1);
@@ -1495,10 +2137,9 @@ fn prepare_hydrates_nonce_after_the_account_leaves_the_book() {
             assert!(ledger.book(&market(), Side::Ask).await.unwrap().is_empty());
             assert!(ledger.book(&market(), Side::Bid).await.unwrap().is_empty());
             assert_eq!(ledger.nonce(&maker_addr).await.unwrap(), 1);
+            ledger.db.set_nonce_accounts(&[]);
             ledger.into_inner()
         };
-        // Existing ledgers recorded the nonce before the account index existed.
-        testing_clear_tracked_account_count(&mut state);
 
         let (actor, mailbox) = ClobActor::new(ClobConfig::default());
         let _actor = actor.start(runtime.child("clob"));
@@ -1560,8 +2201,8 @@ fn prepare_keeps_nonce_when_fills_and_the_account_index_are_gone() {
                 ledger.db.remove_fill(&fill.id);
             }
             ledger.db.set_market_fills(&market(), &[]);
+            ledger.db.set_nonce_accounts(&[]);
         }
-        testing_clear_tracked_account_count(&mut state);
 
         extension.prepare(&mut state).await;
         let stale = place_tx(&maker, 0, Side::Bid, 100, 2, TimeInForce::ImmediateOrCancel);
@@ -1596,196 +2237,6 @@ fn prepare_keeps_nonce_when_fills_and_the_account_index_are_gone() {
 }
 
 #[test]
-fn track_account_rejects_a_new_account_when_the_index_is_full() {
-    run_test(|| async {
-        let signer = PrivateKey::from_seed(7);
-        let account = Address::external(&signer.public_key());
-        let mut store = MemoryStore::default();
-        testing_set_tracked_account_count(&mut store, MAX_TRACKED_ACCOUNTS as u64);
-        let mut ledger = ClobLedger::new(store);
-
-        let err = ledger
-            .apply_transaction(&create_market_tx(&signer, 0), context(1))
-            .await
-            .unwrap_err();
-
-        assert_eq!(err, ClobError::TrackedAccountsFull);
-        assert_eq!(ledger.nonce(&account).await.unwrap(), 0);
-    });
-}
-
-#[test]
-fn full_tracked_account_index_still_applies_a_match_batch() {
-    run_test(|| async {
-        let creator = PrivateKey::from_seed(1);
-        let maker = PrivateKey::from_seed(2);
-        let taker = PrivateKey::from_seed(3);
-        let maker_addr = Address::external(&maker.public_key());
-        let taker_addr = Address::external(&taker.public_key());
-        let mut ledger = ClobLedger::new(MemoryStore::default());
-        seed_market(&mut ledger, &creator).await;
-        let mut store = ledger.into_inner();
-        testing_set_tracked_account_count(&mut store, MAX_TRACKED_ACCOUNTS as u64);
-        let mut ledger = ClobLedger::new(store);
-
-        let ask = place_tx(
-            &maker,
-            0,
-            Side::Ask,
-            100,
-            2,
-            TimeInForce::GoodTilCancelled,
-        );
-        let bid = place_tx(
-            &taker,
-            0,
-            Side::Bid,
-            100,
-            2,
-            TimeInForce::ImmediateOrCancel,
-        );
-        let batch = batch_from_orders(&ledger, vec![ask, bid], context(2)).await;
-        ledger
-            .apply_match_batch(&batch, context(2))
-            .await
-            .expect("a full account index must not reject a valid match");
-
-        assert_eq!(ledger.nonce(&maker_addr).await.unwrap(), 1);
-        assert_eq!(ledger.nonce(&taker_addr).await.unwrap(), 1);
-        assert_eq!(ledger.market_fills(&market()).await.unwrap().len(), 1);
-        assert!(!ledger.db.account_tracked(&maker_addr).await.unwrap());
-        assert!(!ledger.db.account_tracked(&taker_addr).await.unwrap());
-    });
-}
-
-#[test]
-fn pruning_an_untracked_fill_does_not_abort_a_match_when_the_index_is_full() {
-    run_test(|| async {
-        let creator = PrivateKey::from_seed(1);
-        let maker = PrivateKey::from_seed(2);
-        let taker = PrivateKey::from_seed(3);
-        let maker_addr = Address::external(&maker.public_key());
-        let taker_addr = Address::external(&taker.public_key());
-        let retired_maker = Address::external(&PrivateKey::from_seed(8).public_key());
-        let retired_taker = Address::external(&PrivateKey::from_seed(9).public_key());
-        let mut ledger = ClobLedger::new(MemoryStore::default());
-        seed_market(&mut ledger, &creator).await;
-
-        let ask = place_tx(
-            &maker,
-            0,
-            Side::Ask,
-            100,
-            2,
-            TimeInForce::GoodTilCancelled,
-        );
-        let bid = place_tx(
-            &taker,
-            0,
-            Side::Bid,
-            100,
-            2,
-            TimeInForce::ImmediateOrCancel,
-        );
-        let first = batch_from_orders(&ledger, vec![ask, bid], context(2)).await;
-        ledger.apply_match_batch(&first, context(2)).await.unwrap();
-
-        let stale_id = fake_fill_id(1);
-        ledger.db.set_fill(&Fill {
-            id: stale_id,
-            market: market(),
-            maker_order: OrderId(Sha256::hash(&[b"retired-maker"])),
-            taker_order: OrderId(Sha256::hash(&[b"retired-taker"])),
-            maker: retired_maker.clone(),
-            taker: retired_taker.clone(),
-            taker_side: Side::Bid,
-            price: 100,
-            base_quantity: 2,
-            quote_quantity: 200,
-            sequence: 1,
-            written_at_height: 1,
-            written_at_ms: 1_000,
-        });
-        let mut fill_ids = vec![stale_id];
-        fill_ids.extend((2..=MAX_FILLS_PER_MARKET as u64).map(fake_fill_id));
-        ledger.db.set_market_fills(&market(), &fill_ids);
-
-        let mut store = ledger.into_inner();
-        testing_set_tracked_account_count(&mut store, MAX_TRACKED_ACCOUNTS as u64);
-        let mut ledger = ClobLedger::new(store);
-
-        let ask = place_tx(
-            &maker,
-            1,
-            Side::Ask,
-            100,
-            2,
-            TimeInForce::GoodTilCancelled,
-        );
-        let bid = place_tx(
-            &taker,
-            1,
-            Side::Bid,
-            100,
-            2,
-            TimeInForce::ImmediateOrCancel,
-        );
-        let batch = batch_from_orders(&ledger, vec![ask, bid], context(3)).await;
-        ledger
-            .apply_match_batch(&batch, context(3))
-            .await
-            .expect("pruning an untracked fill must not reject a match of tracked accounts");
-
-        assert_eq!(ledger.nonce(&maker_addr).await.unwrap(), 2);
-        assert_eq!(ledger.nonce(&taker_addr).await.unwrap(), 2);
-        assert!(ledger.fill(&stale_id).await.unwrap().is_none());
-        assert!(!ledger.db.account_tracked(&retired_maker).await.unwrap());
-        assert!(!ledger.db.account_tracked(&retired_taker).await.unwrap());
-        assert!(ledger.db.account_tracked(&maker_addr).await.unwrap());
-    });
-}
-
-#[test]
-fn tracked_account_can_advance_nonce_when_the_index_is_full() {
-    run_test(|| async {
-        let creator = PrivateKey::from_seed(1);
-        let account = Address::external(&creator.public_key());
-        let mut ledger = ClobLedger::new(MemoryStore::default());
-        seed_market(&mut ledger, &creator).await;
-        let mut store = ledger.into_inner();
-        testing_set_tracked_account_count(&mut store, MAX_TRACKED_ACCOUNTS as u64);
-        let mut ledger = ClobLedger::new(store);
-
-        ledger
-            .apply_transaction(&create_market_tx_sized(&creator, 1, 7, MARKET_LOT), context(2))
-            .await
-            .unwrap();
-
-        assert_eq!(ledger.nonce(&account).await.unwrap(), 2);
-    });
-}
-
-#[test]
-fn track_account_records_past_a_single_shard() {
-    run_test(|| async {
-        let signer = PrivateKey::from_seed(8);
-        let account = Address::external(&signer.public_key());
-        let mut store = MemoryStore::default();
-        testing_set_tracked_account_count(&mut store, TRACKED_ACCOUNT_SHARD as u64);
-        let mut ledger = ClobLedger::new(store);
-
-        ledger
-            .apply_transaction(&create_market_tx(&signer, 0), context(1))
-            .await
-            .unwrap();
-
-        let tracked = ledger.tracked_accounts().await.unwrap();
-        assert_eq!(tracked, vec![account]);
-        assert_eq!(ledger.nonce(&tracked[0]).await.unwrap(), 1);
-    });
-}
-
-#[test]
 fn preview_matches_same_block_markets_without_mutating_ingress() {
     deterministic::Runner::default().start(|runtime| async move {
         let creator = PrivateKey::from_seed(1);
@@ -1802,8 +2253,6 @@ fn preview_matches_same_block_markets_without_mutating_ingress() {
         let mut extension = ClobExtension::new(mailbox.clone());
         extension.prepare(&mut state).await;
 
-        // Same nonce the speculative CreateMarket will consume. Abandoning that
-        // create must not drop this intent or advance the ingress nonce.
         let creator_order = place_tx(
             &creator,
             1,
@@ -1822,8 +2271,6 @@ fn preview_matches_same_block_markets_without_mutating_ingress() {
         let alt_market = market_id(&asset(b"base"), &asset(b"quote"), 7, MARKET_LOT);
         extension.preview(&mut preview_state).await;
 
-        // The nonce check runs before the duplicate check. Nonce 1 is still
-        // pending, so the next expected nonce stays 2 and the intent is not dropped.
         assert!(matches!(
             mailbox.submit_order(creator_order.clone()).await.unwrap_err(),
             ClobError::NonceMismatch {

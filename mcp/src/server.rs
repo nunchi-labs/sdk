@@ -107,7 +107,7 @@ pub struct DeriveMultisigAddressParams {
 pub struct DeriveCoinIdParams {
     /// Hex-encoded issuer account address (32 bytes).
     pub issuer: String,
-    /// Token-factory nonce of the issuer at the time of creation (use `coins_nonce` to find it).
+    /// Chain-wide factory nonce (use `coins_factory_nonce`, not the issuer account nonce).
     pub nonce: u64,
     /// Token ticker symbol (≤ 32 bytes, UTF-8).
     pub symbol: String,
@@ -192,7 +192,7 @@ pub struct BuildCreateTokenParams {
 pub struct BuildRegisterAccountPolicyParams {
     /// Hex-encoded curve-tagged private key bytes of the transaction signer.
     pub private_key_hex: String,
-    /// Current nonce of the multisig account (from `coins_nonce` on `account_id`).
+    /// Multisig account nonce (from `coins_nonce` on the derived account). Zero before registration.
     pub nonce: u64,
     /// Hex-encoded address derived from the policy being registered.
     pub account_id: String,
@@ -262,8 +262,27 @@ impl NunchiServer {
                         Returns the next expected nonce to use in a transaction."
     )]
     async fn coins_nonce(&self, Parameters(p): Parameters<NonceParams>) -> String {
-        self.rpc_call("coins.nonce", json!({ "account": p.account }))
-            .await
+        match account_query_param(&p.account) {
+            Ok(account) => {
+                self.rpc_call("coins.nonce", json!({ "account": account }))
+                    .await
+            }
+            Err(error) => format!("Error: {error}"),
+        }
+    }
+
+    /// Query the token factory nonce used to derive the next coin id.
+    ///
+    /// This is a chain-wide counter, not an account nonce. `sdk_derive_coin_id` must use this
+    /// value. Returns a JSON object with `nonce` (u64).
+    #[tool(
+        name = "coins_factory_nonce",
+        description = "Query the chain-wide token factory nonce. \
+                        Use this value as the nonce argument to sdk_derive_coin_id. \
+                        It is not the issuer account nonce from coins_nonce."
+    )]
+    async fn coins_factory_nonce(&self) -> String {
+        self.rpc_call("coins.factory_nonce", json!([])).await
     }
 
     /// Look up a token registered in the Nunchi coin ledger.
@@ -289,11 +308,16 @@ impl NunchiServer {
                         Returns the amount as a decimal string (u128)."
     )]
     async fn coins_balance(&self, Parameters(p): Parameters<BalanceParams>) -> String {
-        self.rpc_call(
-            "coins.balance",
-            json!({ "account": p.account, "coin": p.coin }),
-        )
-        .await
+        match account_query_param(&p.account) {
+            Ok(account) => {
+                self.rpc_call(
+                    "coins.balance",
+                    json!({ "account": account, "coin": p.coin }),
+                )
+                .await
+            }
+            Err(error) => format!("Error: {error}"),
+        }
     }
 
     /// Fetch the current authenticated state root of the coin ledger.
@@ -305,7 +329,7 @@ impl NunchiServer {
         description = "Fetch the current authenticated state root (SHA-256 hex) of the Nunchi coin ledger."
     )]
     async fn coins_state_root(&self) -> String {
-        self.rpc_call("coins.state_root", json!(null)).await
+        self.rpc_call("coins.state_root", json!([])).await
     }
 
     /// Submit a signed transaction to the node's mempool.
@@ -354,7 +378,7 @@ impl NunchiServer {
         description = "Get the current applied block height and state root of the Nunchi chain."
     )]
     async fn chain_status(&self) -> String {
-        self.rpc_call("chain.status", json!(null)).await
+        self.rpc_call("chain.status", json!([])).await
     }
 
     // ── SDK offline tools ─────────────────────────────────────────────────────
@@ -400,8 +424,9 @@ impl NunchiServer {
 
     /// Compute the deterministic coin ID that the Nunchi ledger will assign to a new token.
     ///
-    /// Use `coins_nonce` to read the issuer's current nonce before creating the token.
-    /// The coin ID is derived from the issuer address, their factory nonce, and the token spec.
+    /// Use `coins_factory_nonce` for `nonce`. The coin id is derived from the issuer address,
+    /// the chain-wide factory nonce, and the token spec. An account nonce will not match the
+    /// id the ledger assigns.
     #[tool(
         name = "sdk_derive_coin_id",
         description = "Compute the deterministic coin ID (64 hex chars) that the Nunchi ledger \
@@ -443,6 +468,7 @@ impl NunchiServer {
                 .amount
                 .parse::<u128>()
                 .map_err(|_| anyhow::anyhow!("amount is not a valid u128"))?;
+            ensure_external_signer(&signer, &from, "from address")?;
             let tx = Transaction::sign(
                 &signer,
                 p.nonce,
@@ -504,6 +530,7 @@ impl NunchiServer {
                 .amount
                 .parse::<u128>()
                 .map_err(|_| anyhow::anyhow!("amount is not a valid u128"))?;
+            ensure_external_signer(&signer, &from, "from address")?;
             let tx =
                 Transaction::sign(&signer, p.nonce, CoinOperation::Burn { coin, from, amount });
             Ok(encode_value(&tx))
@@ -550,20 +577,28 @@ impl NunchiServer {
     ///
     /// Registers the multisig policy whose derived address is `account_id`. The coin ledger
     /// rejects a policy that does not hash to that account, and it rejects single-key
-    /// authorization for this operation.
+    /// authorization. The signer must be a member and the threshold must be 1, because this
+    /// tool holds a single key. `nonce` is that multisig account's nonce.
     /// Returns hex-encoded transaction bytes ready to pass to `coins_submit_transaction`.
     #[tool(
         name = "sdk_build_register_account_policy",
         description = "Build and sign a Nunchi RegisterAccountPolicy transaction offline. \
-                        Registers the multisig policy of the account derived from that policy. \
+                        Registers the initial threshold-1 multisig policy for account_id. \
+                        account_id must be the address derived from that policy. \
                         Returns hex-encoded transaction bytes to submit via coins_submit_transaction."
     )]
     async fn sdk_build_register_account_policy(
         &self,
         Parameters(p): Parameters<BuildRegisterAccountPolicyParams>,
     ) -> String {
-        match build_register_account_policy_tx(&p) {
-            Ok(hex) => hex,
+        match build_register_account_policy(
+            &p.private_key_hex,
+            p.nonce,
+            &p.account_id,
+            p.threshold,
+            &p.signer_public_keys_hex,
+        ) {
+            Ok(tx) => encode_value(&tx),
             Err(e) => format!("Error: {e}"),
         }
     }
@@ -637,39 +672,13 @@ impl NunchiServer {
 
     async fn rpc_call(&self, method: &str, params: Value) -> String {
         match self.rpc.call(method, params).await {
-            Ok(v) => v.to_string(),
+            Ok(value) => normalize_rpc_result(method, value).to_string(),
             Err(e) => format!("Error: {e}"),
         }
     }
 }
 
 // ── free helpers ──────────────────────────────────────────────────────────────
-
-fn build_register_account_policy_tx(
-    params: &BuildRegisterAccountPolicyParams,
-) -> anyhow::Result<String> {
-    let signer = decode_value::<PrivateKey>(&params.private_key_hex, "private key")?;
-    let account_id = decode_value::<nunchi_coins::Address>(&params.account_id, "account_id")?;
-    let policy = build_multisig_policy(params.threshold, &params.signer_public_keys_hex)?;
-    let derived = multisig_account_id(&policy);
-    if account_id != derived {
-        anyhow::bail!("account_id must be the address derived from the policy");
-    }
-    if policy.threshold() != 1 {
-        anyhow::bail!("this tool signs with one key and requires threshold 1");
-    }
-    if !policy.contains(&signer.public_key()) {
-        anyhow::bail!("signer is not a member of the policy");
-    }
-    let tx = Transaction::sign_multisig(
-        account_id.clone(),
-        policy.clone(),
-        &[&signer],
-        params.nonce,
-        CoinOperation::RegisterAccountPolicy { account_id, policy },
-    );
-    Ok(encode_value(&tx))
-}
 
 fn build_multisig_policy(
     threshold: u16,
@@ -681,6 +690,76 @@ fn build_multisig_policy(
         .map(|(i, hex_str)| decode_value::<PublicKey>(hex_str, &format!("public_key[{i}]")))
         .collect::<anyhow::Result<_>>()?;
     MultisigPolicy::new(threshold, keys).map_err(|e| anyhow::anyhow!("invalid policy: {e}"))
+}
+
+/// JSON-RPC account parameters are Bech32. MCP callers pass the hex wire encoding.
+fn account_query_param(account_hex: &str) -> anyhow::Result<String> {
+    Ok(decode_value::<nunchi_coins::Address>(account_hex, "account address")?.to_bech32())
+}
+
+fn ensure_external_signer(
+    signer: &PrivateKey,
+    account: &nunchi_coins::Address,
+    label: &str,
+) -> anyhow::Result<()> {
+    if &external_account_id(&signer.public_key()) != account {
+        anyhow::bail!("{label} does not match the signing key");
+    }
+    Ok(())
+}
+
+fn build_register_account_policy(
+    private_key_hex: &str,
+    nonce: u64,
+    account_id_hex: &str,
+    threshold: u16,
+    signer_public_keys_hex: &[String],
+) -> anyhow::Result<Transaction> {
+    let signer = decode_value::<PrivateKey>(private_key_hex, "private key")?;
+    let account_id = decode_value::<nunchi_coins::Address>(account_id_hex, "account_id")?;
+    let policy = build_multisig_policy(threshold, signer_public_keys_hex)?;
+    let derived = multisig_account_id(&policy);
+    if account_id != derived {
+        anyhow::bail!("account_id does not match the address derived from this policy");
+    }
+    if threshold != 1 {
+        anyhow::bail!("a single signing key can only register a threshold-1 policy");
+    }
+    if !policy.contains(&signer.public_key()) {
+        anyhow::bail!("signing key is not a member of the policy");
+    }
+    let tx = Transaction::sign_multisig(
+        account_id,
+        policy.clone(),
+        &[&signer],
+        nonce,
+        CoinOperation::RegisterAccountPolicy {
+            account_id: derived,
+            policy,
+        },
+    );
+    tx.verify()
+        .map_err(|error| anyhow::anyhow!("registration transaction is not valid: {error}"))?;
+    Ok(tx)
+}
+
+fn rewrite_bech32_field(value: &mut Value, field: &str) {
+    let Some(text) = value.get(field).and_then(Value::as_str).map(str::to_owned) else {
+        return;
+    };
+    if let Ok(address) = nunchi_coins::Address::from_bech32(&text) {
+        value[field] = Value::String(encode_value(&address));
+    }
+}
+
+/// Node query responses use Bech32 account strings. MCP callers stay on hex wire encoding.
+fn normalize_rpc_result(method: &str, mut value: Value) -> Value {
+    match method {
+        "coins.nonce" | "coins.balance" => rewrite_bech32_field(&mut value, "account"),
+        "coins.token" => rewrite_bech32_field(&mut value, "issuer"),
+        _ => {}
+    }
+    value
 }
 
 fn build_coin_spec_from_params(
@@ -712,7 +791,7 @@ fn build_coin_spec_from_params(
 
 #[tool_handler(
     name = "nunchi-mcp",
-    version = "2026.5.0",
+    version = "2026.9.0-alpha.1",
     instructions = "This server exposes the full Nunchi SDK as a set of tools. \
                     There are three groups: \
                     (1) Chain tools (prefix coins_ / chain_) that query a running node or submit transactions. \
@@ -726,6 +805,8 @@ fn build_coin_spec_from_params(
                     (first byte is the curve tag: 0x01 = Ed25519, 0x02 = Secp256r1). \
                     All amounts are decimal strings representing u128 integers. \
                     Typical workflow: sdk_derive_address → coins_nonce → sdk_build_* → coins_submit_transaction → coins_transaction_status. \
+                    Account arguments to coins_nonce and coins_balance are hex-encoded addresses; the server translates them to the Bech32 form the node expects. \
+                    Coin ids use coins_factory_nonce, not an account nonce. \
                     Call chain_status first to confirm the node is reachable."
 )]
 impl ServerHandler for NunchiServer {}
@@ -882,97 +963,127 @@ fn search_repo_code(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::DecodeExt;
     use nunchi_coins::Authorization;
-    use nunchi_crypto::PrivateKey;
+    use rmcp::handler::server::wrapper::Parameters;
 
-    fn policy_params(
-        signer: &PrivateKey,
-        members: &[PublicKey],
-        account: &nunchi_coins::Address,
-        threshold: u16,
-    ) -> BuildRegisterAccountPolicyParams {
-        BuildRegisterAccountPolicyParams {
-            private_key_hex: encode_value(signer),
-            nonce: 0,
-            account_id: encode_value(account),
-            threshold,
-            signer_public_keys_hex: members.iter().map(encode_value).collect(),
-        }
+    fn key_hex(seed: u64) -> String {
+        encode_value(&PrivateKey::ed25519_from_seed(seed))
     }
 
-    fn one_of_one(seed: u64) -> (PrivateKey, Vec<PublicKey>, nunchi_coins::Address) {
-        let signer = PrivateKey::ed25519_from_seed(seed);
-        let members = vec![signer.public_key()];
-        let keys = members.iter().map(encode_value).collect::<Vec<_>>();
-        let policy = build_multisig_policy(1, &keys).expect("policy");
-        let account = multisig_account_id(&policy);
-        (signer, members, account)
+    fn pubkey_hex(seed: u64) -> String {
+        encode_value(&PrivateKey::ed25519_from_seed(seed).public_key())
     }
 
     #[test]
-    fn register_account_policy_signs_a_verifying_multisig() {
-        let (signer, members, account) = one_of_one(7);
-        let encoded =
-            build_register_account_policy_tx(&policy_params(&signer, &members, &account, 1))
-                .expect("sign");
-        let bytes = from_hex(&encoded).expect("hex");
-        let tx = Transaction::decode(bytes.as_ref()).expect("decode");
-
-        assert_eq!(tx.verify(), Ok(()));
-        assert_eq!(tx.account_id, account);
-        assert!(matches!(
-            tx.payload.operation,
-            CoinOperation::RegisterAccountPolicy { .. }
-        ));
-        assert!(matches!(tx.authorization, Authorization::Multisig { .. }));
-    }
-
-    #[test]
-    fn register_account_policy_rejects_unbound_inputs() {
-        let (signer, members, account) = one_of_one(7);
-        let wrong_account = external_account_id(&signer.public_key());
-        let unbound =
-            build_register_account_policy_tx(&policy_params(&signer, &members, &wrong_account, 1))
-                .expect_err("unbound account");
-        assert!(unbound.to_string().contains("derived from the policy"));
-
-        let bob = PrivateKey::secp256r1_from_seed(8);
-        let both = vec![signer.public_key(), bob.public_key()];
-        let both_hex = both.iter().map(encode_value).collect::<Vec<_>>();
-        let shared = build_multisig_policy(2, &both_hex).expect("2-of-2");
-        let shared_account = multisig_account_id(&shared);
-        let threshold =
-            build_register_account_policy_tx(&policy_params(&signer, &both, &shared_account, 2))
-                .expect_err("threshold");
-        assert!(threshold.to_string().contains("threshold 1"));
-
-        let outsider = PrivateKey::ed25519_from_seed(9);
-        let stranger =
-            build_register_account_policy_tx(&policy_params(&outsider, &members, &account, 1))
-                .expect_err("stranger");
-        assert!(stranger.to_string().contains("not a member"));
+    fn account_query_param_uses_bech32() {
+        let address = external_account_id(&PrivateKey::ed25519_from_seed(4).public_key());
+        let param = account_query_param(&encode_value(&address)).unwrap();
+        assert_eq!(param, address.to_bech32());
+        assert!(account_query_param(&param).is_err());
     }
 
     #[tokio::test]
-    async fn register_tool_formats_success_and_error() {
-        let server = NunchiServer::new(RpcClient::new("http://127.0.0.1:9"), PathBuf::from("."));
-        let (signer, members, account) = one_of_one(7);
-        let signed = server
-            .sdk_build_register_account_policy(Parameters(policy_params(
-                &signer, &members, &account, 1,
-            )))
-            .await;
-        assert!(Transaction::decode(from_hex(&signed).expect("hex").as_ref()).is_ok());
+    async fn coin_queries_fail_closed_for_bad_input_and_unreachable_nodes() {
+        let server = NunchiServer::new(
+            crate::client::RpcClient::new("http://127.0.0.1:9"),
+            std::path::PathBuf::from("."),
+        );
+        let address = encode_value(&external_account_id(
+            &PrivateKey::ed25519_from_seed(4).public_key(),
+        ));
 
-        let rejected = server
-            .sdk_build_register_account_policy(Parameters(policy_params(
-                &signer,
-                &members,
-                &external_account_id(&signer.public_key()),
-                1,
-            )))
+        let bad_nonce = server
+            .coins_nonce(Parameters(NonceParams {
+                account: "not-hex".to_string(),
+            }))
             .await;
-        assert!(rejected.starts_with("Error:"));
+        assert!(bad_nonce.starts_with("Error:"), "{bad_nonce}");
+
+        let offline_nonce = server
+            .coins_nonce(Parameters(NonceParams {
+                account: address.clone(),
+            }))
+            .await;
+        assert!(offline_nonce.starts_with("Error:"), "{offline_nonce}");
+
+        let bad_balance = server
+            .coins_balance(Parameters(BalanceParams {
+                account: "not-hex".to_string(),
+                coin: address.clone(),
+            }))
+            .await;
+        assert!(bad_balance.starts_with("Error:"), "{bad_balance}");
+
+        let offline_balance = server
+            .coins_balance(Parameters(BalanceParams {
+                account: address,
+                coin: "aa".repeat(32),
+            }))
+            .await;
+        assert!(offline_balance.starts_with("Error:"), "{offline_balance}");
+
+        let factory = server.coins_factory_nonce().await;
+        assert!(factory.starts_with("Error:"), "{factory}");
+        let root = server.coins_state_root().await;
+        assert!(root.starts_with("Error:"), "{root}");
+        let status = server.chain_status().await;
+        assert!(status.starts_with("Error:"), "{status}");
+    }
+
+    #[test]
+    fn normalize_rpc_result_rewrites_bech32_accounts_to_hex() {
+        let address = external_account_id(&PrivateKey::ed25519_from_seed(4).public_key());
+        let mut nonce = json!({ "account": address.to_bech32(), "nonce": 3 });
+        nonce = normalize_rpc_result("coins.nonce", nonce);
+        assert_eq!(nonce["account"], encode_value(&address));
+        assert_eq!(nonce["nonce"], 3);
+
+        let mut token = json!({ "issuer": address.to_bech32(), "symbol": "NCHI" });
+        token = normalize_rpc_result("coins.token", token);
+        assert_eq!(token["issuer"], encode_value(&address));
+        assert_eq!(token["symbol"], "NCHI");
+
+        let root = normalize_rpc_result("coins.state_root", json!({ "root": "ab" }));
+        assert_eq!(root["root"], "ab");
+    }
+
+    #[test]
+    fn register_account_policy_is_a_verifiable_threshold_one_multisig() {
+        let signer = key_hex(7);
+        let member = pubkey_hex(7);
+        let other = pubkey_hex(8);
+        let policy = build_multisig_policy(1, &[member.clone(), other.clone()]).unwrap();
+        let account = encode_value(&multisig_account_id(&policy));
+
+        let tx = build_register_account_policy(&signer, 0, &account, 1, &[member, other]).unwrap();
+        assert!(matches!(tx.authorization, Authorization::Multisig { .. }));
+        assert_eq!(tx.account_id, multisig_account_id(&policy));
+        assert_eq!(tx.verify(), Ok(()));
+
+        let wrong_account = encode_value(&external_account_id(
+            &PrivateKey::ed25519_from_seed(7).public_key(),
+        ));
+        assert!(
+            build_register_account_policy(&signer, 0, &wrong_account, 1, &[pubkey_hex(7)]).is_err()
+        );
+        assert!(build_register_account_policy(
+            &signer,
+            0,
+            &encode_value(&multisig_account_id(
+                &build_multisig_policy(2, &[pubkey_hex(7), pubkey_hex(8)]).unwrap()
+            )),
+            2,
+            &[pubkey_hex(7), pubkey_hex(8)]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn transfer_and_burn_reject_a_from_address_the_key_does_not_control() {
+        let signer = PrivateKey::ed25519_from_seed(1);
+        let other = external_account_id(&PrivateKey::ed25519_from_seed(2).public_key());
+        let own = external_account_id(&signer.public_key());
+        assert!(ensure_external_signer(&signer, &other, "from address").is_err());
+        assert!(ensure_external_signer(&signer, &own, "from address").is_ok());
     }
 }

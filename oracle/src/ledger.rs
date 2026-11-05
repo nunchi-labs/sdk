@@ -4,7 +4,7 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{Hasher, Sha256};
-use nunchi_common::{Address, RuntimeContext};
+use nunchi_common::{Address, Authorization, RuntimeContext};
 use nunchi_crypto::SignatureError;
 use thiserror::Error;
 
@@ -13,6 +13,9 @@ use thiserror::Error;
 pub enum OracleError {
     #[error("bad oracle transaction signature: {0}")]
     BadSignature(#[from] SignatureError),
+    /// Multisig authorization is not bound to the account by signature verification.
+    #[error("unsupported oracle authorization")]
+    UnsupportedAuthorization,
     #[error("nonce mismatch for {account:?}: expected {expected}, got {actual}")]
     NonceMismatch {
         account: Box<Address>,
@@ -72,6 +75,12 @@ impl<D: OracleDB> OracleLedger<D> {
         tx: &Transaction,
         context: RuntimeContext,
     ) -> Result<(), OracleError> {
+        // `Transaction::verify` does not bind a multisig policy to `account_id`. Accepting the
+        // embedded policy would let any signer write records as an arbitrary account.
+        if !matches!(tx.authorization, Authorization::Single { .. }) {
+            return Err(OracleError::UnsupportedAuthorization);
+        }
+
         let expected = self.db.nonce(&tx.account_id).await?;
         if tx.payload.nonce != expected {
             return Err(OracleError::NonceMismatch {

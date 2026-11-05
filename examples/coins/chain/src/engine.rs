@@ -55,7 +55,7 @@ use nunchi_chain::state_sync::{
     Actor as StateSyncActor, Config as StateSyncConfig, FloorProvider,
     Mailbox as StateSyncMailbox,
 };
-use nunchi_clob::{ClobActor, ClobConfig, ClobExtension};
+use nunchi_clob::{ClobActor, ClobConfig, ClobExtension, ClobLedger};
 use nunchi_common::{QmdbBackend, QmdbReader, QmdbState};
 use nunchi_dkg::{self as dkg, orchestrator, PeerConfig, UpdateCallBack, MAX_SUPPORTED_MODE};
 use nunchi_mempool::{Mempool, PoolConfig};
@@ -254,16 +254,16 @@ where
         let prune_config = validate_state_prune_config(config.prune_config, config.max_pending_acks)?;
         let retention_policy = history::RetentionPolicy::new(prune_config, config.max_pending_acks)?;
         let (mempool, submitter) = Mempool::<Transaction>::new(config.pool_config.clone());
-        let (clob, clob_mailbox) = ClobActor::new(ClobConfig::default());
-        // The matcher is hydrated from committed state in `ClobExtension::prepare`.
-        // Seeding sequence 0 here would make the first post-restart proposal disagree
-        // with the ledger and abort block production.
+        let (mut clob, clob_mailbox) = ClobActor::new(ClobConfig::default());
         if let Some(clob_genesis) = config.genesis.as_ref().and_then(|genesis| genesis.clob.as_ref())
         {
             for market in &clob_genesis.markets {
-                let _ = market
-                    .market()
-                    .expect("invalid CLOB genesis market should fail genesis validation");
+                clob_mailbox.upsert_market_state(
+                    market
+                        .market()
+                        .expect("invalid CLOB genesis market should fail genesis validation"),
+                    0,
+                );
             }
         }
 
@@ -471,12 +471,17 @@ where
         }
         let genesis_state = expected;
         let current_state_target = {
-            let state = QmdbState::init_with_config(
+            let mut state = QmdbState::init_with_config(
                 context.child("startup_state_probe"),
                 db_config.clone(),
             )
             .await
             .expect("failed to initialize state database for startup probe");
+            let snapshot = ClobLedger::new(&mut state)
+                .actor_snapshot()
+                .await
+                .expect("failed to read committed clob book for proposer recovery");
+            clob.restore_snapshot(snapshot);
             state.sync_target()
         };
         let local_startup_candidate = if let Some((processed_height, candidate)) =

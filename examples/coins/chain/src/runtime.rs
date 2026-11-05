@@ -85,13 +85,11 @@ where
     S: StateStore + Send + Sync,
     Events: EventSink + Send,
 {
-    // One overlay covers the fee and the module write. Dropping it on error reverts both,
-    // including when the caller keeps `state` after `Err` instead of discarding a block batch.
-    // Events stay buffered until that commit so the caller's sink does not report a fee the
-    // reverted transaction never charged.
-    let mut overlay = Overlay::new(state);
+    // Fee and module writes share one overlay. A failed transaction drops both, including the
+    // bridge arm's inner overlay. Events stay buffered until that commit.
+    let mut overlay = Overlay::new(&mut *state);
     let mut staged_events = VecEventSink::new();
-    let result = apply_to_overlay(&mut overlay, context, transaction, &mut staged_events).await;
+    let result = dispatch(&mut overlay, context, transaction, &mut staged_events).await;
     if result.is_ok() {
         overlay.commit();
         for event in staged_events.into_events() {
@@ -101,7 +99,7 @@ where
     result
 }
 
-async fn apply_to_overlay<S, Events>(
+async fn dispatch<S, Events>(
     state: &mut S,
     context: RuntimeContext,
     transaction: &Transaction,
@@ -111,16 +109,13 @@ where
     S: StateStore + Send + Sync,
     Events: EventSink + Send,
 {
-    // Fee ante: charge the authorizing account before module dispatch.
-    {
-        let mut fees = Ledger::new(&mut *state);
-        fees.charge_fee(
-            transaction.account_id(),
-            transaction.encode_size(),
-            &mut *events,
-        )
-        .await?;
-    }
+    let mut fees = Ledger::new(&mut *state);
+    fees.charge_fee(
+        transaction.account_id(),
+        transaction.encode_size(),
+        &mut *events,
+    )
+    .await?;
 
     match transaction {
         Transaction::Coin(transaction) => {

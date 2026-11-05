@@ -9,14 +9,11 @@ pub const MAX_BOOK_ORDERS: usize = 8192;
 /// Maximum order ids retained for one account query index.
 pub const MAX_ACCOUNT_ORDERS: usize = 8192;
 /// Maximum fill ids retained for one market query index.
-pub const MAX_FILLS_PER_MARKET: usize = 16_384;
-/// Maximum accounts whose committed nonces are enumerated for matcher hydration.
-pub const MAX_TRACKED_ACCOUNTS: usize = 1_048_576;
-/// Accounts stored in one tracked-account state value.
 ///
-/// A shard has to fit in a single state value. Nonces live in their own keys, so
-/// this list is only the enumerable index used to reload them.
-pub(crate) const TRACKED_ACCOUNT_SHARD: usize = 1_024;
+/// 16_384 raw ids are 512 KiB before the length prefix, which is already the
+/// state-value cap. The prefix pushes that encoding over the cap and the
+/// following commit fails, so the window stops one short of the power of two.
+pub const MAX_FILLS_PER_MARKET: usize = 16_383;
 /// Maximum signed order intents carried by one proposed match batch.
 pub const MAX_MATCH_BATCH_ORDERS: usize = 4_096;
 /// Maximum fills carried by one proposed match batch.

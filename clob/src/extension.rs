@@ -1,7 +1,8 @@
 use std::collections::BTreeSet;
 
 use crate::{
-    BookSnapshot, ClobLedger, ClobMailbox, ClobOperation, MatchBatch, MarketId, Order, OrderId,
+    BookSnapshot, ClobDB, ClobLedger, ClobMailbox, ClobOperation, MatchBatch, MarketId, Order,
+    OrderId,
 };
 use nunchi_chain::{BlockExtension, ConsensusExtension};
 use nunchi_common::{Address, RuntimeContext, StateStore};
@@ -219,7 +220,7 @@ where
         }
         snapshot.markets.push((market, sequence));
     }
-    for account in ledger.tracked_accounts().await? {
+    for account in ledger.db.nonce_accounts().await? {
         accounts.insert(account);
     }
     let mut listed = BTreeSet::new();

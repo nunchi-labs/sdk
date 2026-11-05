@@ -83,13 +83,10 @@ function mockWasm(): WalletWasm & { signed: Array<{ nonce: bigint; submitHint: s
         digest_hex: `digest:${nonce}`,
       };
     },
-    sign_create_token: (_privateKeyHex, nonce) => {
-      signed.push({ nonce, submitHint: "create" });
-      return {
-        transaction_hex: `create:${nonce}`,
-        digest_hex: `digest:${nonce}`,
-      };
-    },
+    sign_create_token: (_privateKeyHex, nonce) => ({
+      transaction_hex: `create:${nonce}`,
+      digest_hex: `digest:${nonce}`,
+    }),
     sign_mint: (_privateKeyHex, nonce, coin, to, amount) => ({
       transaction_hex: `mint:${nonce}:${coin}:${to}:${amount}`,
       digest_hex: `digest:${nonce}`,
@@ -126,7 +123,6 @@ function createHarness(options?: { storage?: MemoryStorage; clock?: FakeClock })
   let lastWindowId = 0;
   let nonce = 7;
   let factoryNonce = 1;
-  let failSubmits = 0;
   const rpcCalls: Array<{ method: string; params: unknown }> = [];
 
   const host: WalletHost = {
@@ -154,10 +150,6 @@ function createHarness(options?: { storage?: MemoryStorage; clock?: FakeClock })
         return { result: { amount: "42" } };
       }
       if (request.method === "coins.submit_transaction") {
-        if (failSubmits > 0) {
-          failSubmits -= 1;
-          return { error: { message: "submit failed" } };
-        }
         return { result: { hash: "0xabc" } };
       }
       return { error: { message: `unknown method ${request.method}` } };
@@ -178,9 +170,6 @@ function createHarness(options?: { storage?: MemoryStorage; clock?: FakeClock })
     },
     setFactoryNonce: (value: number) => {
       factoryNonce = value;
-    },
-    failNextSubmit: () => {
-      failSubmits += 1;
     },
     restart(): Wallet {
       return new Wallet(host);
@@ -338,83 +327,15 @@ describe("coin operations", () => {
       "coins.factory_nonce",
       "coins.submit_transaction",
       "coins.nonce",
+      "coins.transaction_status",
       "coins.submit_transaction",
       "coins.nonce",
+      "coins.transaction_status",
+      "coins.transaction_status",
       "coins.submit_transaction",
       "coins.nonce",
       "coins.submit_transaction",
     ]);
-  });
-
-  it("does not reuse an account nonce while the chain nonce is unchanged", async () => {
-    const harness = createHarness();
-    expect((await createWallet(harness.wallet)).success).toBe(true);
-    harness.setNonce(7);
-    const from = keyPair(GENERATED_KEY).address;
-    const payload = { from, to: "nch1to", coin: "aa".repeat(32) };
-    const first = send(harness.wallet, "SEND_TRANSACTION", popup, { ...payload, amount: "1" });
-    const second = send(harness.wallet, "SEND_TRANSACTION", popup, { ...payload, amount: "2" });
-    expect((await first).success).toBe(true);
-    expect((await second).success).toBe(true);
-    expect(harness.wasm.signed.map((item) => item.nonce)).toEqual([7n, 8n]);
-  });
-
-  it("reuses a nonce when submission fails", async () => {
-    const harness = createHarness();
-    expect((await createWallet(harness.wallet)).success).toBe(true);
-    harness.setNonce(4);
-    harness.failNextSubmit();
-    const from = keyPair(GENERATED_KEY).address;
-    const payload = { from, to: "nch1to", amount: "1", coin: "aa".repeat(32) };
-    const failed = await send(harness.wallet, "SEND_TRANSACTION", popup, payload);
-    expect(failed.success).toBe(false);
-    expect(failed.error).toBe("submit failed");
-
-    const retried = await send(harness.wallet, "SEND_TRANSACTION", popup, payload);
-    expect(retried.success).toBe(true);
-    expect(harness.wasm.signed.map((item) => item.nonce)).toEqual([4n, 4n]);
-  });
-
-  it("keeps nonce reservations on the rpc url that created them", async () => {
-    const harness = createHarness();
-    expect((await createWallet(harness.wallet)).success).toBe(true);
-    const from = keyPair(GENERATED_KEY).address;
-    const payload = { from, to: "nch1to", amount: "1", coin: "aa".repeat(32) };
-    const token = { symbol: "WLT", name: "Wallet", decimals: 6, initial_supply: "1000" };
-    const otherRpc = {
-      rpcUrl: "http://127.0.0.1:9545",
-      network: "other",
-      chainId: "nunchi-other",
-    };
-    const localRpc = {
-      rpcUrl: "http://localhost:8545",
-      network: "local",
-      chainId: "nunchi-local",
-    };
-
-    harness.setNonce(7);
-    harness.setFactoryNonce(3);
-    expect((await send(harness.wallet, "SEND_TRANSACTION", popup, payload)).success).toBe(true);
-    const created = await send(harness.wallet, "CREATE_TOKEN", popup, token);
-    expect(created.success, created.error).toBe(true);
-    expect(created.data).toMatchObject({ factoryNonce: 3 });
-
-    expect((await send(harness.wallet, "UPDATE_SETTINGS", popup, otherRpc)).success).toBe(true);
-    harness.setNonce(1);
-    harness.setFactoryNonce(0);
-    expect((await send(harness.wallet, "SEND_TRANSACTION", popup, payload)).success).toBe(true);
-    const createdOnOther = await send(harness.wallet, "CREATE_TOKEN", popup, token);
-    expect(createdOnOther.success, createdOnOther.error).toBe(true);
-    expect(createdOnOther.data).toMatchObject({ factoryNonce: 0 });
-
-    expect((await send(harness.wallet, "UPDATE_SETTINGS", popup, localRpc)).success).toBe(true);
-    harness.setNonce(7);
-    harness.setFactoryNonce(3);
-    expect((await send(harness.wallet, "SEND_TRANSACTION", popup, payload)).success).toBe(true);
-    const createdAgain = await send(harness.wallet, "CREATE_TOKEN", popup, token);
-    expect(createdAgain.success, createdAgain.error).toBe(true);
-    expect(createdAgain.data).toMatchObject({ factoryNonce: 4 });
-    expect(harness.wasm.signed.map((item) => item.nonce)).toEqual([7n, 8n, 1n, 2n, 9n, 10n]);
   });
 });
 
@@ -561,6 +482,306 @@ describe("persisted sites and pending requests", () => {
     const approved = await send(restarted, "APPROVE_TRANSACTION", popup, { requestId });
     expect(approved.success).toBe(true);
     expect(approved.data).toMatchObject({ hash: "0xabc" });
+  });
+});
+
+describe("concurrent submissions", () => {
+  it("reserves the next nonce while an earlier submit is still in flight", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    const address = keyPair(GENERATED_KEY).address;
+    let releaseNonce: () => void = () => undefined;
+    const nonceGate = new Promise<void>((resolve) => {
+      releaseNonce = resolve;
+    });
+    let nonceCalls = 0;
+    const originalRpc = harness.host.rpc;
+    harness.host.rpc = async (url, body) => {
+      const request = body as { method: string };
+      if (request.method === "coins.nonce") {
+        nonceCalls += 1;
+        if (nonceCalls === 1) {
+          await nonceGate;
+        }
+      }
+      return originalRpc(url, body);
+    };
+    harness.setNonce(7);
+
+    const first = send(harness.wallet, "SEND_TRANSACTION", popup, {
+      from: address,
+      to: "nch1to",
+      amount: "1",
+      coin: "aa",
+    });
+    for (let i = 0; i < 50 && nonceCalls === 0; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(nonceCalls).toBe(1);
+    const second = send(harness.wallet, "SEND_TRANSACTION", popup, {
+      from: address,
+      to: "nch1to",
+      amount: "2",
+      coin: "bb",
+    });
+    releaseNonce();
+
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    expect(firstResult.success, firstResult.error).toBe(true);
+    expect(secondResult.success, secondResult.error).toBe(true);
+    expect(harness.wasm.signed.map((item) => item.nonce)).toEqual([7n, 8n]);
+  });
+});
+
+function stubTxStatus(harness: ReturnType<typeof createHarness>, status: string): void {
+  const original = harness.host.rpc;
+  harness.host.rpc = async (url, body) => {
+    const request = body as { method: string; params: unknown };
+    if (request.method === "coins.transaction_status") {
+      harness.rpcCalls.push(request);
+      return { result: { hash: "0xstatus", status } };
+    }
+    return original(url, body);
+  };
+}
+
+async function approveSign(harness: ReturnType<typeof createHarness>, amount: string): Promise<Response> {
+  const seen = harness.approvalPaths.length;
+  const pending = harness.wallet.handleMessage(
+    { type: "REQUEST_SIGN", payload: { coin: "nunchi", to: "addr-to", amount } },
+    page
+  );
+  const requestId = await waitForApproval(harness.approvalPaths, seen);
+  const approved = await send(harness.wallet, "APPROVE_TRANSACTION", popup, { requestId });
+  await pending;
+  return approved;
+}
+
+async function sendTransfer(wallet: Wallet, amount: string, coin: string): Promise<Response> {
+  return send(wallet, "SEND_TRANSACTION", popup, {
+    from: keyPair(GENERATED_KEY).address,
+    to: "nch1to",
+    amount,
+    coin,
+  });
+}
+
+describe("nonce reservations follow the chain", () => {
+  it("drops a reserved nonce when the chain nonce moves backward", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    stubTxStatus(harness, "pending");
+    harness.setNonce(4);
+
+    const first = await sendTransfer(harness.wallet, "1", "aa");
+    expect(first.success, first.error).toBe(true);
+    harness.setNonce(0);
+    const second = await sendTransfer(harness.wallet, "2", "bb");
+    expect(second.success, second.error).toBe(true);
+    expect(harness.wasm.signed.map((item) => item.nonce)).toEqual([4n, 0n]);
+  });
+
+  it("reuses a nonce when the previous submit was dropped", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    stubTxStatus(harness, "dropped");
+    harness.setNonce(0);
+    harness.setFactoryNonce(0);
+
+    const first = await send(harness.wallet, "CREATE_TOKEN", popup, {
+      symbol: "WLT",
+      name: "Wallet",
+      decimals: 6,
+      initial_supply: "1000",
+      max_supply: "5000",
+    });
+    expect(first.success, first.error).toBe(true);
+    expect(first.data).toMatchObject({ factoryNonce: 0 });
+
+    const second = await send(harness.wallet, "CREATE_TOKEN", popup, {
+      symbol: "WLT",
+      name: "Wallet",
+      decimals: 6,
+      initial_supply: "1000",
+      max_supply: "5000",
+    });
+    expect(second.success, second.error).toBe(true);
+    expect(second.data).toMatchObject({ factoryNonce: 0 });
+    const submitted = harness.rpcCalls.filter((call) => call.method === "coins.submit_transaction");
+    expect(submitted.map((call) => (call.params as { transaction: string }).transaction)).toEqual([
+      "create:0",
+      "create:0",
+    ]);
+  });
+
+  it("drops a reserved nonce when a restarted chain reports the same nonce", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    stubTxStatus(harness, "unknown");
+    harness.setNonce(0);
+    harness.setFactoryNonce(0);
+
+    const first = await send(harness.wallet, "CREATE_TOKEN", popup, {
+      symbol: "WLT",
+      name: "Wallet",
+      decimals: 6,
+      initial_supply: "1000",
+      max_supply: "5000",
+    });
+    expect(first.success, first.error).toBe(true);
+    expect(first.data).toMatchObject({ factoryNonce: 0 });
+
+    const second = await send(harness.wallet, "CREATE_TOKEN", popup, {
+      symbol: "WLT",
+      name: "Wallet",
+      decimals: 6,
+      initial_supply: "1000",
+      max_supply: "5000",
+    });
+    expect(second.success, second.error).toBe(true);
+    expect(second.data).toMatchObject({ factoryNonce: 0 });
+    const submitted = harness.rpcCalls.filter((call) => call.method === "coins.submit_transaction");
+    expect(submitted.map((call) => (call.params as { transaction: string }).transaction)).toEqual([
+      "create:0",
+      "create:0",
+    ]);
+  });
+
+  it("does not reuse a nonce reserved for another RPC", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    stubTxStatus(harness, "pending");
+    harness.setNonce(5);
+
+    const first = await sendTransfer(harness.wallet, "1", "aa");
+    expect(first.success, first.error).toBe(true);
+    const updated = await send(harness.wallet, "UPDATE_SETTINGS", popup, {
+      rpcUrl: "http://127.0.0.1:9545",
+    });
+    expect(updated.success, updated.error).toBe(true);
+    const second = await sendTransfer(harness.wallet, "2", "bb");
+    expect(second.success, second.error).toBe(true);
+    expect(harness.wasm.signed.map((item) => item.nonce)).toEqual([5n, 5n]);
+  });
+
+  it("keeps the next nonce while the previous submit is still pending", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    stubTxStatus(harness, "pending");
+    harness.setNonce(7);
+
+    const first = await sendTransfer(harness.wallet, "1", "aa");
+    const second = await sendTransfer(harness.wallet, "2", "bb");
+    expect(first.success, first.error).toBe(true);
+    expect(second.success, second.error).toBe(true);
+    expect(harness.wasm.signed.map((item) => item.nonce)).toEqual([7n, 8n]);
+  });
+
+  it("keeps an earlier pending nonce when a later submit is dropped", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    harness.setNonce(7);
+    const statuses = new Map<string, string>();
+    let submitted = 0;
+    const original = harness.host.rpc;
+    harness.host.rpc = async (url, body) => {
+      const request = body as { method: string; params: { hash?: string } };
+      if (request.method === "coins.submit_transaction") {
+        submitted += 1;
+        const hash = `0x${submitted}`;
+        statuses.set(hash, "pending");
+        harness.rpcCalls.push(request);
+        return { result: { hash } };
+      }
+      if (request.method === "coins.transaction_status") {
+        harness.rpcCalls.push(request);
+        const hash = request.params.hash ?? "";
+        return { result: { hash, status: statuses.get(hash) ?? "unknown" } };
+      }
+      return original(url, body);
+    };
+
+    const first = await sendTransfer(harness.wallet, "1", "aa");
+    const second = await sendTransfer(harness.wallet, "2", "bb");
+    expect(first.success, first.error).toBe(true);
+    expect(second.success, second.error).toBe(true);
+    statuses.set("0x2", "dropped");
+    const third = await sendTransfer(harness.wallet, "3", "cc");
+    expect(third.success, third.error).toBe(true);
+    expect(harness.wasm.signed.map((item) => item.nonce)).toEqual([7n, 8n, 8n]);
+  });
+
+  it("does not reuse a nonce that was signed for a dapp", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    await connectSite(harness);
+    stubTxStatus(harness, "unknown");
+    harness.setNonce(4);
+
+    const signed = await approveSign(harness, "1");
+    expect(signed.success, signed.error).toBe(true);
+    const sent = await sendTransfer(harness.wallet, "2", "bb");
+    expect(sent.success, sent.error).toBe(true);
+    expect(harness.wasm.signed.map((item) => item.nonce)).toEqual([4n, 5n]);
+  });
+
+  it("reserves a fresh nonce after signing while a submit is still pending", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    await connectSite(harness);
+    stubTxStatus(harness, "pending");
+    harness.setNonce(4);
+
+    const first = await sendTransfer(harness.wallet, "1", "aa");
+    expect(first.success, first.error).toBe(true);
+    const signed = await approveSign(harness, "2");
+    expect(signed.success, signed.error).toBe(true);
+    const second = await sendTransfer(harness.wallet, "3", "cc");
+    expect(second.success, second.error).toBe(true);
+    expect(harness.wasm.signed.map((item) => item.nonce)).toEqual([4n, 5n, 6n]);
+  });
+
+  it("reuses a dropped submit without taking back a dapp-signed nonce", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    await connectSite(harness);
+    stubTxStatus(harness, "dropped");
+    harness.setNonce(4);
+
+    const signed = await approveSign(harness, "1");
+    expect(signed.success, signed.error).toBe(true);
+    const first = await sendTransfer(harness.wallet, "2", "bb");
+    const second = await sendTransfer(harness.wallet, "3", "cc");
+    expect(first.success, first.error).toBe(true);
+    expect(second.success, second.error).toBe(true);
+    expect(harness.wasm.signed.map((item) => item.nonce)).toEqual([4n, 5n, 5n]);
+  });
+
+  it("keeps a pending nonce when settings do not change the chain", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    stubTxStatus(harness, "pending");
+    harness.setNonce(7);
+
+    const first = await sendTransfer(harness.wallet, "1", "aa");
+    expect(first.success, first.error).toBe(true);
+    const updated = await send(harness.wallet, "UPDATE_SETTINGS", popup, { displayCoin: "nunchi" });
+    expect(updated.success, updated.error).toBe(true);
+    const second = await sendTransfer(harness.wallet, "2", "bb");
+    expect(second.success, second.error).toBe(true);
+    expect(harness.wasm.signed.map((item) => item.nonce)).toEqual([7n, 8n]);
+  });
+});
+
+describe("delete wallet", () => {
+  it("rejects an in-flight connection instead of leaving it pending", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    const pending = harness.wallet.handleMessage({ type: "REQUEST_CONNECTION" }, page);
+    await waitForApproval(harness.approvalPaths);
+    const deleted = await send(harness.wallet, "DELETE_WALLET", popup, { password: PASSWORD });
+    expect(deleted.success).toBe(true);
+    await expect(pending).resolves.toMatchObject({ success: false, error: "Wallet deleted" });
   });
 });
 
