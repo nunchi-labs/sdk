@@ -1,12 +1,16 @@
 check:
     @echo "Checking for unused dependencies..."
-    cargo +nightly udeps --all-features --all-targets
+    cargo +nightly udeps --locked --all-features --all-targets
     @echo "Checking for clippy warnings..."
-    cargo clippy --all --all-targets -- -D warnings
+    cargo clippy --locked --all --all-features --all-targets -- -D warnings
 
 test:
     @echo "Running tests..."
-    @cargo nextest run --workspace
+    @cargo nextest run --locked --workspace --all-features --all-targets
+    @echo "Running doctests..."
+    @cargo test --locked --workspace --all-features --doc
+    @echo "Running wallet wasm-crypto tests..."
+    @cargo test --locked --manifest-path examples/wallet-extension/wasm-crypto/Cargo.toml
 
 mcp-build:
     #!/usr/bin/env bash
@@ -46,11 +50,17 @@ wallet-live:
 
 coverage:
     @echo "Running tests with coverage..."
-    @cargo llvm-cov nextest --workspace
+    @cargo llvm-cov --locked --all-features nextest --workspace --all-targets
 
 stability-check:
-    @echo "Running Commonware stability check (>= BETA) for noble-node..."
-    RUSTFLAGS="--cfg commonware_stability_BETA" cargo +nightly build -p noble-node
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "Checking the workspace builds with Commonware stability ALPHA..."
+    flags=(--cfg commonware_stability_ALPHA)
+    if [[ "$(uname)" == "Linux" ]] && command -v mold >/dev/null; then
+        flags+=(-C link-arg=-fuse-ld=mold)
+    fi
+    RUSTFLAGS="${flags[*]}" cargo build --workspace --locked --all-targets
 
 install-deps:
     #!/usr/bin/env bash
