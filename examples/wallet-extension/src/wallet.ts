@@ -151,9 +151,10 @@ export class Wallet {
   private hydrated = false;
   private lastActive: number;
   private approvalTimers: Set<ReturnType<typeof setTimeout>> = new Set();
-  /** Next unused nonce per account, when this process has signed ahead of the chain. */
-  private reservedNonces = new Map<string, number>();
-  private reservedFactoryNonce: number | null = null;
+  /** Next unused account nonce per RPC URL, when this process has signed ahead of that chain. */
+  private reservedNonces = new Map<string, Map<string, number>>();
+  /** Next unused factory nonce per RPC URL. */
+  private reservedFactoryNonces = new Map<string, number>();
   private signingQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly host: WalletHost) {
@@ -595,7 +596,7 @@ export class Wallet {
             const submitted = await this.submitSigned(signed, { coin, to: wallet.address, amount: initial_supply });
             return { submitted, coin, factoryNonce };
           } catch (error) {
-            this.releaseFactoryNonce(factoryNonce);
+            this.releaseFactoryNonce(settings.rpcUrl, factoryNonce);
             throw error;
           }
         });
@@ -953,23 +954,36 @@ export class Wallet {
   }
 
   /**
-   * Reserve the next nonce for `address`.
+   * Reserve the next nonce for `address` on `rpcUrl`.
    *
    * The chain nonce is the source of truth once a transaction is committed. Until then, this
    * process remembers the next unused nonce so two signatures cannot reuse the same value.
+   * Reservations stay with the RPC URL that issued them, so a settings change cannot spend
+   * another chain's nonce.
    */
   private async allocateNonce(rpcUrl: string, address: string): Promise<number> {
     const chainNonce = await this.fetchNonce(rpcUrl, address);
-    const reserved = this.reservedNonces.get(address);
+    const reservedNonces = this.accountReservations(rpcUrl);
+    const reserved = reservedNonces.get(address);
     const nonce = reserved === undefined ? chainNonce : Math.max(chainNonce, reserved);
-    this.reservedNonces.set(address, nonce + 1);
+    reservedNonces.set(address, nonce + 1);
     return nonce;
   }
 
-  private releaseNonce(address: string, nonce: number): void {
-    if (this.reservedNonces.get(address) === nonce + 1) {
-      this.reservedNonces.set(address, nonce);
+  private releaseNonce(rpcUrl: string, address: string, nonce: number): void {
+    const reservedNonces = this.reservedNonces.get(rpcUrl);
+    if (reservedNonces?.get(address) === nonce + 1) {
+      reservedNonces.set(address, nonce);
     }
+  }
+
+  private accountReservations(rpcUrl: string): Map<string, number> {
+    let reservedNonces = this.reservedNonces.get(rpcUrl);
+    if (!reservedNonces) {
+      reservedNonces = new Map();
+      this.reservedNonces.set(rpcUrl, reservedNonces);
+    }
+    return reservedNonces;
   }
 
   private async withAccountNonce<T>(
@@ -982,7 +996,7 @@ export class Wallet {
       try {
         return await use(nonce);
       } catch (error) {
-        this.releaseNonce(address, nonce);
+        this.releaseNonce(rpcUrl, address, nonce);
         throw error;
       }
     });
@@ -990,14 +1004,15 @@ export class Wallet {
 
   private async allocateFactoryNonce(rpcUrl: string): Promise<number> {
     const chainNonce = await this.fetchFactoryNonce(rpcUrl);
-    const nonce = this.reservedFactoryNonce === null ? chainNonce : Math.max(chainNonce, this.reservedFactoryNonce);
-    this.reservedFactoryNonce = nonce + 1;
+    const reserved = this.reservedFactoryNonces.get(rpcUrl);
+    const nonce = reserved === undefined ? chainNonce : Math.max(chainNonce, reserved);
+    this.reservedFactoryNonces.set(rpcUrl, nonce + 1);
     return nonce;
   }
 
-  private releaseFactoryNonce(nonce: number): void {
-    if (this.reservedFactoryNonce === nonce + 1) {
-      this.reservedFactoryNonce = nonce;
+  private releaseFactoryNonce(rpcUrl: string, nonce: number): void {
+    if (this.reservedFactoryNonces.get(rpcUrl) === nonce + 1) {
+      this.reservedFactoryNonces.set(rpcUrl, nonce);
     }
   }
 
