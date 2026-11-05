@@ -28,6 +28,8 @@ pub enum ClobError {
     },
     #[error("nonce overflow")]
     NonceOverflow,
+    #[error("nonce account index is full")]
+    NonceIndexFull,
     #[error("market already exists")]
     MarketAlreadyExists,
     #[error("market not found")]
@@ -170,6 +172,7 @@ impl<D: ClobDB> ClobLedger<D> {
                 actual: tx.payload.nonce,
             });
         }
+        self.ensure_nonce_index_fits([&tx.account_id]).await?;
 
         self.apply_operation(tx, context).await?;
         let next_nonce = expected.checked_add(1).ok_or(ClobError::NonceOverflow)?;
@@ -292,6 +295,7 @@ impl<D: ClobDB> ClobLedger<D> {
                 starting_sequences.insert(*market, self.db.market_sequence(market).await?);
             }
         }
+        self.ensure_nonce_index_fits(expected_nonces.keys()).await?;
         let resting_orders = self.load_resting_orders(markets.keys().copied().collect()).await?;
 
         let replay = MatchEngine::replay_with_resting(
@@ -344,11 +348,32 @@ impl<D: ClobDB> ClobLedger<D> {
         Ok(())
     }
 
+    async fn ensure_nonce_index_fits<'a>(
+        &self,
+        accounts: impl IntoIterator<Item = &'a Address>,
+    ) -> Result<(), ClobError> {
+        let indexed = self.db.nonce_accounts().await?;
+        let mut extra = BTreeSet::new();
+        for account in accounts {
+            if indexed.iter().any(|existing| existing == account) || !extra.insert(account) {
+                continue;
+            }
+            if indexed.len() + extra.len() > MAX_NONCE_ACCOUNTS {
+                return Err(ClobError::NonceIndexFull);
+            }
+        }
+        Ok(())
+    }
+
     async fn record_nonce(&mut self, account: &Address, nonce: u64) -> Result<(), ClobError> {
         let mut accounts = self.db.nonce_accounts().await?;
-        if !accounts.iter().any(|existing| existing == account)
-            && accounts.len() < MAX_NONCE_ACCOUNTS
-        {
+        let indexed = accounts.iter().any(|existing| existing == account);
+        // Recovery enumerates this index only. An account that does not fit keeps
+        // the default nonce instead of a value the snapshot cannot reload.
+        if !indexed && accounts.len() >= MAX_NONCE_ACCOUNTS {
+            return Err(ClobError::NonceIndexFull);
+        }
+        if !indexed {
             accounts.push(account.clone());
             self.db.set_nonce_accounts(&accounts);
         }

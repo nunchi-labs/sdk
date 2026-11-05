@@ -9,7 +9,8 @@ use nunchi_coins::{
     TokenCreated, TokenFactory, TokenGenesis, TokenName, TokenSymbol, FEE_CHARGED_EVENT,
     TOKEN_CREATED_EVENT, TRANSFERRED_EVENT,
 };
-use nunchi_common::{Address, QmdbState, Runtime, RuntimeContext, VecEventSink};
+use nunchi_common::{Address, MultisigPolicy, QmdbState, Runtime, RuntimeContext, VecEventSink};
+use nunchi_oracle::{IntervalKey, NamespaceId, OracleDB, OracleLedger, OracleOperation};
 use nunchi_crypto::PrivateKey;
 use nunchi_oracle::OracleError;
 
@@ -449,6 +450,117 @@ fn runtime_rejects_transaction_that_cannot_pay_fee() {
             err,
             RuntimeError::Coins(LedgerError::InsufficientBalance { .. })
         ));
+    });
+}
+
+#[test]
+fn runtime_reverts_fee_when_dispatch_rejects() {
+    deterministic::Runner::default().start(|context| async move {
+        let alice_key = PrivateKey::ed25519_from_seed(1);
+        let alice = Address::external(&alice_key.public_key());
+        let bob = Address::external(&PrivateKey::ed25519_from_seed(2).public_key());
+        let collector = Address::external(&PrivateKey::ed25519_from_seed(9).public_key());
+
+        let genesis = fee_genesis(alice.clone(), collector.clone(), 7, 3);
+        let mut state = fee_state(context, "coins-runtime-fee-revert-next", &genesis).await;
+        let coin = TokenFactory::derive_coin_id(&alice, 0, &genesis.tokens[0].spec);
+
+        // The fee ante succeeds, then the nonce check rejects the transfer.
+        let bad = Transaction::from(nunchi_coins::Transaction::sign(
+            &alice_key,
+            5,
+            CoinOperation::Transfer {
+                coin,
+                from: alice.clone(),
+                to: bob.clone(),
+                amount: 100,
+            },
+        ));
+        let err = CoinsRuntime::apply(
+            &mut state,
+            RuntimeContext::default(),
+            &bad,
+            &mut VecEventSink::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            RuntimeError::Coins(LedgerError::NonceMismatch { .. })
+        ));
+        assert_eq!(state.balance(&alice, &coin).await.unwrap(), 1_000);
+        assert_eq!(state.balance(&collector, &coin).await.unwrap(), 0);
+        assert_eq!(state.balance(&bob, &coin).await.unwrap(), 0);
+
+        // A later successful transaction must not commit the reverted fee as well.
+        let good = Transaction::from(nunchi_coins::Transaction::sign(
+            &alice_key,
+            0,
+            CoinOperation::Transfer {
+                coin,
+                from: alice.clone(),
+                to: bob.clone(),
+                amount: 100,
+            },
+        ));
+        let fee = 7 + 3 * good.encode_size() as u128;
+        CoinsRuntime::apply(
+            &mut state,
+            RuntimeContext::default(),
+            &good,
+            &mut VecEventSink::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.balance(&alice, &coin).await.unwrap(), 900 - fee);
+        assert_eq!(state.balance(&bob, &coin).await.unwrap(), 100);
+        assert_eq!(state.balance(&collector, &coin).await.unwrap(), fee);
+    });
+}
+
+#[test]
+fn runtime_rejects_forged_multisig_oracle_without_charging_a_fee() {
+    deterministic::Runner::default().start(|context| async move {
+        let alice_key = PrivateKey::ed25519_from_seed(1);
+        let alice = Address::external(&alice_key.public_key());
+        let attacker = PrivateKey::ed25519_from_seed(4);
+        let collector = Address::external(&PrivateKey::ed25519_from_seed(9).public_key());
+
+        let genesis = fee_genesis(alice.clone(), collector.clone(), 7, 3);
+        let mut state = fee_state(context, "coins-runtime-forged-oracle", &genesis).await;
+        let coin = TokenFactory::derive_coin_id(&alice, 0, &genesis.tokens[0].spec);
+        let policy = MultisigPolicy::new(1, vec![attacker.public_key()]).unwrap();
+        let namespace = NamespaceId(Sha256::hash(&[b"prices"]));
+        let forged = Transaction::from(nunchi_oracle::Transaction::sign_multisig(
+            alice.clone(),
+            policy,
+            &[&attacker],
+            0,
+            OracleOperation::AppendRecord {
+                namespace,
+                interval: IntervalKey::new(1),
+                payload: b"forged-price".to_vec(),
+                proof: None,
+            },
+        ));
+        assert!(!forged.verify());
+
+        let err = CoinsRuntime::apply(
+            &mut state,
+            RuntimeContext::default(),
+            &forged,
+            &mut VecEventSink::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            RuntimeError::Oracle(OracleError::UnsupportedAuthorization)
+        ));
+        assert_eq!(state.balance(&alice, &coin).await.unwrap(), 1_000);
+        assert_eq!(state.balance(&collector, &coin).await.unwrap(), 0);
+        let oracle = OracleLedger::new(&mut state);
+        assert_eq!(OracleDB::nonce(oracle.db(), &alice).await.unwrap(), 0);
     });
 }
 

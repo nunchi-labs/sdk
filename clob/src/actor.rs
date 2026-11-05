@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
+    db::MAX_NONCE_ACCOUNTS,
     engine::{validate_order, MatchCursor},
     ClobActorSnapshot, ClobError, ClobOperation, MatchBatch, MatchEngine, Market, MarketId, Order,
     OrderId, Transaction, MAX_MATCH_BATCH_FILLS, MAX_MATCH_BATCH_ORDERS,
@@ -24,6 +25,8 @@ pub struct BookSnapshot {
     pub markets: Vec<(Market, u64)>,
     pub orders: Vec<Order>,
     pub nonces: Vec<(Address, u64)>,
+    /// Accounts stored in the ledger nonce index, including zero-nonce placeholders.
+    pub nonce_accounts: Vec<Address>,
 }
 use tracing::{debug, warn};
 
@@ -72,6 +75,10 @@ enum Message {
     },
     KnownAccounts {
         responder: oneshot::Sender<Vec<Address>>,
+    },
+    SyncNonceIndex {
+        accounts: Vec<Address>,
+        responder: oneshot::Sender<Result<(), ClobError>>,
     },
 }
 
@@ -144,6 +151,23 @@ impl ClobMailbox {
             .send(Message::SyncNonce {
                 account,
                 nonce,
+                responder,
+            })
+            .await
+            .is_err()
+        {
+            return Err(ClobError::ActorStopped);
+        }
+        receiver.await.unwrap_or(Err(ClobError::ActorStopped))
+    }
+
+    /// Replace the local nonce index after a committed block.
+    pub async fn sync_nonce_index(&self, accounts: Vec<Address>) -> Result<(), ClobError> {
+        let (responder, receiver) = oneshot::channel();
+        let mut sender = self.sender.clone();
+        if sender
+            .send(Message::SyncNonceIndex {
+                accounts,
                 responder,
             })
             .await
@@ -234,6 +258,8 @@ pub struct ClobActor {
     markets: BTreeMap<MarketId, Market>,
     sequences: BTreeMap<MarketId, u64>,
     nonces: BTreeMap<Address, u64>,
+    /// Ledger nonce index, including accounts whose nonce is still zero.
+    nonce_index: BTreeSet<Address>,
 }
 
 impl ClobActor {
@@ -247,6 +273,7 @@ impl ClobActor {
                 markets: BTreeMap::new(),
                 sequences: BTreeMap::new(),
                 nonces: BTreeMap::new(),
+                nonce_index: BTreeSet::new(),
             },
             ClobMailbox { sender },
         )
@@ -264,6 +291,7 @@ impl ClobActor {
             }
         }
         for (account, nonce) in snapshot.nonces {
+            self.nonce_index.insert(account.clone());
             self.nonces.insert(account, nonce);
         }
     }
@@ -377,6 +405,13 @@ impl ClobActor {
             Message::KnownAccounts { responder } => {
                 let _ = responder.send(self.known_account_ids());
             }
+            Message::SyncNonceIndex {
+                accounts,
+                responder,
+            } => {
+                self.nonce_index = accounts.into_iter().collect();
+                let _ = responder.send(Ok(()));
+            }
         }
     }
 
@@ -457,6 +492,7 @@ impl ClobActor {
                 .iter()
                 .map(|(account, nonce)| (account.clone(), *nonce))
                 .collect(),
+            nonce_accounts: self.nonce_index.iter().cloned().collect(),
         };
         self.markets.clear();
         self.sequences.clear();
@@ -474,6 +510,7 @@ impl ClobActor {
         for (account, nonce) in snapshot.nonces {
             self.nonces.insert(account, nonce);
         }
+        self.nonce_index = snapshot.nonce_accounts.into_iter().collect();
         previous
     }
 
@@ -637,13 +674,45 @@ impl ClobActor {
         {
             return Err(ClobError::InvalidOrder("duplicate pending order id"));
         }
+        if !self.nonce_account_admitted(&tx.account_id) {
+            return Err(ClobError::NonceIndexFull);
+        }
         self.pending_orders.push(tx);
         Ok(())
+    }
+
+    /// `account` is already in the nonce index, or the index still has room for it.
+    fn nonce_account_admitted(&self, account: &Address) -> bool {
+        if self.nonce_index.contains(account) || self.nonces.contains_key(account) {
+            return true;
+        }
+        let mut reserved = 0usize;
+        let mut seen = BTreeSet::new();
+        for tx in &self.pending_orders {
+            if self.nonce_index.contains(&tx.account_id) || self.nonces.contains_key(&tx.account_id)
+            {
+                continue;
+            }
+            if &tx.account_id == account {
+                return true;
+            }
+            if seen.insert(&tx.account_id) {
+                reserved += 1;
+            }
+        }
+        self.nonce_index_occupied().saturating_add(reserved) < MAX_NONCE_ACCOUNTS
+    }
+
+    fn nonce_index_occupied(&self) -> usize {
+        self.nonce_index.len().max(self.nonces.len())
     }
 
     fn proposal_orders(&mut self, committed_nonces: &BTreeMap<Address, u64>) -> Vec<Transaction> {
         let bases = self.nonces.clone();
         let mut expected_nonces = self.nonces.clone();
+        let mut new_accounts = 0usize;
+        let mut introduced = BTreeSet::new();
+        let capacity = MAX_NONCE_ACCOUNTS.saturating_sub(self.nonce_index_occupied());
         let mut stale = BTreeSet::new();
         let mut orders = Vec::new();
         for tx in &self.pending_orders {
@@ -661,6 +730,19 @@ impl ClobActor {
                     }
                 }
                 std::cmp::Ordering::Equal if self.can_locally_replay(tx) => {
+                    let known = if self.nonce_index.is_empty() {
+                        bases.contains_key(&tx.account_id) || introduced.contains(&tx.account_id)
+                    } else {
+                        self.nonce_index.contains(&tx.account_id)
+                            || introduced.contains(&tx.account_id)
+                    };
+                    if !known && new_accounts >= capacity {
+                        continue;
+                    }
+                    if !known {
+                        new_accounts += 1;
+                        introduced.insert(tx.account_id.clone());
+                    }
                     orders.push(tx.clone());
                     if let Some(next) = expected.checked_add(1) {
                         *expected = next;

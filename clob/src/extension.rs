@@ -110,10 +110,15 @@ impl ConsensusExtension for ClobExtension {
     ) where
         S: StateStore + Send + Sync,
     {
+        let ledger = ClobLedger::new(state);
+        if let Ok(accounts) = ledger.db.nonce_accounts().await {
+            if let Err(error) = self.mailbox.sync_nonce_index(accounts).await {
+                warn!(?error, "failed to sync the clob nonce index");
+            }
+        }
         if payload.is_empty() {
             return;
         }
-        let ledger = ClobLedger::new(state);
         let order_updates = order_updates(&ledger, payload).await;
         let nonce_updates = nonce_updates(&ledger, payload).await;
         let accepted_order_ids = accepted_order_ids(payload);
@@ -220,7 +225,9 @@ where
         }
         snapshot.markets.push((market, sequence));
     }
-    for account in ledger.db.nonce_accounts().await? {
+    let nonce_accounts = ledger.db.nonce_accounts().await?;
+    snapshot.nonce_accounts = nonce_accounts.clone();
+    for account in nonce_accounts {
         accounts.insert(account);
     }
     let mut listed = BTreeSet::new();
