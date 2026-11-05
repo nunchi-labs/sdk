@@ -79,26 +79,6 @@ async fn apply_transaction<S, Events>(
     state: &mut S,
     context: RuntimeContext,
     transaction: &Transaction,
-    events: Events,
-) -> Result<(), RuntimeError>
-where
-    S: StateStore + Send + Sync,
-    Events: EventSink + Send,
-{
-    // Fee and module writes share one overlay. Dropping it on error discards a charged fee
-    // when dispatch rejects the transaction, including on a store the caller will reuse.
-    let mut overlay = Overlay::new(state);
-    let result = apply_transaction_inner(&mut overlay, context, transaction, events).await;
-    if result.is_ok() {
-        overlay.commit();
-    }
-    result
-}
-
-async fn apply_transaction_inner<S, Events>(
-    state: &mut S,
-    context: RuntimeContext,
-    transaction: &Transaction,
     mut events: Events,
 ) -> Result<(), RuntimeError>
 where
