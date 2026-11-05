@@ -1,6 +1,9 @@
 use std::collections::BTreeSet;
 
-use crate::{ClobLedger, ClobMailbox, ClobOperation, MatchBatch, MarketId, Order, OrderId};
+use crate::{
+    BookSnapshot, ClobDB, ClobLedger, ClobMailbox, ClobOperation, MatchBatch, MarketId, Order,
+    OrderId,
+};
 use nunchi_chain::{BlockExtension, ConsensusExtension};
 use nunchi_common::{Address, RuntimeContext, StateStore};
 use tracing::warn;
@@ -9,11 +12,18 @@ use tracing::warn;
 #[derive(Clone, Debug)]
 pub struct ClobExtension {
     mailbox: ClobMailbox,
+    /// Book staged by [`ConsensusExtension::preview`] for the next proposal.
+    ///
+    /// Matching reads it once and then restores the committed actor state.
+    preview_book: Option<BookSnapshot>,
 }
 
 impl ClobExtension {
     pub const fn new(mailbox: ClobMailbox) -> Self {
-        Self { mailbox }
+        Self {
+            mailbox,
+            preview_book: None,
+        }
     }
 
     pub fn mailbox(&self) -> ClobMailbox {
@@ -31,8 +41,45 @@ impl BlockExtension for ClobExtension {
 }
 
 impl ConsensusExtension for ClobExtension {
-    async fn propose(&mut self) -> Self::Payload {
-        self.mailbox.propose().await
+    async fn prepare<S>(&mut self, state: &mut S)
+    where
+        S: StateStore + Send + Sync,
+    {
+        let known = self.mailbox.known_accounts().await;
+        match load_book_snapshot(state, &known).await {
+            Ok(snapshot) => {
+                if let Err(error) = self.mailbox.hydrate(snapshot).await {
+                    warn!(?error, "clob actor unavailable while hydrating the committed book");
+                }
+            }
+            Err(error) => {
+                warn!(?error, "failed to read the committed clob book; clearing the local matcher");
+                if let Err(error) = self.mailbox.hydrate(BookSnapshot::default()).await {
+                    warn!(?error, "clob actor unavailable while clearing the local matcher");
+                }
+            }
+        }
+    }
+
+    async fn preview<S>(&mut self, state: &mut S)
+    where
+        S: StateStore + Send + Sync,
+    {
+        // The preview is consumed by the following `propose`. It is not installed
+        // on the actor, so ingress keeps serving the committed book from `prepare`.
+        let known = self.mailbox.known_accounts().await;
+        self.preview_book = match load_book_snapshot(state, &known).await {
+            Ok(snapshot) => Some(snapshot),
+            Err(error) => {
+                warn!(?error, "failed to read the clob book staged for this proposal");
+                None
+            }
+        };
+    }
+
+    async fn propose(&mut self, context: RuntimeContext) -> Self::Payload {
+        let book = self.preview_book.take();
+        self.mailbox.propose_with_book(context, book).await
     }
 
     async fn verify_payload(&mut self, payload: &Self::Payload) -> bool {
@@ -141,6 +188,61 @@ fn accepted_order_ids(payload: &MatchBatch) -> Vec<OrderId> {
         orders.insert(fill.taker_order);
     }
     orders.into_iter().collect()
+}
+
+async fn load_book_snapshot<S>(
+    state: &mut S,
+    extra_accounts: &[Address],
+) -> Result<BookSnapshot, crate::ClobError>
+where
+    S: StateStore + Send + Sync,
+{
+    let ledger = ClobLedger::new(&mut *state);
+    let markets = ledger.markets().await?;
+    let mut snapshot = BookSnapshot::default();
+    let mut accounts = BTreeSet::new();
+    for market in markets {
+        accounts.insert(market.created_by.clone());
+        let sequence = ledger.market_sequence(&market.id).await?;
+        for side in [crate::Side::Bid, crate::Side::Ask] {
+            for order in ledger.book(&market.id, side).await? {
+                accounts.insert(order.owner.clone());
+                if order.status.is_open() && order.remaining_base > 0 {
+                    snapshot.orders.push(order);
+                }
+            }
+        }
+        // Filled accounts leave the book. Their fills are the remaining record of
+        // the nonce until the fill index drops them.
+        for fill in ledger.market_fills(&market.id).await? {
+            accounts.insert(fill.maker);
+            accounts.insert(fill.taker);
+        }
+        snapshot.markets.push((market, sequence));
+    }
+    for account in ledger.db.nonce_accounts().await? {
+        accounts.insert(account);
+    }
+    let mut listed = BTreeSet::new();
+    for account in accounts {
+        let nonce = ledger.nonce(&account).await?;
+        if nonce > 0 {
+            listed.insert(account.clone());
+            snapshot.nonces.push((account, nonce));
+        }
+    }
+    // Pending orders and nonces the actor already holds may belong to accounts
+    // that have left the book and the fill index. Read those nonces explicitly
+    // so hydration does not replace them with zero.
+    for account in extra_accounts {
+        if listed.contains(account) {
+            continue;
+        }
+        let nonce = ledger.nonce(account).await?;
+        listed.insert(account.clone());
+        snapshot.nonces.push((account.clone(), nonce));
+    }
+    Ok(snapshot)
 }
 
 fn affected_markets(payload: &MatchBatch) -> BTreeSet<MarketId> {

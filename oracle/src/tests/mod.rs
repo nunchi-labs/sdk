@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, future::Future};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_runtime::{deterministic, Runner as _};
-use nunchi_common::{Address, RuntimeContext, StateError, StateStore};
+use nunchi_common::{Address, MultisigPolicy, RuntimeContext, StateError, StateStore};
 use nunchi_crypto::PrivateKey;
 
 use crate::{
@@ -272,5 +272,40 @@ fn genesis_is_noop_for_permissionless_oracle() {
             .await
             .unwrap();
         assert_eq!(records[0].payload, b"from-genesis");
+    });
+}
+
+#[test]
+fn append_rejects_multisig_for_another_account() {
+    run_test(|| async {
+        let victim_key = PrivateKey::from_seed(1);
+        let attacker = PrivateKey::from_seed(2);
+        let victim = Address::external(&victim_key.public_key());
+        let policy = MultisigPolicy::new(1, vec![attacker.public_key()]).unwrap();
+        let tx = Transaction::sign_multisig(
+            victim.clone(),
+            policy,
+            &[&attacker],
+            0,
+            OracleOperation::AppendRecord {
+                namespace: namespace(),
+                interval: IntervalKey::new(1),
+                payload: b"forged".to_vec(),
+                proof: None,
+            },
+        );
+        assert!(tx.verify().is_err());
+
+        let mut ledger = OracleLedger::new(MemoryStore::default());
+        let err = ledger
+            .apply_transaction(&tx, context(1_000))
+            .await
+            .unwrap_err();
+        assert_eq!(err, OracleError::UnsupportedAuthorization);
+        assert!(ledger
+            .records_by_writer(&victim, IntervalKey::new(1), IntervalKey::new(1))
+            .await
+            .unwrap()
+            .is_empty());
     });
 }

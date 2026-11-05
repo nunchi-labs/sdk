@@ -23,6 +23,10 @@ just test
 just check
 ```
 
+## Nunchi SDK MCP
+
+`mcp/` serves this repository over MCP. It is not a Cargo member. Build with `just mcp-build`, run with `just mcp` (`http://127.0.0.1:8787`), then index the checkout and git tags with `just mcp-index`. `.cursor/mcp.json` and `.mcp.json` call the server `nunchi-sdk` and use that URL. Tools default to `HEAD`. `npm run ci` in `mcp/` is the package check.
+
 ## Architecture
 
 ### Core Primitives
