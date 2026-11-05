@@ -2153,6 +2153,144 @@ fn extension_rejects_unbound_multisig_and_bad_signatures() {
 }
 
 #[test]
+fn full_nonce_index_rejects_accounts_it_cannot_recover() {
+    deterministic::Runner::default().start(|runtime| async move {
+        let creator = PrivateKey::from_seed(1);
+        let maker = PrivateKey::from_seed(2);
+        let taker = PrivateKey::from_seed(3);
+        let fresh = PrivateKey::from_seed(4);
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        seed_market(&mut ledger, &creator).await;
+
+        let ask = place_tx(
+            &maker,
+            0,
+            Side::Ask,
+            100,
+            4,
+            TimeInForce::GoodTilCancelled,
+        );
+        let opener = place_tx(
+            &taker,
+            0,
+            Side::Bid,
+            100,
+            2,
+            TimeInForce::ImmediateOrCancel,
+        );
+        let batch = batch_from_orders(&ledger, vec![ask, opener], context(2)).await;
+        ledger.apply_match_batch(&batch, context(2)).await.unwrap();
+        fill_nonce_account_index(&mut ledger).await;
+
+        let fresh_addr = Address::external(&fresh.public_key());
+        let taker_addr = Address::external(&taker.public_key());
+        let fresh_bid = place_tx(
+            &fresh,
+            0,
+            Side::Bid,
+            100,
+            2,
+            TimeInForce::ImmediateOrCancel,
+        );
+        let market_info = ledger.market(&market()).await.unwrap().unwrap();
+        let mut markets = BTreeMap::new();
+        markets.insert(market(), market_info);
+        let mut sequences = BTreeMap::new();
+        sequences.insert(market(), ledger.market_sequence(&market()).await.unwrap());
+        let resting = ledger.book(&market(), Side::Ask).await.unwrap();
+        let replay = MatchEngine::replay_with_resting(
+            &resting,
+            std::slice::from_ref(&fresh_bid),
+            &markets,
+            sequences,
+            context(3),
+        )
+        .unwrap();
+        assert!(!replay.fills.is_empty());
+        let overflow = MatchBatch {
+            orders: vec![fresh_bid.clone()],
+            fills: replay.fills,
+        };
+        let err = ledger
+            .apply_match_batch(&overflow, context(3))
+            .await
+            .unwrap_err();
+        assert_eq!(err, ClobError::NonceIndexFull);
+        assert_eq!(ledger.nonce(&fresh_addr).await.unwrap(), 0);
+        assert!(!ledger
+            .db
+            .nonce_accounts()
+            .await
+            .unwrap()
+            .contains(&fresh_addr));
+        assert_eq!(ledger.book(&market(), Side::Ask).await.unwrap(), resting);
+
+        let other = market_id(
+            &asset(b"other-base"),
+            &asset(b"other-quote"),
+            MARKET_TICK,
+            MARKET_LOT,
+        );
+        let create = Transaction::sign(
+            &fresh,
+            0,
+            ClobOperation::CreateMarket {
+                base_asset: asset(b"other-base"),
+                quote_asset: asset(b"other-quote"),
+                tick_size: MARKET_TICK,
+                lot_size: MARKET_LOT,
+            },
+        );
+        let err = ledger
+            .apply_transaction(&create, context(3))
+            .await
+            .unwrap_err();
+        assert_eq!(err, ClobError::NonceIndexFull);
+        assert!(ledger.market(&other).await.unwrap().is_none());
+
+        let snapshot = ledger.actor_snapshot().await.unwrap();
+        assert!(snapshot
+            .nonces
+            .iter()
+            .all(|(account, _)| account != &fresh_addr));
+        assert!(snapshot
+            .nonces
+            .iter()
+            .any(|(account, nonce)| account == &taker_addr && *nonce == 1));
+
+        let (mut actor, mailbox) = ClobActor::new(ClobConfig::default());
+        actor.restore_snapshot(snapshot);
+        let _actor_handle = actor.start(runtime);
+
+        let err = mailbox.submit_order(fresh_bid).await.unwrap_err();
+        assert_eq!(err, ClobError::NonceIndexFull);
+
+        let next = place_tx(
+            &taker,
+            1,
+            Side::Bid,
+            100,
+            2,
+            TimeInForce::ImmediateOrCancel,
+        );
+        mailbox.submit_order(next.clone()).await.unwrap();
+        let proposed = mailbox.propose().await;
+        assert_eq!(proposed.orders, vec![next]);
+        ledger
+            .apply_match_batch(&proposed, context(3))
+            .await
+            .expect("indexed account still matches after the nonce index is full");
+        assert_eq!(ledger.nonce(&taker_addr).await.unwrap(), 2);
+        assert!(!ledger
+            .db
+            .nonce_accounts()
+            .await
+            .unwrap()
+            .contains(&fresh_addr));
+    });
+}
+
+#[test]
 fn corrupt_nonce_account_index_is_a_storage_error() {
     run_test(|| async {
         let creator = PrivateKey::from_seed(1);
@@ -2168,6 +2306,16 @@ fn corrupt_nonce_account_index_is_a_storage_error() {
         let err = ledger.db.nonce_accounts().await.unwrap_err();
         assert!(matches!(err, ClobError::Storage(_)));
     });
+}
+
+async fn fill_nonce_account_index(ledger: &mut ClobLedger<MemoryStore>) {
+    let mut accounts = ledger.db.nonce_accounts().await.unwrap();
+    let mut label = 0u64;
+    while accounts.len() < crate::db::MAX_NONCE_ACCOUNTS {
+        accounts.push(Address::reserved(&label.to_le_bytes()));
+        label += 1;
+    }
+    ledger.db.set_nonce_accounts(&accounts);
 }
 
 fn order_id_above(floor: &OrderId) -> OrderId {

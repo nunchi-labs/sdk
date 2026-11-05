@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
+    db::MAX_NONCE_ACCOUNTS,
     engine::{validate_order, MatchCursor},
     ClobActorSnapshot, ClobError, ClobOperation, MatchBatch, MatchEngine, Market, MarketId, Order,
     OrderId, Transaction, MAX_MATCH_BATCH_FILLS, MAX_MATCH_BATCH_ORDERS,
@@ -464,26 +465,61 @@ impl ClobActor {
         {
             return Err(ClobError::InvalidOrder("duplicate pending order id"));
         }
+        if !self.nonce_account_admitted(&tx.account_id) {
+            return Err(ClobError::NonceIndexFull);
+        }
         self.pending_orders.push(tx);
         Ok(())
     }
 
+    /// `account` can be recovered after restart, or the nonce index still has room for it.
+    fn nonce_account_admitted(&self, account: &Address) -> bool {
+        if self.nonces.contains_key(account) {
+            return true;
+        }
+        let mut reserved = 0usize;
+        let mut seen = BTreeSet::new();
+        for tx in &self.pending_orders {
+            if self.nonces.contains_key(&tx.account_id) {
+                continue;
+            }
+            if &tx.account_id == account {
+                return true;
+            }
+            if seen.insert(&tx.account_id) {
+                reserved += 1;
+            }
+        }
+        self.nonces
+            .len()
+            .saturating_add(reserved)
+            < MAX_NONCE_ACCOUNTS
+    }
+
     fn proposal_orders(&mut self) -> Vec<Transaction> {
         let mut expected_nonces = self.nonces.clone();
+        let mut new_accounts = 0usize;
+        let new_account_capacity = MAX_NONCE_ACCOUNTS.saturating_sub(self.nonces.len());
         let mut stale = BTreeSet::new();
         let mut orders = Vec::new();
         for tx in &self.pending_orders {
             let order_id = OrderId(tx.digest());
-            let expected = expected_nonces.entry(tx.account_id.clone()).or_default();
-            match tx.payload.nonce.cmp(expected) {
+            let already_indexed = expected_nonces.contains_key(&tx.account_id);
+            if !already_indexed && new_accounts >= new_account_capacity {
+                continue;
+            }
+            let expected = expected_nonces.get(&tx.account_id).copied().unwrap_or(0);
+            match tx.payload.nonce.cmp(&expected) {
                 std::cmp::Ordering::Less => {
                     stale.insert(order_id);
                 }
                 std::cmp::Ordering::Equal if self.can_locally_replay(tx) => {
-                    orders.push(tx.clone());
-                    if let Some(next) = expected.checked_add(1) {
-                        *expected = next;
+                    if !already_indexed {
+                        new_accounts += 1;
                     }
+                    orders.push(tx.clone());
+                    let next = expected.checked_add(1).unwrap_or(expected);
+                    expected_nonces.insert(tx.account_id.clone(), next);
                 }
                 std::cmp::Ordering::Equal | std::cmp::Ordering::Greater => {}
             }
