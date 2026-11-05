@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    engine::validate_order, ClobActorSnapshot, ClobError, ClobOperation, MatchBatch, MatchEngine,
-    Market, MarketId, Order, OrderId, Transaction, MAX_MATCH_BATCH_FILLS, MAX_MATCH_BATCH_ORDERS,
+    engine::{validate_order, MatchCursor},
+    ClobActorSnapshot, ClobError, ClobOperation, MatchBatch, MatchEngine, Market, MarketId, Order,
+    OrderId, Transaction, MAX_MATCH_BATCH_FILLS, MAX_MATCH_BATCH_ORDERS,
 };
 use commonware_codec::{Encode, Read};
 use commonware_cryptography::PublicKey;
@@ -331,19 +332,21 @@ impl ClobActor {
         let resting_snapshots = self.active_orders.values().cloned().collect::<Vec<_>>();
         let markets = self.markets.clone();
         let sequences = self.sequences.clone();
-        let replay_fills = |batch: &[Transaction]| {
-            MatchEngine::replay_with_resting(
-                &resting_snapshots,
-                batch,
-                &markets,
-                sequences.clone(),
-                RuntimeContext::default(),
-            )
-            .map(|result| result.fills.len())
+        let mut replay = match ProposalFillCount::new(
+            &resting_snapshots,
+            &markets,
+            sequences.clone(),
+            RuntimeContext::default(),
+        ) {
+            Ok(replay) => replay,
+            Err(error) => {
+                warn!(?error, "dropping invalid local clob proposal batch");
+                return MatchBatch::default();
+            }
         };
         let selected = select_bounded_orders(
             &orders,
-            replay_fills,
+            |batch| replay.fill_count(batch),
             MAX_MATCH_BATCH_ORDERS,
             MAX_MATCH_BATCH_FILLS,
         );
@@ -524,6 +527,72 @@ impl ClobActor {
     }
 }
 
+/// Fill counts for proposal selection.
+///
+/// Each call is the accepted prefix plus one candidate, or the accepted prefix again at the end.
+/// The cursor commits an order once a later call keeps it, so a candidate verifies and matches once.
+pub(crate) struct ProposalFillCount {
+    resting: MatchCursor,
+    committed: MatchCursor,
+    committed_orders: Vec<Transaction>,
+    speculative: Option<(Transaction, MatchCursor, usize)>,
+}
+
+impl ProposalFillCount {
+    pub(crate) fn new(
+        resting_orders: &[Order],
+        markets: &BTreeMap<MarketId, Market>,
+        sequences: BTreeMap<MarketId, u64>,
+        context: RuntimeContext,
+    ) -> Result<Self, ClobError> {
+        let resting = MatchCursor::from_resting(resting_orders, markets, sequences, context)?;
+        let committed = resting.clone();
+        Ok(Self {
+            resting,
+            committed,
+            committed_orders: Vec::new(),
+            speculative: None,
+        })
+    }
+
+    pub(crate) fn fill_count(&mut self, batch: &[Transaction]) -> Result<usize, ClobError> {
+        if batch.is_empty() {
+            return Ok(0);
+        }
+
+        if let Some((tx, cursor, fills)) = self.speculative.take() {
+            let commit_at = self.committed_orders.len();
+            let extends = batch.len() > commit_at
+                && batch[..commit_at] == self.committed_orders[..]
+                && batch[commit_at] == tx;
+            if extends {
+                self.committed = cursor;
+                self.committed_orders.push(tx);
+                if batch.len() == self.committed_orders.len() {
+                    return Ok(fills);
+                }
+            }
+        }
+
+        if self.committed_orders.len() > batch.len()
+            || batch[..self.committed_orders.len()] != self.committed_orders[..]
+        {
+            self.committed = self.resting.clone();
+            self.committed_orders.clear();
+        }
+
+        let mut trial = self.committed.clone();
+        for tx in &batch[self.committed_orders.len()..] {
+            trial.push(tx)?;
+        }
+        let fills = trial.fill_len();
+        if batch.len() == self.committed_orders.len() + 1 {
+            self.speculative = Some((batch[batch.len() - 1].clone(), trial, fills));
+        }
+        Ok(fills)
+    }
+}
+
 /// Pick a nonce-valid subset that matches and fits in one batch.
 ///
 /// A full pending set above the order cap used to make every proposal empty. Non-filling
@@ -539,6 +608,8 @@ pub(crate) fn select_bounded_orders(
         return Vec::new();
     }
     let mut chosen = Vec::new();
+    // Fill count of `chosen`. The trial callback already produced it when that prefix was accepted.
+    let mut chosen_fills = 0;
     let mut blocked = BTreeSet::new();
     let mut next_nonce = BTreeMap::new();
     for (index, tx) in orders.iter().enumerate() {
@@ -565,13 +636,13 @@ pub(crate) fn select_bounded_orders(
                 continue;
             }
         };
-        let chosen_fills = fill_count(&chosen).unwrap_or(0);
         let later_orders = index + 1 < orders.len();
         if fills == chosen_fills && chosen.len() + 1 == max_orders && later_orders {
             blocked.insert(tx.account_id.clone());
             continue;
         }
         chosen = trial;
+        chosen_fills = fills;
         match tx.payload.nonce.checked_add(1) {
             Some(next) => {
                 next_nonce.insert(tx.account_id.clone(), next);

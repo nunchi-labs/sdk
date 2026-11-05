@@ -274,6 +274,53 @@ impl MatchEngine {
     }
 }
 
+/// Proposer replay positioned after the resting book and any orders already applied.
+///
+/// A trial clones this cursor and applies one new order.
+#[derive(Clone)]
+pub(crate) struct MatchCursor {
+    engine: MatchEngine,
+    sequences: BTreeMap<MarketId, u64>,
+    fills: Vec<Fill>,
+    markets: BTreeMap<MarketId, Market>,
+    context: RuntimeContext,
+}
+
+impl MatchCursor {
+    pub(crate) fn from_resting(
+        resting_orders: &[Order],
+        markets: &BTreeMap<MarketId, Market>,
+        sequences: BTreeMap<MarketId, u64>,
+        context: RuntimeContext,
+    ) -> Result<Self, ClobError> {
+        let mut engine = MatchEngine::new();
+        engine.seed_resting_orders(resting_orders, markets)?;
+        Ok(Self {
+            engine,
+            sequences,
+            fills: Vec::new(),
+            markets: markets.clone(),
+            context,
+        })
+    }
+
+    pub(crate) fn fill_len(&self) -> usize {
+        self.fills.len()
+    }
+
+    pub(crate) fn push(&mut self, tx: &Transaction) -> Result<(), ClobError> {
+        let mut order_updates = BTreeMap::new();
+        self.engine.apply_order_tx(
+            tx,
+            &self.markets,
+            self.context,
+            &mut self.sequences,
+            &mut self.fills,
+            &mut order_updates,
+        )
+    }
+}
+
 impl Book {
     fn side_mut(&mut self, side: Side) -> &mut Vec<Order> {
         match side {

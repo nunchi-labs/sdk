@@ -1688,6 +1688,83 @@ fn bounded_proposal_keeps_a_slot_for_a_later_crossing_order() {
 }
 
 #[test]
+fn incremental_fill_counts_match_a_full_replay() {
+    let maker = PrivateKey::from_seed(2);
+    let filler = PrivateKey::from_seed(3);
+    let taker = PrivateKey::from_seed(4);
+    let markets = test_markets();
+    let mut sequences = BTreeMap::new();
+    sequences.insert(market(), 0);
+    let ask = place_tx(
+        &maker,
+        0,
+        Side::Ask,
+        100,
+        2,
+        TimeInForce::GoodTilCancelled,
+    );
+    let resting = MatchEngine::replay(std::slice::from_ref(&ask), &markets, sequences, context(2))
+        .unwrap();
+    let resting_orders = resting.orders.values().cloned().collect::<Vec<_>>();
+    let mut orders = (0..8)
+        .map(|nonce| {
+            place_tx(
+                &filler,
+                nonce,
+                Side::Bid,
+                50,
+                2,
+                TimeInForce::GoodTilCancelled,
+            )
+        })
+        .collect::<Vec<_>>();
+    orders.push(place_tx(
+        &taker,
+        0,
+        Side::Bid,
+        100,
+        2,
+        TimeInForce::ImmediateOrCancel,
+    ));
+    let mut counter = crate::actor::ProposalFillCount::new(
+        &resting_orders,
+        &markets,
+        resting.sequences.clone(),
+        context(3),
+    )
+    .unwrap();
+    let selected = crate::actor::select_bounded_orders(
+        &orders,
+        |batch| {
+            let incremental = counter.fill_count(batch)?;
+            let full = MatchEngine::replay_with_resting(
+                &resting_orders,
+                batch,
+                &markets,
+                resting.sequences.clone(),
+                context(3),
+            )?
+            .fills
+            .len();
+            assert_eq!(incremental, full);
+            Ok(incremental)
+        },
+        8,
+        8,
+    );
+    let replay = MatchEngine::replay_with_resting(
+        &resting_orders,
+        &selected,
+        &markets,
+        resting.sequences,
+        context(3),
+    )
+    .unwrap();
+    assert_eq!(replay.fills.len(), 1);
+    assert!(selected.iter().any(|tx| tx.digest() == orders.last().unwrap().digest()));
+}
+
+#[test]
 fn full_book_applies_removals_before_inserts() {
     run_test(|| async {
         let creator = PrivateKey::from_seed(1);

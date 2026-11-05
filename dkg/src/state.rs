@@ -626,15 +626,22 @@ where
     }
 
     /// Persists a player acknowledgment we received (as a dealer) for crash recovery.
-    /// Returns false if the ack was already stored.
+    ///
+    /// Returns false if this same ack is already stored. A different ack for the player
+    /// replaces it. Journal replay keeps the latest record, which is also what the dealer
+    /// view has accepted.
     pub async fn append_ack(
         &mut self,
         epoch: EpochNum,
         player: P,
         ack: PlayerAck<P>,
     ) -> Result<bool, Error> {
-        // Check if already stored
-        if self.has_cached(epoch, |c| &c.acks, &player) {
+        if self
+            .epochs
+            .get(&epoch)
+            .and_then(|cache| cache.acks.get(&player))
+            == Some(&ack)
+        {
             return Ok(false);
         }
 
@@ -821,26 +828,31 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
         // Finalize takes the dealer view and leaves `unsent` populated. A late ack must not
         // be journaled: restart replays every stored ack into a new dealer and can sign a
         // different log than the one this process already produced.
-        if self.dealer.is_none() {
+        let Some(dealer) = self.dealer.as_mut() else {
+            return false;
+        };
+        // Rejection leaves the dealer unchanged. Journaling it would keep this player's slot,
+        // so recovery would skip it while a later valid ack could be applied only in memory.
+        if dealer
+            .receive_player_ack(player.clone(), ack.clone())
+            .is_err()
+        {
             return false;
         }
-        // Persist before the dealer view accepts the ack. `receive_player_ack` cannot be rolled
-        // back, and a later restart rebuilds the dealer from the journal. Accepting first and
-        // failing the fsync makes this process sign a log the restarted process will not.
-        match storage.append_ack(epoch, player.clone(), ack.clone()).await {
-            Ok(true) | Ok(false) => {}
+        // The view now records the ack and cannot drop just that player. Persist before
+        // reporting success. A failed fsync drops the whole view so finalize cannot sign a
+        // log the journal does not contain.
+        match storage.append_ack(epoch, player.clone(), ack).await {
+            Ok(true) | Ok(false) => {
+                self.unsent.remove(&player);
+                true
+            }
             Err(err) => {
                 error!(?epoch, ?player, %err, "failed to persist DKG ack");
-                return false;
+                self.dealer = None;
+                false
             }
         }
-        if let Some(ref mut dealer) = self.dealer {
-            if dealer.receive_player_ack(player.clone(), ack).is_ok() {
-                self.unsent.remove(&player);
-                return true;
-            }
-        }
-        false
     }
 
     /// Finalize the dealer and produce a signed log for inclusion in a block.
