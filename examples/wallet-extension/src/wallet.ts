@@ -389,25 +389,24 @@ export class Wallet {
           throw new Error("No wallet found");
         }
         await this.decryptWithLockout(wallet, password);
-        this.notifyAllAccounts([]);
-        this.rejectOutstanding("Wallet deleted");
-        this.unlockedWallet = null;
-        this.backupRevealed = false;
-        this.connectedSites.clear();
-        this.nonceCursor.clear();
-        this.factoryCursor = null;
-        await this.host.storageRemove([
-          "wallet",
-          "activity",
-          "connectedSites",
-          "pendingConnections",
-          "pendingTransactions",
-          "backupRevealed",
-          LOCKOUT_STORAGE,
-          NONCE_CURSOR_STORAGE,
-          FACTORY_CURSOR_STORAGE,
-        ]);
-        await this.persistPending();
+        await this.withSubmitLock(async () => {
+          this.notifyAllAccounts([]);
+          this.rejectOutstanding("Wallet deleted");
+          this.unlockedWallet = null;
+          this.backupRevealed = false;
+          this.connectedSites.clear();
+          await this.clearNonceCursors();
+          await this.host.storageRemove([
+            "wallet",
+            "activity",
+            "connectedSites",
+            "pendingConnections",
+            "pendingTransactions",
+            "backupRevealed",
+            LOCKOUT_STORAGE,
+          ]);
+          await this.persistPending();
+        });
         return { success: true };
       }
 
@@ -671,6 +670,7 @@ export class Wallet {
         }
         const wallet = this.unlockedWallet;
         return this.withSubmitLock(async () => {
+          this.requireUnlocked(wallet);
           const settings = await this.getSettings();
           const nonce = await this.allocateNonce(settings.rpcUrl, wallet.address);
           const factoryNonce = await this.allocateFactoryNonce(settings.rpcUrl);
@@ -717,6 +717,7 @@ export class Wallet {
         const amount = requirePositiveAmount(rawAmount);
         const wallet = this.unlockedWallet;
         return this.withSubmitLock(async () => {
+          this.requireUnlocked(wallet);
           const settings = await this.getSettings();
           const nonce = await this.allocateNonce(settings.rpcUrl, wallet.address);
           const wasm = await this.host.wasm();
@@ -736,6 +737,7 @@ export class Wallet {
         const amount = requirePositiveAmount(rawAmount);
         const wallet = this.unlockedWallet;
         return this.withSubmitLock(async () => {
+          this.requireUnlocked(wallet);
           const settings = await this.getSettings();
           const nonce = await this.allocateNonce(settings.rpcUrl, wallet.address);
           const wasm = await this.host.wasm();
@@ -771,6 +773,7 @@ export class Wallet {
           throw new Error("This wallet can only authorize a one-signature policy");
         }
         return this.withSubmitLock(async () => {
+          this.requireUnlocked(wallet);
           const settings = await this.getSettings();
           const wasm = await this.host.wasm();
           const account = wasm.derive_multisig_account(required, keys);
@@ -1207,6 +1210,12 @@ export class Wallet {
     }
   }
 
+  private requireUnlocked(wallet: UnlockedWallet): void {
+    if (this.unlockedWallet?.privateKeyHex !== wallet.privateKeyHex) {
+      throw new Error("Wallet is locked");
+    }
+  }
+
   private async authorizeTransfer(
     wallet: UnlockedWallet,
     coin: string,
@@ -1215,6 +1224,7 @@ export class Wallet {
     amount: string,
     submit: boolean
   ): Promise<{ hash?: string; digest: string; transaction: string }> {
+    this.requireUnlocked(wallet);
     const settings = await this.getSettings();
     const nonce = await this.allocateNonce(settings.rpcUrl, from);
     const signed = await this.signOnly(wallet, nonce, coin, from, to, amount);

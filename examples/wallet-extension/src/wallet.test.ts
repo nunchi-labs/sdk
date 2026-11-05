@@ -3,6 +3,7 @@ import type { Message, MessageType, Response } from "./types";
 import {
   AUTO_LOCK_MS,
   LOCKOUT_DURATION,
+  NONCE_CURSOR_STORAGE,
   MAX_UNLOCK_ATTEMPTS,
   MIN_PASSWORD_LENGTH,
   PRIVILEGED_TYPES,
@@ -964,6 +965,46 @@ describe("nonce reservation", () => {
     expect(second.success, second.error).toBe(true);
     expect(first.data).toMatchObject({ factoryNonce: 1 });
     expect(second.data).toMatchObject({ factoryNonce: 2 });
+  });
+
+  it("does not let an in-flight send rewrite cursors after delete", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    harness.setNonce(7);
+    let held = false;
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = harness.host.rpc.bind(harness.host);
+    harness.host.rpc = async (url, body) => {
+      const request = body as { method: string };
+      if (request.method === "coins.submit_transaction" && !held) {
+        held = true;
+        await gate;
+      }
+      return original(url, body);
+    };
+
+    const inflight = send(harness.wallet, "SEND_TRANSACTION", popup, transfer("1"));
+    for (let i = 0; i < 50 && !held; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(held).toBe(true);
+
+    const deleted = send(harness.wallet, "DELETE_WALLET", popup, { password: PASSWORD });
+    // Password derivation is synchronous PBKDF2. Give delete time to finish it
+    // and reach the submit lock before the in-flight send commits its cursor.
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    release();
+
+    const [sent, removed] = await Promise.all([inflight, deleted]);
+    expect(sent.success, sent.error).toBe(true);
+    expect(removed.success, removed.error).toBe(true);
+    const stored = await harness.storage.get(["wallet", NONCE_CURSOR_STORAGE, "activity"]);
+    expect(stored.wallet).toBeUndefined();
+    expect(stored[NONCE_CURSOR_STORAGE]).toBeUndefined();
+    expect(stored.activity).toBeUndefined();
   });
 });
 
