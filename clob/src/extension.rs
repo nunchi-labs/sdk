@@ -183,10 +183,6 @@ where
                 }
             }
         }
-        for fill in ledger.market_fills(&market.id).await? {
-            accounts.insert(fill.maker.clone());
-            accounts.insert(fill.taker.clone());
-        }
         snapshot.markets.push((market, sequence));
     }
     for account in ledger.tracked_accounts().await? {

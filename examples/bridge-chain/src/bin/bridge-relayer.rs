@@ -67,19 +67,25 @@ fn should_relay(cursor: Option<&RelayCursor>, source: &str, destination: Option<
     }
 }
 
+/// Cursor to store after a submission.
+///
+/// `updated` caches `source` on the destination, so the remembered certificate
+/// is the one just submitted. `stale` leaves the destination certificate
+/// unchanged. Any other result is not recorded and will be retried.
 fn cursor_after_submit(
     source: &str,
     destination: Option<&str>,
     result: &str,
 ) -> Option<RelayCursor> {
-    if result == "updated" || result == "stale" {
-        Some(RelayCursor {
-            source: source.to_string(),
-            destination: destination.map(str::to_string),
-        })
-    } else {
-        None
-    }
+    let destination = match result {
+        "updated" => Some(source),
+        "stale" => destination,
+        _ => return None,
+    };
+    Some(RelayCursor {
+        source: source.to_string(),
+        destination: destination.map(str::to_string),
+    })
 }
 
 async fn relay_one(
@@ -176,9 +182,14 @@ mod tests {
             updated,
             RelayCursor {
                 source: source.to_string(),
-                destination: None,
+                destination: Some(source.to_string()),
             }
         );
         assert!(!should_relay(Some(&updated), source, Some(source)));
+        assert!(should_relay(Some(&updated), source, None));
+
+        let replaced = cursor_after_submit(source, Some("bb"), "updated").unwrap();
+        assert_eq!(replaced.destination.as_deref(), Some(source));
+        assert!(should_relay(Some(&replaced), source, None));
     }
 }
