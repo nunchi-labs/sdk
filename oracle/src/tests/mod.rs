@@ -3,11 +3,11 @@ use std::{collections::BTreeMap, future::Future};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_runtime::{deterministic, Runner as _};
-use nunchi_common::{Address, RuntimeContext, StateError, StateStore};
+use nunchi_common::{Address, MultisigPolicy, RuntimeContext, StateError, StateStore};
 use nunchi_crypto::PrivateKey;
 
 use crate::{
-    IntervalKey, NamespaceId, OracleError, OracleGenesis, OracleLedger, OracleOperation,
+    IntervalKey, NamespaceId, OracleDB, OracleError, OracleGenesis, OracleLedger, OracleOperation,
     Transaction, MAX_PAYLOAD_SIZE, MAX_PROOF_SIZE,
 };
 
@@ -250,6 +250,44 @@ fn transaction_codec_round_trips() {
     let encoded = tx.encode();
 
     assert_eq!(Transaction::decode(encoded).unwrap(), tx);
+}
+
+#[test]
+fn multisig_authorization_cannot_impersonate_another_account() {
+    run_test(|| async {
+        let attacker = PrivateKey::from_seed(2);
+        let victim = Address::external(&PrivateKey::from_seed(3).public_key());
+        let policy = MultisigPolicy::new(1, vec![attacker.public_key()]).unwrap();
+        let tx = Transaction::sign_multisig(
+            victim.clone(),
+            policy,
+            &[&attacker],
+            0,
+            OracleOperation::AppendRecord {
+                namespace: namespace(),
+                interval: IntervalKey::new(1),
+                payload: b"forged".to_vec(),
+                proof: None,
+            },
+        );
+        // Stateless verification accepts this: the policy is not bound to account_id.
+        assert!(tx.verify().is_ok());
+
+        let mut ledger = OracleLedger::new(MemoryStore::default());
+        assert_eq!(
+            ledger
+                .apply_transaction(&tx, context(1_000))
+                .await
+                .unwrap_err(),
+            OracleError::UnsupportedAuthorization
+        );
+        assert_eq!(ledger.db().nonce(&victim).await.unwrap(), 0);
+        assert!(ledger
+            .records_by_writer(&victim, IntervalKey::new(1), IntervalKey::new(1))
+            .await
+            .unwrap()
+            .is_empty());
+    });
 }
 
 #[test]

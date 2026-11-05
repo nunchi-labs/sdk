@@ -10,7 +10,7 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{Hasher, Sha256};
-use nunchi_common::{Address, RuntimeContext};
+use nunchi_common::{Address, Authorization, RuntimeContext};
 use nunchi_crypto::SignatureError;
 use thiserror::Error;
 
@@ -19,6 +19,8 @@ use thiserror::Error;
 pub enum ClobError {
     #[error("bad CLOB transaction signature: {0}")]
     BadSignature(#[from] SignatureError),
+    #[error("unsupported authorization: clob operations require single-key signatures")]
+    UnsupportedAuthorization,
     #[error("nonce mismatch for {account:?}: expected {expected}, got {actual}")]
     NonceMismatch {
         account: Box<Address>,
@@ -146,6 +148,10 @@ impl<D: ClobDB> ClobLedger<D> {
         context: RuntimeContext,
     ) -> Result<(), ClobError> {
         tx.verify()?;
+        // `Transaction::verify` does not bind a multisig `account_id` to its policy.
+        // Without a registered-policy lookup, a caller-supplied policy would create
+        // markets and advance nonces for an arbitrary account.
+        require_single_authorization(&tx.authorization)?;
 
         let expected = self.db.nonce(&tx.account_id).await?;
         if tx.payload.nonce != expected {
@@ -244,6 +250,7 @@ impl<D: ClobDB> ClobLedger<D> {
         let mut expected_nonces = BTreeMap::<Address, u64>::new();
         for tx in &batch.orders {
             tx.verify()?;
+            require_single_authorization(&tx.authorization)?;
             let ClobOperation::PlaceOrder { market, .. } = &tx.payload.operation else {
                 return Err(ClobError::InvalidOrder(
                     "match batches may only carry signed place-order intents",
@@ -466,6 +473,16 @@ pub fn market_id(
     bytes.extend_from_slice(tick_size.encode().as_ref());
     bytes.extend_from_slice(lot_size.encode().as_ref());
     MarketId(Sha256::hash(&[bytes.as_slice()]))
+}
+
+pub(crate) fn require_single_authorization(
+    authorization: &Authorization,
+) -> Result<(), ClobError> {
+    if matches!(authorization, Authorization::Single { .. }) {
+        Ok(())
+    } else {
+        Err(ClobError::UnsupportedAuthorization)
+    }
 }
 
 pub(crate) fn validate_market(

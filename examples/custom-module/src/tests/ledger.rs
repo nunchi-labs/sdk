@@ -1,6 +1,6 @@
 use super::MemoryState;
-use crate::{CustomLedger, CustomOperation, Transaction};
-use nunchi_common::{Address, NoopEventSink};
+use crate::{CustomError, CustomLedger, CustomOperation, Transaction};
+use nunchi_common::{Address, MultisigPolicy, NoopEventSink};
 use nunchi_crypto::PrivateKey;
 
 #[test]
@@ -20,5 +20,34 @@ fn ledger_applies_signed_transactions() {
         ledger.apply_transaction(&clear, NoopEventSink).await.unwrap();
         assert_eq!(ledger.value(&account).await.unwrap(), None);
         assert_eq!(ledger.nonce(&account).await.unwrap(), 2);
+    });
+}
+
+#[test]
+fn ledger_rejects_multisig_authorization_for_another_account() {
+    let mut state = MemoryState::default();
+    futures::executor::block_on(async {
+        let attacker = PrivateKey::ed25519_from_seed(1);
+        let victim = Address::external(&PrivateKey::ed25519_from_seed(2).public_key());
+        let policy = MultisigPolicy::new(1, vec![attacker.public_key()]).unwrap();
+        let tx = Transaction::sign_multisig(
+            victim.clone(),
+            policy,
+            &[&attacker],
+            0,
+            CustomOperation::SetValue { value: 42 },
+        );
+        assert!(tx.verify().is_ok());
+
+        let mut ledger = CustomLedger::new(&mut state);
+        assert_eq!(
+            ledger
+                .apply_transaction(&tx, NoopEventSink)
+                .await
+                .unwrap_err(),
+            CustomError::UnsupportedAuthorization
+        );
+        assert_eq!(ledger.value(&victim).await.unwrap(), None);
+        assert_eq!(ledger.nonce(&victim).await.unwrap(), 0);
     });
 }

@@ -2,7 +2,7 @@ use crate::{
     value_cleared_event, value_set_event, CustomDB, CustomOperation, Transaction, ValueCleared,
     ValueSet,
 };
-use nunchi_common::{Address, Event, EventSink};
+use nunchi_common::{Address, Authorization, Event, EventSink};
 use nunchi_crypto::SignatureError;
 use thiserror::Error;
 
@@ -11,6 +11,8 @@ use thiserror::Error;
 pub enum CustomError {
     #[error("bad transaction signature: {0}")]
     BadSignature(#[from] SignatureError),
+    #[error("unsupported authorization: custom module operations require single-key signatures")]
+    UnsupportedAuthorization,
     #[error("nonce mismatch for {account:?}: expected {expected}, got {actual}")]
     NonceMismatch {
         account: Box<Address>,
@@ -62,6 +64,11 @@ impl<D: CustomDB> CustomLedger<D> {
         Events: EventSink + Send,
     {
         tx.verify()?;
+        // `Transaction::verify` does not bind a multisig account to its policy. This module
+        // has no registered-policy lookup, so multisig authorization is rejected.
+        if !matches!(tx.authorization, Authorization::Single { .. }) {
+            return Err(CustomError::UnsupportedAuthorization);
+        }
 
         let expected = self.db.nonce(&tx.account_id).await?;
         if tx.payload.nonce != expected {

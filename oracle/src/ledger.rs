@@ -4,7 +4,7 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{Hasher, Sha256};
-use nunchi_common::{Address, RuntimeContext};
+use nunchi_common::{Address, Authorization, RuntimeContext};
 use nunchi_crypto::SignatureError;
 use thiserror::Error;
 
@@ -13,6 +13,8 @@ use thiserror::Error;
 pub enum OracleError {
     #[error("bad oracle transaction signature: {0}")]
     BadSignature(#[from] SignatureError),
+    #[error("unsupported authorization: oracle operations require single-key signatures")]
+    UnsupportedAuthorization,
     #[error("nonce mismatch for {account:?}: expected {expected}, got {actual}")]
     NonceMismatch {
         account: Box<Address>,
@@ -67,11 +69,20 @@ impl<D: OracleDB> OracleLedger<D> {
     /// transactions that already passed stateless verification
     /// ([`Transaction::verify`]), which the chain guarantees at mempool
     /// admission and block verification.
+    ///
+    /// Only single-key authorization is accepted. `Transaction::verify` binds a
+    /// signature to `account_id`, but for multisig it does not bind `account_id`
+    /// to the transaction-supplied policy. This module has no registered-policy
+    /// lookup, so a caller-chosen policy would authorize writes as any account.
     pub async fn apply_transaction(
         &mut self,
         tx: &Transaction,
         context: RuntimeContext,
     ) -> Result<(), OracleError> {
+        if !matches!(tx.authorization, Authorization::Single { .. }) {
+            return Err(OracleError::UnsupportedAuthorization);
+        }
+
         let expected = self.db.nonce(&tx.account_id).await?;
         if tx.payload.nonce != expected {
             return Err(OracleError::NonceMismatch {

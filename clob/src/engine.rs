@@ -102,6 +102,7 @@ impl MatchEngine {
         order_updates: &mut BTreeMap<OrderId, Order>,
     ) -> Result<(), ClobError> {
         tx.verify()?;
+        crate::ledger::require_single_authorization(&tx.authorization)?;
         let order_id = OrderId(tx.digest());
         let ClobOperation::PlaceOrder {
             market,

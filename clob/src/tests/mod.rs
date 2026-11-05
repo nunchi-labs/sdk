@@ -7,7 +7,9 @@ use commonware_p2p::simulated::{self, Link, Network};
 use commonware_runtime::{deterministic, Clock, Runner as _, Supervisor};
 use commonware_utils::{probability, NZUsize, NZU32};
 use governor::Quota;
-use nunchi_common::{Address, CommitState, RuntimeContext, StateError, StateStore};
+use nunchi_common::{
+    Address, CommitState, MultisigPolicy, RuntimeContext, StateError, StateStore,
+};
 use nunchi_crypto::PrivateKey;
 
 use crate::{
@@ -195,6 +197,87 @@ fn genesis_seeds_markets() {
         assert_eq!(markets[0].id, market());
         assert_eq!(markets[0].tick_size, 5);
         assert_eq!(markets[0].lot_size, 2);
+    });
+}
+
+fn forged_multisig_order(victim: Address, nonce: u64) -> Transaction {
+    let attacker = PrivateKey::from_seed(50);
+    let policy = MultisigPolicy::new(1, vec![attacker.public_key()]).unwrap();
+    Transaction::sign_multisig(
+        victim,
+        policy,
+        &[&attacker],
+        nonce,
+        ClobOperation::PlaceOrder {
+            market: market(),
+            side: Side::Bid,
+            price: 100,
+            base_quantity: 4,
+            time_in_force: TimeInForce::GoodTilCancelled,
+        },
+    )
+}
+
+#[test]
+fn multisig_authorization_cannot_create_a_market_for_another_account() {
+    run_test(|| async {
+        let attacker = PrivateKey::from_seed(1);
+        let victim = Address::external(&PrivateKey::from_seed(2).public_key());
+        let policy = MultisigPolicy::new(1, vec![attacker.public_key()]).unwrap();
+        let tx = Transaction::sign_multisig(
+            victim.clone(),
+            policy,
+            &[&attacker],
+            0,
+            ClobOperation::CreateMarket {
+                base_asset: asset(b"base"),
+                quote_asset: asset(b"quote"),
+                tick_size: MARKET_TICK,
+                lot_size: MARKET_LOT,
+            },
+        );
+        assert!(tx.verify().is_ok());
+
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        assert_eq!(
+            ledger.apply_transaction(&tx, context(1)).await.unwrap_err(),
+            ClobError::UnsupportedAuthorization
+        );
+        assert!(ledger.markets().await.unwrap().is_empty());
+        assert_eq!(ledger.nonce(&victim).await.unwrap(), 0);
+    });
+}
+
+#[test]
+fn multisig_match_batch_cannot_trade_as_another_account() {
+    run_test(|| async {
+        let creator = PrivateKey::from_seed(1);
+        let victim = Address::external(&PrivateKey::from_seed(2).public_key());
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        seed_market(&mut ledger, &creator).await;
+
+        let forged = forged_multisig_order(victim.clone(), 0);
+        assert!(forged.verify().is_ok());
+        let err = MatchEngine::replay(
+            std::slice::from_ref(&forged),
+            &BTreeMap::from([(market(), ledger.market(&market()).await.unwrap().unwrap())]),
+            BTreeMap::from([(market(), 0)]),
+            context(2),
+        )
+        .unwrap_err();
+        assert_eq!(err, ClobError::UnsupportedAuthorization);
+
+        let batch = MatchBatch {
+            orders: vec![forged],
+            fills: Vec::new(),
+        };
+        assert_eq!(
+            ledger.apply_match_batch(&batch, context(2)).await.unwrap_err(),
+            ClobError::UnsupportedAuthorization
+        );
+        assert!(ledger.market_fills(&market()).await.unwrap().is_empty());
+        assert_eq!(ledger.nonce(&victim).await.unwrap(), 0);
+        assert!(ledger.book(&market(), Side::Bid).await.unwrap().is_empty());
     });
 }
 
@@ -1228,6 +1311,22 @@ fn clob_actor_holds_order_when_market_metadata_is_missing() {
 
         let batch = mailbox.propose().await;
         assert!(batch.is_empty());
+    });
+}
+
+#[test]
+fn clob_actor_rejects_multisig_order_for_another_account() {
+    deterministic::Runner::default().start(|context| async move {
+        let (actor, mailbox) = ClobActor::new(ClobConfig::default());
+        let _actor_handle = actor.start(context);
+        let victim = Address::external(&PrivateKey::from_seed(9).public_key());
+
+        let err = mailbox
+            .submit_order(forged_multisig_order(victim, 0))
+            .await
+            .unwrap_err();
+        assert_eq!(err, ClobError::UnsupportedAuthorization);
+        assert!(mailbox.propose().await.is_empty());
     });
 }
 

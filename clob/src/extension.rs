@@ -36,7 +36,10 @@ impl ConsensusExtension for ClobExtension {
     }
 
     async fn verify_payload(&mut self, payload: &Self::Payload) -> bool {
-        payload.orders.iter().all(|tx| tx.verify().is_ok())
+        payload.orders.iter().all(|tx| {
+            tx.verify().is_ok()
+                && crate::ledger::require_single_authorization(&tx.authorization).is_ok()
+        })
     }
 
     async fn apply_payload<S>(
