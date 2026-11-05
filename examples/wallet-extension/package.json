@@ -1,6 +1,7 @@
 {
   "name": "nunchi-wallet-extension",
   "version": "0.1.0",
+  "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -28,10 +29,11 @@
     "@types/react-dom": "^18.2.17",
     "@vitejs/plugin-react": "^4.7.0",
     "typescript": "^5.2.2",
-    "vite": "6.4.3",
-    "vitest": "^4.1.11"
+    "vite": "^6.4.5",
+    "vitest": "^4.1.12"
   },
   "overrides": {
-    "vite": "6.4.3"
+    "source-map-js": "^1.2.2",
+    "vite": "^6.4.5"
   }
 }
