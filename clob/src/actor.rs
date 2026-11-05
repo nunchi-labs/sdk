@@ -12,7 +12,7 @@ use futures::{
     channel::{mpsc, oneshot},
     FutureExt, SinkExt, StreamExt,
 };
-use nunchi_common::{Address, Authorization, RuntimeContext};
+use nunchi_common::{Address, RuntimeContext};
 use tracing::{debug, warn};
 
 /// Runtime settings for the validator-local CLOB actor.
@@ -431,9 +431,6 @@ impl ClobActor {
 
     fn accept_order(&mut self, tx: Transaction) -> Result<(), ClobError> {
         tx.verify()?;
-        if !matches!(tx.authorization, Authorization::Single { .. }) {
-            return Err(ClobError::UnsupportedAuthorization);
-        }
         let ClobOperation::PlaceOrder {
             market,
             price,

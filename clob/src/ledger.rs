@@ -11,7 +11,7 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{Hasher, Sha256};
-use nunchi_common::{Address, Authorization, RuntimeContext};
+use nunchi_common::{Address, RuntimeContext};
 use nunchi_crypto::SignatureError;
 use thiserror::Error;
 
@@ -20,9 +20,6 @@ use thiserror::Error;
 pub enum ClobError {
     #[error("bad CLOB transaction signature: {0}")]
     BadSignature(#[from] SignatureError),
-    /// Multisig authorization is not bound to the account by signature verification.
-    #[error("unsupported clob authorization")]
-    UnsupportedAuthorization,
     #[error("nonce mismatch for {account:?}: expected {expected}, got {actual}")]
     NonceMismatch {
         account: Box<Address>,
@@ -164,7 +161,6 @@ impl<D: ClobDB> ClobLedger<D> {
         context: RuntimeContext,
     ) -> Result<(), ClobError> {
         tx.verify()?;
-        ensure_single_signer(&tx.authorization)?;
 
         let expected = self.db.nonce(&tx.account_id).await?;
         if tx.payload.nonce != expected {
@@ -263,7 +259,6 @@ impl<D: ClobDB> ClobLedger<D> {
         let mut expected_nonces = BTreeMap::<Address, u64>::new();
         for tx in &batch.orders {
             tx.verify()?;
-            ensure_single_signer(&tx.authorization)?;
             let ClobOperation::PlaceOrder { market, .. } = &tx.payload.operation else {
                 return Err(ClobError::InvalidOrder(
                     "match batches may only carry signed place-order intents",
@@ -556,14 +551,6 @@ pub(crate) fn validate_market(
         return Err(ClobError::InvalidMarket("lot size must be non-zero"));
     }
     Ok(())
-}
-
-fn ensure_single_signer(authorization: &Authorization) -> Result<(), ClobError> {
-    if matches!(authorization, Authorization::Single { .. }) {
-        Ok(())
-    } else {
-        Err(ClobError::UnsupportedAuthorization)
-    }
 }
 
 struct OrderUpdateBatches {

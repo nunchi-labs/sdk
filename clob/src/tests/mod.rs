@@ -181,6 +181,67 @@ async fn sync_actor_from_ledger(
 }
 
 #[test]
+fn forged_multisig_cannot_create_market_for_another_account() {
+    run_test(|| async {
+        let victim = PrivateKey::from_seed(1);
+        let attacker = PrivateKey::from_seed(2);
+        let victim_account = Address::external(&victim.public_key());
+        let forged = MultisigPolicy::new(1, vec![attacker.public_key()]).unwrap();
+        let tx = Transaction::sign_multisig(
+            victim_account,
+            forged,
+            &[&attacker],
+            0,
+            ClobOperation::CreateMarket {
+                base_asset: asset(b"base"),
+                quote_asset: asset(b"quote"),
+                tick_size: MARKET_TICK,
+                lot_size: MARKET_LOT,
+            },
+        );
+
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        let err = ledger
+            .apply_transaction(&tx, context(1))
+            .await
+            .expect_err("forged authorization");
+
+        assert!(matches!(err, ClobError::BadSignature(_)));
+        assert!(ledger.market(&market()).await.unwrap().is_none());
+    });
+}
+
+#[test]
+fn policy_derived_multisig_can_create_market() {
+    run_test(|| async {
+        let creator = PrivateKey::from_seed(1);
+        let policy = MultisigPolicy::new(1, vec![creator.public_key()]).unwrap();
+        let account = Address::multisig(&policy);
+        let tx = Transaction::sign_multisig(
+            account.clone(),
+            policy,
+            &[&creator],
+            0,
+            ClobOperation::CreateMarket {
+                base_asset: asset(b"base"),
+                quote_asset: asset(b"quote"),
+                tick_size: MARKET_TICK,
+                lot_size: MARKET_LOT,
+            },
+        );
+
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        ledger
+            .apply_transaction(&tx, context(1))
+            .await
+            .expect("policy-derived multisig");
+
+        let created = ledger.market(&market()).await.unwrap().expect("market");
+        assert_eq!(created.created_by, account);
+    });
+}
+
+#[test]
 fn transaction_codec_round_trips() {
     let signer = PrivateKey::from_seed(1);
     let tx = Transaction::sign(
@@ -1350,13 +1411,13 @@ fn create_market_rejects_multisig_for_another_account() {
                 lot_size: MARKET_LOT,
             },
         );
-        tx.verify().expect("forged multisig still verifies");
+        assert!(tx.verify().is_err());
         let mut ledger = ClobLedger::new(MemoryStore::default());
         let err = ledger
             .apply_transaction(&tx, context(1))
             .await
             .unwrap_err();
-        assert_eq!(err, ClobError::UnsupportedAuthorization);
+        assert!(matches!(err, ClobError::BadSignature(_)));
         assert!(ledger.db.market_index().await.unwrap().is_empty());
     });
 }
@@ -1813,7 +1874,7 @@ fn extension_rejects_unbound_multisig_and_bad_signatures() {
                 time_in_force: TimeInForce::GoodTilCancelled,
             },
         );
-        forged.verify().expect("forged multisig still verifies");
+        assert!(forged.verify().is_err());
         assert!(!extension
             .verify_payload(&MatchBatch {
                 orders: vec![forged.clone()],
@@ -1826,7 +1887,7 @@ fn extension_rejects_unbound_multisig_and_bad_signatures() {
             .submit_order(forged)
             .await
             .unwrap_err();
-        assert_eq!(err, ClobError::UnsupportedAuthorization);
+        assert!(matches!(err, ClobError::BadSignature(_)));
     });
 }
 

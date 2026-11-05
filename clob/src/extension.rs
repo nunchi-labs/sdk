@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use crate::{ClobLedger, ClobMailbox, ClobOperation, MatchBatch, MarketId, Order, OrderId};
 use nunchi_chain::{BlockExtension, ConsensusExtension};
-use nunchi_common::{Address, Authorization, RuntimeContext, StateStore};
+use nunchi_common::{Address, RuntimeContext, StateStore};
 use tracing::warn;
 
 /// Consensus extension that carries proposer CLOB matches outside the normal mempool.
@@ -36,9 +36,7 @@ impl ConsensusExtension for ClobExtension {
     }
 
     async fn verify_payload(&mut self, payload: &Self::Payload) -> bool {
-        payload.orders.iter().all(|tx| {
-            tx.verify().is_ok() && matches!(tx.authorization, Authorization::Single { .. })
-        })
+        payload.orders.iter().all(|tx| tx.verify().is_ok())
     }
 
     async fn apply_payload<S>(

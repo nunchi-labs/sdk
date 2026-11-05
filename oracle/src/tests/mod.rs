@@ -294,7 +294,7 @@ fn append_rejects_multisig_for_another_account() {
                 proof: None,
             },
         );
-        tx.verify().expect("forged multisig still verifies");
+        assert!(tx.verify().is_err());
 
         let mut ledger = OracleLedger::new(MemoryStore::default());
         let err = ledger
