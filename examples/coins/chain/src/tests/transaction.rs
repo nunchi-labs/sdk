@@ -52,7 +52,7 @@ fn oracle_transaction(seed: u64, nonce: u64) -> OracleTransaction {
         &signer,
         nonce,
         OracleOperation::AppendRecord {
-            namespace: NamespaceId(Sha256::hash(b"test-namespace")),
+            namespace: NamespaceId(Sha256::hash(&[b"test-namespace"])),
             interval: IntervalKey::new(0),
             payload: b"payload".to_vec(),
             proof: None,
@@ -66,8 +66,8 @@ fn clob_transaction(seed: u64, nonce: u64) -> ClobTransaction {
         &signer,
         nonce,
         ClobOperation::CreateMarket {
-            base_asset: AssetId(Sha256::hash(b"base")),
-            quote_asset: AssetId(Sha256::hash(b"quote")),
+            base_asset: AssetId(Sha256::hash(&[b"base"])),
+            quote_asset: AssetId(Sha256::hash(&[b"quote"])),
             tick_size: 1,
             lot_size: 1,
         },

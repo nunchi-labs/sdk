@@ -1,7 +1,7 @@
 //! Indexer upload integration for configured coins-chain nodes.
 
-use crate::{Block, Finalized, Notarized, Seed};
-use commonware_consensus::marshal::{core::Mailbox as MarshalMailbox, standard::Standard};
+use crate::{Finalized, Notarized, Seed};
+use commonware_consensus::marshal::core::Mailbox as MarshalMailbox;
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::bls12381::{
     dkg::feldman_desmedt::Output as DkgOutput, primitives::variant::MinSig,
@@ -123,7 +123,7 @@ pub trait Client: Clone + Send + Sync + 'static {
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 
-/// HTTP client for an Alto-compatible coins-chain indexer API.
+/// HTTP client for a Constantinople-compatible coins-chain indexer API.
 #[derive(Clone)]
 pub struct HttpClient {
     uri: String,
@@ -257,7 +257,7 @@ impl<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> Indexer<E
     pub(crate) async fn new(
         context: E,
         client: C,
-        marshal: MarshalMailbox<crate::Scheme, Standard<Block>>,
+        marshal: MarshalMailbox<crate::Scheme, crate::EngineVariant>,
         backfiller: (queue::Writer<E, Entry>, queue::Reader<E, Entry>),
         config: Config,
     ) -> Self {
@@ -288,7 +288,10 @@ impl<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> Indexer<E
             };
             uploads.lock().recover_queued(position, &entry);
         }
-        reader.reset().await;
+        reader
+            .reset()
+            .await
+            .expect("failed to reset indexer spool reader");
         let (admission_sender, admission_receiver) = commonware_actor::mailbox::new(
             context.child("admission_mailbox"),
             mailbox_size,

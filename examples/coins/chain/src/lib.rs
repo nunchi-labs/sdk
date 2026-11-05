@@ -29,17 +29,24 @@ pub mod transaction;
 #[cfg(test)]
 mod tests;
 
-pub use nunchi_chain::{StateCommitment, MAX_TRANSACTIONS};
+pub use nunchi_chain::{dummy_genesis_parent, genesis_parent, StateCommitment, MAX_TRANSACTIONS};
 pub use nunchi_dkg::{
-    Activity, Context, EdScheme, EpochProvider, Finalization, Identity, Notarization, Provider,
-    PublicKey, Scheme, Seed, Seedable, Signature, ThresholdScheme, MAX_SUPPORTED_MODE,
+    EdScheme, EpochProvider, Identity, Provider, PublicKey, Scheme, Seed, Seedable, Signature,
+    ThresholdScheme, MAX_SUPPORTED_MODE,
 };
 pub use runtime::{CoinsRuntime, RuntimeError};
 pub use transaction::Transaction;
 
-pub type Block<Tx = Transaction> = nunchi_chain::Block<Tx, nunchi_clob::ClobExtension>;
+pub type Block<Tx = Transaction> = nunchi_chain::CodingBlock<Tx, nunchi_clob::ClobExtension>;
+pub type BlockCommitment<Tx = Transaction> =
+    nunchi_chain::BlockCommitment<Tx, nunchi_clob::ClobExtension>;
+pub type Context<Tx = Transaction> = nunchi_chain::CodingContext<Tx, nunchi_clob::ClobExtension>;
 pub type Notarized<Tx = Transaction> = nunchi_chain::Notarized<Tx, nunchi_clob::ClobExtension>;
 pub type Finalized<Tx = Transaction> = nunchi_chain::Finalized<Tx, nunchi_clob::ClobExtension>;
+pub type Finalization = nunchi_dkg::Finalization<BlockCommitment>;
+pub type Notarization = nunchi_dkg::Notarization<BlockCommitment>;
+pub type Activity = nunchi_dkg::Activity<BlockCommitment>;
+pub type EngineVariant = nunchi_chain::EngineVariant<Transaction, nunchi_clob::ClobExtension>;
 
 /// Namespace prefix used in all consensus signing operations to prevent signature replay attacks.
 pub const NAMESPACE: &[u8] = b"_NUNCHI_COINS_CHAIN";
@@ -52,7 +59,8 @@ pub mod channels {
     pub const PENDING: u64 = 0;
     pub const RECOVERED: u64 = 1;
     pub const RESOLVER: u64 = 2;
-    pub const BROADCAST: u64 = 3;
+    /// Erasure-coded marshal shard dissemination.
+    pub const MARSHAL: u64 = 3;
     pub const DKG: u64 = 4;
     pub const BACKFILL: u64 = 5;
     pub const MEMPOOL: u64 = 6;

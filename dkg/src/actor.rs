@@ -18,7 +18,8 @@ use commonware_consensus::types::{Epoch, EpochPhase, Epocher, FixedEpocher, Heig
 use commonware_cryptography::{
     bls12381::{
         dkg::feldman_desmedt::{
-            observe, DealerPrivMsg, DealerPubMsg, Info, Logs, Output, PlayerAck,
+            observe, DealerPrivMsg, DealerPubMsg, Error as FeldmanError, FinalizeError, Info, Logs,
+            Output, PlayerAck, Reveal,
         },
         primitives::{
             group::Share,
@@ -456,6 +457,7 @@ where
                 epoch.get(),
                 epoch_state.output.clone(),
                 Mode::NonZeroCounter,
+            Reveal::V1,
                 dealers,
                 players.clone(),
             )
@@ -747,9 +749,7 @@ where
                                                 Some(player_share),
                                             )
                                         }
-                                        Err(
-                                            commonware_cryptography::bls12381::dkg::feldman_desmedt::Error::MissingPlayerDealing,
-                                        ) => (
+                                        Err(FinalizeError::Error(FeldmanError::MissingPlayerDealing)) => (
                                             true,
                                             public.checkpoint.successful_round,
                                             Some(public.checkpoint.output),
@@ -897,7 +897,7 @@ where
             return Err(ReconciliationError::LocalConfigurationMismatch);
         }
         let info = bootstrap.config.round_info(&bootstrap.checkpoint)?;
-        let checkpoint_digest = Sha256::hash(&bootstrap.checkpoint.encode());
+        let checkpoint_digest = Sha256::hash(&[bootstrap.checkpoint.encode().as_ref()]);
         if let Some(reconciliation) = storage.reconciliation() {
             if reconciliation.phase == ReconciliationPhase::Importing
                 && (reconciliation.checkpoint_digest != checkpoint_digest

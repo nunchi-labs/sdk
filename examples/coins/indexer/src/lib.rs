@@ -1,6 +1,6 @@
 //! In-memory indexer for coins-chain consensus artifacts.
 //!
-//! The API mirrors Alto's binary indexer shape so configured nodes can upload
+//! The API mirrors Constantinople's binary indexer shape so configured nodes can upload
 //! encoded consensus artifacts and browsers or tooling can fetch the same
 //! encoded bytes for local verification.
 
@@ -751,6 +751,9 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_consensus::marshal::coding::types::{
+        coding_config_for_participants, CodedBlock,
+    };
     use commonware_consensus::simplex::{
         scheme::bls12381_threshold::vrf as bls12381_threshold,
         types::{
@@ -760,12 +763,17 @@ mod tests {
     };
     use commonware_consensus::types::Height;
     use commonware_cryptography::{
-        bls12381::dkg::feldman_desmedt::deal, certificate::mocks::Fixture, ed25519, sha256::Sha256,
-        Digest as _, Hasher, Signer,
+        bls12381::{dkg::feldman_desmedt::deal, primitives::sharing::Mode},
+        certificate::mocks::Fixture,
+        ed25519,
+        sha256::Sha256,
+        Committable, Hasher, Signer,
     };
     use commonware_storage::mmr::Location;
-    use commonware_utils::{ordered::Set, range::NonEmptyRange, test_rng, N3f1, TestRng, NZU32};
-    use nunchi_coins_chain::{Context, Seedable, StateCommitment};
+    use commonware_utils::{
+        non_empty, ordered::Set, range::NonEmptyRange, test_rng, N3f1, TestRng, NZU32,
+    };
+    use nunchi_coins_chain::{dummy_genesis_parent, Context, Seedable, StateCommitment};
 
     fn schemes() -> Vec<Scheme> {
         let mut rng = test_rng();
@@ -777,14 +785,22 @@ mod tests {
 
     fn seed(schemes: &[Scheme], epoch: u64, view: u64) -> Seed {
         let round = Round::new(Epoch::new(epoch), View::new(view));
-        let proposal = Proposal::new(round, View::zero(), Sha256::hash(&round.encode()));
+        let proposal = Proposal::new(
+            round,
+            View::zero(),
+            Sha256::hash(&[round.encode().as_ref()]),
+        );
         let notarizes = schemes
             .iter()
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).expect("sign notarize"))
             .collect::<Vec<_>>();
-        ConsensusNotarization::from_notarizes(&schemes[0], &notarizes, &Sequential)
-            .expect("build notarization")
-            .seed()
+        ConsensusNotarization::from_notarizes(
+            &schemes[0],
+            non_empty![@notarizes.iter()],
+            &Sequential,
+        )
+        .expect("build notarization")
+        .seed()
     }
 
     fn output(seed: u64) -> DkgOutput {
@@ -792,7 +808,7 @@ mod tests {
             (0..4).map(|offset| ed25519::PrivateKey::from_seed(seed + offset).public_key()),
         );
         let mut rng = TestRng::new(seed);
-        deal::<MinSig, _, N3f1>(&mut rng, Default::default(), players)
+        deal::<MinSig, _, N3f1>(&mut rng, Mode::NonZeroCounter, players)
             .expect("deal")
             .0
     }
@@ -803,27 +819,37 @@ mod tests {
             Context {
                 round,
                 leader: ed25519::PrivateKey::from_seed(100).public_key(),
-                parent: (View::zero(), Digest::EMPTY),
+                parent: (View::zero(), dummy_genesis_parent()),
             },
-            Sha256::hash(b"parent"),
+            Sha256::hash(&[b"parent"]),
             Height::new(height),
             1_000,
             Vec::new(),
             None,
             Default::default(),
             StateCommitment {
-                root: Sha256::hash(b"state"),
+                root: Sha256::hash(&[b"state"]),
                 range: NonEmptyRange::new(Location::new(1)..Location::new(2)).unwrap(),
             },
         );
-        let proposal = Proposal::new(round, View::zero(), block.digest());
+        let commitment = CodedBlock::new(
+            block.clone(),
+            coding_config_for_participants(4),
+            &Sequential,
+        )
+        .commitment();
+        let proposal = Proposal::new(round, View::zero(), commitment);
         let finalizes = schemes
             .iter()
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("sign finalize"))
             .collect::<Vec<_>>();
         Finalized::new(
-            ConsensusFinalization::from_finalizes(&schemes[0], &finalizes, &Sequential)
-                .expect("build finalization"),
+            ConsensusFinalization::from_finalizes(
+                &schemes[0],
+                non_empty![@finalizes.iter()],
+                &Sequential,
+            )
+            .expect("build finalization"),
             block,
         )
     }

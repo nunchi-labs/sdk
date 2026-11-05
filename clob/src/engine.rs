@@ -284,7 +284,7 @@ pub(crate) fn fill_id(taker: &OrderId, maker: &OrderId, sequence: u64) -> FillId
     bytes.extend_from_slice(taker.encode().as_ref());
     bytes.extend_from_slice(maker.encode().as_ref());
     bytes.extend_from_slice(sequence.encode().as_ref());
-    FillId(Sha256::hash(&bytes))
+    FillId(Sha256::hash(&[bytes.as_slice()]))
 }
 
 pub(crate) fn validate_order(

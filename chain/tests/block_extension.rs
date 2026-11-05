@@ -5,7 +5,8 @@ use commonware_cryptography::{ed25519, sha256, Digest as _, Digestible as _, Sig
 use commonware_storage::mmr::Location;
 use commonware_utils::{non_empty_range, NZU32};
 use nunchi_chain::{
-    Block, BlockExtension, Composite, ConsensusExtension, NoConsensusExtension, StateCommitment,
+    Block, BlockExtension, Composite, ConsensusExtension, EmptyPayload, NoConsensusExtension,
+    StateCommitment,
 };
 use nunchi_common::{RuntimeContext, StateError, StateStore};
 use nunchi_dkg::{Context, ReshareBlock};
@@ -127,11 +128,11 @@ fn default_block_extension_is_empty_payload() {
         1,
         vec![7],
         None,
-        (),
+        EmptyPayload,
         state(),
     );
 
-    assert_eq!(block.header.extension, ());
+    assert_eq!(block.header.extension, EmptyPayload);
     assert_eq!(
         Block::<u8>::decode_cfg(block.encode().as_ref(), &block_cfg()).unwrap(),
         block
@@ -241,7 +242,7 @@ fn default_consensus_extension_applies_noop_payload() {
     assert!(futures::executor::block_on(extension.apply_payload(
         &mut state,
         RuntimeContext::default(),
-        &()
+        &EmptyPayload
     )));
 }
 
@@ -271,11 +272,11 @@ fn dkg_reshare_log_is_core_block_field() {
         1,
         vec![7],
         None,
-        (),
+        EmptyPayload,
         state(),
     );
 
     assert!(block.header.reshare_log.is_none());
-    assert_eq!(block.header.extension, ());
+    assert_eq!(block.header.extension, EmptyPayload);
     assert!(ReshareBlock::reshare_log(&block).is_none());
 }

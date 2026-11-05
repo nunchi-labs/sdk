@@ -1,6 +1,7 @@
 use std::{fmt::Debug, future::Future};
 
-use commonware_codec::{EncodeSize, Read, Write};
+use bytes::{Buf, BufMut};
+use commonware_codec::{EncodeSize, Error as CodecError, Read, Write};
 use nunchi_common::{RuntimeContext, StateStore};
 
 /// Consensus-side payload carried by blocks but driven outside ordinary runtime transactions.
@@ -27,7 +28,7 @@ pub trait BlockExtension: 'static {
 /// Finalization/reporting is intentionally not part of this trait. Extensions that need finalized
 /// block notifications should wire that through the consensus/marshal reporter path that owns
 /// acknowledgements for those notifications.
-pub trait ConsensusExtension: BlockExtension + Clone + Send + 'static {
+pub trait ConsensusExtension: BlockExtension + Clone + Send + Sync + 'static {
     /// Produce the extension payload for the next proposal.
     fn propose(&mut self) -> impl Future<Output = Self::Payload> + Send;
 
@@ -131,15 +132,39 @@ where
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoConsensusExtension;
 
+/// Zero-byte payload used when a block has no extra consensus extension.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct EmptyPayload;
+
+impl Write for EmptyPayload {
+    fn write(&self, _buf: &mut impl BufMut) {}
+}
+
+impl EncodeSize for EmptyPayload {
+    fn encode_size(&self) -> usize {
+        0
+    }
+}
+
+impl Read for EmptyPayload {
+    type Cfg = ();
+
+    fn read_cfg(_buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        Ok(Self)
+    }
+}
+
 impl BlockExtension for NoConsensusExtension {
-    type Payload = ();
+    type Payload = EmptyPayload;
     type ReadCfg = ();
 
-    fn genesis_payload() -> Self::Payload {}
+    fn genesis_payload() -> Self::Payload {
+        EmptyPayload
+    }
 }
 
 impl ConsensusExtension for NoConsensusExtension {
     fn propose(&mut self) -> impl Future<Output = Self::Payload> + Send {
-        std::future::ready(())
+        std::future::ready(EmptyPayload)
     }
 }

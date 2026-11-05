@@ -27,7 +27,7 @@ type SharedMockRelease = Arc<Mutex<Option<MockRelease>>>;
 
 fn state(height: u64) -> StateCommitment {
     StateCommitment {
-        root: Sha256::hash(&height.to_be_bytes()),
+        root: Sha256::hash(&[height.to_be_bytes().as_slice()]),
         range: NonEmptyRange::new(Location::new(height)..Location::new(height + 1))
             .expect("non-empty range"),
     }
@@ -40,10 +40,10 @@ fn block(view: u64, height: u64, label: &[u8]) -> Block {
             leader: ed25519::PrivateKey::from_seed(view).public_key(),
             parent: (
                 View::new(view.saturating_sub(1)),
-                Sha256::hash(format!("parent-{view}").as_bytes()),
+                    nunchi_chain::dummy_genesis_parent(),
             ),
         },
-        Sha256::hash(label),
+        Sha256::hash(&[label]),
         Height::new(height),
         height,
         Vec::<Transaction>::new(),

@@ -61,7 +61,7 @@ fn main() {
     };
 
     let transaction_bytes = transaction.encode();
-    let digest = commonware_cryptography::Sha256::hash(&transaction_bytes);
+    let digest = commonware_cryptography::Sha256::hash(&[transaction_bytes.as_ref()]);
 
     println!("Test Transfer:");
     println!("  Nonce:       {}", nonce);

@@ -3,7 +3,7 @@ use crate::{AdmissionError, Mempool, PoolConfig, TxStatus};
 use commonware_cryptography::{ed25519, Signer};
 use commonware_p2p::simulated::{self, Link, Network};
 use commonware_runtime::{deterministic, Clock, Metrics, Runner as _, Supervisor};
-use commonware_utils::{NZUsize, NZU32};
+use commonware_utils::{probability, NZUsize, NZU32};
 use governor::Quota;
 use std::time::Duration;
 
@@ -86,6 +86,7 @@ fn p2p_gossips_submitted_transactions() {
             context.child("network"),
             simulated::Config {
                 max_size: 1024 * 1024,
+                max_peers_per_set: NZUsize!(2),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
             },
@@ -108,7 +109,7 @@ fn p2p_gossips_submitted_transactions() {
         let link = Link {
             latency: Duration::from_millis(10),
             jitter: Duration::ZERO,
-            success_rate: 1.0,
+            success_rate: probability!(1.0),
         };
         oracle
             .add_link(peer_a.clone(), peer_b.clone(), link.clone())

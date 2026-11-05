@@ -465,7 +465,7 @@ pub fn market_id(
     bytes.extend_from_slice(quote.encode().as_ref());
     bytes.extend_from_slice(tick_size.encode().as_ref());
     bytes.extend_from_slice(lot_size.encode().as_ref());
-    MarketId(Sha256::hash(&bytes))
+    MarketId(Sha256::hash(&[bytes.as_slice()]))
 }
 
 pub(crate) fn validate_market(

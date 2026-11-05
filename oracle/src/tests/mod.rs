@@ -39,7 +39,7 @@ impl StateStore for MemoryStore {
 }
 
 fn id(seed: &'static [u8]) -> Digest {
-    Sha256::hash(seed)
+    Sha256::hash(&[seed])
 }
 
 fn namespace() -> NamespaceId {

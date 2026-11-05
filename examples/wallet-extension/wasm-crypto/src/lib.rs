@@ -37,11 +37,11 @@ pub struct Address(Digest);
 
 impl Address {
     pub fn external(public_key: &PublicKey) -> Self {
-        let mut hasher = Sha256::new();
+        let mut hasher = Sha256::default();
         hasher.update(ADDRESS_DOMAIN);
         hasher.update(&[ADDRESS_EXTERNAL]);
         hasher.update(&public_key.encode());
-        Self(hasher.finalize())
+        Self(hasher.finalize().1)
     }
 
     pub fn to_bech32(&self) -> String {

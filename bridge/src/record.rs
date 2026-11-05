@@ -94,7 +94,7 @@ impl AssetId {
         bytes.extend_from_slice(ASSET_ID_DOMAIN);
         bytes.extend_from_slice(source_chain_id.encode().as_ref());
         bytes.extend_from_slice(local_asset.encode().as_ref());
-        Self(Sha256::hash(&bytes))
+        Self(Sha256::hash(&[bytes.as_slice()]))
     }
 
     /// The underlying digest.
@@ -161,7 +161,7 @@ impl BridgeTransferRecord {
         bytes.extend_from_slice(&(TRANSFER_ID_DOMAIN.len() as u32).to_be_bytes());
         bytes.extend_from_slice(TRANSFER_ID_DOMAIN);
         bytes.extend_from_slice(self.encode().as_ref());
-        TransferRecordId(Sha256::hash(&bytes))
+        TransferRecordId(Sha256::hash(&[bytes.as_slice()]))
     }
 }
 

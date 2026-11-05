@@ -288,7 +288,7 @@ impl<Operation: self::Operation> Transaction<Operation> {
     }
 
     pub fn digest(&self) -> Digest {
-        Sha256::hash(&self.encode())
+        Sha256::hash(&[self.encode().as_ref()])
     }
 }
 

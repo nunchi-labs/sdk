@@ -1,7 +1,7 @@
 //! Bridge-chain node-facing handles.
 
-use crate::{Application, Block, Scheme};
-use commonware_consensus::marshal::{core::Mailbox as MarshalMailbox, standard::Standard};
+use crate::{Application, EngineVariant, Scheme};
+use commonware_consensus::marshal::core::Mailbox as MarshalMailbox;
 use commonware_glue::stateful::Mailbox as StatefulMailbox;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_storage::Context;
@@ -17,7 +17,7 @@ where
 {
     pub bridge: BridgeMailbox,
     pub stateful: StatefulMailbox<E, Application>,
-    pub marshal: MarshalMailbox<Scheme, Standard<Block>>,
+    pub marshal: MarshalMailbox<Scheme, EngineVariant>,
     pub applied_height: SharedAppliedHeight,
 }
 
@@ -28,7 +28,7 @@ where
     pub fn new(
         bridge: BridgeMailbox,
         stateful: StatefulMailbox<E, Application>,
-        marshal: MarshalMailbox<Scheme, Standard<Block>>,
+        marshal: MarshalMailbox<Scheme, EngineVariant>,
         applied_height: SharedAppliedHeight,
     ) -> Self {
         Self {

@@ -248,5 +248,5 @@ fn record_id(
     bytes.extend_from_slice(nonce.encode().as_ref());
     bytes.extend_from_slice(namespace.encode().as_ref());
     bytes.extend_from_slice(interval.encode().as_ref());
-    RecordId(Sha256::hash(&bytes))
+    RecordId(Sha256::hash(&[bytes.as_slice()]))
 }

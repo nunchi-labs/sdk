@@ -3,17 +3,24 @@ use crate::execution::NodeHandle;
 use crate::genesis::{authenticated_genesis_target, state_commitment, ChainGenesis};
 use crate::history::{self, BlocksArchive, FinalizationsArchive};
 use crate::indexer;
-use crate::{Block, EpochProvider, Provider, PublicKey, Scheme, Transaction, NAMESPACE};
-use commonware_broadcast::buffered;
+use crate::{
+    Block, BlockCommitment, EngineVariant, EpochProvider, Provider, PublicKey, Scheme, Transaction,
+    NAMESPACE,
+};
+use commonware_coding::CodecConfig;
 use commonware_consensus::{
     marshal::{
         self,
+        coding::{
+            shards,
+            types::{coding_config_for_participants, CodedBlock},
+            Marshaled, MarshaledConfig,
+        },
         core::Actor as MarshalActor,
         resolver,
-        standard::{Inline, Standard},
         store::Certificates,
     },
-    simplex::elector::Random,
+    simplex::elector::{Random, RandomVersion},
     simplex::types::Finalization,
     types::{Epoch, FixedEpocher, Height, ViewDelta},
     Epochable, Reporters,
@@ -25,7 +32,7 @@ use commonware_cryptography::{
     },
     ed25519::{self, Batch},
     sha256::Digest,
-    BatchVerifier, Digestible, Signer,
+    BatchVerifier, Committable, Digestible, Signer,
 };
 use commonware_glue::stateful::{
     Application as StatefulApplication,
@@ -55,7 +62,6 @@ use nunchi_mempool::{Mempool, PoolConfig};
 use rand::{CryptoRng, Rng};
 use std::{
     collections::BTreeSet,
-    marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -101,6 +107,8 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
     pub strategy: S,
     /// Discover a finalized floor and perform peer QMDB state sync on a fresh database.
     pub state_sync: bool,
+    /// Maximum number of marshal acknowledgements that may remain pending.
+    pub max_pending_acks: std::num::NonZeroUsize,
     pub prune_config: commonware_glue::stateful::PruneConfig,
     pub max_block_transactions: usize,
     pub pool_config: PoolConfig,
@@ -111,15 +119,26 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
 
 type DkgActor<E, P> = nunchi_chain::DkgActor<E, P, Transaction, ClobExtension>;
 type DkgMailbox = nunchi_chain::DkgMailbox<Transaction, ClobExtension>;
-type StatefulApp<E> = StatefulActor<E, Application, Scheme, Standard<Block>, StateSyncMailbox<E>>;
+type StatefulApp<E> =
+    StatefulActor<E, Application, Scheme, EngineVariant, StateSyncMailbox<E>>;
 type StatefulAppMailbox<E> = StatefulMailbox<E, Application>;
 type LimitedStatefulAppMailbox<E> = VerifyLimiter<StatefulAppMailbox<E>>;
-type InlineApp<E> = Inline<E, Scheme, LimitedStatefulAppMailbox<E>, Block, FixedEpocher>;
-type Marshaled<E> = BoxedAutomaton<InlineApp<E>>;
+type MarshaledApp<E, S> = BoxedAutomaton<
+    Marshaled<
+        E,
+        LimitedStatefulAppMailbox<E>,
+        Block,
+        commonware_coding::ReedSolomon<commonware_cryptography::Sha256>,
+        commonware_cryptography::Sha256,
+        SchemeProvider,
+        S,
+        FixedEpocher,
+    >,
+>;
 type SchemeProvider = Provider<Scheme, ed25519::PrivateKey>;
 type Marshal<E, S> = MarshalActor<
     E,
-    Standard<Block>,
+    EngineVariant,
     SchemeProvider,
     FinalizationsArchive<E>,
     BlocksArchive<E>,
@@ -129,15 +148,32 @@ type Marshal<E, S> = MarshalActor<
 type Orchestrator<E, B, S> = orchestrator::Actor<
     E,
     B,
-    Marshaled<E>,
+    MarshaledApp<E, S>,
     Scheme,
     Random,
     S,
-    Block,
+    EngineVariant,
     Option<indexer::Pusher<E, indexer::HttpClient>>,
 >;
 type IndexerConsumer<E> = indexer::Consumer<E, indexer::HttpClient>;
 type StartupReporter = nunchi_chain::startup::StartupReporter<Block>;
+type ShardsEngine<E, B, P, S> = shards::Engine<
+    E,
+    SchemeProvider,
+    B,
+    P,
+    commonware_coding::ReedSolomon<commonware_cryptography::Sha256>,
+    commonware_cryptography::Sha256,
+    Block,
+    PublicKey,
+    S,
+>;
+type ShardMailbox = shards::Mailbox<
+    Block,
+    commonware_coding::ReedSolomon<commonware_cryptography::Sha256>,
+    commonware_cryptography::Sha256,
+    PublicKey,
+>;
 
 /// The engine that drives the coins-chain [Application].
 #[allow(clippy::type_complexity)]
@@ -164,10 +200,12 @@ where
     dkg_state: nunchi_chain::DkgState,
     startup_coordinator: Arc<Mutex<nunchi_chain::startup::StartupCoordinator>>,
     startup_reporter: StartupReporter,
-    startup_finalization: Option<Finalization<Scheme, Digest>>,
-    buffer: buffered::Engine<E, PublicKey, Block, P>,
-    buffered_mailbox: buffered::Mailbox<PublicKey, Block>,
+    startup_finalization: Option<Finalization<Scheme, BlockCommitment>>,
+    genesis_commitment: BlockCommitment,
+    shards: ShardsEngine<E, B, P, S>,
+    shard_mailbox: ShardMailbox,
     marshal: Marshal<E, S>,
+    marshal_mailbox: marshal::core::Mailbox<Scheme, EngineVariant>,
     probe_handle: Handle<()>,
     state_sync_handle: Handle<()>,
     orchestrator: Orchestrator<E, B, S>,
@@ -213,8 +251,8 @@ where
             impl Receiver<PublicKey = PublicKey>,
         ),
     ) -> Result<(Self, NodeHandle<E>), StartupError> {
-        let prune_config = validate_state_prune_config(config.prune_config)?;
-        let retention_policy = history::RetentionPolicy::new(prune_config)?;
+        let prune_config = validate_state_prune_config(config.prune_config, config.max_pending_acks)?;
+        let retention_policy = history::RetentionPolicy::new(prune_config, config.max_pending_acks)?;
         let (mempool, submitter) = Mempool::<Transaction>::new(config.pool_config.clone());
         let (clob, clob_mailbox) = ClobActor::new(ClobConfig::default());
         if let Some(clob_genesis) = config.genesis.as_ref().and_then(|genesis| genesis.clob.as_ref())
@@ -265,18 +303,6 @@ where
             },
         );
 
-        let (buffer, buffered_mailbox) = buffered::Engine::new(
-            context.child("buffer"),
-            buffered::Config {
-                public_key: config.signer.public_key(),
-                mailbox_size: MAILBOX_SIZE,
-                deque_size: DEQUE_SIZE,
-                priority: true,
-                codec_config: block_codec_config,
-                peer_provider: config.manager.clone(),
-            },
-        );
-
         let start = Instant::now();
         let opened_history = history::open(
             &context,
@@ -300,7 +326,7 @@ where
             finalizations_value = %history_partitions.finalizations_value,
             blocks_key = %history_partitions.blocks_key,
             blocks_value = %history_partitions.blocks_value,
-            max_pending_acks = prune_config.max_pending_acks.get(),
+            max_pending_acks = config.max_pending_acks.get(),
             maintenance_interval = prune_config.maintenance_interval.get(),
             retained_marshal_blocks = prune_config.retained_marshal_blocks,
             retained_qmdb_blocks = prune_config.retained_qmdb_blocks,
@@ -334,6 +360,30 @@ where
             consensus_namespace.clone(),
             config.signer.clone(),
             certificate_verifier,
+        );
+        let n_coding_participants = u16::try_from(config.output.players().len())
+            .expect("participant count must fit in u16");
+        assert!(
+            n_coding_participants >= 4,
+            "erasure-coded marshal requires at least 4 participants, got {n_coding_participants}"
+        );
+        let coding_config = coding_config_for_participants(n_coding_participants);
+        let genesis_parent = nunchi_chain::genesis_parent(n_coding_participants);
+        let (shards, shard_mailbox) = shards::Engine::new(
+            context.child("shards"),
+            shards::Config {
+                scheme_provider: provider.clone(),
+                blocker: config.blocker.clone(),
+                shard_codec_cfg: CodecConfig {
+                    maximum_shard_size: MAX_SHARD_SIZE,
+                },
+                block_codec_cfg: block_codec_config,
+                strategy: config.strategy.clone(),
+                mailbox_size: MAILBOX_SIZE,
+                peer_buffer_size: SHARD_PEER_BUFFER_SIZE,
+                background_channel_capacity: SHARD_BACKGROUND_CHANNEL_CAPACITY,
+                peer_provider: config.manager.clone(),
+            },
         );
         let floor_sizing_scheme =
             provider.scheme_for_epoch(&orchestrator::EpochTransition {
@@ -436,7 +486,7 @@ where
             &finalizations_by_height,
             &finalized_blocks,
             &current_state_target,
-            prune_config.max_pending_acks,
+            config.max_pending_acks,
         )
         .await
         {
@@ -450,11 +500,11 @@ where
                 let policy_floor =
                     history::policy_floor(tip, retention_policy.logical_retention);
                 let safe_floor = policy_floor.min(processed_height.get());
-                finalizations_by_height
+                finalizations_by_height = finalizations_by_height
                     .prune(safe_floor)
                     .await
                     .expect("failed to startup-prune finalized certificates");
-                finalized_blocks
+                finalized_blocks = finalized_blocks
                     .prune(safe_floor)
                     .await
                     .expect("failed to startup-prune finalized blocks");
@@ -478,14 +528,17 @@ where
             applied_height.clone(),
             genesis_state,
             application::genesis_payload(),
-        );
+        )
+        .with_genesis_parent(genesis_parent);
         let genesis = app.genesis_block();
         let genesis_digest = genesis.digest();
+        let coded_genesis = CodedBlock::new(genesis.clone(), coding_config, &config.strategy);
+        let genesis_commitment = coded_genesis.commitment();
         // The sync plan drives both marshal and stateful startup. Fresh joining nodes can discover
         // a floor and sync QMDB directly; bootstrap nodes leave `state_sync` disabled and start
         // from genesis. Interrupted state sync resumes from its persisted floor.
         let mut plan =
-            SyncPlan::<_, Scheme, Standard<Block>>::init(&context, config.partition_prefix.clone())
+            SyncPlan::<_, Scheme, EngineVariant>::init(&context, config.partition_prefix.clone())
                 .await;
         let (state_sync, state_sync_mailbox) = StateSyncActor::new(
             context.child("state_sync_resolver"),
@@ -496,7 +549,6 @@ where
                 operation_codec_config: nunchi_common::qmdb_operation_codec_config(),
                 mailbox_size: MAILBOX_SIZE,
                 me: Some(config.signer.public_key()),
-                initial: STATE_SYNC_RESOLVER_INITIAL,
                 timeout: STATE_SYNC_RESOLVER_TIMEOUT,
                 fetch_retry_timeout: STATE_SYNC_RESOLVER_RETRY,
                 max_serve_ops: STATE_SYNC_FETCH_BATCH_SIZE,
@@ -528,11 +580,11 @@ where
         let startup_finalization = plan.floor().cloned();
         let certified_payloads = recovered_floor
             .iter()
-            .map(|certificate| certificate.proposal.payload)
+            .map(|certificate| certificate.proposal.payload.block())
             .chain(
                 plan.floor()
                     .into_iter()
-                    .map(|certificate| certificate.proposal.payload),
+                    .map(|certificate| certificate.proposal.payload.block()),
             )
             .collect::<BTreeSet<_>>();
         let coordinator_capacity = startup_coordinator_capacity(
@@ -567,8 +619,8 @@ where
         );
         let marshal_start = recovered_floor
             .clone()
-            .map_or_else(|| plan.marshal_start(genesis), marshal::Start::Floor);
-        let (marshal, marshal_mailbox, _processed_height) = MarshalActor::init(
+            .map_or_else(|| plan.marshal_start(coded_genesis), marshal::Start::Floor);
+        let (marshal, marshal_mailbox, marshal_floor) = MarshalActor::init(
             context.child("marshal"),
             finalizations_by_height,
             finalized_blocks,
@@ -578,7 +630,7 @@ where
                 start: marshal_start,
                 partition_prefix: format!("{}_marshal", config.partition_prefix),
                 mailbox_size: MAILBOX_SIZE,
-                view_retention_timeout: ViewDelta::new(
+                view_retention: ViewDelta::new(
                     ACTIVITY_TIMEOUT
                         .get()
                         .saturating_mul(SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER),
@@ -590,7 +642,7 @@ where
                 value_write_buffer: WRITE_BUFFER,
                 block_codec_config,
                 max_repair: MAX_REPAIR,
-                max_pending_acks: prune_config.max_pending_acks,
+                max_pending_acks: config.max_pending_acks,
                 strategy: config.strategy.clone(),
             },
         )
@@ -603,8 +655,8 @@ where
             StatefulConfig {
                 application: app,
                 db_config,
-                input_provider: submitter.clone(),
-                marshal: marshal_mailbox.clone(),
+                provider: submitter.clone(),
+                marshal: (marshal_mailbox.clone(), marshal_floor),
                 mailbox_size: MAILBOX_SIZE,
                 plan,
                 resolvers: state_sync_mailbox,
@@ -621,15 +673,20 @@ where
         );
 
         let verify_limiter_context = context.child("application_verify");
-        let application = BoxedAutomaton::new(Inline::new(
+        let application = BoxedAutomaton::new(Marshaled::new(
             context.child("application"),
-            VerifyLimiter::new(
-                &verify_limiter_context,
-                stateful_mailbox.clone(),
-                APPLICATION_VERIFY_CONCURRENCY,
-            ),
-            marshal_mailbox.clone(),
-            FixedEpocher::new(config.epoch_length),
+            MarshaledConfig {
+                application: VerifyLimiter::new(
+                    &verify_limiter_context,
+                    stateful_mailbox.clone(),
+                    APPLICATION_VERIFY_CONCURRENCY,
+                ),
+                marshal: marshal_mailbox.clone(),
+                shards: shard_mailbox.clone(),
+                scheme_provider: provider.clone(),
+                strategy: config.strategy.clone(),
+                epocher: FixedEpocher::new(config.epoch_length),
+            },
         ));
 
         let (indexer_producer, indexer_producer_handle, indexer_pusher, indexer_consumer) =
@@ -649,6 +706,7 @@ where
                         codec_config: block_codec_config,
                         page_cache: page_cache.clone(),
                         write_buffer: WRITE_BUFFER,
+                        replay_buffer: REPLAY_BUFFER,
                     },
                 )
                 .await
@@ -684,8 +742,9 @@ where
                 oracle: config.blocker.clone(),
                 application: application.clone(),
                 provider,
-                marshal: marshal_mailbox,
+                marshal: marshal_mailbox.clone(),
                 reporter: indexer_pusher,
+                elector: Random::new(RandomVersion::V1),
                 strategy: config.strategy.clone(),
                 leader_timeout: config.leader_timeout,
                 certification_timeout: config.certification_timeout,
@@ -693,11 +752,10 @@ where
                 mailbox_size: MAILBOX_SIZE,
                 partition_prefix: format!("{}_consensus", config.partition_prefix),
                 epoch_length: config.epoch_length,
-                genesis_digest,
+                genesis_digest: genesis_commitment,
                 recovered_floor,
                 startup_finalization: None,
                 startup_floor: None,
-                _phantom: PhantomData,
             },
         );
 
@@ -710,9 +768,11 @@ where
             startup_coordinator,
             startup_reporter,
             startup_finalization,
-            buffer,
-            buffered_mailbox,
+            genesis_commitment,
+            shards,
+            shard_mailbox,
             marshal,
+            marshal_mailbox,
             probe_handle,
             state_sync_handle,
             orchestrator,
@@ -743,7 +803,7 @@ where
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
-        broadcast: (
+        marshal_shards: (
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
@@ -759,9 +819,9 @@ where
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
-        marshal: (
-            resolver::handler::Receiver<Digest>,
-            resolver::p2p::Mailbox<Digest, PublicKey>,
+        marshal_resolver: (
+            resolver::handler::Receiver<BlockCommitment>,
+            resolver::p2p::Mailbox<BlockCommitment, PublicKey>,
         ),
         callback: Box<dyn UpdateCallBack<MinSig, PublicKey>>,
     ) -> Handle<Result<(), EngineError>> {
@@ -771,11 +831,11 @@ where
                 votes,
                 certificates,
                 resolver,
-                broadcast,
+                marshal_shards,
                 dkg,
                 mempool,
                 clob,
-                marshal,
+                marshal_resolver,
                 callback
             )
         )
@@ -796,7 +856,7 @@ where
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
-        broadcast: (
+        marshal_shards: (
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
@@ -812,13 +872,13 @@ where
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
-        marshal: (
-            resolver::handler::Receiver<Digest>,
-            resolver::p2p::Mailbox<Digest, PublicKey>,
+        marshal_resolver: (
+            resolver::handler::Receiver<BlockCommitment>,
+            resolver::p2p::Mailbox<BlockCommitment, PublicKey>,
         ),
         callback: Box<dyn UpdateCallBack<MinSig, PublicKey>>,
     ) -> Result<(), EngineError> {
-        let buffer_handle = self.buffer.start(broadcast);
+        let shards_handle = self.shards.start(marshal_shards);
         let reporters: Reporters<_, _, indexer::Producer> = Reporters::from((
             Reporters::from((
                 nunchi_chain::dkg_reporters(
@@ -831,7 +891,7 @@ where
         ));
         let marshal_handle = self
             .marshal
-            .start(reporters, self.buffered_mailbox, marshal);
+            .start(reporters, self.shard_mailbox, marshal_resolver);
         let probe_handle = self.probe_handle;
         let state_sync_handle = self.state_sync_handle;
         let stateful_handle = self.stateful.start();
@@ -861,7 +921,7 @@ where
         .expect("authenticated DKG checkpoint does not match startup anchor height");
         if let Some(finalization) = self.startup_finalization.take() {
             assert_eq!(
-                finalization.proposal.payload, artifact.anchor_digest,
+                finalization.proposal.payload.block(), artifact.anchor_digest,
                 "state-sync finalization does not certify the attached QMDB anchor"
             );
             assert_eq!(
@@ -870,10 +930,20 @@ where
             );
             self.orchestrator.set_startup_finalization(finalization);
         }
+        let startup_digest = if artifact.anchor_height == Height::zero() {
+            self.genesis_commitment
+        } else {
+            let block = self
+                .marshal_mailbox
+                .get_block(artifact.anchor_height)
+                .await
+                .expect("startup floor block must be available from marshal");
+            <EngineVariant as marshal::core::Variant>::commitment(&block)
+        };
         self.orchestrator
             .set_startup_floor(orchestrator::StartupFloor {
                 height: artifact.anchor_height,
-                digest: artifact.anchor_digest,
+                digest: startup_digest,
             });
         let logs = self
             .dkg_state
@@ -913,7 +983,7 @@ where
                     Err(_) => Err(EngineError::ShutdownSignalClosed),
                 },
                 result = dkg_handle => unexpected_exit("dkg", result),
-                result = buffer_handle => unexpected_exit("buffer", result),
+                result = shards_handle => unexpected_exit("shards", result),
                 result = marshal_handle => unexpected_exit("marshal", result),
                 result = probe_handle => unexpected_exit("probe", result),
                 result = state_sync_handle => unexpected_exit("state sync resolver", result),
@@ -935,7 +1005,7 @@ where
                     Err(_) => Err(EngineError::ShutdownSignalClosed),
                 },
                 result = dkg_handle => unexpected_exit("dkg", result),
-                result = buffer_handle => unexpected_exit("buffer", result),
+                result = shards_handle => unexpected_exit("shards", result),
                 result = marshal_handle => unexpected_exit("marshal", result),
                 result = probe_handle => unexpected_exit("probe", result),
                 result = state_sync_handle => unexpected_exit("state sync resolver", result),
@@ -1043,7 +1113,8 @@ where
         else {
             continue;
         };
-        let target = <Application as StatefulApplication<E>>::sync_targets(&block);
+        let inner = block.inner();
+        let target = <Application as StatefulApplication<E>>::sync_targets(inner);
         if &target == current_target {
             let certificate = Certificates::get(
                 finalizations,
@@ -1054,16 +1125,16 @@ where
             .expect("startup candidate block has no finalization");
             assert_eq!(
                 certificate.proposal.payload,
-                block.digest(),
-                "startup candidate certificate payload must equal block digest"
+                block.commitment(),
+                "startup candidate certificate payload must equal block commitment"
             );
             return Some((
                 processed_height,
                 nunchi_chain::startup::StartupCandidate {
-                    height: block.header.height,
-                    digest: block.digest(),
+                    height: inner.header.height,
+                    digest: inner.digest(),
                     state_target: target,
-                    certificate_payload: Some(certificate.proposal.payload),
+                    certificate_payload: Some(certificate.proposal.payload.block()),
                     genesis: false,
                 },
             ));
@@ -1083,7 +1154,7 @@ async fn validate_history_through_processed<E>(
     processed_height: Height,
 )
 where
-    E: BufferPooler + Metrics + Storage,
+    E: BufferPooler + Clock + Metrics + Storage,
 {
     let processed = processed_height.get();
     let first = match (finalizations.first_index(), blocks.first_index()) {
@@ -1099,12 +1170,10 @@ where
     }
 
     for height in first..=processed {
-        let certificate = finalizations
-            .get(ArchiveIdentifier::Index(height))
+        let certificate = ArchiveStore::get(finalizations, ArchiveIdentifier::Index(height))
             .await
             .expect("failed to validate finalized certificate archive");
-        let block = blocks
-            .get(ArchiveIdentifier::Index(height))
+        let block = ArchiveStore::get(blocks, ArchiveIdentifier::Index(height))
             .await
             .expect("failed to validate finalized block archive");
         if height == processed {
@@ -1116,12 +1185,12 @@ where
         if let (Some(certificate), Some(block)) = (certificate, block) {
             assert_eq!(
                 certificate.proposal.payload,
-                block.digest(),
+                block.commitment(),
                 "finalized block and certificate conflict at height {height}"
             );
             assert_eq!(
                 certificate.proposal.round.epoch(),
-                block.header.context.round.epoch(),
+                block.inner().header.context.round.epoch(),
                 "finalized block and certificate epochs conflict at height {height}"
             );
         }

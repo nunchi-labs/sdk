@@ -5,7 +5,7 @@ use super::{
 use crate::{Activity, Block, Finalized, Notarized, Scheme, Seed, Seedable};
 use commonware_actor::Feedback;
 use commonware_consensus::{
-    marshal::{core::DigestFallback, core::Mailbox as MarshalMailbox, standard::Standard},
+    marshal::{core::DigestFallback, core::Mailbox as MarshalMailbox},
     types::{Round, View},
     Reporter, Viewable,
 };
@@ -18,7 +18,7 @@ use tracing::{debug, warn};
 pub(crate) struct Pusher<E: Spawner + Metrics + Clock, C: Client> {
     context: Arc<E>,
     client: C,
-    marshal: MarshalMailbox<Scheme, Standard<Block>>,
+    marshal: MarshalMailbox<Scheme, crate::EngineVariant>,
     uploads: SharedState,
     metrics: IndexerMetrics,
 }
@@ -39,7 +39,7 @@ impl<E: Spawner + Metrics + Clock, C: Client> Pusher<E, C> {
     pub(crate) fn new(
         context: E,
         client: C,
-        marshal: MarshalMailbox<Scheme, Standard<Block>>,
+        marshal: MarshalMailbox<Scheme, crate::EngineVariant>,
         uploads: SharedState,
         metrics: IndexerMetrics,
     ) -> Self {
@@ -129,10 +129,10 @@ impl<E: Spawner + Metrics + Clock, C: Client> Pusher<E, C> {
                 let mut guard = CertificateUploadGuard::new(uploads, digest);
 
                 let mut wait = upload.start_marshal_wait();
-                let block = marshal
+                let coded = marshal
                     .subscribe_by_digest(digest, DigestFallback::FetchByRound { round })
                     .await;
-                let Ok(block) = block else {
+                let Ok(coded) = coded else {
                     drop(wait);
                     upload.marshal_cancelled();
                     warn!(%view, "subscription for block cancelled");
@@ -141,7 +141,7 @@ impl<E: Spawner + Metrics + Clock, C: Client> Pusher<E, C> {
                 wait.found();
                 drop(wait);
 
-                let block = block.as_ref().clone();
+                let block = coded.inner().clone();
                 let height = block.header.height.get();
                 metrics.observe_block(BlockMetricSource::LiveCertificate, &block);
                 guard.cache_block(block.clone());
@@ -176,7 +176,7 @@ impl<E: Spawner + Metrics + Clock, C: Client> Reporter for Pusher<E, C> {
                     LiveUploadArtifact::NotarizedBlock,
                     view,
                     notarization.round(),
-                    notarization.proposal.payload,
+                    notarization.proposal.payload.block(),
                     false,
                     move |indexer, block| {
                         let notarization = notarization.clone();
@@ -199,7 +199,7 @@ impl<E: Spawner + Metrics + Clock, C: Client> Reporter for Pusher<E, C> {
                     LiveUploadArtifact::FinalizedBlock,
                     view,
                     finalization.round(),
-                    finalization.proposal.payload,
+                    finalization.proposal.payload.block(),
                     true,
                     move |indexer, block| {
                         let finalization = finalization.clone();

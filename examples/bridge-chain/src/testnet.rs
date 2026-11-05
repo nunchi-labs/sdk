@@ -10,7 +10,7 @@ use commonware_consensus::marshal;
 use commonware_cryptography::{
     bls12381::{
         dkg::feldman_desmedt::{deal, Output},
-        primitives::{group, variant::MinSig},
+        primitives::{group, sharing::Mode, variant::MinSig},
     },
     ed25519, Signer,
 };
@@ -24,7 +24,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{tokio, Handle, Runner as _, Supervisor as _};
 use commonware_utils::{
     ordered::{Map, Set},
-    union, Hostname, N3f1, NZUsize, NZU32,
+    union, Hostname, N3f1, NZUsize,
 };
 use governor::Quota;
 use nunchi_bridge::BridgeActor;
@@ -33,7 +33,8 @@ use nunchi_dkg::{
 };
 use nunchi_mempool::PoolConfig;
 use nunchi_chain::engine::{
-    default_state_prune_config, validate_state_prune_config, PruneConfigError,
+    default_state_prune_config, validate_state_prune_config, DEFAULT_MAX_PENDING_ACKS,
+    PruneConfigError,
 };
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
@@ -51,6 +52,10 @@ use tracing::info;
 const FREEZER_TABLE_INITIAL_SIZE: u32 = 2u32.pow(14);
 const DEFAULT_MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 const DEFAULT_CHANNEL_BACKLOG: usize = 1024;
+/// Per-channel received-message quota. Authenticated discovery sizes each channel
+/// mailbox as `max_peers * quota.burst`, so unbounded rates are not safe.
+const DEFAULT_CHANNEL_RATE_PER_SECOND: u32 = 1_024;
+const MAX_CHANNEL_RATE_PER_SECOND: u32 = 4_096;
 
 #[derive(Clone, Debug)]
 pub struct LocalBridgePairConfig {
@@ -159,12 +164,14 @@ impl NodeConfig {
     }
 
     pub fn prune_config(&self) -> Result<PruneConfig, PruneConfigError> {
-        validate_state_prune_config(PruneConfig {
-            max_pending_acks: self.max_pending_acks,
-            maintenance_interval: self.maintenance_interval,
-            retained_marshal_blocks: self.retained_marshal_blocks,
-            retained_qmdb_blocks: self.retained_qmdb_blocks,
-        })
+        validate_state_prune_config(
+            PruneConfig {
+                maintenance_interval: self.maintenance_interval,
+                retained_marshal_blocks: self.retained_marshal_blocks,
+                retained_qmdb_blocks: self.retained_qmdb_blocks,
+            },
+            self.max_pending_acks,
+        )
     }
 }
 
@@ -361,6 +368,7 @@ impl Default for ConsensusConfig {
 pub struct NetworkConfig {
     pub max_message_size: u32,
     pub channel_backlog: usize,
+    /// Received-message rate limit per p2p channel. `0` (and `u32::MAX`) use the default.
     pub channel_rate_per_second: u32,
 }
 
@@ -369,7 +377,7 @@ impl Default for NetworkConfig {
         Self {
             max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
             channel_backlog: DEFAULT_CHANNEL_BACKLOG,
-            channel_rate_per_second: u32::MAX,
+            channel_rate_per_second: DEFAULT_CHANNEL_RATE_PER_SECOND,
         }
     }
 }
@@ -500,7 +508,7 @@ fn material(validators: u32, seed: u64) -> Result<Material, Error> {
     let participants_set = Set::from_iter_dedup(participants.clone());
     let mut rng = StdRng::seed_from_u64(seed);
     let (output, shares) =
-        deal::<MinSig, _, N3f1>(&mut rng, Default::default(), participants_set.clone())
+        deal::<MinSig, _, N3f1>(&mut rng, Mode::NonZeroCounter, participants_set.clone())
             .map_err(Error::Deal)?;
     let peer_config = PeerConfig {
         num_participants_per_round: vec![validators],
@@ -582,7 +590,7 @@ fn write_chain(
             consensus: ConsensusConfig::default(),
             networking: NetworkConfig::default(),
             state_sync: false,
-            max_pending_acks: default_state_prune_config().max_pending_acks,
+            max_pending_acks: DEFAULT_MAX_PENDING_ACKS,
             maintenance_interval: default_state_prune_config().maintenance_interval,
             retained_marshal_blocks: default_state_prune_config().retained_marshal_blocks,
             retained_qmdb_blocks: default_state_prune_config().retained_qmdb_blocks,
@@ -603,6 +611,14 @@ fn write_chain(
         });
     }
     Ok(())
+}
+
+fn channel_quota(rate_per_second: u32) -> Quota {
+    let rate = match rate_per_second {
+        0 | u32::MAX => DEFAULT_CHANNEL_RATE_PER_SECOND,
+        rate => rate.min(MAX_CHANNEL_RATE_PER_SECOND),
+    };
+    Quota::per_second(NonZeroU32::new(rate).expect("channel rate"))
 }
 
 fn check_port_range(base_port: u16, validators: u32) -> Result<(), Error> {
@@ -730,26 +746,26 @@ async fn start_node(
         "starting bridge-chain validator"
     );
 
+    let max_peers_per_set = NonZeroUsize::new(config.peer_config.participants.len().max(2))
+        .expect("max_peers_per_set");
     let p2p_config = discovery::Config::local(
         private_key.clone(),
         config.namespace.as_bytes(),
         config.listen_address,
         config.dialable_address.clone(),
         bootstrappers,
+        max_peers_per_set,
         config.networking.max_message_size,
     );
     let (mut network, mut oracle) = Network::new(context.child("network"), p2p_config);
     oracle.track(0, config.peer_config.participants.clone());
 
-    let channel_rate = Quota::per_second(
-        NonZeroU32::new(config.networking.channel_rate_per_second).unwrap_or(NZU32!(u32::MAX)),
-    );
-    let mut register =
-        |channel| network.register(channel, channel_rate, config.networking.channel_backlog);
+    let channel_rate = channel_quota(config.networking.channel_rate_per_second);
+    let mut register = |channel| network.register(channel, channel_rate);
     let pending = register(channels::PENDING);
     let recovered = register(channels::RECOVERED);
     let resolver = register(channels::RESOLVER);
-    let broadcast = register(channels::BROADCAST);
+    let marshal_shards = register(channels::MARSHAL);
     let dkg = register(channels::DKG);
     let backfill = register(channels::BACKFILL);
     let probe = register(channels::PROBE);
@@ -773,6 +789,7 @@ async fn start_node(
         certification_timeout: Duration::from_millis(config.consensus.certification_timeout_ms),
         strategy: Sequential,
         state_sync: config.state_sync,
+        max_pending_acks: config.max_pending_acks,
         prune_config,
         pool_config: PoolConfig::default(),
         bridge: bridge_mailbox,
@@ -784,7 +801,6 @@ async fn start_node(
         peer_provider: oracle.clone(),
         blocker: oracle,
         mailbox_size: NZUsize!(1024),
-        initial: Duration::from_secs(1),
         timeout: Duration::from_secs(2),
         fetch_retry_timeout: Duration::from_millis(100),
         priority_requests: false,
@@ -804,7 +820,7 @@ async fn start_node(
         pending,
         recovered,
         resolver,
-        broadcast,
+        marshal_shards,
         dkg,
         marshal_resolver,
         ContinueOnUpdate::boxed(),
@@ -873,6 +889,25 @@ mod tests {
     use super::*;
     use commonware_utils::NZUsize;
     use std::collections::HashSet;
+
+    #[test]
+    fn channel_quota_rejects_unbounded_rates() {
+        assert_eq!(
+            channel_quota(0).burst_size().get(),
+            DEFAULT_CHANNEL_RATE_PER_SECOND
+        );
+        assert_eq!(
+            channel_quota(u32::MAX).burst_size().get(),
+            DEFAULT_CHANNEL_RATE_PER_SECOND
+        );
+        assert_eq!(channel_quota(100).burst_size().get(), 100);
+        assert_eq!(
+            channel_quota(MAX_CHANNEL_RATE_PER_SECOND + 1)
+                .burst_size()
+                .get(),
+            MAX_CHANNEL_RATE_PER_SECOND
+        );
+    }
 
     #[test]
     fn generated_pair_has_distinct_validator_sets_and_foreign_outputs() {
@@ -949,6 +984,11 @@ mod tests {
             assert_eq!(config.maintenance_interval, NZUsize!(32));
             assert_eq!(config.retained_marshal_blocks, 200);
             assert_eq!(config.retained_qmdb_blocks, 200);
+            assert_eq!(
+                config.networking.channel_rate_per_second,
+                1_024,
+                "unbounded channel quotas OOM authenticated discovery mailboxes"
+            );
             assert_eq!(
                 config.min_block_interval_ms,
                 nunchi_chain::DEFAULT_MIN_BLOCK_INTERVAL_MS

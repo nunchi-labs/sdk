@@ -21,15 +21,15 @@ fn addr(key: &PrivateKey) -> Address {
 }
 
 fn local_chain() -> ChainId {
-    ChainId(Sha256::hash(b"local-chain"))
+    ChainId(Sha256::hash(&[b"local-chain"]))
 }
 
 fn dest_chain() -> ChainId {
-    ChainId(Sha256::hash(b"dest-chain"))
+    ChainId(Sha256::hash(&[b"dest-chain"]))
 }
 
 fn coin() -> sha256::Digest {
-    Sha256::hash(b"coin")
+    Sha256::hash(&[b"coin"])
 }
 
 fn lock_tx(

@@ -6,7 +6,7 @@ use commonware_codec::{Encode, Read};
 use commonware_consensus::types::{Epoch, Epocher, FixedEpocher, Height};
 use commonware_cryptography::{
     bls12381::{
-        dkg::feldman_desmedt::{deal, Dealer, Player, Verdict},
+        dkg::feldman_desmedt::{deal, Dealer, Player},
         primitives::{
             group::{Private, Scalar, Share},
             sharing::Mode,
@@ -142,11 +142,10 @@ fn successful_transition_and_identical_duplicate_are_deterministic() {
                 .unwrap()
                 .clone();
             let mut player = Player::new(info.clone(), player_signer).unwrap();
-            let Verdict::Valid(ack) =
-                player.dealer_message::<N3f1>(dealer_pk.clone(), public.clone(), private)
-            else {
-                panic!("valid dealing should be acknowledged");
-            };
+            let ack = player
+                .dealer_message::<N3f1>(dealer_pk.clone(), public.clone(), private)
+                .expect("valid dealing")
+                .expect("dealing should be acknowledged");
             dealer.receive_player_ack(player_pk, ack).unwrap();
         }
         logs.push(dealer.finalize::<N3f1>());
