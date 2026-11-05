@@ -24,7 +24,7 @@ A Manifest V3 Chrome extension wallet for Nunchi chains.
 
 ### Prerequisites
 
-- Rust 1.97+ (stable) with `wasm-pack` installed: `cargo install wasm-pack`
+- Rust 1.95+ (stable) with `wasm-pack` installed: `cargo install wasm-pack`
 - Node.js and npm
 - `wasm32-unknown-unknown` target: `rustup target add wasm32-unknown-unknown`
 
@@ -58,8 +58,14 @@ The built extension will be in `dist/`.
 ### Start Coins Chain
 
 ```bash
-cd examples/coins/chain
-cargo run --bin coins-chain -- --config node0.json
+cargo build -p nunchi-coins-chain --bin coins-chain-node
+cargo run -p narae -- up coins-chain
+```
+
+The first validator serves JSON-RPC at http://127.0.0.1:8545, which is the wallet's default RPC URL. To run one generated node directly:
+
+```bash
+cargo run -p nunchi-coins-chain --bin coins-chain-node -- --config testnet/validator-0.toml
 ```
 
 ### Start Coins Frontend
@@ -137,7 +143,7 @@ window.nunchi.on('accountsChanged', (accounts) => {
 
 ### Coins Provider
 
-A convenience wrapper is available at `window.nunchi.coins` with the same API.
+A convenience wrapper is available at `window.nunchi.coins`. It forwards `request` to the same methods. Account events stay on `window.nunchi.on`.
 
 ## Test Fixtures
 
@@ -226,4 +232,4 @@ cargo test --package nunchi-common address_derivation
 
 ## License
 
-See repository root LICENSE.MD.
+See the repository root `LICENSE-MIT` and `LICENSE-APACHE` files. The code is dual-licensed.
