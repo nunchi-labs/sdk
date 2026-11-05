@@ -2,16 +2,17 @@ use std::collections::BTreeMap;
 
 use crate::{
     ClobError, ClobOperation, Fill, FillId, Market, MarketId, Order, OrderId, OrderStatus, Side,
-    TimeInForce, Transaction, CLOB_NAMESPACE,
+    TimeInForce,     Transaction, CLOB_NAMESPACE, MAX_MATCH_BATCH_FILLS,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{Hasher, Sha256};
 use nunchi_common::RuntimeContext;
 
 /// Deterministic in-memory matcher used by proposers and validator replay.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MatchEngine {
     books: BTreeMap<MarketId, Book>,
+    max_fills: usize,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -28,9 +29,18 @@ pub struct ReplayResult {
     pub sequences: BTreeMap<MarketId, u64>,
 }
 
+impl Default for MatchEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MatchEngine {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            books: BTreeMap::new(),
+            max_fills: MAX_MATCH_BATCH_FILLS,
+        }
     }
 
     /// Replay signed `PlaceOrder` intents in order, starting each market at the supplied sequence.
@@ -51,7 +61,30 @@ impl MatchEngine {
         sequences: BTreeMap<MarketId, u64>,
         context: RuntimeContext,
     ) -> Result<ReplayResult, ClobError> {
+        Self::replay_limited(
+            resting_orders,
+            orders,
+            markets,
+            sequences,
+            context,
+            MAX_MATCH_BATCH_FILLS,
+        )
+    }
+
+    /// Replay like [`Self::replay_with_resting`], stopping after `max_fills` fills.
+    ///
+    /// One taker can cross more makers than a block extension can carry. The remainder stays
+    /// resting (or expires, for immediate-or-cancel) so a later batch can continue the match.
+    pub(crate) fn replay_limited(
+        resting_orders: &[Order],
+        orders: &[Transaction],
+        markets: &BTreeMap<MarketId, Market>,
+        sequences: BTreeMap<MarketId, u64>,
+        context: RuntimeContext,
+        max_fills: usize,
+    ) -> Result<ReplayResult, ClobError> {
         let mut engine = Self::new();
+        engine.max_fills = max_fills;
         let mut sequences = sequences;
         let mut fills = Vec::new();
         let mut order_updates = BTreeMap::new();
@@ -157,7 +190,7 @@ impl MatchEngine {
         let makers = std::mem::take(opposite);
 
         for idx in 0..makers.len() {
-            if taker.remaining_base == 0 {
+            if taker.remaining_base == 0 || fills.len() >= self.max_fills {
                 append_open_orders(&mut remaining_makers, &makers[idx..]);
                 break;
             }

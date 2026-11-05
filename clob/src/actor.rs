@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    engine::validate_order, ClobError, ClobOperation, MatchBatch, MatchEngine, Market, MarketId,
-    Order, OrderId, Transaction, MAX_MATCH_BATCH_FILLS, MAX_MATCH_BATCH_ORDERS,
+    engine::validate_order, ClobActorSnapshot, ClobError, ClobOperation, MatchBatch, MatchEngine,
+    Market, MarketId, Order, OrderId, Transaction, MAX_MATCH_BATCH_FILLS, MAX_MATCH_BATCH_ORDERS,
 };
 use commonware_codec::{Encode, Read};
 use commonware_cryptography::PublicKey;
@@ -12,7 +12,7 @@ use futures::{
     channel::{mpsc, oneshot},
     FutureExt, SinkExt, StreamExt,
 };
-use nunchi_common::{Address, RuntimeContext};
+use nunchi_common::{Address, Authorization, RuntimeContext};
 use tracing::{debug, warn};
 
 /// Runtime settings for the validator-local CLOB actor.
@@ -170,6 +170,22 @@ impl ClobActor {
         )
     }
 
+    /// Reload committed markets, resting orders, and nonces after process start.
+    pub fn restore_snapshot(&mut self, snapshot: ClobActorSnapshot) {
+        for (market, sequence) in snapshot.markets {
+            self.sequences.insert(market.id, sequence);
+            self.markets.insert(market.id, market);
+        }
+        for order in snapshot.orders {
+            if order.status.is_open() && order.remaining_base > 0 {
+                self.active_orders.insert(order.id, order);
+            }
+        }
+        for (account, nonce) in snapshot.nonces {
+            self.nonces.insert(account, nonce);
+        }
+    }
+
     pub fn start<E>(self, context: E) -> Handle<()>
     where
         E: Spawner + Send + 'static,
@@ -232,8 +248,13 @@ impl ClobActor {
                 let _ = responder.send(result);
             }
             Message::UpsertMarket { market, sequence } => {
-                self.sequences.insert(market.id, sequence);
-                self.markets.insert(market.id, market);
+                // Genesis seeding queues sequence 0 before recovery runs. Do not
+                // roll a restored sequence backwards.
+                let current = self.sequences.get(&market.id).copied().unwrap_or(0);
+                if sequence >= current || !self.markets.contains_key(&market.id) {
+                    self.sequences.insert(market.id, sequence.max(current));
+                }
+                self.markets.entry(market.id).or_insert(market);
             }
             Message::SyncAccepted {
                 market,
@@ -307,39 +328,53 @@ impl ClobActor {
         if orders.is_empty() {
             return MatchBatch::default();
         }
-        if orders.len() > MAX_MATCH_BATCH_ORDERS {
-            warn!(
-                orders = orders.len(),
-                "local clob proposal exceeds match batch order limits"
-            );
+        let resting_snapshots = self.active_orders.values().cloned().collect::<Vec<_>>();
+        let markets = self.markets.clone();
+        let sequences = self.sequences.clone();
+        let replay_fills = |batch: &[Transaction]| {
+            MatchEngine::replay_with_resting(
+                &resting_snapshots,
+                batch,
+                &markets,
+                sequences.clone(),
+                RuntimeContext::default(),
+            )
+            .map(|result| result.fills.len())
+        };
+        let selected = select_bounded_orders(
+            &orders,
+            replay_fills,
+            MAX_MATCH_BATCH_ORDERS,
+            MAX_MATCH_BATCH_FILLS,
+        );
+        if selected.is_empty() {
+            if orders.len() <= MAX_MATCH_BATCH_ORDERS {
+                if let Ok(result) = MatchEngine::replay_with_resting(
+                    &resting_snapshots,
+                    &orders,
+                    &self.markets,
+                    self.sequences.clone(),
+                    RuntimeContext::default(),
+                ) {
+                    self.drop_closed_pending_orders(&result.orders);
+                }
+            }
             return MatchBatch::default();
         }
-        let resting_snapshots = self
-            .active_orders
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        let replay = MatchEngine::replay_with_resting(
+        match MatchEngine::replay_with_resting(
             &resting_snapshots,
-            &orders,
+            &selected,
             &self.markets,
             self.sequences.clone(),
             RuntimeContext::default(),
-        );
-        match replay {
-            Ok(result) if result.fills.is_empty() => {
+        ) {
+            Ok(result) if !result.fills.is_empty() => MatchBatch {
+                orders: selected,
+                fills: result.fills,
+            },
+            Ok(result) => {
                 self.drop_closed_pending_orders(&result.orders);
                 MatchBatch::default()
-            }
-            Ok(result) => {
-                if result.fills.len() > MAX_MATCH_BATCH_FILLS {
-                    warn!(
-                        fills = result.fills.len(),
-                        "local clob proposal exceeds match batch fill limits"
-                    );
-                    return MatchBatch::default();
-                }
-                MatchBatch { orders, fills: result.fills }
             }
             Err(error) => {
                 warn!(?error, "dropping invalid local clob proposal batch");
@@ -396,6 +431,9 @@ impl ClobActor {
 
     fn accept_order(&mut self, tx: Transaction) -> Result<(), ClobError> {
         tx.verify()?;
+        if !matches!(tx.authorization, Authorization::Single { .. }) {
+            return Err(ClobError::UnsupportedAuthorization);
+        }
         let ClobOperation::PlaceOrder {
             market,
             price,
@@ -486,5 +524,68 @@ impl ClobActor {
                 .get(&tx.account_id)
                 .is_none_or(|expected| tx.payload.nonce >= *expected)
         });
+    }
+}
+
+/// Pick a nonce-valid subset that matches and fits in one batch.
+///
+/// A full pending set above the order cap used to make every proposal empty. Non-filling
+/// orders do not consume the last free slot while later orders remain, so a crossing order
+/// from another account can still be included.
+pub(crate) fn select_bounded_orders(
+    orders: &[Transaction],
+    mut fill_count: impl FnMut(&[Transaction]) -> Result<usize, ClobError>,
+    max_orders: usize,
+    max_fills: usize,
+) -> Vec<Transaction> {
+    if max_orders == 0 || orders.is_empty() {
+        return Vec::new();
+    }
+    let mut chosen = Vec::new();
+    let mut blocked = BTreeSet::new();
+    let mut next_nonce = BTreeMap::new();
+    for (index, tx) in orders.iter().enumerate() {
+        if blocked.contains(&tx.account_id) {
+            continue;
+        }
+        if next_nonce
+            .get(&tx.account_id)
+            .is_some_and(|expected| tx.payload.nonce != *expected)
+        {
+            blocked.insert(tx.account_id.clone());
+            continue;
+        }
+        if chosen.len() == max_orders {
+            blocked.insert(tx.account_id.clone());
+            continue;
+        }
+        let mut trial = chosen.clone();
+        trial.push(tx.clone());
+        let fills = match fill_count(&trial) {
+            Ok(fills) if fills <= max_fills => fills,
+            Ok(_) | Err(_) => {
+                blocked.insert(tx.account_id.clone());
+                continue;
+            }
+        };
+        let chosen_fills = fill_count(&chosen).unwrap_or(0);
+        let later_orders = index + 1 < orders.len();
+        if fills == chosen_fills && chosen.len() + 1 == max_orders && later_orders {
+            blocked.insert(tx.account_id.clone());
+            continue;
+        }
+        chosen = trial;
+        match tx.payload.nonce.checked_add(1) {
+            Some(next) => {
+                next_nonce.insert(tx.account_id.clone(), next);
+            }
+            None => {
+                blocked.insert(tx.account_id.clone());
+            }
+        }
+    }
+    match fill_count(&chosen) {
+        Ok(fills) if fills > 0 && fills <= max_fills && chosen.len() <= max_orders => chosen,
+        _ => Vec::new(),
     }
 }

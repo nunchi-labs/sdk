@@ -29,7 +29,7 @@ pub(crate) use engine::fills_equivalent;
 pub use engine::{MatchEngine, ReplayResult};
 pub use extension::ClobExtension;
 pub use genesis::{ClobGenesis, ClobMarketGenesis};
-pub use ledger::{canonical_asset_pair, market_id, ClobError, ClobLedger};
+pub use ledger::{canonical_asset_pair, market_id, ClobActorSnapshot, ClobError, ClobLedger};
 pub use nunchi_common::{AccountSignature, Authorization};
 pub use transaction::{ClobOperation, MatchBatch, Transaction, TransactionPayload};
 pub use types::{

@@ -818,20 +818,19 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
         if !self.unsent.contains_key(&player) {
             return false;
         }
+        // Persist before the dealer view accepts the ack. `receive_player_ack` cannot be rolled
+        // back, and a later restart rebuilds the dealer from the journal. Accepting first and
+        // failing the fsync makes this process sign a log the restarted process will not.
+        match storage.append_ack(epoch, player.clone(), ack.clone()).await {
+            Ok(true) | Ok(false) => {}
+            Err(err) => {
+                error!(?epoch, ?player, %err, "failed to persist DKG ack");
+                return false;
+            }
+        }
         if let Some(ref mut dealer) = self.dealer {
-            if dealer
-                .receive_player_ack(player.clone(), ack.clone())
-                .is_ok()
-            {
+            if dealer.receive_player_ack(player.clone(), ack).is_ok() {
                 self.unsent.remove(&player);
-                match storage.append_ack(epoch, player.clone(), ack).await {
-                    Ok(true) => {}
-                    Ok(false) => return false,
-                    Err(err) => {
-                        error!(?epoch, ?player, %err, "failed to persist DKG ack");
-                        return false;
-                    }
-                }
                 return true;
             }
         }
@@ -907,7 +906,8 @@ impl<V: Variant, C: Signer> Player<V, C> {
             return Some(ack.clone());
         }
 
-        // Otherwise generate a new ack
+        // Otherwise generate a new ack. `dealer_message` records the dealing in the player
+        // view before we can persist it, and a second call then returns `Ok(None)`.
         let Ok(Some(ack)) = self.player.dealer_message::<M>(
             dealer.clone(),
             pub_msg.clone(),
@@ -919,13 +919,13 @@ impl<V: Variant, C: Signer> Player<V, C> {
             .append_dealing(epoch, dealer.clone(), pub_msg, priv_msg)
             .await
         {
-            Ok(true) => {}
-            Ok(false) => return None,
+            Ok(true) | Ok(false) => {}
             Err(err) => {
                 error!(?epoch, ?dealer, %err, "failed to persist DKG dealing");
-                return None;
             }
         }
+        // Cache even when the journal write failed. Dropping the ack here makes every later
+        // delivery of this dealing return `None`, so the dealer finalizes the player as a reveal.
         self.acks.insert(dealer, ack.clone());
         Some(ack)
     }
