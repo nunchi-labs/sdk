@@ -5,7 +5,9 @@ use nunchi_authority::{AuthorityError, AuthorityLedger};
 use nunchi_bridge::{escrow_address, BridgeError, BridgeLedger, BridgeOperation};
 use nunchi_clob::{ClobError, ClobLedger};
 use nunchi_coins::{CoinId, Ledger, LedgerError};
-use nunchi_common::{EventSink, NoopEventSink, Overlay, Runtime, RuntimeContext, StateStore};
+use nunchi_common::{
+    EventSink, NoopEventSink, Overlay, Runtime, RuntimeContext, StateStore, VecEventSink,
+};
 use nunchi_oracle::{OracleError, OracleLedger};
 
 use crate::Transaction;
@@ -85,10 +87,16 @@ where
 {
     // One overlay covers the fee and the module write. Dropping it on error reverts both,
     // including when the caller keeps `state` after `Err` instead of discarding a block batch.
+    // Events stay buffered until that commit so the caller's sink does not report a fee the
+    // reverted transaction never charged.
     let mut overlay = Overlay::new(state);
-    let result = apply_to_overlay(&mut overlay, context, transaction, &mut events).await;
+    let mut staged_events = VecEventSink::new();
+    let result = apply_to_overlay(&mut overlay, context, transaction, &mut staged_events).await;
     if result.is_ok() {
         overlay.commit();
+        for event in staged_events.into_events() {
+            events.emit(event);
+        }
     }
     result
 }

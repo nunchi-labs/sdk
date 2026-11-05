@@ -11,11 +11,18 @@ use tracing::warn;
 #[derive(Clone, Debug)]
 pub struct ClobExtension {
     mailbox: ClobMailbox,
+    /// Book staged by [`ConsensusExtension::preview`] for the next proposal.
+    ///
+    /// Matching reads it once and then restores the committed actor state.
+    preview_book: Option<BookSnapshot>,
 }
 
 impl ClobExtension {
     pub const fn new(mailbox: ClobMailbox) -> Self {
-        Self { mailbox }
+        Self {
+            mailbox,
+            preview_book: None,
+        }
     }
 
     pub fn mailbox(&self) -> ClobMailbox {
@@ -52,8 +59,24 @@ impl ConsensusExtension for ClobExtension {
         }
     }
 
+    async fn preview<S>(&mut self, state: &mut S)
+    where
+        S: StateStore + Send + Sync,
+    {
+        // The preview is consumed by the following `propose`. It is not installed
+        // on the actor, so ingress keeps serving the committed book from `prepare`.
+        self.preview_book = match load_book_snapshot(state).await {
+            Ok(snapshot) => Some(snapshot),
+            Err(error) => {
+                warn!(?error, "failed to read the clob book staged for this proposal");
+                None
+            }
+        };
+    }
+
     async fn propose(&mut self, context: RuntimeContext) -> Self::Payload {
-        self.mailbox.propose_with_context(context).await
+        let book = self.preview_book.take();
+        self.mailbox.propose_with_book(context, book).await
     }
 
     async fn verify_payload(&mut self, payload: &Self::Payload) -> bool {
@@ -182,6 +205,12 @@ where
                     snapshot.orders.push(order);
                 }
             }
+        }
+        // Filled accounts leave the book. Their fills are the remaining record of
+        // the nonce until the fill index drops them.
+        for fill in ledger.market_fills(&market.id).await? {
+            accounts.insert(fill.maker);
+            accounts.insert(fill.taker);
         }
         snapshot.markets.push((market, sequence));
     }

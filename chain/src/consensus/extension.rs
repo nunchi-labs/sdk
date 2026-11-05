@@ -41,6 +41,18 @@ pub trait ConsensusExtension: BlockExtension + Clone + Send + Sync + 'static {
         std::future::ready(())
     }
 
+    /// Read state staged for the block being proposed.
+    ///
+    /// Called after in-block transactions are applied and before [`Self::propose`].
+    /// `prepare` has already loaded the parent state. The default is a no-op.
+    /// Overrides must not publish this view on any path that outlives the attempt.
+    fn preview<S>(&mut self, _state: &mut S) -> impl Future<Output = ()> + Send
+    where
+        S: StateStore + Send + Sync,
+    {
+        std::future::ready(())
+    }
+
     /// Produce the extension payload for the next proposal.
     ///
     /// `context` is the block being proposed. Payloads that record height or
@@ -116,6 +128,14 @@ where
     {
         self.0.prepare(state).await;
         self.1.prepare(state).await;
+    }
+
+    async fn preview<S>(&mut self, state: &mut S)
+    where
+        S: StateStore + Send + Sync,
+    {
+        self.0.preview(state).await;
+        self.1.preview(state).await;
     }
 
     async fn propose(&mut self, context: RuntimeContext) -> Self::Payload {

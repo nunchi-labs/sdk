@@ -1,8 +1,8 @@
 //! Persistence layer for the CLOB module.
 
 use crate::{
-    ClobError,     Fill, FillId, Market, MarketId, Order, OrderId, Side, MAX_ACCOUNT_ORDERS,
-    MAX_BOOK_ORDERS, MAX_FILLS_PER_MARKET, MAX_MARKETS, MAX_TRACKED_ACCOUNTS, CLOB_NAMESPACE,
+    ClobError, Fill, FillId, Market, MarketId, Order, OrderId, Side, MAX_ACCOUNT_ORDERS,
+    MAX_BOOK_ORDERS, MAX_FILLS_PER_MARKET, MAX_MARKETS, types::TRACKED_ACCOUNT_SHARD, CLOB_NAMESPACE,
 };
 use async_trait::async_trait;
 use commonware_codec::{Encode, RangeCfg, Read, ReadExt};
@@ -23,7 +23,9 @@ enum Table {
     Fill = 6,
     MarketFills = 7,
     MarketSequence = 8,
-    TrackedAccounts = 9,
+    TrackedAccountCount = 9,
+    TrackedAccountShard = 10,
+    TrackedAccountFlag = 11,
 }
 
 impl From<Table> for u8 {
@@ -79,8 +81,16 @@ fn market_sequence_key(market: &MarketId) -> Digest {
     NS.key(Table::MarketSequence, market.encode().as_ref())
 }
 
-fn tracked_accounts_key() -> Digest {
-    NS.key(Table::TrackedAccounts, b"all")
+fn tracked_account_count_key() -> Digest {
+    NS.key(Table::TrackedAccountCount, b"count")
+}
+
+fn tracked_account_shard_key(index: u64) -> Digest {
+    NS.key(Table::TrackedAccountShard, index.encode().as_ref())
+}
+
+fn tracked_account_flag_key(account: &Address) -> Digest {
+    NS.key(Table::TrackedAccountFlag, account.encode().as_ref())
 }
 
 /// Typed state access required by [`crate::ClobLedger`].
@@ -126,9 +136,17 @@ pub trait ClobDB {
 
     fn set_market_sequence(&mut self, market: &MarketId, sequence: u64);
 
-    async fn tracked_accounts(&self) -> Result<Vec<Address>, ClobError>;
+    async fn account_tracked(&self, account: &Address) -> Result<bool, ClobError>;
 
-    fn set_tracked_accounts(&mut self, accounts: &[Address]);
+    fn set_account_tracked(&mut self, account: &Address);
+
+    async fn tracked_account_count(&self) -> Result<u64, ClobError>;
+
+    fn set_tracked_account_count(&mut self, count: u64);
+
+    async fn tracked_account_shard(&self, index: u64) -> Result<Vec<Address>, ClobError>;
+
+    fn set_tracked_account_shard(&mut self, index: u64, accounts: &[Address]);
 }
 
 #[async_trait]
@@ -287,25 +305,60 @@ impl<S: StateStore + Send + Sync> ClobDB for S {
         StateStore::set(self, market_sequence_key(market), encoded(&sequence));
     }
 
-    async fn tracked_accounts(&self) -> Result<Vec<Address>, ClobError> {
-        match StateStore::get(self, &tracked_accounts_key())
+    async fn account_tracked(&self, account: &Address) -> Result<bool, ClobError> {
+        Ok(StateStore::get(self, &tracked_account_flag_key(account))
+            .await
+            .map_err(|err| ClobError::Storage(err.to_string()))?
+            .is_some())
+    }
+
+    fn set_account_tracked(&mut self, account: &Address) {
+        StateStore::set(self, tracked_account_flag_key(account), Vec::new());
+    }
+
+    async fn tracked_account_count(&self) -> Result<u64, ClobError> {
+        match StateStore::get(self, &tracked_account_count_key())
+            .await
+            .map_err(|err| ClobError::Storage(err.to_string()))?
+        {
+            Some(bytes) => decoded(&bytes),
+            None => Ok(0),
+        }
+    }
+
+    fn set_tracked_account_count(&mut self, count: u64) {
+        StateStore::set(self, tracked_account_count_key(), encoded(&count));
+    }
+
+    async fn tracked_account_shard(&self, index: u64) -> Result<Vec<Address>, ClobError> {
+        match StateStore::get(self, &tracked_account_shard_key(index))
             .await
             .map_err(|err| ClobError::Storage(err.to_string()))?
         {
             Some(bytes) => {
                 let mut buf = bytes.as_ref();
-                Vec::read_cfg(&mut buf, &(RangeCfg::new(0..=MAX_TRACKED_ACCOUNTS), ()))
+                Vec::read_cfg(&mut buf, &(RangeCfg::new(0..=TRACKED_ACCOUNT_SHARD), ()))
                     .map_err(|err| ClobError::Storage(err.to_string()))
             }
             None => Ok(Vec::new()),
         }
     }
 
-    fn set_tracked_accounts(&mut self, accounts: &[Address]) {
+    fn set_tracked_account_shard(&mut self, index: u64, accounts: &[Address]) {
         StateStore::set(
             self,
-            tracked_accounts_key(),
+            tracked_account_shard_key(index),
             encoded(&accounts.to_vec()),
         );
     }
+}
+
+#[cfg(test)]
+pub(crate) fn testing_set_tracked_account_count<S: StateStore>(store: &mut S, count: u64) {
+    StateStore::set(store, tracked_account_count_key(), encoded(&count));
+}
+
+#[cfg(test)]
+pub(crate) fn testing_clear_tracked_account_count<S: StateStore>(store: &mut S) {
+    StateStore::remove(store, tracked_account_count_key());
 }

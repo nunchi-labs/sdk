@@ -198,18 +198,18 @@ fn failed_dispatch_reverts_the_fee() {
                 amount: 1_000,
             },
         ));
-        let err = CoinsRuntime::apply(
-            &mut state,
-            RuntimeContext::default(),
-            &tx,
-            &mut VecEventSink::new(),
-        )
-        .await
-        .unwrap_err();
+        let mut events = VecEventSink::new();
+        let err = CoinsRuntime::apply(&mut state, RuntimeContext::default(), &tx, &mut events)
+            .await
+            .unwrap_err();
         assert!(matches!(
             err,
             RuntimeError::Coins(LedgerError::InsufficientBalance { .. })
         ));
+        assert!(
+            events.is_empty(),
+            "a reverted transaction must not emit the fee it charged"
+        );
 
         let ledger = Ledger::new(&mut state);
         assert_eq!(ledger.balance(&alice, &coin).await.unwrap(), 1_000);

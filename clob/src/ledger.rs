@@ -5,8 +5,9 @@ use std::{
 
 use crate::{
     fills_equivalent, AssetId, ClobDB, ClobOperation, Fill, FillId, Market, MarketId, MatchBatch,
-    MatchEngine, Order, OrderId, Side, Transaction,     MAX_ACCOUNT_ORDERS, MAX_BOOK_ORDERS,
-    MAX_FILLS_PER_MARKET, MAX_MARKETS, MAX_TRACKED_ACCOUNTS, CLOB_NAMESPACE,
+    MatchEngine, Order, OrderId, Side, Transaction, MAX_ACCOUNT_ORDERS, MAX_BOOK_ORDERS,
+    MAX_FILLS_PER_MARKET, MAX_MARKETS, MAX_TRACKED_ACCOUNTS, types::TRACKED_ACCOUNT_SHARD,
+    CLOB_NAMESPACE,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{Hasher, Sha256};
@@ -43,6 +44,8 @@ pub enum ClobError {
     BookFull,
     #[error("account order index is full")]
     AccountIndexFull,
+    #[error("tracked account index is full")]
+    TrackedAccountsFull,
     #[error("market fill index is full")]
     FillIndexFull,
     #[error("order book index references a missing order")]
@@ -94,7 +97,21 @@ impl<D: ClobDB> ClobLedger<D> {
     }
 
     pub async fn tracked_accounts(&self) -> Result<Vec<Address>, ClobError> {
-        self.db.tracked_accounts().await
+        let count = self.db.tracked_account_count().await?;
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        if count > MAX_TRACKED_ACCOUNTS as u64 {
+            return Err(ClobError::Storage(
+                "tracked account count exceeds the maximum".into(),
+            ));
+        }
+        let shard_len = TRACKED_ACCOUNT_SHARD as u64;
+        let mut accounts = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
+        for index in 0..count.div_ceil(shard_len) {
+            accounts.extend(self.db.tracked_account_shard(index).await?);
+        }
+        Ok(accounts)
     }
 
     pub async fn market(&self, id: &MarketId) -> Result<Option<Market>, ClobError> {
@@ -160,10 +177,12 @@ impl<D: ClobDB> ClobLedger<D> {
             });
         }
 
+        // Index the account before any nonce write. A nonce missing from the index
+        // hydrates as zero, and a later nonce-zero intent can halt proposal.
+        self.track_account(&tx.account_id).await?;
         self.apply_operation(tx, context).await?;
         let next_nonce = expected.checked_add(1).ok_or(ClobError::NonceOverflow)?;
         self.db.set_nonce(&tx.account_id, next_nonce);
-        self.track_account(&tx.account_id).await?;
         Ok(())
     }
 
@@ -306,12 +325,22 @@ impl<D: ClobDB> ClobLedger<D> {
             }
         }
 
+        for account in expected_nonces.keys() {
+            self.track_account(account).await?;
+        }
+
         for fill in &replay.fills {
             let mut market_fills = self.db.market_fills(&fill.market).await?;
             self.db.set_fill(fill);
             market_fills.push(fill.id);
             let pruned_fill_ids = prune_oldest_fill_ids(&mut market_fills);
             for fill_id in pruned_fill_ids {
+                // A pruned fill may be the last on-ledger reference to an account that
+                // already left the book. Index it before the fill is deleted.
+                if let Some(pruned) = self.db.fill(&fill_id).await? {
+                    self.track_account(&pruned.maker).await?;
+                    self.track_account(&pruned.taker).await?;
+                }
                 self.db.remove_fill(&fill_id);
             }
             self.db.set_market_fills(&fill.market, &market_fills);
@@ -323,22 +352,29 @@ impl<D: ClobDB> ClobLedger<D> {
             self.db.set_market_sequence(&market, sequence);
         }
         for (account, nonce) in &expected_nonces {
-            self.db.set_nonce(account, *nonce);
             self.track_account(account).await?;
+            self.db.set_nonce(account, *nonce);
         }
         Ok(())
     }
 
     async fn track_account(&mut self, account: &Address) -> Result<(), ClobError> {
-        let mut accounts = self.db.tracked_accounts().await?;
-        if accounts.iter().any(|existing| existing == account) {
+        if self.db.account_tracked(account).await? {
             return Ok(());
         }
-        if accounts.len() == MAX_TRACKED_ACCOUNTS {
-            return Ok(());
+        let count = self.db.tracked_account_count().await?;
+        if count >= MAX_TRACKED_ACCOUNTS as u64 {
+            return Err(ClobError::TrackedAccountsFull);
         }
-        accounts.push(account.clone());
-        self.db.set_tracked_accounts(&accounts);
+        let shard_index = count / TRACKED_ACCOUNT_SHARD as u64;
+        let mut shard = self.db.tracked_account_shard(shard_index).await?;
+        if shard.len() >= TRACKED_ACCOUNT_SHARD {
+            return Err(ClobError::TrackedAccountsFull);
+        }
+        shard.push(account.clone());
+        self.db.set_tracked_account_shard(shard_index, &shard);
+        self.db.set_account_tracked(account);
+        self.db.set_tracked_account_count(count + 1);
         Ok(())
     }
 

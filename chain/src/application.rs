@@ -316,6 +316,10 @@ where
         let mut batch = QmdbBatch::new(batches);
         let mut included = Vec::new();
 
+        // Hydrate extension ingress from the parent block. Transactions below are
+        // still speculative; `preview` hands that view to proposal matching only.
+        self.consensus.prepare(&mut batch).await;
+
         let validate_start = timing.map(|_| rng.current());
         for transaction in candidates {
             if included.len() == self.max_block_transactions {
@@ -342,7 +346,7 @@ where
                 .observe_between(validate_start, rng.current());
         }
 
-        self.consensus.prepare(&mut batch).await;
+        self.consensus.preview(&mut batch).await;
         let extension = self.consensus.propose(context).await;
         if !self
             .consensus

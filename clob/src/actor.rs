@@ -62,6 +62,7 @@ enum Message {
     },
     Propose {
         context: RuntimeContext,
+        book: Option<BookSnapshot>,
         responder: oneshot::Sender<MatchBatch>,
     },
     Hydrate {
@@ -159,10 +160,25 @@ impl ClobMailbox {
 
     /// Drain currently matchable signed orders, stamping fills with `context`.
     pub async fn propose_with_context(&self, context: RuntimeContext) -> MatchBatch {
+        self.propose_with_book(context, None).await
+    }
+
+    /// Propose against `book` when it is set, then restore the committed actor state.
+    ///
+    /// `book` is the post-transaction preview. Ingress keeps the committed book.
+    pub(crate) async fn propose_with_book(
+        &self,
+        context: RuntimeContext,
+        book: Option<BookSnapshot>,
+    ) -> MatchBatch {
         let (responder, receiver) = oneshot::channel();
         let mut sender = self.sender.clone();
         if sender
-            .send(Message::Propose { context, responder })
+            .send(Message::Propose {
+                context,
+                book,
+                responder,
+            })
             .await
             .is_err()
         {
@@ -305,8 +321,12 @@ impl ClobActor {
                 self.sync_nonce_state(account, nonce);
                 let _ = responder.send(Ok(()));
             }
-            Message::Propose { context, responder } => {
-                let _ = responder.send(self.propose_batch(context));
+            Message::Propose {
+                context,
+                book,
+                responder,
+            } => {
+                let _ = responder.send(self.propose_batch(context, book));
             }
             Message::Hydrate { snapshot, responder } => {
                 self.hydrate_snapshot(snapshot);
@@ -349,6 +369,30 @@ impl ClobActor {
     }
 
     fn hydrate_snapshot(&mut self, snapshot: BookSnapshot) {
+        let _ = self.install_book(snapshot);
+        self.drop_stale_pending_orders();
+    }
+
+    /// Replace the committed book and return the book that was installed before.
+    fn install_book(&mut self, snapshot: BookSnapshot) -> BookSnapshot {
+        let previous = BookSnapshot {
+            markets: self
+                .markets
+                .values()
+                .map(|market| {
+                    (
+                        market.clone(),
+                        self.sequences.get(&market.id).copied().unwrap_or(0),
+                    )
+                })
+                .collect(),
+            orders: self.active_orders.values().cloned().collect(),
+            nonces: self
+                .nonces
+                .iter()
+                .map(|(account, nonce)| (account.clone(), *nonce))
+                .collect(),
+        };
         self.markets.clear();
         self.sequences.clear();
         self.active_orders.clear();
@@ -365,14 +409,31 @@ impl ClobActor {
         for (account, nonce) in snapshot.nonces {
             self.nonces.insert(account, nonce);
         }
-        self.drop_stale_pending_orders();
+        previous
     }
 
-    fn propose_batch(&mut self, context: RuntimeContext) -> MatchBatch {
+    fn propose_batch(&mut self, context: RuntimeContext, book: Option<BookSnapshot>) -> MatchBatch {
+        // Matching may use the post-transaction preview. Pending-order drops still
+        // follow the committed nonces, and the preview is uninstalled before return
+        // so `submit_order` never observes it.
+        let committed_nonces = self.nonces.clone();
+        let previous = book.map(|book| self.install_book(book));
+        let batch = self.propose_installed(context, &committed_nonces);
+        if let Some(previous) = previous {
+            let _preview = self.install_book(previous);
+        }
+        batch
+    }
+
+    fn propose_installed(
+        &mut self,
+        context: RuntimeContext,
+        committed_nonces: &BTreeMap<Address, u64>,
+    ) -> MatchBatch {
         if self.pending_orders.is_empty() {
             return MatchBatch::default();
         }
-        let orders = self.proposal_orders();
+        let orders = self.proposal_orders(committed_nonces);
         if orders.is_empty() {
             return MatchBatch::default();
         }
@@ -499,16 +560,24 @@ impl ClobActor {
         Ok(())
     }
 
-    fn proposal_orders(&mut self) -> Vec<Transaction> {
+    fn proposal_orders(&mut self, committed_nonces: &BTreeMap<Address, u64>) -> Vec<Transaction> {
+        let bases = self.nonces.clone();
         let mut expected_nonces = self.nonces.clone();
         let mut stale = BTreeSet::new();
         let mut orders = Vec::new();
         for tx in &self.pending_orders {
             let order_id = OrderId(tx.digest());
+            let base = bases.get(&tx.account_id).copied().unwrap_or(0);
+            let committed_base = committed_nonces.get(&tx.account_id).copied().unwrap_or(0);
             let expected = expected_nonces.entry(tx.account_id.clone()).or_default();
             match tx.payload.nonce.cmp(expected) {
+                // A preview can move the nonce ahead of the committed book. Keep an
+                // intent that is still valid there; drop it once this scan or the
+                // committed nonce has moved past it.
                 std::cmp::Ordering::Less => {
-                    stale.insert(order_id);
+                    if *expected > base || tx.payload.nonce < committed_base {
+                        stale.insert(order_id);
+                    }
                 }
                 std::cmp::Ordering::Equal if self.can_locally_replay(tx) => {
                     orders.push(tx.clone());

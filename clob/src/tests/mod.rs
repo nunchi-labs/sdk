@@ -1,24 +1,26 @@
 use std::{collections::BTreeMap, future::Future, time::Duration};
 
-use commonware_codec::{DecodeExt, Encode};
+use commonware_codec::{DecodeExt, Encode, EncodeSize};
 use commonware_cryptography::{ed25519, sha256::Digest, Hasher, Sha256, Signer as _};
 use commonware_formatting::hex;
 use commonware_p2p::simulated::{self, Link, Network};
 use commonware_runtime::{deterministic, Clock, Runner as _, Supervisor};
 use commonware_utils::{probability, NZUsize, NZU32};
 use governor::Quota;
-use nunchi_common::{Address, CommitState, RuntimeContext, StateError, StateStore};
+use nunchi_common::{Address, CommitState, RuntimeContext, StateError, StateStore, MAX_STATE_VALUE_SIZE};
 use nunchi_crypto::PrivateKey;
 
 use nunchi_chain::ConsensusExtension;
 
+use crate::db::{testing_clear_tracked_account_count, testing_set_tracked_account_count};
 use crate::{
-    market_id, AssetId, ClobActor, ClobConfig, ClobDB, ClobError, ClobExtension, ClobGenesis,
-    ClobLedger, ClobMailbox, ClobMarketGenesis, ClobOperation, FillId, Market, MatchBatch,
-    MatchEngine, OrderId, Side, TimeInForce, Transaction, MAX_FILLS_PER_MARKET,
+    market_id, types::TRACKED_ACCOUNT_SHARD, AssetId, ClobActor, ClobConfig, ClobDB, ClobError,
+    ClobExtension, ClobGenesis, ClobLedger, ClobMailbox, ClobMarketGenesis, ClobOperation, FillId,
+    Market, MatchBatch, MatchEngine, OrderId, Side, TimeInForce, Transaction, MAX_FILLS_PER_MARKET,
+    MAX_TRACKED_ACCOUNTS,
 };
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct MemoryStore {
     values: BTreeMap<Digest, Option<Vec<u8>>>,
 }
@@ -104,15 +106,53 @@ fn place_tx(
     base_quantity: u128,
     time_in_force: TimeInForce,
 ) -> Transaction {
+    place_tx_on(
+        signer,
+        nonce,
+        market(),
+        side,
+        price,
+        base_quantity,
+        time_in_force,
+    )
+}
+
+fn place_tx_on(
+    signer: &PrivateKey,
+    nonce: u64,
+    market: crate::MarketId,
+    side: Side,
+    price: u128,
+    base_quantity: u128,
+    time_in_force: TimeInForce,
+) -> Transaction {
     Transaction::sign(
         signer,
         nonce,
         ClobOperation::PlaceOrder {
-            market: market(),
+            market,
             side,
             price,
             base_quantity,
             time_in_force,
+        },
+    )
+}
+
+fn create_market_tx_sized(
+    signer: &PrivateKey,
+    nonce: u64,
+    tick_size: u128,
+    lot_size: u128,
+) -> Transaction {
+    Transaction::sign(
+        signer,
+        nonce,
+        ClobOperation::CreateMarket {
+            base_asset: asset(b"base"),
+            quote_asset: asset(b"quote"),
+            tick_size,
+            lot_size,
         },
     )
 }
@@ -1364,5 +1404,226 @@ fn prepare_hydrates_a_restarted_matcher_from_the_ledger() {
         assert_eq!(fills.len(), 2);
         assert_eq!(fills[1].maker_order, OrderId(ask.digest()));
         assert_eq!(fills[1].taker_order, OrderId(bid.digest()));
+    });
+}
+
+#[test]
+fn tracked_account_shard_fits_in_one_state_value() {
+    let account = Address::external(&PrivateKey::from_seed(1).public_key());
+    let shard = vec![account; TRACKED_ACCOUNT_SHARD];
+    assert!(shard.encode_size() <= MAX_STATE_VALUE_SIZE);
+}
+
+#[test]
+fn prepare_hydrates_nonce_after_the_account_leaves_the_book() {
+    deterministic::Runner::default().start(|runtime| async move {
+        let creator = PrivateKey::from_seed(1);
+        let maker = PrivateKey::from_seed(2);
+        let taker = PrivateKey::from_seed(3);
+        let maker_addr = Address::external(&maker.public_key());
+        let mut state = {
+            let mut ledger = ClobLedger::new(MemoryStore::default());
+            seed_market(&mut ledger, &creator).await;
+            let ask = place_tx(&maker, 0, Side::Ask, 100, 2, TimeInForce::GoodTilCancelled);
+            let bid = place_tx(&taker, 0, Side::Bid, 100, 2, TimeInForce::ImmediateOrCancel);
+            let batch = batch_from_orders(&ledger, vec![ask, bid], context(2)).await;
+            ledger.apply_match_batch(&batch, context(2)).await.unwrap();
+            assert!(ledger.book(&market(), Side::Ask).await.unwrap().is_empty());
+            assert!(ledger.book(&market(), Side::Bid).await.unwrap().is_empty());
+            assert_eq!(ledger.nonce(&maker_addr).await.unwrap(), 1);
+            ledger.into_inner()
+        };
+        // Existing ledgers recorded the nonce before the account index existed.
+        testing_clear_tracked_account_count(&mut state);
+
+        let (actor, mailbox) = ClobActor::new(ClobConfig::default());
+        let _actor = actor.start(runtime.child("clob"));
+        let mut extension = ClobExtension::new(mailbox.clone());
+        extension.prepare(&mut state).await;
+
+        let stale = place_tx(&maker, 0, Side::Bid, 100, 2, TimeInForce::ImmediateOrCancel);
+        assert_eq!(
+            mailbox.submit_order(stale).await.unwrap_err(),
+            ClobError::NonceMismatch {
+                account: Box::new(maker_addr.clone()),
+                expected: 1,
+                actual: 0,
+            }
+        );
+        let ask = place_tx(&maker, 1, Side::Ask, 100, 2, TimeInForce::GoodTilCancelled);
+        let bid = place_tx(&taker, 1, Side::Bid, 100, 2, TimeInForce::ImmediateOrCancel);
+        mailbox.submit_order(ask).await.unwrap();
+        mailbox.submit_order(bid).await.unwrap();
+        let proposal_context = context(4);
+        let payload = extension.propose(proposal_context).await;
+        assert_eq!(payload.fills.len(), 1);
+        assert!(extension
+            .apply_payload(&mut state, proposal_context, &payload)
+            .await);
+        assert_eq!(
+            ClobLedger::new(&mut state).nonce(&maker_addr).await.unwrap(),
+            2
+        );
+    });
+}
+
+#[test]
+fn track_account_rejects_a_new_account_when_the_index_is_full() {
+    run_test(|| async {
+        let signer = PrivateKey::from_seed(7);
+        let account = Address::external(&signer.public_key());
+        let mut store = MemoryStore::default();
+        testing_set_tracked_account_count(&mut store, MAX_TRACKED_ACCOUNTS as u64);
+        let mut ledger = ClobLedger::new(store);
+
+        let err = ledger
+            .apply_transaction(&create_market_tx(&signer, 0), context(1))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err, ClobError::TrackedAccountsFull);
+        assert_eq!(ledger.nonce(&account).await.unwrap(), 0);
+    });
+}
+
+#[test]
+fn tracked_account_can_advance_nonce_when_the_index_is_full() {
+    run_test(|| async {
+        let creator = PrivateKey::from_seed(1);
+        let account = Address::external(&creator.public_key());
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        seed_market(&mut ledger, &creator).await;
+        let mut store = ledger.into_inner();
+        testing_set_tracked_account_count(&mut store, MAX_TRACKED_ACCOUNTS as u64);
+        let mut ledger = ClobLedger::new(store);
+
+        ledger
+            .apply_transaction(&create_market_tx_sized(&creator, 1, 7, MARKET_LOT), context(2))
+            .await
+            .unwrap();
+
+        assert_eq!(ledger.nonce(&account).await.unwrap(), 2);
+    });
+}
+
+#[test]
+fn track_account_records_past_a_single_shard() {
+    run_test(|| async {
+        let signer = PrivateKey::from_seed(8);
+        let account = Address::external(&signer.public_key());
+        let mut store = MemoryStore::default();
+        testing_set_tracked_account_count(&mut store, TRACKED_ACCOUNT_SHARD as u64);
+        let mut ledger = ClobLedger::new(store);
+
+        ledger
+            .apply_transaction(&create_market_tx(&signer, 0), context(1))
+            .await
+            .unwrap();
+
+        let tracked = ledger.tracked_accounts().await.unwrap();
+        assert_eq!(tracked, vec![account]);
+        assert_eq!(ledger.nonce(&tracked[0]).await.unwrap(), 1);
+    });
+}
+
+#[test]
+fn preview_matches_same_block_markets_without_mutating_ingress() {
+    deterministic::Runner::default().start(|runtime| async move {
+        let creator = PrivateKey::from_seed(1);
+        let alt_maker = PrivateKey::from_seed(4);
+        let alt_taker = PrivateKey::from_seed(5);
+        let probe = PrivateKey::from_seed(6);
+        let mut state = {
+            let mut ledger = ClobLedger::new(MemoryStore::default());
+            seed_market(&mut ledger, &creator).await;
+            ledger.into_inner()
+        };
+        let (actor, mailbox) = ClobActor::new(ClobConfig::default());
+        let _actor = actor.start(runtime.child("clob"));
+        let mut extension = ClobExtension::new(mailbox.clone());
+        extension.prepare(&mut state).await;
+
+        // Same nonce the speculative CreateMarket will consume. Abandoning that
+        // create must not drop this intent or advance the ingress nonce.
+        let creator_order = place_tx(
+            &creator,
+            1,
+            Side::Bid,
+            100,
+            2,
+            TimeInForce::ImmediateOrCancel,
+        );
+        mailbox.submit_order(creator_order.clone()).await.unwrap();
+
+        let mut preview_state = state.clone();
+        ClobLedger::new(&mut preview_state)
+            .apply_transaction(&create_market_tx_sized(&creator, 1, 7, MARKET_LOT), context(2))
+            .await
+            .unwrap();
+        let alt_market = market_id(&asset(b"base"), &asset(b"quote"), 7, MARKET_LOT);
+        extension.preview(&mut preview_state).await;
+
+        // The nonce check runs before the duplicate check. Nonce 1 is still
+        // pending, so the next expected nonce stays 2 and the intent is not dropped.
+        assert!(matches!(
+            mailbox.submit_order(creator_order.clone()).await.unwrap_err(),
+            ClobError::NonceMismatch {
+                expected: 2,
+                actual: 1,
+                ..
+            }
+        ));
+
+        let ask = place_tx_on(
+            &alt_maker,
+            0,
+            alt_market,
+            Side::Ask,
+            7,
+            2,
+            TimeInForce::GoodTilCancelled,
+        );
+        let bid = place_tx_on(
+            &alt_taker,
+            0,
+            alt_market,
+            Side::Bid,
+            7,
+            2,
+            TimeInForce::ImmediateOrCancel,
+        );
+        mailbox.submit_order(ask).await.unwrap();
+        mailbox.submit_order(bid).await.unwrap();
+
+        let proposal_context = context(3);
+        let payload = extension.propose(proposal_context).await;
+        assert_eq!(payload.fills.len(), 1);
+        assert_eq!(payload.fills[0].market, alt_market);
+        assert!(payload
+            .orders
+            .iter()
+            .all(|tx| tx.digest() != creator_order.digest()));
+        assert!(extension
+            .apply_payload(&mut preview_state, proposal_context, &payload)
+            .await);
+
+        assert!(matches!(
+            mailbox.submit_order(creator_order).await.unwrap_err(),
+            ClobError::NonceMismatch {
+                expected: 2,
+                actual: 1,
+                ..
+            }
+        ));
+        let off_tick = place_tx_on(
+            &probe,
+            0,
+            alt_market,
+            Side::Bid,
+            1,
+            2,
+            TimeInForce::ImmediateOrCancel,
+        );
+        mailbox.submit_order(off_tick).await.unwrap();
     });
 }
