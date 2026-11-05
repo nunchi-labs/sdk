@@ -8,6 +8,7 @@ import {
   parseWorkspaceMembers,
   parseCrateInfo,
   buildFileTree,
+  topLevelDirectories,
   buildSnippets,
   hasMajorityOverlap,
   selectTopSnippets,
@@ -266,6 +267,25 @@ test-crate = { name = "also-wrong" }`;
     const info = parseCrateInfo(cargoToml, "fallback");
     expect(info.name).toBe("correct-name");
     expect(info.description).toBe("The correct description");
+  });
+});
+
+describe("topLevelDirectories", () => {
+  it("omits root files and returns unique directory names", () => {
+    const files = [
+      "README.md",
+      "Cargo.toml",
+      "Justfile",
+      "coins/src/lib.rs",
+      "coins/Cargo.toml",
+      "mcp/src/index.ts",
+      "examples/coins/chain/src/main.rs",
+    ];
+    expect(topLevelDirectories(files)).toEqual(["coins", "examples", "mcp"]);
+  });
+
+  it("returns an empty list when every path is a root file", () => {
+    expect(topLevelDirectories(["README.md", "Cargo.toml", "Justfile"])).toEqual([]);
   });
 });
 

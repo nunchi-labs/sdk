@@ -21,6 +21,7 @@ import { z } from "zod";
 import type { Env } from "./env.d.ts";
 import {
   buildFileTree,
+  topLevelDirectories,
   buildSnippets,
   formatSnippet,
   formatWithLineNumbers,
@@ -397,14 +398,8 @@ export class NunchiMCP extends McpAgent<Env, {}, {}> {
             };
           }
         } else {
-          // List top-level directories
-          prefix = "";
-          const dirs = new Set<string>();
-          for (const file of allFiles) {
-            const topDir = file.split("/")[0];
-            dirs.add(topDir);
-          }
-          const sortedDirs = [...dirs].sort();
+          // List top-level directories. Root files have no slash and are not directories.
+          const sortedDirs = topLevelDirectories(allFiles);
           return {
             content: [
               {

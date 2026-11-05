@@ -275,6 +275,22 @@ export function formatWithLineNumbers(
 }
 
 /**
+ * Unique top-level directory names among indexed paths, sorted ascending.
+ * Paths with no `/` are files at the repository root and are omitted.
+ */
+export function topLevelDirectories(files: string[]): string[] {
+  const dirs = new Set<string>();
+  for (const file of files) {
+    const slash = file.indexOf("/");
+    if (slash === -1) {
+      continue;
+    }
+    dirs.add(file.slice(0, slash));
+  }
+  return [...dirs].sort();
+}
+
+/**
  * Build a file tree string from a list of file paths.
  * Groups files by directory and formats as an indented tree.
  */
