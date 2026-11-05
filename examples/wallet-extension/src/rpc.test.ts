@@ -37,4 +37,11 @@ describe("parseRpcResponse", () => {
     const parsed = parseRpcResponse('{"result":{"nonce":7,"amount":"42"}}');
     expect(parsed.result).toEqual({ nonce: 7, amount: "42" });
   });
+
+  it("keeps large numbers that already sit inside strings", () => {
+    const parsed = parseRpcResponse(
+      '{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"nonce mismatch: expected 9007199254740993, got 7"}}'
+    );
+    expect(parsed.error?.message).toBe("nonce mismatch: expected 9007199254740993, got 7");
+  });
 });

@@ -845,7 +845,17 @@ export class Wallet {
         } else if (incoming.displayCoin === "") {
           settings.displayCoin = "";
         }
-        await this.host.storageSet({ settings });
+        // Cursors are the next nonce on one chain. Another RPC has its own
+        // sequence, so drop them before publishing the switch. Hold the submit
+        // lock so an in-flight send cannot rewrite the old cursor afterward.
+        if (settings.rpcUrl !== current.rpcUrl) {
+          await this.withSubmitLock(async () => {
+            await this.clearNonceCursors();
+            await this.host.storageSet({ settings });
+          });
+        } else {
+          await this.host.storageSet({ settings });
+        }
         return { success: true, data: settings };
       }
 
@@ -1209,7 +1219,6 @@ export class Wallet {
     const nonce = await this.allocateNonce(settings.rpcUrl, from);
     const signed = await this.signOnly(wallet, nonce, coin, from, to, amount);
     if (!submit) {
-      await this.commitCursors({ address: from, nextNonce: nonce + 1n });
       return { digest: signed.digest, transaction: signed.transaction };
     }
     const hash = await this.submitTransaction(settings.rpcUrl, signed.transaction);
@@ -1245,6 +1254,12 @@ export class Wallet {
       amount: activity.amount,
     });
     return { hash, digest: signed.digest_hex, transaction: signed.transaction_hex };
+  }
+
+  private async clearNonceCursors(): Promise<void> {
+    this.nonceCursor.clear();
+    this.factoryCursor = null;
+    await this.host.storageRemove([NONCE_CURSOR_STORAGE, FACTORY_CURSOR_STORAGE]);
   }
 
   private async allocateNonce(rpcUrl: string, address: string): Promise<bigint> {
