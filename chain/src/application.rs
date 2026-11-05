@@ -316,6 +316,10 @@ where
         let mut batch = QmdbBatch::new(batches);
         let mut included = Vec::new();
 
+        // Hydrate extension ingress from the parent block. Transactions below are
+        // still speculative; `preview` hands that view to proposal matching only.
+        self.consensus.prepare(&mut batch).await;
+
         let validate_start = timing.map(|_| rng.current());
         for transaction in candidates {
             if included.len() == self.max_block_transactions {
@@ -342,10 +346,8 @@ where
                 .observe_between(validate_start, rng.current());
         }
 
-        let extension = self
-            .consensus
-            .propose_from_state(&mut batch, context)
-            .await;
+        self.consensus.preview(&mut batch).await;
+        let extension = self.consensus.propose(context).await;
         if !self
             .consensus
             .apply_payload(&mut batch, context, &extension)
@@ -924,11 +926,13 @@ where
             "finalized block"
         );
         *self.applied_height.lock().await = block.height();
-        self.submitter.finalized(
-            applied,
-            lane_nonces.into_iter().collect(),
-            block.height().get(),
-        );
+        self.submitter
+            .finalized(
+                applied,
+                lane_nonces.into_iter().collect(),
+                block.height().get(),
+            )
+            .await;
         self.events
             .finalized(Self::block_runtime_context(block))
             .await;

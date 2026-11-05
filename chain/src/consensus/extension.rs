@@ -29,19 +29,49 @@ pub trait BlockExtension: 'static {
 /// block notifications should wire that through the consensus/marshal reporter path that owns
 /// acknowledgements for those notifications.
 pub trait ConsensusExtension: BlockExtension + Clone + Send + Sync + 'static {
+    /// Load extension state that proposals must match before [`Self::propose`].
+    ///
+    /// The default is a no-op. Extensions whose proposal state is rebuilt from
+    /// the parent chain state should override this so a restarted process does
+    /// not propose from an empty cache.
+    fn prepare<S>(&mut self, _state: &mut S) -> impl Future<Output = ()> + Send
+    where
+        S: StateStore + Send + Sync,
+    {
+        std::future::ready(())
+    }
+
+    /// Read state staged for the block being proposed.
+    ///
+    /// Called after in-block transactions are applied and before [`Self::propose`].
+    /// `prepare` has already loaded the parent state. The default is a no-op.
+    /// Overrides must not publish this view on any path that outlives the attempt.
+    fn preview<S>(&mut self, _state: &mut S) -> impl Future<Output = ()> + Send
+    where
+        S: StateStore + Send + Sync,
+    {
+        std::future::ready(())
+    }
+
     /// Produce the extension payload for the next proposal.
-    fn propose(&mut self) -> impl Future<Output = Self::Payload> + Send;
+    ///
+    /// `context` is the block being proposed. Payloads that record height or
+    /// time must use it so verification replays the same values.
+    fn propose(
+        &mut self,
+        context: RuntimeContext,
+    ) -> impl Future<Output = Self::Payload> + Send;
 
     /// Produce the extension payload after runtime transactions are applied to `state`.
     fn propose_from_state<S>(
         &mut self,
         _state: &mut S,
-        _context: RuntimeContext,
+        context: RuntimeContext,
     ) -> impl Future<Output = Self::Payload> + Send
     where
         S: StateStore + Send + Sync,
     {
-        self.propose()
+        self.propose(context)
     }
 
     /// Verify an extension payload included in a proposed block.
@@ -104,9 +134,25 @@ where
     A: ConsensusExtension,
     B: ConsensusExtension,
 {
-    async fn propose(&mut self) -> Self::Payload {
-        let left = self.0.propose().await;
-        let right = self.1.propose().await;
+    async fn prepare<S>(&mut self, state: &mut S)
+    where
+        S: StateStore + Send + Sync,
+    {
+        self.0.prepare(state).await;
+        self.1.prepare(state).await;
+    }
+
+    async fn preview<S>(&mut self, state: &mut S)
+    where
+        S: StateStore + Send + Sync,
+    {
+        self.0.preview(state).await;
+        self.1.preview(state).await;
+    }
+
+    async fn propose(&mut self, context: RuntimeContext) -> Self::Payload {
+        let left = self.0.propose(context).await;
+        let right = self.1.propose(context).await;
         (left, right)
     }
 
@@ -189,7 +235,7 @@ impl BlockExtension for NoConsensusExtension {
 }
 
 impl ConsensusExtension for NoConsensusExtension {
-    fn propose(&mut self) -> impl Future<Output = Self::Payload> + Send {
+    fn propose(&mut self, _context: RuntimeContext) -> impl Future<Output = Self::Payload> + Send {
         std::future::ready(EmptyPayload)
     }
 }

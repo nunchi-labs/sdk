@@ -295,7 +295,7 @@ fn clob_mailbox_extension_records_verified_fill() {
         mailbox.submit_order(bid.clone()).await.unwrap();
 
         let mut extension = ClobExtension::new(mailbox);
-        let payload = extension.propose().await;
+        let payload = extension.propose(committed_context(2)).await;
         assert_eq!(payload.fills.len(), 1);
         let first_context = committed_context(2);
         assert!(extension
@@ -329,7 +329,7 @@ fn clob_mailbox_extension_records_verified_fill() {
             .submit_order(second_bid.clone())
             .await
             .unwrap();
-        let second_payload = extension.propose().await;
+        let second_payload = extension.propose(committed_context(3)).await;
         assert_eq!(second_payload.orders, vec![second_bid.clone()]);
         assert_eq!(second_payload.fills.len(), 1);
         let second_context = committed_context(3);

@@ -136,6 +136,24 @@ type PendingTransaction = TransactionRequest & {
 type StoredConnection = { id: string; origin: string; timestamp: number; windowId?: number };
 type StoredTransaction = Omit<TransactionRequest, "id"> & { id: string; windowId?: number };
 
+/** One wallet submit that may still occupy its nonce. */
+type SubmittedNonce = {
+  nonce: number;
+  hash: string;
+};
+
+/** In-flight nonce for one account or the factory on a single RPC endpoint. */
+type NonceCursor = {
+  /** Next nonce to assign while a live submit or a dapp signature still reserves one. */
+  next: number;
+  /** Highest chain nonce observed for this cursor. */
+  seen: number;
+  /** Wallet submits still occupying a nonce. Absent when the reservation is only a local signature. */
+  submits?: SubmittedNonce[];
+  /** Nonces signed for a dapp and not yet consumed by the chain. */
+  held?: number[];
+};
+
 const DEFAULT_SETTINGS: Settings = {
   rpcUrl: "http://localhost:8545",
   network: "local",
@@ -151,11 +169,14 @@ export class Wallet {
   private hydrated = false;
   private lastActive: number;
   private approvalTimers: Set<ReturnType<typeof setTimeout>> = new Set();
-  /** Next unused account nonce per RPC URL, when this process has signed ahead of that chain. */
-  private reservedNonces = new Map<string, Map<string, number>>();
-  /** Next unused factory nonce per RPC URL. */
-  private reservedFactoryNonces = new Map<string, number>();
-  private signingQueue: Promise<void> = Promise.resolve();
+  private submissionTail: Promise<unknown> = Promise.resolve();
+  private storageTail: Promise<void> = Promise.resolve();
+  /**
+   * Next nonce to use after a submit or a sign-only request, before that chain's nonce advances.
+   * Keyed by RPC so a network switch cannot reuse a cursor from another chain.
+   */
+  private reservedNonce = new Map<string, NonceCursor>();
+  private reservedFactoryNonce = new Map<string, NonceCursor>();
 
   constructor(private readonly host: WalletHost) {
     this.lastActive = host.now();
@@ -310,17 +331,18 @@ export class Wallet {
         await decryptPrivateKey(wallet.encrypted, wallet.salt, password);
         this.unlockedWallet = null;
         this.connectedSites.clear();
-        this.pendingConnections.clear();
-        this.pendingTransactions.clear();
-        await this.host.storageRemove([
-          "wallet",
-          "activity",
-          "connectedSites",
-          "pendingConnections",
-          "pendingTransactions",
-          LOCKOUT_STORAGE,
-        ]);
-        await this.persistPending();
+        this.clearNonceCursors();
+        this.rejectOutstanding("Wallet deleted");
+        await this.enqueueStorage(async () => {
+          await this.host.storageRemove([
+            "wallet",
+            "activity",
+            "connectedSites",
+            "pendingConnections",
+            "pendingTransactions",
+            LOCKOUT_STORAGE,
+          ]);
+        });
         return { success: true };
       }
 
@@ -510,15 +532,28 @@ export class Wallet {
           throw new Error("Transaction from address must match unlocked wallet");
         }
         try {
-          const settings = await this.getSettings();
           const wallet = this.unlockedWallet;
-          const result = await this.withAccountNonce(settings.rpcUrl, wallet.address, (nonce) =>
-            request.submit
-              ? this.signAndSubmit(wallet, nonce, request.coin, request.from, request.to, request.amount)
-              : this.signOnly(wallet, nonce, request.coin, request.from, request.to, request.amount)
-          );
-          this.settlePending(this.pendingTransactions, requestId, { success: true, data: result });
-          return { success: true, data: result };
+          const settings = await this.getSettings();
+          return await this.enqueueSubmission(async () => {
+            const nonce = await this.allocateNonce(settings.rpcUrl, wallet.address);
+            if (request.submit) {
+              const submitted = await this.signAndSubmit(
+                wallet,
+                nonce,
+                request.coin,
+                request.from,
+                request.to,
+                request.amount
+              );
+              this.noteSubmittedNonce(settings.rpcUrl, wallet.address, nonce, submitted.hash);
+              this.settlePending(this.pendingTransactions, requestId, { success: true, data: submitted });
+              return { success: true, data: submitted };
+            }
+            const signed = await this.signOnly(wallet, nonce, request.coin, request.from, request.to, request.amount);
+            this.noteSignedNonce(settings.rpcUrl, wallet.address, nonce);
+            this.settlePending(this.pendingTransactions, requestId, { success: true, data: signed });
+            return { success: true, data: signed };
+          });
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           this.settlePending(this.pendingTransactions, requestId, { success: false, error: message });
@@ -547,14 +582,14 @@ export class Wallet {
         if (from !== this.unlockedWallet.address) {
           throw new Error("from address must match unlocked wallet");
         }
-        const settings = await this.getSettings();
         const wallet = this.unlockedWallet;
-        return {
-          success: true,
-          data: await this.withAccountNonce(settings.rpcUrl, wallet.address, (nonce) =>
-            this.signAndSubmit(wallet, nonce, coin, from, to, amount)
-          ),
-        };
+        const settings = await this.getSettings();
+        return this.enqueueSubmission(async () => {
+          const nonce = await this.allocateNonce(settings.rpcUrl, wallet.address);
+          const result = await this.signAndSubmit(wallet, nonce, coin, from, to, amount);
+          this.noteSubmittedNonce(settings.rpcUrl, wallet.address, nonce, result.hash);
+          return { success: true, data: result };
+        });
       }
 
       case "CREATE_TOKEN": {
@@ -568,39 +603,36 @@ export class Wallet {
           initial_supply: string;
           max_supply?: string;
         };
-        const settings = await this.getSettings();
         const wallet = this.unlockedWallet;
+        const settings = await this.getSettings();
         const maxSupply = max_supply ?? "";
-        const created = await this.withAccountNonce(settings.rpcUrl, wallet.address, async (nonce) => {
+        return this.enqueueSubmission(async () => {
+          const nonce = await this.allocateNonce(settings.rpcUrl, wallet.address);
           const factoryNonce = await this.allocateFactoryNonce(settings.rpcUrl);
-          try {
-            const wasm = await this.host.wasm();
-            const signed = wasm.sign_create_token(
-              wallet.privateKeyHex,
-              BigInt(nonce),
-              symbol,
-              name,
-              decimals,
-              initial_supply,
-              maxSupply
-            );
-            const coin = wasm.derive_coin_id(
-              wallet.address,
-              BigInt(factoryNonce),
-              symbol,
-              name,
-              decimals,
-              initial_supply,
-              maxSupply
-            );
-            const submitted = await this.submitSigned(signed, { coin, to: wallet.address, amount: initial_supply });
-            return { submitted, coin, factoryNonce };
-          } catch (error) {
-            this.releaseFactoryNonce(settings.rpcUrl, factoryNonce);
-            throw error;
-          }
+          const wasm = await this.host.wasm();
+          const signed = wasm.sign_create_token(
+            wallet.privateKeyHex,
+            BigInt(nonce),
+            symbol,
+            name,
+            decimals,
+            initial_supply,
+            maxSupply
+          );
+          const coin = wasm.derive_coin_id(
+            wallet.address,
+            BigInt(factoryNonce),
+            symbol,
+            name,
+            decimals,
+            initial_supply,
+            maxSupply
+          );
+          const submitted = await this.submitSigned(signed, { coin, to: wallet.address, amount: initial_supply });
+          this.noteSubmittedNonce(settings.rpcUrl, wallet.address, nonce, submitted.hash);
+          this.noteSubmittedFactoryNonce(settings.rpcUrl, factoryNonce, submitted.hash);
+          return { success: true, data: { ...submitted, coin, factoryNonce } };
         });
-        return { success: true, data: { ...created.submitted, coin: created.coin, factoryNonce: created.factoryNonce } };
       }
 
       case "MINT": {
@@ -608,14 +640,16 @@ export class Wallet {
           throw new Error("Wallet is locked");
         }
         const { coin, to, amount } = payload as { coin: string; to: string; amount: string };
-        const settings = await this.getSettings();
         const wallet = this.unlockedWallet;
-        const submitted = await this.withAccountNonce(settings.rpcUrl, wallet.address, async (nonce) => {
+        const settings = await this.getSettings();
+        return this.enqueueSubmission(async () => {
+          const nonce = await this.allocateNonce(settings.rpcUrl, wallet.address);
           const wasm = await this.host.wasm();
           const signed = wasm.sign_mint(wallet.privateKeyHex, BigInt(nonce), coin, to, amount);
-          return this.submitSigned(signed, { coin, to, amount });
+          const result = await this.submitSigned(signed, { coin, to, amount });
+          this.noteSubmittedNonce(settings.rpcUrl, wallet.address, nonce, result.hash);
+          return { success: true, data: result };
         });
-        return { success: true, data: submitted };
       }
 
       case "BURN": {
@@ -623,14 +657,16 @@ export class Wallet {
           throw new Error("Wallet is locked");
         }
         const { coin, amount } = payload as { coin: string; amount: string };
-        const settings = await this.getSettings();
         const wallet = this.unlockedWallet;
-        const submitted = await this.withAccountNonce(settings.rpcUrl, wallet.address, async (nonce) => {
+        const settings = await this.getSettings();
+        return this.enqueueSubmission(async () => {
+          const nonce = await this.allocateNonce(settings.rpcUrl, wallet.address);
           const wasm = await this.host.wasm();
           const signed = wasm.sign_burn(wallet.privateKeyHex, BigInt(nonce), coin, wallet.address, amount);
-          return this.submitSigned(signed, { coin, to: wallet.address, amount });
+          const result = await this.submitSigned(signed, { coin, to: wallet.address, amount });
+          this.noteSubmittedNonce(settings.rpcUrl, wallet.address, nonce, result.hash);
+          return { success: true, data: result };
         });
-        return { success: true, data: submitted };
       }
 
       case "REGISTER_ACCOUNT_POLICY": {
@@ -641,22 +677,28 @@ export class Wallet {
           threshold?: number;
           signer_pub_keys?: string;
         };
-        const settings = await this.getSettings();
         const wallet = this.unlockedWallet;
+        const settings = await this.getSettings();
         const wasm = await this.host.wasm();
         const keys = signer_pub_keys ?? wallet.publicKeyHex;
         const required = threshold ?? 1;
         const account = wasm.derive_multisig_account(required, keys);
-        const submitted = await this.withAccountNonce(settings.rpcUrl, account, async (nonce) => {
-          const signed = wasm.sign_register_account_policy(wallet.privateKeyHex, BigInt(nonce), required, keys);
-          const recorded = await this.submitSigned(signed, {
+        return this.enqueueSubmission(async () => {
+          const nonce = await this.allocateNonce(settings.rpcUrl, account);
+          const signed = wasm.sign_register_account_policy(
+            wallet.privateKeyHex,
+            BigInt(nonce),
+            required,
+            keys
+          );
+          const submitted = await this.submitSigned(signed, {
             coin: "",
             to: signed.account,
             amount: "0",
           });
-          return { ...recorded, account: signed.account ?? account };
+          this.noteSubmittedNonce(settings.rpcUrl, account, nonce, submitted.hash);
+          return { success: true, data: { ...submitted, account: signed.account ?? account } };
         });
-        return { success: true, data: submitted };
       }
 
       case "GET_CONNECTED_SITES": {
@@ -681,6 +723,9 @@ export class Wallet {
         parseRpcUrl(settings.rpcUrl);
         if (!settings.chainId) {
           settings.chainId = settings.network || DEFAULT_SETTINGS.chainId;
+        }
+        if (this.chainChanged(current, settings)) {
+          this.clearNonceCursors();
         }
         await this.host.storageSet({ settings });
         return { success: true, data: settings };
@@ -763,31 +808,222 @@ export class Wallet {
     }
   }
 
-  private async persistConnectedSites(): Promise<void> {
-    await this.host.storageSet({ connectedSites: Array.from(this.connectedSites) });
+  private enqueueSubmission<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.submissionTail.then(work, work);
+    this.submissionTail = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
   }
 
-  private async persistPending(): Promise<void> {
-    const connections: StoredConnection[] = [];
-    for (const [id, request] of this.pendingConnections) {
-      connections.push({ id, origin: request.origin, timestamp: request.timestamp, windowId: request.windowId });
+  private enqueueStorage(work: () => Promise<void>): Promise<void> {
+    const run = this.storageTail.then(work, work);
+    this.storageTail = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  }
+
+  private async allocateNonce(rpcUrl: string, address: string): Promise<number> {
+    const chainNonce = await this.fetchNonce(rpcUrl, address);
+    return this.takeReservedNonce(this.reservedNonce, this.accountNonceKey(rpcUrl, address), rpcUrl, chainNonce);
+  }
+
+  private noteSubmittedNonce(rpcUrl: string, address: string, nonce: number, hash: string): void {
+    this.rememberSubmittedNonce(this.reservedNonce, this.accountNonceKey(rpcUrl, address), nonce, hash);
+  }
+
+  private noteSignedNonce(rpcUrl: string, address: string, nonce: number): void {
+    this.rememberSignedNonce(this.reservedNonce, this.accountNonceKey(rpcUrl, address), nonce);
+  }
+
+  private async allocateFactoryNonce(rpcUrl: string): Promise<number> {
+    const chainNonce = await this.fetchFactoryNonce(rpcUrl);
+    return this.takeReservedNonce(this.reservedFactoryNonce, rpcUrl, rpcUrl, chainNonce);
+  }
+
+  private noteSubmittedFactoryNonce(rpcUrl: string, nonce: number, hash: string): void {
+    this.rememberSubmittedNonce(this.reservedFactoryNonce, rpcUrl, nonce, hash);
+  }
+
+  private accountNonceKey(rpcUrl: string, address: string): string {
+    return `${rpcUrl}\n${address}`;
+  }
+
+  private chainChanged(current: Settings, next: Settings): boolean {
+    return current.rpcUrl !== next.rpcUrl || current.network !== next.network || current.chainId !== next.chainId;
+  }
+
+  private clearNonceCursors(): void {
+    this.reservedNonce.clear();
+    this.reservedFactoryNonce.clear();
+  }
+
+  /**
+   * Use a reserved nonce only while this endpoint is still the chain that issued it.
+   * A lower chain nonce releases the cursor. A wallet submit that is `unknown` or
+   * `dropped` no longer occupies its nonce. A nonce signed for a dapp stays reserved
+   * until the chain nonce passes it.
+   */
+  private async takeReservedNonce(
+    cursors: Map<string, NonceCursor>,
+    key: string,
+    rpcUrl: string,
+    chainNonce: number
+  ): Promise<number> {
+    const cursor = cursors.get(key);
+    if (!cursor) {
+      return chainNonce;
     }
-    const transactions: StoredTransaction[] = [];
-    for (const request of this.pendingTransactions.values()) {
-      transactions.push({
-        id: request.id,
-        origin: request.origin,
-        nonce: request.nonce,
-        coin: request.coin,
-        from: request.from,
-        to: request.to,
-        amount: request.amount,
-        timestamp: request.timestamp,
-        submit: request.submit,
-        windowId: request.windowId,
+    if (chainNonce < cursor.seen || chainNonce >= cursor.next) {
+      cursors.delete(key);
+      return chainNonce;
+    }
+    if (chainNonce > cursor.seen) {
+      cursor.seen = chainNonce;
+    }
+    const held = (cursor.held ?? []).filter((nonce) => nonce >= chainNonce);
+    if (held.length === 0) {
+      delete cursor.held;
+    } else {
+      cursor.held = held;
+    }
+    const live: SubmittedNonce[] = [];
+    for (const submit of cursor.submits ?? []) {
+      if (submit.nonce < chainNonce) {
+        continue;
+      }
+      if (await this.submissionOnChain(rpcUrl, submit.hash)) {
+        live.push(submit);
+      }
+    }
+    if (live.length === 0) {
+      delete cursor.submits;
+    } else {
+      cursor.submits = live;
+    }
+    if (live.length === 0 && held.length === 0) {
+      cursors.delete(key);
+      return chainNonce;
+    }
+    const reserved = held.slice();
+    for (const submit of live) {
+      reserved.push(submit.nonce);
+    }
+    let nonce = chainNonce;
+    while (reserved.includes(nonce)) {
+      nonce += 1;
+    }
+    return Math.min(nonce, cursor.next);
+  }
+
+  private rememberSubmittedNonce(
+    cursors: Map<string, NonceCursor>,
+    key: string,
+    nonce: number,
+    hash: string
+  ): void {
+    const next = nonce + 1;
+    const cursor = cursors.get(key);
+    if (!cursor) {
+      cursors.set(key, { next, seen: nonce, submits: [{ nonce, hash }] });
+      return;
+    }
+    if (next > cursor.next) {
+      cursor.next = next;
+    }
+    const submits = (cursor.submits ?? []).filter((submit) => submit.nonce !== nonce);
+    submits.push({ nonce, hash });
+    cursor.submits = submits;
+    if (cursor.held) {
+      cursor.held = cursor.held.filter((reserved) => reserved !== nonce);
+      if (cursor.held.length === 0) {
+        delete cursor.held;
+      }
+    }
+  }
+
+  private rememberSignedNonce(cursors: Map<string, NonceCursor>, key: string, nonce: number): void {
+    const next = nonce + 1;
+    const cursor = cursors.get(key);
+    if (!cursor) {
+      cursors.set(key, { next, seen: nonce, held: [nonce] });
+      return;
+    }
+    if (next > cursor.next) {
+      cursor.next = next;
+    }
+    const held = cursor.held ?? [];
+    if (!held.includes(nonce)) {
+      held.push(nonce);
+    }
+    cursor.held = held;
+  }
+
+  /** `unknown` and `dropped` mean this chain did not consume the submit. A failed status query keeps the cursor. */
+  private async submissionOnChain(rpcUrl: string, hash: string): Promise<boolean> {
+    const status = await this.fetchTransactionStatus(rpcUrl, hash);
+    return status !== "unknown" && status !== "dropped";
+  }
+
+  private async fetchTransactionStatus(rpcUrl: string, hash: string): Promise<string | undefined> {
+    try {
+      const data = await this.host.rpc(rpcUrl, {
+        jsonrpc: "2.0",
+        id: this.host.now(),
+        method: "coins.transaction_status",
+        params: { hash },
       });
+      if (data.error) {
+        return undefined;
+      }
+      const status = (data.result as { status?: unknown } | undefined)?.status;
+      return typeof status === "string" ? status : undefined;
+    } catch {
+      return undefined;
     }
-    await this.host.storageSet({ pendingConnections: connections, pendingTransactions: transactions });
+  }
+
+  private rejectOutstanding(reason: string): void {
+    for (const requestId of [...this.pendingConnections.keys()]) {
+      this.settlePending(this.pendingConnections, requestId, { success: false, error: reason });
+    }
+    for (const requestId of [...this.pendingTransactions.keys()]) {
+      this.settlePending(this.pendingTransactions, requestId, { success: false, error: reason });
+    }
+  }
+
+  private persistConnectedSites(): Promise<void> {
+    return this.enqueueStorage(async () => {
+      await this.host.storageSet({ connectedSites: Array.from(this.connectedSites) });
+    });
+  }
+
+  private persistPending(): Promise<void> {
+    return this.enqueueStorage(async () => {
+      const connections: StoredConnection[] = [];
+      for (const [id, request] of this.pendingConnections) {
+        connections.push({ id, origin: request.origin, timestamp: request.timestamp, windowId: request.windowId });
+      }
+      const transactions: StoredTransaction[] = [];
+      for (const request of this.pendingTransactions.values()) {
+        transactions.push({
+          id: request.id,
+          origin: request.origin,
+          nonce: request.nonce,
+          coin: request.coin,
+          from: request.from,
+          to: request.to,
+          amount: request.amount,
+          timestamp: request.timestamp,
+          submit: request.submit,
+          windowId: request.windowId,
+        });
+      }
+      await this.host.storageSet({ pendingConnections: connections, pendingTransactions: transactions });
+    });
   }
 
   private async getWalletState(): Promise<WalletState | null> {
@@ -942,78 +1178,6 @@ export class Wallet {
     const hash = await this.submitTransaction(settings.rpcUrl, signed.transaction);
     await this.addActivity({ hash, timestamp: this.host.now(), coin, to, amount });
     return { hash, digest: signed.digest, transaction: signed.transaction };
-  }
-
-  private enqueueSigning<T>(task: () => Promise<T>): Promise<T> {
-    const run = this.signingQueue.then(task, task);
-    this.signingQueue = run.then(
-      () => undefined,
-      () => undefined
-    );
-    return run;
-  }
-
-  /**
-   * Reserve the next nonce for `address` on `rpcUrl`.
-   *
-   * The chain nonce is the source of truth once a transaction is committed. Until then, this
-   * process remembers the next unused nonce so two signatures cannot reuse the same value.
-   * Reservations stay with the RPC URL that issued them, so a settings change cannot spend
-   * another chain's nonce.
-   */
-  private async allocateNonce(rpcUrl: string, address: string): Promise<number> {
-    const chainNonce = await this.fetchNonce(rpcUrl, address);
-    const reservedNonces = this.accountReservations(rpcUrl);
-    const reserved = reservedNonces.get(address);
-    const nonce = reserved === undefined ? chainNonce : Math.max(chainNonce, reserved);
-    reservedNonces.set(address, nonce + 1);
-    return nonce;
-  }
-
-  private releaseNonce(rpcUrl: string, address: string, nonce: number): void {
-    const reservedNonces = this.reservedNonces.get(rpcUrl);
-    if (reservedNonces?.get(address) === nonce + 1) {
-      reservedNonces.set(address, nonce);
-    }
-  }
-
-  private accountReservations(rpcUrl: string): Map<string, number> {
-    let reservedNonces = this.reservedNonces.get(rpcUrl);
-    if (!reservedNonces) {
-      reservedNonces = new Map();
-      this.reservedNonces.set(rpcUrl, reservedNonces);
-    }
-    return reservedNonces;
-  }
-
-  private async withAccountNonce<T>(
-    rpcUrl: string,
-    address: string,
-    use: (nonce: number) => Promise<T>
-  ): Promise<T> {
-    return this.enqueueSigning(async () => {
-      const nonce = await this.allocateNonce(rpcUrl, address);
-      try {
-        return await use(nonce);
-      } catch (error) {
-        this.releaseNonce(rpcUrl, address, nonce);
-        throw error;
-      }
-    });
-  }
-
-  private async allocateFactoryNonce(rpcUrl: string): Promise<number> {
-    const chainNonce = await this.fetchFactoryNonce(rpcUrl);
-    const reserved = this.reservedFactoryNonces.get(rpcUrl);
-    const nonce = reserved === undefined ? chainNonce : Math.max(chainNonce, reserved);
-    this.reservedFactoryNonces.set(rpcUrl, nonce + 1);
-    return nonce;
-  }
-
-  private releaseFactoryNonce(rpcUrl: string, nonce: number): void {
-    if (this.reservedFactoryNonces.get(rpcUrl) === nonce + 1) {
-      this.reservedFactoryNonces.set(rpcUrl, nonce);
-    }
   }
 
   private async fetchFactoryNonce(rpcUrl: string): Promise<number> {

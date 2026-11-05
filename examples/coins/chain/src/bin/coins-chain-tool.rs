@@ -815,6 +815,8 @@ async fn query_nonces(
     Ok(next_nonces)
 }
 
+const NONCE_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
+
 async fn wait_for_nonce(
     client: &reqwest::Client,
     rpc_url: &str,
@@ -822,7 +824,11 @@ async fn wait_for_nonce(
     account: &Address,
     target: u64,
 ) -> Result<(), Box<dyn Error>> {
+    let started = Instant::now();
     loop {
+        if started.elapsed() >= NONCE_WAIT_TIMEOUT {
+            return Err(format!("timed out waiting for {account} nonce to reach {target}").into());
+        }
         let response: NonceResponse = rpc_async_retry(
             client,
             rpc_url,
