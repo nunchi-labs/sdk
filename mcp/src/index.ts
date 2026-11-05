@@ -19,6 +19,7 @@ import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Env } from "./env.d.ts";
+import { handleIndexWrite } from "./index-write.ts";
 import {
   buildFileTree,
   topLevelDirectories,
@@ -44,7 +45,6 @@ interface CrateInfo {
 
 // Constants
 const MAX_SEARCH_RESULTS = 50;
-const INDEX_BUILD_BATCH_SIZE = 20; // D1 has 100 bind param limit, 20 rows × 3 cols = 60
 
 export class NunchiMCP extends McpAgent<Env, {}, {}> {
   server!: McpServer;
@@ -677,87 +677,14 @@ export class NunchiMCP extends McpAgent<Env, {}, {}> {
 // CORS is handled automatically by the WorkerTransport with permissive defaults
 const mcpHandler = McpAgent.serve("/", { binding: "MCP" });
 
-interface IndexFile {
-  path: string;
-  content: string;
-}
-
-type IndexRequest =
-  | { op: "batch"; version: string; reset: boolean; files: IndexFile[] }
-  | { op: "prune"; keep: string[] };
-
-function isSafeRef(ref: string): boolean {
-  return ref.length > 0 && ref.length < 200 && !ref.includes("..") && !ref.includes("/");
-}
-
-// Write one batch of this repository into D1. `just mcp-index` reads git in Node
-// (the Worker isolate cannot spawn git) and posts batches here. The first batch
-// for a ref sets `reset` so HEAD is replaced with the current working tree.
-async function applyIndex(env: Env, body: IndexRequest): Promise<{ files: number }> {
-  const session = env.SEARCH_DB.withSession("first-primary");
-
-  if (body.op === "prune") {
-    const indexed = await session
-      .prepare("SELECT version FROM versions")
-      .all<{ version: string }>();
-    const keep = new Set(body.keep.filter(isSafeRef));
-    for (const row of indexed.results) {
-      if (!keep.has(row.version)) {
-        await session.batch([
-          session.prepare("DELETE FROM versions WHERE version = ?").bind(row.version),
-          session.prepare("DELETE FROM files WHERE version = ?").bind(row.version),
-        ]);
-      }
-    }
-    return { files: 0 };
-  }
-
-  if (!isSafeRef(body.version)) {
-    throw new Error(`invalid ref '${body.version}'`);
-  }
-  if (body.reset) {
-    await session.prepare("DELETE FROM files WHERE version = ?").bind(body.version).run();
-  }
-
-  const files = body.files.filter(
-    (file) =>
-      isValidPath(file.path) &&
-      typeof file.content === "string" &&
-      file.content.length <= 512 * 1024
-  );
-  for (let i = 0; i < files.length; i += INDEX_BUILD_BATCH_SIZE) {
-    const batch = files.slice(i, i + INDEX_BUILD_BATCH_SIZE);
-    const placeholders = batch.map(() => "(?, ?, ?)").join(", ");
-    const params = batch.flatMap((file) => [body.version, file.path, file.content]);
-    await session
-      .prepare(`INSERT OR REPLACE INTO files (version, path, content) VALUES ${placeholders}`)
-      .bind(...params)
-      .run();
-  }
-
-  await session
-    .prepare("INSERT OR REPLACE INTO versions (version) VALUES (?)")
-    .bind(body.version)
-    .run();
-  return { files: files.length };
-}
-
 // Worker fetch handler
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(request.url);
-    if (url.pathname === "/__index" && request.method === "POST") {
-      try {
-        const body = (await request.json()) as IndexRequest;
-        if (body.op !== "batch" && body.op !== "prune") {
-          return new Response("expected op batch or prune", { status: 400 });
-        }
-        const result = await applyIndex(env, body);
-        return Response.json(result);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "index failed";
-        return new Response(message, { status: 400 });
-      }
+    // `/__index` never reaches the MCP handler. That handler's permissive CORS
+    // would otherwise answer OPTIONS and let a browser replace the corpus.
+    const indexResponse = await handleIndexWrite(request, env);
+    if (indexResponse !== null) {
+      return indexResponse;
     }
 
     // Route all other requests to the MCP agent (handles CORS including OPTIONS preflight)

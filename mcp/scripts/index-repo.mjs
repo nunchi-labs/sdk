@@ -12,17 +12,28 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { listRepoFiles, listRepoRefs, readRepoFile } from "../src/repo.ts";
+import { readIndexToken } from "./index-token.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const baseUrl = process.env.MCP_URL || "http://127.0.0.1:8787";
+const indexToken = readIndexToken();
 const BATCH = 20;
 
 async function post(body) {
+  if (!indexToken) {
+    throw new Error(
+      "INDEX_TOKEN is not set. Start the server with `npm run dev` " +
+        "so it can write mcp/.dev.vars, or export INDEX_TOKEN."
+    );
+  }
   let response;
   try {
     response = await fetch(`${baseUrl}/__index`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${indexToken}`,
+      },
       body: JSON.stringify(body),
     });
   } catch (error) {

@@ -46,6 +46,8 @@ just mcp-index
 
 That command reads this git checkout in Node and posts file batches to the Worker's `/__index` route. The Worker stores them in D1. The Worker isolate cannot spawn git, so the index command is the process that walks the repository.
 
+`/__index` accepts those batches only with `Authorization: Bearer $INDEX_TOKEN`. `npm run dev` writes a local token to `.dev.vars` (gitignored), and `just mcp-index` reads it. A deployed Worker rejects writes until the same secret is set with `npx wrangler secret put INDEX_TOKEN`. Export that value before indexing a remote `MCP_URL`.
+
 * tracked text files in the working tree are stored as `HEAD` (replaced on every run, so local edits show up)
 * each git tag is stored under that tag name
 * refs that are no longer present are dropped
@@ -62,4 +64,4 @@ Indexed paths are Rust, Markdown, TOML, JSON, YAML, JavaScript, TypeScript, HTML
 * **D1 + FTS5** stores one copy of each file per git ref, with trigram and word indexes
 * **`just mcp-index`** walks this checkout and posts batches. The Worker writes those batches into D1
 
-Deploying the Worker to Cloudflare does not bring the git checkout with it. Indexing runs against the repository on disk.
+Deploying the Worker to Cloudflare does not bring the git checkout with it. Indexing runs against the repository on disk and must present `INDEX_TOKEN`.
