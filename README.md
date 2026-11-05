@@ -86,32 +86,25 @@ When upgrading nodes:
 * Mid-sync glue metadata from v2026.7.0 cannot resume after upgrading to v2026.9.0; clear or re-sync any node that crashed mid state-sync before the bump.
 * Fresh joining nodes can enable peer QMDB state sync with `state_sync = true`. Nunchi's resolver preserves Commonware's standard wire layout while decoding variable-value operations with the chain-wide 512 KiB value bound.
 
-## Commonware MCP
+## Nunchi SDK MCP
 
-[`mcp/`](mcp/) is Commonware's MCP server, vendored from [commonwarexyz/monorepo](https://github.com/commonwarexyz/monorepo/tree/5ac6c01c0901d0d48997820f898ceed286c10b73/mcp) at `5ac6c01c0901d0d48997820f898ceed286c10b73`. It replaces `nunchi-mcp`. The package is a TypeScript Cloudflare Worker, so it is not a Cargo workspace member and `cargo build` does not compile it. Node.js 22 is required. Wrangler is installed with the package. A Cloudflare account is required only to deploy.
+[`mcp/`](mcp/) is the SDK's MCP server. It is a TypeScript Cloudflare Worker (the Commonware MCP server architecture: Durable Object sessions, D1 full-text search, a scheduled indexer) retargeted at this repository. It is not a Cargo workspace member. `cargo build` does not compile it. Node.js 22 is required.
 
-`nunchi-mcp` was `cargo run -p nunchi-mcp` and spoke MCP over stdio. Build and run this server with:
+Build, run, and index:
 
 ```bash
 just mcp-build
 just mcp
+just mcp-index
 ```
 
-`just mcp-build` runs `npm ci` and `npm run build` in `mcp/`. `just mcp` applies the local D1 migration and runs `npm run dev`. The server listens on `http://127.0.0.1:8787`.
+`just mcp-build` runs `npm ci` and `npm run build` in `mcp/`. `just mcp` applies the local D1 migration and runs `npm run dev` on `http://127.0.0.1:8787`. `just mcp-index` asks that server to index the working tree (`HEAD`) and every git tag. Run it from a second terminal after the server is up, and again after the tree changes.
 
-Cursor ([`.cursor/mcp.json`](.cursor/mcp.json)) and Claude Code ([`.mcp.json`](.mcp.json)) use that URL. Start `just mcp` first. Other clients use the same Streamable HTTP endpoint.
+Cursor ([`.cursor/mcp.json`](.cursor/mcp.json)) and Claude Code ([`.mcp.json`](.mcp.json)) use that URL under the name `nunchi-sdk`. Start `just mcp` first. Tools default to `HEAD`. Pass `version` set to a git tag to read that tag instead.
 
-This workspace pins `commonware-*` to **2026.9.0**, indexed as `v2026.9.0`. Pass that `version` on `get_file`, `search_code`, `list_crates`, `get_crate_readme`, and `list_files`. The server defaults to the latest indexed release.
+`get_file`, `search_code`, `list_versions`, `list_crates`, `get_crate_readme`, `get_overview`, and `list_files` read this index. Paths look like `coins/src/lib.rs`. Crate names look like `nunchi-coins`.
 
-After the server is up, fill the local search index:
-
-```bash
-curl "http://127.0.0.1:8787/__scheduled?cron=*"
-```
-
-Checks for the package are `npm run ci` in `mcp/` (format, lint, typecheck, unit tests). Tool list, deploy steps, and architecture are in [`mcp/README.md`](mcp/README.md).
-
-Nunchi chain queries and transaction submission stay on the node's JSON-RPC API (narae's default base port is 8545).
+Chain queries and transaction building stay on the node's JSON-RPC API (narae's default base port is 8545). Details are in [`mcp/README.md`](mcp/README.md).
 
 ## License
 

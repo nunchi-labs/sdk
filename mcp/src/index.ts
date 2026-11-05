@@ -1,16 +1,17 @@
 /**
- * Commonware MCP
+ * Nunchi SDK MCP
  *
- * A Model Context Protocol server for the Commonware Library that exposes
- * source code to AI assistants like Claude, Cursor, etc.
+ * A Model Context Protocol server that exposes this repository (crates, docs,
+ * and examples) to AI assistants. Content comes from the local checkout (`HEAD`)
+ * and from git tags. Search runs against the D1 full-text index.
  *
  * Tools:
  * - get_file: Retrieve a specific file by path
  * - search_code: Search across source code files
- * - list_versions: List available code versions
- * - list_crates: List all crates in the workspace (from Cargo.toml)
+ * - list_versions: List indexed git refs (`HEAD` and tags)
+ * - list_crates: List workspace crates from Cargo.toml
  * - get_crate_readme: Get the README for a specific crate
- * - get_overview: Get the repository overview
+ * - get_overview: Get the repository README
  * - list_files: List files in a crate or directory
  */
 
@@ -25,7 +26,6 @@ import {
   formatWithLineNumbers,
   getLanguage,
   isValidPath,
-  parseSitemap,
   parseWorkspaceMembers,
   parseCrateInfo,
   selectTopSnippets,
@@ -45,33 +45,31 @@ interface CrateInfo {
 const MAX_SEARCH_RESULTS = 50;
 const INDEX_BUILD_BATCH_SIZE = 20; // D1 has 100 bind param limit, 20 rows × 3 cols = 60
 
-export class CommonwareMCP extends McpAgent<Env, {}, {}> {
+export class NunchiMCP extends McpAgent<Env, {}, {}> {
   server!: McpServer;
 
   async init() {
     this.server = new McpServer({
-      name: "commonware-library",
+      name: "nunchi-sdk",
       version: pkg.version,
     });
 
     // Tool: Get a specific file by path
     this.server.tool(
       "get_file",
-      "Retrieve a file from the Commonware repository by its path. " +
-        "Paths should be relative to the repository root (e.g., 'commonware-cryptography/src/lib.rs'). " +
-        "Optionally specify a version (e.g., 'v0.0.64'), defaults to latest. " +
+      "Retrieve a file from the Nunchi SDK repository by its path. " +
+        "Paths are relative to the repository root (e.g., 'coins/src/lib.rs'). " +
+        "Optionally specify a git ref (`HEAD` for the current checkout, or a tag). Defaults to HEAD when it is indexed. " +
         "Optionally specify start_line and end_line to fetch a specific range (0-indexed, inclusive). " +
         "Line numbers in output match those returned by search_code.",
       {
         path: z
           .string()
-          .describe(
-            "File path relative to repository root, e.g., 'commonware-cryptography/src/lib.rs'"
-          ),
+          .describe("File path relative to the repository root, e.g., 'coins/src/lib.rs'"),
         version: z
           .string()
           .optional()
-          .describe("Version tag (e.g., 'v0.0.64'). Defaults to latest."),
+          .describe("Git ref. `HEAD` is the current checkout. Defaults to HEAD when indexed."),
         start_line: z
           .number()
           .int()
@@ -94,11 +92,8 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           };
         }
 
-        // Strip commonware- prefix from path if present (folders don't have it)
-        const normalizedPath = stripCratePrefix(path);
-
         const ver = version || (await this.getLatestVersion());
-        const content = await this.fetchFile(ver, normalizedPath);
+        const content = await this.fetchFile(ver, path);
         if (content === null) {
           return {
             content: [
@@ -135,9 +130,9 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     // Tool: Search code files
     this.server.tool(
       "search_code",
-      "Search for a pattern across source code files in the Commonware repository. " +
+      "Search source, docs, and examples in the Nunchi SDK repository. " +
         "Returns matching files with relevant snippets. Useful for finding function definitions, " +
-        "usage patterns, or understanding how features are implemented.",
+        "usage patterns, or how a crate is implemented.",
       {
         query: z.string().describe("Search query"),
         mode: z
@@ -151,13 +146,16 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
         crate: z
           .string()
           .optional()
-          .describe("Limit search to a specific crate (e.g., 'commonware-cryptography')"),
+          .describe("Limit search to a crate name or directory (e.g., 'nunchi-coins' or 'coins')"),
         file_type: z
-          .enum(["rs", "md", "toml", "all"])
+          .enum(["rs", "md", "toml", "ts", "js", "json", "yml", "all"])
           .optional()
           .default("rs")
-          .describe("File type to search: 'rs' for Rust, 'md' for markdown, 'toml', or 'all'"),
-        version: z.string().optional().describe("Version tag. Defaults to latest."),
+          .describe("File type to search: 'rs', 'md', 'toml', 'ts', 'js', 'json', 'yml', or 'all'"),
+        version: z
+          .string()
+          .optional()
+          .describe("Git ref. `HEAD` is the current checkout. Defaults to HEAD when indexed."),
         max_results: z
           .number()
           .optional()
@@ -234,13 +232,18 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     // Tool: List available versions
     this.server.tool(
       "list_versions",
-      "List all available versions of the Commonware Library source code.",
+      "List indexed git refs of the Nunchi SDK. `HEAD` is the current checkout. Other entries are git tags.",
       {},
       async () => {
         const versions = await this.getVersions();
         if (versions.length === 0) {
           return {
-            content: [{ type: "text", text: "No versions available" }],
+            content: [
+              {
+                type: "text",
+                text: "No versions indexed. Start the server with `just mcp`, then run `just mcp-index`.",
+              },
+            ],
             isError: true,
           };
         }
@@ -260,9 +263,12 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     // Tool: List crates (dynamically from Cargo.toml)
     this.server.tool(
       "list_crates",
-      "List all crates (primitives) in the Commonware workspace with their descriptions.",
+      "List crates in the Nunchi SDK workspace with their paths and descriptions.",
       {
-        version: z.string().optional().describe("Version tag. Defaults to latest."),
+        version: z
+          .string()
+          .optional()
+          .describe("Git ref. `HEAD` is the current checkout. Defaults to HEAD when indexed."),
       },
       async ({ version }) => {
         const ver = version || (await this.getLatestVersion());
@@ -283,7 +289,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           content: [
             {
               type: "text",
-              text: `# Commonware Crates (${ver})\n\n${output}\n\nUse \`get_crate_readme\` to get detailed documentation for any crate. Use the path in parentheses with \`list_files\` or \`get_file\` to browse crate contents.`,
+              text: `# Nunchi SDK crates (${ver})\n\n${output}\n\nUse \`get_crate_readme\` for a crate's README. Use the path in parentheses with \`list_files\` or \`get_file\` to browse that crate.`,
             },
           ],
         };
@@ -293,14 +299,17 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     // Tool: Get crate README
     this.server.tool(
       "get_crate_readme",
-      "Get the README documentation for a specific Commonware crate.",
+      "Get the README for a Nunchi SDK crate.",
       {
         crate: z
           .string()
           .describe(
-            "Crate name (e.g., 'commonware-cryptography', 'commonware-consensus', 'commonware-p2p')"
+            "Crate name or directory (e.g., 'nunchi-coins', 'coins', 'examples/coins/chain')"
           ),
-        version: z.string().optional().describe("Version tag. Defaults to latest."),
+        version: z
+          .string()
+          .optional()
+          .describe("Git ref. `HEAD` is the current checkout. Defaults to HEAD when indexed."),
       },
       async ({ crate, version }) => {
         const ver = version || (await this.getLatestVersion());
@@ -327,7 +336,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     // Tool: Get repository overview
     this.server.tool(
       "get_overview",
-      "Get an overview of the Commonware Library, including its purpose, design principles, and structure.",
+      "Get the Nunchi SDK repository README: what the SDK is, its modules, and how to build it.",
       {},
       async () => {
         const ver = await this.getLatestVersion();
@@ -355,10 +364,13 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           .string()
           .optional()
           .describe(
-            "Crate name (e.g., 'commonware-cryptography') or directory path. " +
+            "Crate name (e.g., 'nunchi-coins') or directory path (e.g., 'examples/coins/chain'). " +
               "If omitted, lists top-level directories."
           ),
-        version: z.string().optional().describe("Version tag. Defaults to latest."),
+        version: z
+          .string()
+          .optional()
+          .describe("Git ref. `HEAD` is the current checkout. Defaults to HEAD when indexed."),
       },
       async ({ crate, version }) => {
         const ver = version || (await this.getLatestVersion());
@@ -420,14 +432,22 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     );
   }
 
-  // Helper: Fetch file from commonware.xyz
-  private async fetchFile(version: string, path: string): Promise<string | null> {
-    const url = `${this.env.BASE_URL}/code/${version}/${path}`;
-    const response = await fetch(url);
-    if (!response.ok) {
-      return null;
+  // Helper: Read a file from the D1 index. Accepts a `nunchi-` prefixed path as a fallback.
+  private async fetchFile(version: string, filePath: string): Promise<string | null> {
+    const candidates = [filePath];
+    if (filePath.startsWith("nunchi-")) {
+      candidates.push(stripCratePrefix(filePath));
     }
-    return response.text();
+    for (const candidate of candidates) {
+      const row = await this.env.SEARCH_DB.withSession()
+        .prepare("SELECT content FROM files WHERE version = ? AND path = ?")
+        .bind(version, candidate)
+        .first<{ content: string }>();
+      if (row) {
+        return row.content;
+      }
+    }
+    return null;
   }
 
   // Helper: Get indexed versions from D1 (sorted descending)
@@ -441,11 +461,11 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     return versions;
   }
 
-  // Helper: Get latest version
+  // Helper: Default ref. `HEAD` is the working checkout when it has been indexed.
   private async getLatestVersion(): Promise<string> {
     const versions = await this.getIndexedVersions();
     if (versions.length === 0) {
-      throw new Error("No versions available");
+      throw new Error("No versions indexed. Run `just mcp-index` after starting the server.");
     }
     return versions[0];
   }
@@ -514,14 +534,14 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 
   // Helper: Resolve crate name or path to actual directory path
   private async resolveCratePath(version: string, crate: string): Promise<string> {
-    // Try matching by crate name first (e.g., "commonware-consensus-fuzz" -> "consensus/fuzz")
+    // Match the Cargo package name first (`nunchi-coins` -> `coins`).
     const crates = await this.getCrates(version);
     const byName = crates.find((c) => c.name === crate);
     if (byName) {
       return byName.path;
     }
 
-    // Otherwise strip prefix and use as path (e.g., "commonware-cryptography" -> "cryptography")
+    // Otherwise treat it as a directory, stripping a leading `nunchi-` if present.
     return stripCratePrefix(crate);
   }
 
@@ -662,96 +682,96 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 // CORS is handled automatically by the WorkerTransport with permissive defaults
 const mcpHandler = McpAgent.serve("/", { binding: "MCP" });
 
-// Helper: Sync indexed versions with sitemap (index one version per run to avoid timeout)
-async function reindexVersions(
-  env: Env
-): Promise<{ indexed: string | null; pruned: string | null }> {
-  // Fetch sitemap to get available versions
-  const sitemapUrl = `${env.BASE_URL}/sitemap.xml`;
-  const response = await fetch(sitemapUrl);
-  if (!response.ok) {
-    throw new Error("Failed to fetch sitemap");
-  }
-  const xml = await response.text();
-  const { versions: sitemapVersions, files } = parseSitemap(xml);
-  const sitemapSet = new Set(sitemapVersions);
+interface IndexFile {
+  path: string;
+  content: string;
+}
 
-  // Get already indexed versions (use primary for writes)
+type IndexRequest =
+  | { op: "batch"; version: string; reset: boolean; files: IndexFile[] }
+  | { op: "prune"; keep: string[] };
+
+function isSafeRef(ref: string): boolean {
+  return ref.length > 0 && ref.length < 200 && !ref.includes("..") && !ref.includes("/");
+}
+
+// Write one batch of this repository into D1. `just mcp-index` reads git in Node
+// (the Worker isolate cannot spawn git) and posts batches here. The first batch
+// for a ref sets `reset` so HEAD is replaced with the current working tree.
+async function applyIndex(env: Env, body: IndexRequest): Promise<{ files: number }> {
   const session = env.SEARCH_DB.withSession("first-primary");
-  const indexedResult = await session.prepare("SELECT version FROM versions").all<{
-    version: string;
-  }>();
-  const indexedSet = new Set(indexedResult.results.map((r) => r.version));
 
-  // Prune ONE version not in sitemap (delete version record first to prevent
-  // queries from finding a version with no files)
-  let pruned: string | null = null;
-  for (const oldVersion of indexedSet) {
-    if (!sitemapSet.has(oldVersion)) {
-      await session.batch([
-        session.prepare("DELETE FROM versions WHERE version = ?").bind(oldVersion),
-        session.prepare("DELETE FROM files WHERE version = ?").bind(oldVersion),
-      ]);
-      pruned = oldVersion;
-      break;
+  if (body.op === "prune") {
+    const indexed = await session
+      .prepare("SELECT version FROM versions")
+      .all<{ version: string }>();
+    const keep = new Set(body.keep.filter(isSafeRef));
+    for (const row of indexed.results) {
+      if (!keep.has(row.version)) {
+        await session.batch([
+          session.prepare("DELETE FROM versions WHERE version = ?").bind(row.version),
+          session.prepare("DELETE FROM files WHERE version = ?").bind(row.version),
+        ]);
+      }
     }
+    return { files: 0 };
   }
 
-  // Index ONE version not yet indexed (newest first since sitemapVersions is sorted desc)
-  let indexed: string | null = null;
-  for (const version of sitemapVersions) {
-    if (indexedSet.has(version)) {
-      continue;
-    }
+  if (!isSafeRef(body.version)) {
+    throw new Error(`invalid ref '${body.version}'`);
+  }
+  if (body.reset) {
+    await session.prepare("DELETE FROM files WHERE version = ?").bind(body.version).run();
+  }
 
-    // Get all files for this version
-    const versionFiles = files.get(version) || [];
-
-    // Fetch and index all files in batches
-    for (let i = 0; i < versionFiles.length; i += INDEX_BUILD_BATCH_SIZE) {
-      const batch = versionFiles.slice(i, i + INDEX_BUILD_BATCH_SIZE);
-      const results = await Promise.all(
-        batch.map(async (file) => {
-          const fileUrl = `${env.BASE_URL}/code/${version}/${file}`;
-          const res = await fetch(fileUrl);
-          if (!res.ok) {
-            throw new Error(`Failed to fetch ${file} for ${version}: ${res.status}`);
-          }
-          const content = await res.text();
-          return { file, content };
-        })
-      );
-
-      // Use multi-row INSERT for better performance
-      const placeholders = results.map(() => "(?, ?, ?)").join(", ");
-      const params = results.flatMap((r) => [version, r.file, r.content]);
-      await session
-        .prepare(`INSERT OR REPLACE INTO files (version, path, content) VALUES ${placeholders}`)
-        .bind(...params)
-        .run();
-    }
-
-    // Mark version as indexed
+  const files = body.files.filter(
+    (file) =>
+      isValidPath(file.path) &&
+      typeof file.content === "string" &&
+      file.content.length <= 512 * 1024
+  );
+  for (let i = 0; i < files.length; i += INDEX_BUILD_BATCH_SIZE) {
+    const batch = files.slice(i, i + INDEX_BUILD_BATCH_SIZE);
+    const placeholders = batch.map(() => "(?, ?, ?)").join(", ");
+    const params = batch.flatMap((file) => [body.version, file.path, file.content]);
     await session
-      .prepare("INSERT OR REPLACE INTO versions (version) VALUES (?)")
-      .bind(version)
+      .prepare(`INSERT OR REPLACE INTO files (version, path, content) VALUES ${placeholders}`)
+      .bind(...params)
       .run();
-    indexed = version;
-    break;
   }
 
-  return { indexed, pruned };
+  await session
+    .prepare("INSERT OR REPLACE INTO versions (version) VALUES (?)")
+    .bind(body.version)
+    .run();
+  return { files: files.length };
 }
 
 // Worker fetch handler
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    // Route all requests to MCP agent (handles CORS including OPTIONS preflight)
+    const url = new URL(request.url);
+    if (url.pathname === "/__index" && request.method === "POST") {
+      try {
+        const body = (await request.json()) as IndexRequest;
+        if (body.op !== "batch" && body.op !== "prune") {
+          return new Response("expected op batch or prune", { status: 400 });
+        }
+        const result = await applyIndex(env, body);
+        return Response.json(result);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "index failed";
+        return new Response(message, { status: 400 });
+      }
+    }
+
+    // Route all other requests to the MCP agent (handles CORS including OPTIONS preflight)
     return mcpHandler.fetch(request, env, ctx);
   },
 
-  // Scheduled handler for automatic indexing
-  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(reindexVersions(env));
+  // The cron binding stays so the Worker shape matches the original server.
+  // Indexing reads this git checkout from `just mcp-index`, which can spawn git.
+  async scheduled(_event: ScheduledEvent, _env: Env, _ctx: ExecutionContext): Promise<void> {
+    console.log("Nunchi SDK index is built by `just mcp-index` against the local checkout.");
   },
 };

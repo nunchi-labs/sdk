@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { isIndexablePath } from "./repo.ts";
 import {
   sortVersionsDesc,
   getLanguage,
   stripCratePrefix,
   isValidPath,
-  parseSitemap,
   parseWorkspaceMembers,
   parseCrateInfo,
   buildFileTree,
@@ -57,6 +57,12 @@ describe("sortVersionsDesc", () => {
     sortVersionsDesc(versions);
     expect(versions).toEqual(["v0.0.64"]);
   });
+
+  it("should sort Nunchi tags above older tags and keep HEAD first", () => {
+    const versions = ["v2026.7.0-alpha.1", "HEAD", "v2026.9.0-alpha.1"];
+    sortVersionsDesc(versions);
+    expect(versions).toEqual(["HEAD", "v2026.9.0-alpha.1", "v2026.7.0-alpha.1"]);
+  });
 });
 
 describe("getLanguage", () => {
@@ -77,30 +83,51 @@ describe("getLanguage", () => {
 
   it("should return empty string for unknown extensions", () => {
     expect(getLanguage("file.txt")).toBe("");
-    expect(getLanguage("file.json")).toBe("");
+    expect(getLanguage("file.json")).toBe("json");
     expect(getLanguage("file")).toBe("");
   });
 });
 
 describe("stripCratePrefix", () => {
-  it("should strip commonware- prefix from crate names", () => {
-    expect(stripCratePrefix("commonware-cryptography")).toBe("cryptography");
-    expect(stripCratePrefix("commonware-broadcast")).toBe("broadcast");
-    expect(stripCratePrefix("commonware-p2p")).toBe("p2p");
+  it("should strip nunchi- prefix from crate names", () => {
+    expect(stripCratePrefix("nunchi-coins")).toBe("coins");
+    expect(stripCratePrefix("nunchi-bridge")).toBe("bridge");
+    expect(stripCratePrefix("nunchi-rpc")).toBe("rpc");
   });
 
   it("should strip prefix from paths", () => {
-    expect(stripCratePrefix("commonware-cryptography/src/lib.rs")).toBe("cryptography/src/lib.rs");
+    expect(stripCratePrefix("nunchi-coins/src/lib.rs")).toBe("coins/src/lib.rs");
   });
 
   it("should not modify names without prefix", () => {
-    expect(stripCratePrefix("chat")).toBe("chat");
+    expect(stripCratePrefix("coins")).toBe("coins");
     expect(stripCratePrefix("bridge")).toBe("bridge");
-    expect(stripCratePrefix("cryptography")).toBe("cryptography");
+    expect(stripCratePrefix("examples/coins/chain")).toBe("examples/coins/chain");
   });
 
   it("should only strip prefix at start", () => {
-    expect(stripCratePrefix("foo-commonware-bar")).toBe("foo-commonware-bar");
+    expect(stripCratePrefix("foo-nunchi-bar")).toBe("foo-nunchi-bar");
+  });
+});
+
+describe("isIndexablePath", () => {
+  it("should accept SDK source, docs, and examples", () => {
+    expect(isIndexablePath("coins/src/lib.rs")).toBe(true);
+    expect(isIndexablePath("README.md")).toBe(true);
+    expect(isIndexablePath("Cargo.toml")).toBe(true);
+    expect(isIndexablePath("examples/wallet-extension/src/popup.ts")).toBe(true);
+    expect(isIndexablePath("AGENTS.md")).toBe(true);
+    expect(isIndexablePath("Justfile")).toBe(true);
+    expect(isIndexablePath("LICENSE-MIT")).toBe(true);
+  });
+
+  it("should reject lockfiles, images, dependencies, and traversal", () => {
+    expect(isIndexablePath("Cargo.lock")).toBe(false);
+    expect(isIndexablePath("mcp/package-lock.json")).toBe(false);
+    expect(isIndexablePath("image.png")).toBe(false);
+    expect(isIndexablePath("mcp/node_modules/zod/index.js")).toBe(false);
+    expect(isIndexablePath("target/debug/foo.rs")).toBe(false);
+    expect(isIndexablePath("../secrets.env")).toBe(false);
   });
 });
 
@@ -126,76 +153,6 @@ describe("isValidPath", () => {
     expect(isValidPath(".gitignore")).toBe(true);
     expect(isValidPath("src/.hidden/file.rs")).toBe(true);
     expect(isValidPath("file.test.rs")).toBe(true);
-  });
-});
-
-describe("parseSitemap", () => {
-  it("should parse versions and files from sitemap XML", () => {
-    const xml = `<?xml version="1.0" encoding="UTF-8"?>
-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <url>
-    <loc>https://commonware.xyz/code/v0.0.64/README.md</loc>
-  </url>
-  <url>
-    <loc>https://commonware.xyz/code/v0.0.64/cryptography/src/lib.rs</loc>
-  </url>
-  <url>
-    <loc>https://commonware.xyz/code/v0.0.63/README.md</loc>
-  </url>
-</urlset>`;
-
-    const result = parseSitemap(xml);
-
-    expect(result.versions).toEqual(["v0.0.64", "v0.0.63"]);
-    expect(result.files.get("v0.0.64")).toEqual(["README.md", "cryptography/src/lib.rs"]);
-    expect(result.files.get("v0.0.63")).toEqual(["README.md"]);
-  });
-
-  it("should sort versions in descending order", () => {
-    const xml = `<?xml version="1.0" encoding="UTF-8"?>
-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <url>
-    <loc>https://commonware.xyz/code/v0.0.62/README.md</loc>
-  </url>
-  <url>
-    <loc>https://commonware.xyz/code/v0.0.64/README.md</loc>
-  </url>
-  <url>
-    <loc>https://commonware.xyz/code/v0.0.63/README.md</loc>
-  </url>
-</urlset>`;
-
-    const result = parseSitemap(xml);
-    expect(result.versions).toEqual(["v0.0.64", "v0.0.63", "v0.0.62"]);
-  });
-
-  it("should handle empty sitemap", () => {
-    const xml = `<?xml version="1.0" encoding="UTF-8"?>
-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-</urlset>`;
-
-    const result = parseSitemap(xml);
-    expect(result.versions).toEqual([]);
-    expect(result.files.size).toBe(0);
-  });
-
-  it("should ignore non-code URLs", () => {
-    const xml = `<?xml version="1.0" encoding="UTF-8"?>
-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <url>
-    <loc>https://commonware.xyz/index.html</loc>
-  </url>
-  <url>
-    <loc>https://commonware.xyz/blog/post.html</loc>
-  </url>
-  <url>
-    <loc>https://commonware.xyz/code/v0.0.64/README.md</loc>
-  </url>
-</urlset>`;
-
-    const result = parseSitemap(xml);
-    expect(result.versions).toEqual(["v0.0.64"]);
-    expect(result.files.get("v0.0.64")).toEqual(["README.md"]);
   });
 });
 
@@ -244,24 +201,24 @@ members = ["broadcast", "codec"]`;
 describe("parseCrateInfo", () => {
   it("should parse crate name and description", () => {
     const cargoToml = `[package]
-name = "commonware-cryptography"
+name = "nunchi-coins"
 edition.workspace = true
 description = "Generate keys, sign arbitrary messages, and deterministically verify signatures."`;
 
-    const info = parseCrateInfo(cargoToml, "cryptography");
-    expect(info.name).toBe("commonware-cryptography");
+    const info = parseCrateInfo(cargoToml, "coins");
+    expect(info.name).toBe("nunchi-coins");
     expect(info.description).toBe(
       "Generate keys, sign arbitrary messages, and deterministically verify signatures."
     );
   });
 
-  it("should preserve commonware- prefix in name", () => {
+  it("should preserve nunchi- prefix in name", () => {
     const cargoToml = `[package]
-name = "commonware-broadcast"
+name = "nunchi-bridge"
 description = "Disseminate data over a wide-area network."`;
 
-    const info = parseCrateInfo(cargoToml, "broadcast");
-    expect(info.name).toBe("commonware-broadcast");
+    const info = parseCrateInfo(cargoToml, "bridge");
+    expect(info.name).toBe("nunchi-bridge");
   });
 
   it("should use fallback path when name is missing", () => {
@@ -275,13 +232,13 @@ description = "Some description"`;
 
   it("should use default description when missing", () => {
     const cargoToml = `[package]
-name = "commonware-invariants"`;
+name = "nunchi-oracle"`;
 
     const info = parseCrateInfo(cargoToml, "test");
     expect(info.description).toBe("No description available");
   });
 
-  it("should handle example crates without commonware prefix", () => {
+  it("should handle example crates without a nunchi prefix", () => {
     const cargoToml = `[package]
 name = "chat"
 description = "Send encrypted messages to a group of friends."`;

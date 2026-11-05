@@ -22,8 +22,19 @@ mcp:
     if [[ ! -d node_modules ]]; then
         npm ci
     fi
-    npx wrangler d1 migrations apply commonware-mcp-search --local
+    npx wrangler d1 migrations apply nunchi-mcp-search --local
+    echo "Server will listen on http://127.0.0.1:8787."
+    echo "In another terminal, index this checkout: just mcp-index"
     npm run dev
+
+mcp-index:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd mcp
+    if [[ ! -d node_modules ]]; then
+        npm ci
+    fi
+    node --experimental-strip-types scripts/index-repo.mjs
 
 wallet-test:
     @echo "Running wallet extension tests..."

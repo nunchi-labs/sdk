@@ -1,18 +1,41 @@
 /**
- * Utility functions for Commonware MCP
+ * Utility functions for the Nunchi SDK MCP server.
  */
 
 /**
- * Sort versions in descending order (newest first).
- * Handles semantic versioning like v0.0.64, v0.0.63, v0.0.62
+ * Numeric pieces of a version or tag, ignoring a leading `v` and prerelease words.
+ * `v2026.7.0-alpha.1` becomes [2026, 7, 0, 1].
+ */
+function versionKey(version: string): number[] {
+  return version
+    .replace(/^v/, "")
+    .split(/[.-]/)
+    .map((part) => {
+      const match = part.match(/^\d+/);
+      return match ? Number(match[0]) : -1;
+    });
+}
+
+/**
+ * Sort refs newest first. `HEAD` (the working checkout) stays first.
+ * Tags compare as dotted numbers, so `v2026.9.0-alpha.1` sorts above `v2026.7.0-alpha.1`.
  */
 export function sortVersionsDesc(versions: string[]): void {
   versions.sort((a, b) => {
-    const partsA = a.replace(/^v/, "").split(".").map(Number);
-    const partsB = b.replace(/^v/, "").split(".").map(Number);
-    for (let i = 0; i < 3; i++) {
-      if (partsA[i] !== partsB[i]) {
-        return partsB[i] - partsA[i];
+    if (a === "HEAD") {
+      return -1;
+    }
+    if (b === "HEAD") {
+      return 1;
+    }
+    const partsA = versionKey(a);
+    const partsB = versionKey(b);
+    const length = Math.max(partsA.length, partsB.length);
+    for (let i = 0; i < length; i++) {
+      const left = partsA[i] ?? 0;
+      const right = partsB[i] ?? 0;
+      if (left !== right) {
+        return right - left;
       }
     }
     return 0;
@@ -32,15 +55,30 @@ export function getLanguage(path: string): string {
   if (path.endsWith(".md")) {
     return "markdown";
   }
+  if (path.endsWith(".ts") || path.endsWith(".tsx")) {
+    return "typescript";
+  }
+  if (path.endsWith(".js") || path.endsWith(".mjs")) {
+    return "javascript";
+  }
+  if (path.endsWith(".json") || path.endsWith(".jsonc")) {
+    return "json";
+  }
+  if (path.endsWith(".yml") || path.endsWith(".yaml")) {
+    return "yaml";
+  }
+  if (path.endsWith(".sh")) {
+    return "bash";
+  }
   return "";
 }
 
 /**
- * Strip the commonware- prefix from a crate name or path.
- * Crate names use commonware-* but folder paths don't have the prefix.
+ * Strip the `nunchi-` prefix from a crate name or path.
+ * Package names use `nunchi-*` but directory paths do not (`nunchi-coins` lives in `coins/`).
  */
 export function stripCratePrefix(name: string): string {
-  return name.replace(/^commonware-/, "");
+  return name.replace(/^nunchi-/, "");
 }
 
 /**
@@ -54,35 +92,6 @@ export function isValidPath(path: string): boolean {
     return false;
   }
   return true;
-}
-
-/**
- * Parse versions and files from sitemap XML.
- */
-export function parseSitemap(xml: string): { versions: string[]; files: Map<string, string[]> } {
-  const versions: string[] = [];
-  const files = new Map<string, string[]>();
-
-  const urlMatches = xml.matchAll(/<loc>([^<]+)<\/loc>/g);
-  for (const match of urlMatches) {
-    const url = match[1];
-
-    // Extract version from /code/vX.X.X/ paths
-    const codeMatch = url.match(/\/code\/(v[\d.]+)\/(.+)$/);
-    if (codeMatch) {
-      const [, version, path] = codeMatch;
-      if (!versions.includes(version)) {
-        versions.push(version);
-      }
-      if (!files.has(version)) {
-        files.set(version, []);
-      }
-      files.get(version)!.push(path);
-    }
-  }
-
-  sortVersionsDesc(versions);
-  return { versions, files };
 }
 
 /**

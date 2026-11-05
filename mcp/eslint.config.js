@@ -24,6 +24,7 @@ export default [
         ExecutionContext: "readonly",
         D1Database: "readonly",
         ScheduledEvent: "readonly",
+        process: "readonly",
       },
     },
     plugins: {

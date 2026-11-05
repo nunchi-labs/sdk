@@ -1,7 +1,7 @@
 {
-  "name": "commonware-mcp",
+  "name": "nunchi-sdk-mcp",
   "version": "0.0.5",
-  "description": "Commonware Library MCP server vendored into the Nunchi SDK. Run locally with npm run dev.",
+  "description": "MCP server for the Nunchi SDK source tree. Indexes this checkout and its git tags.",
   "type": "module",
   "scripts": {
     "dev": "wrangler dev --test-scheduled",
@@ -23,6 +23,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261013.1",
+    "@types/node": "^22.20.5",
     "@typescript-eslint/eslint-plugin": "^8.33.0",
     "@typescript-eslint/parser": "^8.33.0",
     "eslint": "^9.28.0",

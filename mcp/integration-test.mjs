@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Integration test for the Commonware MCP server.
+ * Integration test for the Nunchi SDK MCP server.
  *
  * This script:
  * 1. Tests CORS support
@@ -9,6 +9,7 @@
  * 3. Triggers indexing and tests MCP tools
  */
 
+import { spawn } from "node:child_process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
@@ -19,12 +20,26 @@ async function sleep(ms) {
 }
 
 async function triggerIndexing() {
-  console.log("Triggering scheduled indexing...");
-  const response = await fetch(`${BASE_URL}/__scheduled?cron=*`);
-  if (!response.ok) {
-    throw new Error(`Failed to trigger indexing: ${response.status}`);
-  }
-  console.log("Indexing triggered");
+  console.log("Indexing the Nunchi SDK checkout...");
+  await new Promise((resolve, reject) => {
+    const child = spawn(
+      "node",
+      ["--experimental-strip-types", "scripts/index-repo.mjs"],
+      {
+        stdio: "inherit",
+        env: { ...process.env, MCP_URL: BASE_URL },
+      }
+    );
+    child.on("error", reject);
+    child.on("exit", (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`index-repo.mjs exited ${code}`));
+      }
+    });
+  });
+  console.log("Indexing finished");
 }
 
 async function waitForIndexing() {
@@ -89,8 +104,8 @@ async function testServerInfo() {
   if (!serverInfo) {
     throw new Error("Server info not available after connection");
   }
-  if (serverInfo.name !== "commonware-library") {
-    throw new Error(`Expected server name 'commonware-library', got '${serverInfo.name}'`);
+  if (serverInfo.name !== "nunchi-sdk") {
+    throw new Error(`Expected server name 'nunchi-sdk', got '${serverInfo.name}'`);
   }
   if (!serverInfo.version || !/^\d+\.\d+\.\d+$/.test(serverInfo.version)) {
     throw new Error(`Invalid server version format: '${serverInfo.version}'`);
@@ -119,7 +134,7 @@ async function testMcpTools() {
   console.log("list_versions result:", versionsResult.content[0].text.slice(0, 200) + "...");
 
   // Extract latest version from the result
-  const versionMatch = versionsResult.content[0].text.match(/- (v[\d.]+) \(latest\)/);
+  const versionMatch = versionsResult.content[0].text.match(/- (\S+) \(latest\)/);
   if (!versionMatch) {
     throw new Error("Could not find latest version in list_versions result");
   }
@@ -192,7 +207,7 @@ async function testMcpTools() {
   const getFileResult = await client.callTool({
     name: "get_file",
     arguments: {
-      path: "cryptography/src/lib.rs",
+      path: "coins/src/lib.rs",
     },
   });
   if (getFileResult.isError) {
@@ -209,7 +224,7 @@ async function testMcpTools() {
   const getFileRangeResult = await client.callTool({
     name: "get_file",
     arguments: {
-      path: "cryptography/src/lib.rs",
+      path: "coins/src/lib.rs",
       start_line: 5,
       end_line: 10,
     },
@@ -243,7 +258,7 @@ async function testLineNumberAlignment(client) {
     arguments: {
       query: "pub struct",
       mode: "substring",
-      crate: "commonware-cryptography",
+      crate: "nunchi-coins",
       max_results: 1,
     },
   });
