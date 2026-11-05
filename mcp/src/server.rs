@@ -196,7 +196,7 @@ pub struct BuildRegisterAccountPolicyParams {
     pub nonce: u64,
     /// Hex-encoded address derived from the policy being registered.
     pub account_id: String,
-    /// Minimum threshold of signers required.
+    /// Minimum threshold of signers required. This tool can sign only a threshold of 1.
     pub threshold: u16,
     /// Hex-encoded curve-tagged public keys of all policy members.
     pub signer_public_keys_hex: Vec<String>,
@@ -403,9 +403,8 @@ impl NunchiServer {
 
     /// Derive the bootstrap address of a multisig account from its initial policy.
     ///
-    /// The address is deterministically hashed from the sorted public keys and threshold.
-    /// The coin ledger binds that address to this exact policy. A different signer set is a
-    /// different account; the ledger does not rotate a policy in place.
+    /// The address is the hash of the canonical policy. A different policy is a different
+    /// account. The coin ledger rejects a registration whose account id is not that hash.
     #[tool(
         name = "sdk_derive_multisig_address",
         description = "Derive the Nunchi multisig account address from a threshold and list of \
@@ -576,9 +575,10 @@ impl NunchiServer {
 
     /// Build and sign a RegisterAccountPolicy transaction.
     ///
-    /// Registers the initial multisig policy whose derived address is `account_id`. The signer
-    /// must be a member and the threshold must be 1, because this tool holds a single key.
-    /// `nonce` is that multisig account's nonce (`coins_nonce`), which is 0 before registration.
+    /// Registers the multisig policy whose derived address is `account_id`. The coin ledger
+    /// rejects a policy that does not hash to that account, and it rejects single-key
+    /// authorization. The signer must be a member and the threshold must be 1, because this
+    /// tool holds a single key. `nonce` is that multisig account's nonce.
     /// Returns hex-encoded transaction bytes ready to pass to `coins_submit_transaction`.
     #[tool(
         name = "sdk_build_register_account_policy",
