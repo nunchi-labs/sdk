@@ -402,6 +402,18 @@ impl<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> Consumer<
                         }
                         Err(e) => {
                             upload_results.inc(status::Status::Failure);
+                            if !C::is_retryable(&e) {
+                                warn!(
+                                    ?e,
+                                    ?digest,
+                                    "terminal indexer upload failure; dropping finalized payload"
+                                );
+                                return Completion::Skipped {
+                                    position,
+                                    height,
+                                    digest,
+                                };
+                            }
                             warn!(?e, ?digest, "retrying finalized block upload by digest");
                             Self::wait(&context, &metrics, BackfillWaitReason::HttpError, retry)
                                 .await;
