@@ -106,7 +106,7 @@ impl<E: Spawner + Metrics + Clock, C: Client> Pusher<E, C> {
                             debug!(%view, "seed uploaded to indexer");
                             return;
                         }
-                        Err(e) if attempt < UPLOAD_ATTEMPTS => {
+                        Err(e) if attempt < UPLOAD_ATTEMPTS && C::is_retryable(&e) => {
                             warn!(?e, attempt, "failed to upload seed; retrying");
                             upload.sleep(delay).await;
                             delay = delay.saturating_mul(2).min(Duration::from_secs(2));
@@ -168,7 +168,7 @@ impl<E: Spawner + Metrics + Clock, C: Client> Pusher<E, C> {
                             uploaded = true;
                             break;
                         }
-                        Err(e) if attempt < UPLOAD_ATTEMPTS => {
+                        Err(e) if attempt < UPLOAD_ATTEMPTS && C::is_retryable(&e) => {
                             warn!(
                                 ?e,
                                 %view,

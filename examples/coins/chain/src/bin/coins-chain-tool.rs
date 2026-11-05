@@ -5,7 +5,10 @@ use commonware_formatting::from_hex;
 use commonware_runtime::{tokio as cw_tokio, Runner as _, Supervisor as _};
 use futures::{stream, StreamExt};
 use nunchi_coins::{
-    rpc::{NonceResponse, SubmitTransactionResponse, SubmitTransactionsResponse},
+    rpc::{
+        NonceResponse, SubmitTransactionResponse, SubmitTransactionResult,
+        SubmitTransactionsResponse,
+    },
     Address, AllocationGenesis, CoinId, CoinOperation, CoinSpec, CoinsGenesis, PrivateKey,
     TokenFactory, TokenGenesis, TokenName, TokenSymbol, Transaction,
 };
@@ -812,25 +815,7 @@ async fn query_nonces(
     Ok(next_nonces)
 }
 
-const RPC_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const NONCE_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
-
-fn async_rpc_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .connect_timeout(RPC_CONNECT_TIMEOUT)
-        .timeout(RPC_REQUEST_TIMEOUT)
-        .build()
-        .expect("valid RPC HTTP client")
-}
-
-fn blocking_rpc_client() -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder()
-        .connect_timeout(RPC_CONNECT_TIMEOUT)
-        .timeout(RPC_REQUEST_TIMEOUT)
-        .build()
-        .expect("valid RPC HTTP client")
-}
 
 async fn wait_for_nonce(
     client: &reqwest::Client,
@@ -894,35 +879,8 @@ async fn submit_batch_until(
         .await
         {
             Ok(response) => {
-                let mut ok = 0u64;
-                let mut err = 0u64;
-                let mut first_error = None;
-                let mut requeue = Vec::new();
-                for (result, transaction) in response.results.into_iter().zip(&pending) {
-                    if result.hash.is_some() && result.error.is_none() {
-                        ok += 1;
-                        continue;
-                    }
-                    let error = result
-                        .error
-                        .unwrap_or_else(|| "submit result had no hash".to_string());
-                    // An earlier attempt already pooled the transaction.
-                    if error.contains("already pending") {
-                        ok += 1;
-                        continue;
-                    }
-                    // Pool capacity rejections are backpressure, not
-                    // failures: dropping the transaction would leave a
-                    // permanent nonce hole in its lane.
-                    if error.contains("queue is full") || error.contains("pool is full") {
-                        requeue.push(transaction.clone());
-                        continue;
-                    }
-                    err += 1;
-                    if first_error.is_none() {
-                        first_error = Some(error);
-                    }
-                }
+                let (ok, err, requeue, first_error) =
+                    classify_submit_results(&pending, response.results);
                 accepted.fetch_add(ok, Ordering::Relaxed);
                 if err > 0 {
                     failed.fetch_add(err, Ordering::Relaxed);
@@ -946,7 +904,7 @@ async fn submit_batch_until(
                 time::sleep(delay).await;
                 delay = delay.saturating_mul(2).min(Duration::from_secs(2));
             }
-            Err(error) if Instant::now() < retry_deadline => {
+            Err(error) if is_retryable_rpc_error(&error) && Instant::now() < retry_deadline => {
                 retried.fetch_add(1, Ordering::Relaxed);
                 record_sample_error(&sample_error, error);
                 time::sleep(delay).await;
@@ -1157,6 +1115,25 @@ fn boxed_error(error: String) -> Box<dyn Error> {
     std::io::Error::other(error).into()
 }
 
+const RPC_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn async_rpc_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(RPC_CONNECT_TIMEOUT)
+        .timeout(RPC_REQUEST_TIMEOUT)
+        .build()
+        .expect("valid async RPC HTTP client configuration")
+}
+
+fn blocking_rpc_client() -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder()
+        .connect_timeout(RPC_CONNECT_TIMEOUT)
+        .timeout(RPC_REQUEST_TIMEOUT)
+        .build()
+        .expect("valid blocking RPC HTTP client configuration")
+}
+
 fn rpc<T, P>(
     client: &reqwest::blocking::Client,
     url: &str,
@@ -1176,9 +1153,16 @@ where
             method,
             params,
         })
-        .send()?
-        .error_for_status()?
-        .json::<RpcResponse<T>>()?;
+        .send()
+        .map_err(|error| -> Box<dyn Error> { error_chain(&error).into() })?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().unwrap_or_default();
+        return Err(format!("http status {status}: {body}").into());
+    }
+    let response = response
+        .json::<RpcResponse<T>>()
+        .map_err(|error| -> Box<dyn Error> { error_chain(&error).into() })?;
     match (response.result, response.error) {
         (Some(result), None) => Ok(result),
         (_, Some(error)) => {
@@ -1248,7 +1232,7 @@ where
         })
         .send()
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error_chain(&error))?;
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
@@ -1257,7 +1241,7 @@ where
     let response = response
         .json::<RpcResponse<T>>()
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error_chain(&error))?;
     match (response.result, response.error) {
         (Some(result), None) => Ok(result),
         (_, Some(error)) => {
@@ -1274,11 +1258,182 @@ where
     }
 }
 
+/// Accepted count, permanent-failure count, transactions to retry, and the first permanent error.
+fn classify_submit_results(
+    pending: &[String],
+    results: Vec<SubmitTransactionResult>,
+) -> (u64, u64, Vec<String>, Option<String>) {
+    let mut ok = 0u64;
+    let mut err = 0u64;
+    let mut first_error = None;
+    let mut requeue = Vec::new();
+    let paired = results.len().min(pending.len());
+    for (result, transaction) in results.into_iter().take(paired).zip(&pending[..paired]) {
+        if result.hash.is_some() && result.error.is_none() {
+            ok += 1;
+            continue;
+        }
+        // A missing hash and a missing error is an incomplete response, not a
+        // rejection. Dropping it would open a nonce hole.
+        let Some(error) = result.error else {
+            requeue.push(transaction.clone());
+            continue;
+        };
+        // An earlier attempt already pooled the transaction.
+        if error.contains("already pending") {
+            ok += 1;
+            continue;
+        }
+        // Capacity and shutdown refusals are backpressure, not failures:
+        // dropping the transaction would leave a permanent nonce hole.
+        if error.contains("queue is full")
+            || error.contains("pool is full")
+            || error.contains("shut down")
+        {
+            requeue.push(transaction.clone());
+            continue;
+        }
+        err += 1;
+        if first_error.is_none() {
+            first_error = Some(error);
+        }
+    }
+    // A short result list must not count the tail as accepted.
+    if paired < pending.len() {
+        requeue.extend(pending[paired..].iter().cloned());
+    }
+    (ok, err, requeue, first_error)
+}
+
 fn is_retryable_rpc_error(error: &str) -> bool {
-    error.contains("429")
-        || error.contains("Too Many Requests")
-        || error.contains("connection")
-        || error.contains("timed out")
-        // reqwest transport failures (dropped tunnels, refused sockets)
-        || error.contains("error sending request")
+    if let Some(status) = http_status_code(error) {
+        return matches!(status, 408 | 425 | 429 | 500 | 502 | 503 | 504);
+    }
+    let lower = error.to_ascii_lowercase();
+    if let Some(rest) = lower.strip_prefix("rpc error") {
+        return rest.contains("pool is full")
+            || rest.contains("queue is full")
+            || rest.contains("shut down");
+    }
+    if lower.contains("rpc response had no result") {
+        return true;
+    }
+    lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("error sending request")
+        || lower.contains("error decoding response body")
+        || lower.contains("request or response body error")
+        || lower.contains("connection")
+}
+
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    for _ in 0..8 {
+        let Some(cause) = source else {
+            break;
+        };
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    message
+}
+
+fn http_status_code(error: &str) -> Option<u16> {
+    let rest = error.strip_prefix("http status ")?;
+    rest.split_whitespace().next()?.parse().ok()
+}
+
+#[cfg(test)]
+mod rpc_tests {
+    use super::*;
+
+    fn result(hash: Option<&str>, error: Option<&str>) -> SubmitTransactionResult {
+        SubmitTransactionResult {
+            hash: hash.map(str::to_string),
+            error: error.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn short_submit_results_requeue_the_unmatched_tail() {
+        let pending = vec!["tx-a".to_string(), "tx-b".to_string(), "tx-c".to_string()];
+        let (ok, err, requeue, sample) =
+            classify_submit_results(&pending, vec![result(Some("hash-a"), None)]);
+        assert_eq!(ok, 1);
+        assert_eq!(err, 0);
+        assert_eq!(requeue, vec!["tx-b".to_string(), "tx-c".to_string()]);
+        assert!(sample.is_none());
+    }
+
+    #[test]
+    fn backpressure_and_duplicates_do_not_open_nonce_holes() {
+        let pending = vec!["full".to_string(), "dup".to_string(), "stale".to_string()];
+        let (ok, err, requeue, sample) = classify_submit_results(
+            &pending,
+            vec![
+                result(None, Some("the pool is full")),
+                result(None, Some("transaction is already pending")),
+                result(
+                    None,
+                    Some("nonce 1 is below the account's committed nonce 3"),
+                ),
+            ],
+        );
+        assert_eq!(ok, 1);
+        assert_eq!(err, 1);
+        assert_eq!(requeue, vec!["full".to_string()]);
+        assert_eq!(
+            sample.as_deref(),
+            Some("nonce 1 is below the account's committed nonce 3")
+        );
+    }
+
+    #[test]
+    fn mempool_shutdown_is_retried() {
+        let pending = vec!["tx".to_string()];
+        let (ok, err, requeue, sample) = classify_submit_results(
+            &pending,
+            vec![result(None, Some("the mempool is shut down"))],
+        );
+        assert_eq!((ok, err), (0, 0));
+        assert_eq!(requeue, pending);
+        assert!(sample.is_none());
+    }
+
+    #[test]
+    fn incomplete_submit_result_is_retried() {
+        let pending = vec!["tx".to_string()];
+        let (ok, err, requeue, _) = classify_submit_results(&pending, vec![result(None, None)]);
+        assert_eq!((ok, err), (0, 0));
+        assert_eq!(requeue, pending);
+    }
+
+    #[test]
+    fn retry_classification_matches_transport_and_backpressure_only() {
+        assert!(is_retryable_rpc_error(
+            "error sending request for url (http://127.0.0.1:1): Connection refused (os error 111)"
+        ));
+        assert!(is_retryable_rpc_error(
+            "error decoding response body: connection reset"
+        ));
+        assert!(is_retryable_rpc_error(
+            "http status 503 Service Unavailable: upload pending"
+        ));
+        assert!(is_retryable_rpc_error("http status 429 Too Many Requests"));
+        assert!(is_retryable_rpc_error(
+            "rpc error -32000 Module error: the pool is full"
+        ));
+        assert!(is_retryable_rpc_error("rpc response had no result"));
+        assert!(!is_retryable_rpc_error(
+            "rpc error -32602 Invalid params: transaction is already pending"
+        ));
+        assert!(!is_retryable_rpc_error(
+            "rpc error -32602 Invalid params: connection was rejected and nonce 429 is stale"
+        ));
+        assert!(!is_retryable_rpc_error(
+            "http status 400 Bad Request: invalid transaction"
+        ));
+    }
 }
