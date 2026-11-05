@@ -12,8 +12,13 @@ type IndexRequest =
   | { op: "batch"; version: string; reset: boolean; files: IndexFile[] }
   | { op: "prune"; keep: string[] };
 
+// Git tags may contain slashes (`release/1.0`). Reject traversal, empty
+// segments, and characters git itself refuses in a ref name.
 function isSafeRef(ref: string): boolean {
-  return ref.length > 0 && ref.length < 200 && !ref.includes("..") && !ref.includes("/");
+  if (ref.length === 0 || ref.length >= 200 || ref.includes("..")) {
+    return false;
+  }
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/.test(ref);
 }
 
 // Write one batch of this repository into D1. `just mcp-index` reads git in Node

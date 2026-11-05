@@ -169,4 +169,32 @@ describe("POST /__index", () => {
     expect(queries.some((sql) => sql.startsWith("INSERT OR REPLACE INTO files"))).toBe(true);
     expect(response.headers.get("access-control-allow-origin")).toBeNull();
   });
+
+  it("indexes a tag that contains a slash", async () => {
+    const { db, queries } = recordingDb();
+    const response = await indexResponse(
+      "http://127.0.0.1:8787/__index",
+      "POST",
+      { "content-type": "application/json", authorization: "Bearer secret" },
+      "secret",
+      db,
+      JSON.stringify({ op: "batch", version: "release/1.0", reset: true, files: [] })
+    );
+
+    expect(response.status).toBe(200);
+    expect(queries.some((sql) => sql.startsWith("INSERT OR REPLACE INTO versions"))).toBe(true);
+  });
+
+  it("rejects a ref that escapes the repository", async () => {
+    const response = await indexResponse(
+      "http://127.0.0.1:8787/__index",
+      "POST",
+      { "content-type": "application/json", authorization: "Bearer secret" },
+      "secret",
+      untouchedDb(),
+      JSON.stringify({ op: "batch", version: "release/../1.0", reset: true, files: [] })
+    );
+
+    expect(response.status).toBe(400);
+  });
 });
