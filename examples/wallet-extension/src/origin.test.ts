@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isAllowedPageOrigin, requirePageOrigin, senderOrigin } from "./origin";
+import { isAllowedPageOrigin, pageTargetOrigin, requirePageOrigin, senderOrigin } from "./origin";
 
 describe("senderOrigin", () => {
   it("prefers origin when present", () => {
@@ -33,5 +33,15 @@ describe("isAllowedPageOrigin", () => {
     expect(isAllowedPageOrigin("file://")).toBe(false);
     expect(isAllowedPageOrigin("chrome-extension://abcdefghijklmnopqrstuvwxyzabcdef")).toBe(false);
     expect(() => requirePageOrigin("null")).toThrow("Missing sender origin");
+  });
+});
+
+describe("pageTargetOrigin", () => {
+  it("keeps http(s) origins and refuses a wildcard", () => {
+    expect(pageTargetOrigin("https://dapp.example")).toBe("https://dapp.example");
+    expect(pageTargetOrigin("http://127.0.0.1:3000")).toBe("http://127.0.0.1:3000");
+    expect(pageTargetOrigin("null")).toBe("null");
+    expect(pageTargetOrigin("")).toBe("null");
+    expect(pageTargetOrigin("*")).toBe("null");
   });
 });

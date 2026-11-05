@@ -1,5 +1,5 @@
 import { randomRequestId } from "./ids";
-import { isAllowedPageOrigin } from "./origin";
+import { isAllowedPageOrigin, pageTargetOrigin } from "./origin";
 import { isTrustedPageRequest, PAGE_EVENT_TARGET, PAGE_RESPONSE_TARGET } from "./page-messages";
 
 const bridgeToken = randomRequestId("tok");
@@ -32,7 +32,7 @@ function connectPagePort(): void {
         event: message.event,
         params: message.params,
       },
-      "*"
+      pageTargetOrigin(frameOrigin())
     );
   });
   port.onDisconnect.addListener(() => {
@@ -69,7 +69,7 @@ window.addEventListener("message", async (event) => {
         requestId,
         response,
       },
-      "*"
+      pageTargetOrigin(frameOrigin())
     );
   } catch (error) {
     window.postMessage(
@@ -82,7 +82,7 @@ window.addEventListener("message", async (event) => {
           error: error instanceof Error ? error.message : String(error),
         },
       },
-      "*"
+      pageTargetOrigin(frameOrigin())
     );
   }
 });

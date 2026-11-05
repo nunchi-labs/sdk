@@ -1,5 +1,6 @@
 import type { Message } from "./types";
 import { isAllowedPageOrigin } from "./origin";
+import { parseRpcResponse } from "./rpc";
 import { Wallet, type WalletHost, type WalletWasm } from "./wallet";
 // Static import: Vite wraps dynamic import() with a window-based preload helper
 // that throws `window is not defined` in the MV3 service worker.
@@ -81,7 +82,7 @@ function chromeHost(): WalletHost {
         throw new Error(`RPC HTTP ${response.status}`);
       }
       try {
-        return await response.json();
+        return parseRpcResponse(await response.text());
       } catch {
         throw new Error("RPC returned non-JSON");
       }

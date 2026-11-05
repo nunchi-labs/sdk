@@ -4,6 +4,7 @@ import {
   normalizeHex,
   requireAddress,
   requireAmount,
+  requirePositiveAmount,
   requireCoinHex,
   requireCurve,
   requireDecimals,
@@ -52,6 +53,13 @@ describe("requireAmount", () => {
     expect(() => requireAmount("-1")).toThrow("whole number");
     expect(() => requireAmount("01")).toThrow("whole number");
     expect(() => requireAmount((U128_MAX + 1n).toString())).toThrow("u128");
+  });
+});
+
+describe("requirePositiveAmount", () => {
+  it("rejects zero", () => {
+    expect(requirePositiveAmount("1")).toBe("1");
+    expect(() => requirePositiveAmount("0")).toThrow("greater than zero");
   });
 });
 

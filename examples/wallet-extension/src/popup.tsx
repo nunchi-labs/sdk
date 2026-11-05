@@ -36,6 +36,7 @@ import {
   tokenByCoinId,
   tokenLabel,
   formatUnits,
+  formatUnitsExact,
   formatUsd,
   usdValue,
   parseUnits,
@@ -1567,7 +1568,7 @@ function Send({
                 className="maxButton"
                 disabled={balance === "0"}
                 onClick={() =>
-                  setAmount(token ? formatCoin(balance, coin).replace(/,/g, "") : balance)
+                  setAmount(token ? formatUnitsExact(balance, token.decimals) : balance)
                 }
               >
                 Max
@@ -2354,7 +2355,9 @@ function SwapView() {
                   type="button"
                   className="maxButton"
                   disabled={fromBalance === "0"}
-                  onClick={() => setAmount(formatCoin(fromBalance, from).replace(/,/g, ""))}
+                  onClick={() =>
+                    setAmount(fromToken ? formatUnitsExact(fromBalance, fromToken.decimals) : fromBalance)
+                  }
                 >
                   Max
                 </button>
@@ -2585,7 +2588,11 @@ function SettingsView({ onReload, onSaved }: { onReload: () => void; onSaved?: (
     try {
       const origin = rpcOriginPattern(settings.rpcUrl);
       if (chrome.permissions?.request) {
-        await chrome.permissions.request({ origins: [origin] });
+        const granted = await chrome.permissions.request({ origins: [origin] });
+        if (!granted) {
+          setError("Allow access to this RPC URL to save it");
+          return;
+        }
       }
       const response = await chrome.runtime.sendMessage({ type: "UPDATE_SETTINGS", payload: settings });
       if (!response.success) {

@@ -1,4 +1,5 @@
 import { randomRequestId } from "./ids";
+import { pageTargetOrigin } from "./origin";
 import { isTrustedPageEvent, isTrustedPageResponse, PAGE_REQUEST_TARGET } from "./page-messages";
 
 const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;
@@ -91,7 +92,7 @@ class NunchiWalletProvider extends EventEmitter implements NunchiProvider {
           payload,
           requestId,
         },
-        "*"
+        pageTargetOrigin(window.location.origin)
       );
 
       setTimeout(() => {

@@ -43,6 +43,15 @@ export function requireAmount(value: string): string {
   return amount;
 }
 
+/** Transfer, mint, and burn amounts. Zero is a legal integer but the ledger rejects it. */
+export function requirePositiveAmount(value: string): string {
+  const amount = requireAmount(value);
+  if (amount === "0") {
+    throw new Error("Amount must be greater than zero");
+  }
+  return amount;
+}
+
 export function requireAddress(value: string): string {
   const address = value.trim();
   try {

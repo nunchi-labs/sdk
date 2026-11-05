@@ -30,3 +30,15 @@ export function requirePageOrigin(origin: string): string {
   }
   return origin;
 }
+
+/**
+ * Origin to pass to `window.postMessage`. `*` would deliver the bridge token
+ * and any signed transaction to whatever document occupies the window after a
+ * navigation. Opaque frames use the literal origin `"null"`.
+ */
+export function pageTargetOrigin(origin: string): string {
+  if (isAllowedPageOrigin(origin)) {
+    return origin;
+  }
+  return "null";
+}
