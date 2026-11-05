@@ -964,6 +964,7 @@ fn search_repo_code(
 mod tests {
     use super::*;
     use nunchi_coins::Authorization;
+    use rmcp::handler::server::wrapper::Parameters;
 
     fn key_hex(seed: u64) -> String {
         encode_value(&PrivateKey::ed25519_from_seed(seed))
@@ -979,6 +980,54 @@ mod tests {
         let param = account_query_param(&encode_value(&address)).unwrap();
         assert_eq!(param, address.to_bech32());
         assert!(account_query_param(&param).is_err());
+    }
+
+    #[tokio::test]
+    async fn coin_queries_fail_closed_for_bad_input_and_unreachable_nodes() {
+        let server = NunchiServer::new(
+            crate::client::RpcClient::new("http://127.0.0.1:9"),
+            std::path::PathBuf::from("."),
+        );
+        let address = encode_value(&external_account_id(
+            &PrivateKey::ed25519_from_seed(4).public_key(),
+        ));
+
+        let bad_nonce = server
+            .coins_nonce(Parameters(NonceParams {
+                account: "not-hex".to_string(),
+            }))
+            .await;
+        assert!(bad_nonce.starts_with("Error:"), "{bad_nonce}");
+
+        let offline_nonce = server
+            .coins_nonce(Parameters(NonceParams {
+                account: address.clone(),
+            }))
+            .await;
+        assert!(offline_nonce.starts_with("Error:"), "{offline_nonce}");
+
+        let bad_balance = server
+            .coins_balance(Parameters(BalanceParams {
+                account: "not-hex".to_string(),
+                coin: address.clone(),
+            }))
+            .await;
+        assert!(bad_balance.starts_with("Error:"), "{bad_balance}");
+
+        let offline_balance = server
+            .coins_balance(Parameters(BalanceParams {
+                account: address,
+                coin: "aa".repeat(32),
+            }))
+            .await;
+        assert!(offline_balance.starts_with("Error:"), "{offline_balance}");
+
+        let factory = server.coins_factory_nonce().await;
+        assert!(factory.starts_with("Error:"), "{factory}");
+        let root = server.coins_state_root().await;
+        assert!(root.starts_with("Error:"), "{root}");
+        let status = server.chain_status().await;
+        assert!(status.starts_with("Error:"), "{status}");
     }
 
     #[test]
