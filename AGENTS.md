@@ -23,6 +23,10 @@ just test
 just check
 ```
 
+## Commonware MCP
+
+This repository does not ship an MCP server. Cursor (`.cursor/mcp.json`) and Claude Code (`.mcp.json`) connect to Commonware's hosted server at `https://mcp.commonware.xyz` (`commonware-library`). It indexes Commonware Library source and docs. This workspace pins `commonware-*` to 2026.9.0, and the server defaults to the latest release, so pass `version` `v2026.9.0` when a tool accepts it. The README section "Commonware MCP" explains how to connect a client and how to run a local copy from the Commonware monorepo.
+
 ## Architecture
 
 ### Core Primitives

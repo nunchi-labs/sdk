@@ -86,6 +86,57 @@ When upgrading nodes:
 * Mid-sync glue metadata from v2026.7.0 cannot resume after upgrading to v2026.9.0; clear or re-sync any node that crashed mid state-sync before the bump.
 * Fresh joining nodes can enable peer QMDB state sync with `state_sync = true`. Nunchi's resolver preserves Commonware's standard wire layout while decoding variable-value operations with the chain-wide 512 KiB value bound.
 
+## Commonware MCP
+
+Assistants in this repository use Commonware's official MCP server, [commonware-library](https://mcp.commonware.xyz). The server is the `mcp` package in the [Commonware monorepo](https://github.com/commonwarexyz/monorepo/tree/main/mcp). It speaks Streamable HTTP and serves a version-pinned index of Commonware Library source and documentation. This SDK does not build or vendor that server.
+
+The hosted server defaults to the latest indexed release. This workspace pins `commonware-*` to **2026.9.0**, which is indexed as `v2026.9.0`. Pass that version on any tool that accepts `version` (`get_file`, `search_code`, `list_crates`, `get_crate_readme`, `list_files`) so answers match the crates this SDK builds against. `list_versions` lists every indexed tag. `get_overview` returns the library README.
+
+Nunchi chain queries and transaction submission stay on the node's JSON-RPC API (narae's default base port is 8545). Commonware's server does not expose them.
+
+### Connect a client
+
+Cursor is configured in [`.cursor/mcp.json`](.cursor/mcp.json):
+
+```json
+{
+  "mcpServers": {
+    "commonware-library": {
+      "url": "https://mcp.commonware.xyz"
+    }
+  }
+}
+```
+
+Claude Code reads [`.mcp.json`](.mcp.json). You can also register the server from the shell:
+
+```bash
+claude mcp add --transport http commonware-library https://mcp.commonware.xyz
+```
+
+Other MCP clients use the Streamable HTTP endpoint `https://mcp.commonware.xyz`. The public explorer is [commonware.xyz/mcp](https://commonware.xyz/mcp).
+
+### Run a local server
+
+Use the hosted endpoint above unless you are changing the indexer. A local copy is built from the Commonware monorepo, not from this repository. From a checkout of [commonwarexyz/monorepo](https://github.com/commonwarexyz/monorepo):
+
+Prerequisites are Node.js 18 or newer, the Wrangler CLI (`npm install -g wrangler`), and a Cloudflare account when you deploy.
+
+```bash
+cd mcp
+npm install
+npx wrangler d1 migrations apply commonware-mcp-search --local
+npm run dev
+```
+
+In a second terminal, populate the local search index:
+
+```bash
+curl "http://localhost:8787/__scheduled?cron=*"
+```
+
+The dev server listens on `http://localhost:8787`. Point the client at that URL with Streamable HTTP and a direct connection. Deploy steps and architecture notes stay in the upstream [`mcp/README.md`](https://github.com/commonwarexyz/monorepo/blob/main/mcp/README.md).
+
 ## License
 
 This repository is dual-licensed under both the [Apache 2.0](./LICENSE-APACHE) and [MIT](./LICENSE-MIT) licenses. You may choose either license when employing this code.
