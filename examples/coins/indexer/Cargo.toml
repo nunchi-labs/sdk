@@ -35,3 +35,4 @@ path = "src/main.rs"
 commonware-consensus = { workspace = true, features = ["mocks"] }
 commonware-cryptography = { workspace = true, features = ["mocks"] }
 commonware-storage = { workspace = true }
+tokio-tungstenite = "0.29"
