@@ -52,7 +52,12 @@ enum Message {
         responder: oneshot::Sender<Result<(), ClobError>>,
     },
     Propose {
+        indexed: Option<Vec<Address>>,
         responder: oneshot::Sender<MatchBatch>,
+    },
+    SyncNonces {
+        updates: Vec<(Address, u64)>,
+        responder: oneshot::Sender<Result<(), ClobError>>,
     },
 }
 
@@ -135,11 +140,40 @@ impl ClobMailbox {
         receiver.await.unwrap_or(Err(ClobError::ActorStopped))
     }
 
-    /// Drain currently matchable signed orders into one proposed batch.
-    pub async fn propose(&self) -> MatchBatch {
+    /// Apply committed nonces recorded outside a match batch.
+    pub(crate) async fn sync_nonces(
+        &self,
+        updates: Vec<(Address, u64)>,
+    ) -> Result<(), ClobError> {
+        if updates.is_empty() {
+            return Ok(());
+        }
         let (responder, receiver) = oneshot::channel();
         let mut sender = self.sender.clone();
-        if sender.send(Message::Propose { responder }).await.is_err() {
+        if sender
+            .send(Message::SyncNonces { updates, responder })
+            .await
+            .is_err()
+        {
+            return Err(ClobError::ActorStopped);
+        }
+        receiver.await.unwrap_or(Err(ClobError::ActorStopped))
+    }
+
+    /// Drain currently matchable signed orders into one proposed batch.
+    pub async fn propose(&self) -> MatchBatch {
+        self.propose_with_indexed(None).await
+    }
+
+    /// Propose using the ledger nonce index when it is ahead of this actor.
+    pub(crate) async fn propose_with_indexed(&self, indexed: Option<Vec<Address>>) -> MatchBatch {
+        let (responder, receiver) = oneshot::channel();
+        let mut sender = self.sender.clone();
+        if sender
+            .send(Message::Propose { indexed, responder })
+            .await
+            .is_err()
+        {
             return MatchBatch::default();
         }
         receiver.await.unwrap_or_default()
@@ -283,8 +317,15 @@ impl ClobActor {
                 self.sync_nonce_state(account, nonce);
                 let _ = responder.send(Ok(()));
             }
-            Message::Propose { responder } => {
-                let _ = responder.send(self.propose_batch());
+            Message::SyncNonces { updates, responder } => {
+                for (account, nonce) in updates {
+                    self.nonces.insert(account, nonce);
+                }
+                self.drop_stale_pending_orders();
+                let _ = responder.send(Ok(()));
+            }
+            Message::Propose { indexed, responder } => {
+                let _ = responder.send(self.propose_batch(indexed));
             }
         }
     }
@@ -322,11 +363,12 @@ impl ClobActor {
         }
     }
 
-    fn propose_batch(&mut self) -> MatchBatch {
+    fn propose_batch(&mut self, indexed: Option<Vec<Address>>) -> MatchBatch {
         if self.pending_orders.is_empty() {
             return MatchBatch::default();
         }
-        let orders = self.proposal_orders();
+        let indexed = indexed.map(|accounts| accounts.into_iter().collect::<BTreeSet<_>>());
+        let orders = self.proposal_orders(indexed.as_ref());
         if orders.is_empty() {
             return MatchBatch::default();
         }
@@ -496,16 +538,30 @@ impl ClobActor {
             < MAX_NONCE_ACCOUNTS
     }
 
-    fn proposal_orders(&mut self) -> Vec<Transaction> {
+    fn proposal_orders(&mut self, indexed: Option<&BTreeSet<Address>>) -> Vec<Transaction> {
         let mut expected_nonces = self.nonces.clone();
         let mut new_accounts = 0usize;
-        let new_account_capacity = MAX_NONCE_ACCOUNTS.saturating_sub(self.nonces.len());
+        let mut introduced = BTreeSet::new();
+        // `indexed` is the ledger nonce index, including create-market accounts
+        // this actor has not learned yet. Capacity follows that index.
+        let occupied = indexed.map_or(self.nonces.len(), BTreeSet::len);
+        let new_account_capacity = MAX_NONCE_ACCOUNTS.saturating_sub(occupied);
         let mut stale = BTreeSet::new();
         let mut orders = Vec::new();
         for tx in &self.pending_orders {
             let order_id = OrderId(tx.digest());
-            let already_indexed = expected_nonces.contains_key(&tx.account_id);
-            if !already_indexed && new_accounts >= new_account_capacity {
+            if indexed.is_some_and(|accounts| {
+                accounts.contains(&tx.account_id) && !expected_nonces.contains_key(&tx.account_id)
+            }) {
+                continue;
+            }
+            let known = match indexed {
+                Some(accounts) => {
+                    accounts.contains(&tx.account_id) || introduced.contains(&tx.account_id)
+                }
+                None => expected_nonces.contains_key(&tx.account_id),
+            };
+            if !known && new_accounts >= new_account_capacity {
                 continue;
             }
             let expected = expected_nonces.get(&tx.account_id).copied().unwrap_or(0);
@@ -514,8 +570,11 @@ impl ClobActor {
                     stale.insert(order_id);
                 }
                 std::cmp::Ordering::Equal if self.can_locally_replay(tx) => {
-                    if !already_indexed {
+                    if !known {
                         new_accounts += 1;
+                        if indexed.is_some() {
+                            introduced.insert(tx.account_id.clone());
+                        }
                     }
                     orders.push(tx.clone());
                     let next = expected.checked_add(1).unwrap_or(expected);

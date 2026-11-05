@@ -342,7 +342,10 @@ where
                 .observe_between(validate_start, rng.current());
         }
 
-        let extension = self.consensus.propose().await;
+        let extension = self
+            .consensus
+            .propose_from_state(&mut batch, context)
+            .await;
         if !self
             .consensus
             .apply_payload(&mut batch, context, &extension)

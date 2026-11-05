@@ -1,6 +1,9 @@
 use std::collections::BTreeSet;
 
-use crate::{ClobLedger, ClobMailbox, ClobOperation, MatchBatch, MarketId, Order, OrderId};
+use crate::{
+    ClobDB, ClobError, ClobLedger, ClobMailbox, ClobOperation, MatchBatch, MarketId, Order,
+    OrderId,
+};
 use nunchi_chain::{BlockExtension, ConsensusExtension};
 use nunchi_common::{Address, RuntimeContext, StateStore};
 use tracing::warn;
@@ -35,6 +38,29 @@ impl ConsensusExtension for ClobExtension {
         self.mailbox.propose().await
     }
 
+    async fn propose_from_state<S>(
+        &mut self,
+        state: &mut S,
+        _context: RuntimeContext,
+    ) -> Self::Payload
+    where
+        S: StateStore + Send + Sync,
+    {
+        // The proposal state already includes create-market nonce accounts. The
+        // actor's map does not, until this block commits.
+        let indexed = {
+            let ledger = ClobLedger::new(&mut *state);
+            match ledger.db.nonce_accounts().await {
+                Ok(accounts) => Some(accounts),
+                Err(error) => {
+                    warn!(?error, "failed to read clob nonce index before proposal");
+                    None
+                }
+            }
+        };
+        self.mailbox.propose_with_indexed(indexed).await
+    }
+
     async fn verify_payload(&mut self, payload: &Self::Payload) -> bool {
         payload.orders.iter().all(|tx| tx.verify().is_ok())
     }
@@ -63,10 +89,20 @@ impl ConsensusExtension for ClobExtension {
     ) where
         S: StateStore + Send + Sync,
     {
+        let ledger = ClobLedger::new(state);
+        // Create-market writes the signer into the nonce index without a match batch.
+        // Sync that account or the next proposal spends a slot the ledger already filled.
+        match market_creator_nonces(&ledger).await {
+            Ok(updates) => {
+                if let Err(error) = self.mailbox.sync_nonces(updates).await {
+                    warn!(?error, "failed to sync clob market-creator nonces");
+                }
+            }
+            Err(error) => warn!(?error, "failed to read clob market-creator nonces"),
+        }
         if payload.is_empty() {
             return;
         }
-        let ledger = ClobLedger::new(state);
         let order_updates = order_updates(&ledger, payload).await;
         let nonce_updates = nonce_updates(&ledger, payload).await;
         let accepted_order_ids = accepted_order_ids(payload);
@@ -92,6 +128,32 @@ impl ConsensusExtension for ClobExtension {
             }
         }
     }
+}
+
+async fn market_creator_nonces<S>(
+    ledger: &ClobLedger<&mut S>,
+) -> Result<Vec<(Address, u64)>, ClobError>
+where
+    S: StateStore + Send + Sync,
+{
+    let indexed = ledger.db.nonce_accounts().await?;
+    if indexed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let indexed = indexed.into_iter().collect::<BTreeSet<_>>();
+    let mut seen = BTreeSet::new();
+    let mut updates = Vec::new();
+    for id in ledger.db.market_index().await? {
+        let Some(market) = ledger.market(&id).await? else {
+            continue;
+        };
+        if !indexed.contains(&market.created_by) || !seen.insert(market.created_by.clone()) {
+            continue;
+        }
+        let nonce = ledger.nonce(&market.created_by).await?;
+        updates.push((market.created_by, nonce));
+    }
+    Ok(updates)
 }
 
 async fn order_updates<S>(
