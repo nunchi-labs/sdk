@@ -23,6 +23,7 @@ jobs:
       rust: ${{ steps.filter.outputs.rust }}
       wallet: ${{ steps.filter.outputs.wallet }}
       wallet-live: ${{ steps.filter.outputs.wallet-live }}
+      mcp: ${{ steps.filter.outputs.mcp }}
 
     steps:
       - name: Checkout Repository
@@ -55,6 +56,8 @@ jobs:
               - 'rpc/**'
               - 'chain/**'
               - 'xtask/**'
+            mcp:
+              - 'mcp/**'
 
   fmt:
     needs: changes
@@ -231,3 +234,27 @@ jobs:
 
       - name: Broadcast a wallet transfer on a local testnet
         run: ./examples/wallet-extension/scripts/run-live-tests.sh
+
+  mcp:
+    needs: changes
+    if: ${{ always() && !cancelled() && (needs.changes.result == 'failure' || needs.changes.outputs.mcp == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: mcp/package-lock.json
+
+      - name: Install, lint, build, and test
+        working-directory: mcp
+        run: npm ci && npm run ci
+
+      - name: Check package-lock.json unchanged
+        run: git diff --exit-code -- mcp/package-lock.json

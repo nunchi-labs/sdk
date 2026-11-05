@@ -8,6 +8,23 @@ test:
     @echo "Running tests..."
     @cargo nextest run --workspace
 
+mcp-build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd mcp
+    npm ci
+    npm run build
+
+mcp:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd mcp
+    if [[ ! -d node_modules ]]; then
+        npm ci
+    fi
+    npx wrangler d1 migrations apply commonware-mcp-search --local
+    npm run dev
+
 wallet-test:
     @echo "Running wallet extension tests..."
     cd examples/wallet-extension && npm test

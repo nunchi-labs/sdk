@@ -2,7 +2,7 @@
   "mcpServers": {
     "commonware-library": {
       "type": "http",
-      "url": "https://mcp.commonware.xyz"
+      "url": "http://127.0.0.1:8787"
     }
   }
 }
