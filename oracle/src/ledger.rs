@@ -13,7 +13,7 @@ use thiserror::Error;
 pub enum OracleError {
     #[error("bad oracle transaction signature: {0}")]
     BadSignature(#[from] SignatureError),
-    #[error("unsupported authorization: oracle operations require single-key signatures")]
+    #[error("unsupported oracle authorization")]
     UnsupportedAuthorization,
     #[error("nonce mismatch for {account:?}: expected {expected}, got {actual}")]
     NonceMismatch {
