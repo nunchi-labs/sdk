@@ -192,11 +192,11 @@ pub struct BuildCreateTokenParams {
 pub struct BuildRegisterAccountPolicyParams {
     /// Hex-encoded curve-tagged private key bytes of the transaction signer.
     pub private_key_hex: String,
-    /// Signer's current nonce (from `coins_nonce`).
+    /// Current nonce of the multisig account (from `coins_nonce` on `account_id`).
     pub nonce: u64,
-    /// Hex-encoded address of the account whose policy is being registered.
+    /// Hex-encoded address derived from the policy being registered.
     pub account_id: String,
-    /// Minimum threshold of signers required.
+    /// Minimum threshold of signers required. This tool can sign only a threshold of 1.
     pub threshold: u16,
     /// Hex-encoded curve-tagged public keys of all policy members.
     pub signer_public_keys_hex: Vec<String>,
@@ -379,9 +379,8 @@ impl NunchiServer {
 
     /// Derive the bootstrap address of a multisig account from its initial policy.
     ///
-    /// The address is deterministically hashed from the sorted public keys and threshold.
-    /// Note: after a policy rotation (`sdk_build_register_account_policy`) the address
-    /// remains the same, but the controlling policy changes.
+    /// The address is the hash of the canonical policy. A different policy is a different
+    /// account. The coin ledger rejects a registration whose account id is not that hash.
     #[tool(
         name = "sdk_derive_multisig_address",
         description = "Derive the Nunchi multisig account address from a threshold and list of \
@@ -549,30 +548,21 @@ impl NunchiServer {
 
     /// Build and sign a RegisterAccountPolicy transaction.
     ///
-    /// Registers or rotates the multisig policy of `account_id`.  After this transaction is
-    /// finalized, future transactions from `account_id` must carry signatures from the new policy.
+    /// Registers the multisig policy whose derived address is `account_id`. The coin ledger
+    /// rejects a policy that does not hash to that account, and it rejects single-key
+    /// authorization for this operation.
     /// Returns hex-encoded transaction bytes ready to pass to `coins_submit_transaction`.
     #[tool(
         name = "sdk_build_register_account_policy",
         description = "Build and sign a Nunchi RegisterAccountPolicy transaction offline. \
-                        Registers or rotates the multisig policy of the given account. \
+                        Registers the multisig policy of the account derived from that policy. \
                         Returns hex-encoded transaction bytes to submit via coins_submit_transaction."
     )]
     async fn sdk_build_register_account_policy(
         &self,
         Parameters(p): Parameters<BuildRegisterAccountPolicyParams>,
     ) -> String {
-        match (|| -> anyhow::Result<String> {
-            let signer = decode_value::<PrivateKey>(&p.private_key_hex, "private key")?;
-            let account_id = decode_value::<nunchi_coins::Address>(&p.account_id, "account_id")?;
-            let policy = build_multisig_policy(p.threshold, &p.signer_public_keys_hex)?;
-            let tx = Transaction::sign(
-                &signer,
-                p.nonce,
-                CoinOperation::RegisterAccountPolicy { account_id, policy },
-            );
-            Ok(encode_value(&tx))
-        })() {
+        match build_register_account_policy_tx(&p) {
             Ok(hex) => hex,
             Err(e) => format!("Error: {e}"),
         }
@@ -654,6 +644,32 @@ impl NunchiServer {
 }
 
 // ── free helpers ──────────────────────────────────────────────────────────────
+
+fn build_register_account_policy_tx(
+    params: &BuildRegisterAccountPolicyParams,
+) -> anyhow::Result<String> {
+    let signer = decode_value::<PrivateKey>(&params.private_key_hex, "private key")?;
+    let account_id = decode_value::<nunchi_coins::Address>(&params.account_id, "account_id")?;
+    let policy = build_multisig_policy(params.threshold, &params.signer_public_keys_hex)?;
+    let derived = multisig_account_id(&policy);
+    if account_id != derived {
+        anyhow::bail!("account_id must be the address derived from the policy");
+    }
+    if policy.threshold() != 1 {
+        anyhow::bail!("this tool signs with one key and requires threshold 1");
+    }
+    if !policy.contains(&signer.public_key()) {
+        anyhow::bail!("signer is not a member of the policy");
+    }
+    let tx = Transaction::sign_multisig(
+        account_id.clone(),
+        policy.clone(),
+        &[&signer],
+        params.nonce,
+        CoinOperation::RegisterAccountPolicy { account_id, policy },
+    );
+    Ok(encode_value(&tx))
+}
 
 fn build_multisig_policy(
     threshold: u16,
@@ -861,4 +877,102 @@ fn search_repo_code(
         }
     }
     Ok(hits)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_codec::DecodeExt;
+    use nunchi_coins::Authorization;
+    use nunchi_crypto::PrivateKey;
+
+    fn policy_params(
+        signer: &PrivateKey,
+        members: &[PublicKey],
+        account: &nunchi_coins::Address,
+        threshold: u16,
+    ) -> BuildRegisterAccountPolicyParams {
+        BuildRegisterAccountPolicyParams {
+            private_key_hex: encode_value(signer),
+            nonce: 0,
+            account_id: encode_value(account),
+            threshold,
+            signer_public_keys_hex: members.iter().map(encode_value).collect(),
+        }
+    }
+
+    fn one_of_one(seed: u64) -> (PrivateKey, Vec<PublicKey>, nunchi_coins::Address) {
+        let signer = PrivateKey::ed25519_from_seed(seed);
+        let members = vec![signer.public_key()];
+        let keys = members.iter().map(encode_value).collect::<Vec<_>>();
+        let policy = build_multisig_policy(1, &keys).expect("policy");
+        let account = multisig_account_id(&policy);
+        (signer, members, account)
+    }
+
+    #[test]
+    fn register_account_policy_signs_a_verifying_multisig() {
+        let (signer, members, account) = one_of_one(7);
+        let encoded =
+            build_register_account_policy_tx(&policy_params(&signer, &members, &account, 1))
+                .expect("sign");
+        let bytes = from_hex(&encoded).expect("hex");
+        let tx = Transaction::decode(bytes.as_ref()).expect("decode");
+
+        assert_eq!(tx.verify(), Ok(()));
+        assert_eq!(tx.account_id, account);
+        assert!(matches!(
+            tx.payload.operation,
+            CoinOperation::RegisterAccountPolicy { .. }
+        ));
+        assert!(matches!(tx.authorization, Authorization::Multisig { .. }));
+    }
+
+    #[test]
+    fn register_account_policy_rejects_unbound_inputs() {
+        let (signer, members, account) = one_of_one(7);
+        let wrong_account = external_account_id(&signer.public_key());
+        let unbound =
+            build_register_account_policy_tx(&policy_params(&signer, &members, &wrong_account, 1))
+                .expect_err("unbound account");
+        assert!(unbound.to_string().contains("derived from the policy"));
+
+        let bob = PrivateKey::secp256r1_from_seed(8);
+        let both = vec![signer.public_key(), bob.public_key()];
+        let both_hex = both.iter().map(encode_value).collect::<Vec<_>>();
+        let shared = build_multisig_policy(2, &both_hex).expect("2-of-2");
+        let shared_account = multisig_account_id(&shared);
+        let threshold =
+            build_register_account_policy_tx(&policy_params(&signer, &both, &shared_account, 2))
+                .expect_err("threshold");
+        assert!(threshold.to_string().contains("threshold 1"));
+
+        let outsider = PrivateKey::ed25519_from_seed(9);
+        let stranger =
+            build_register_account_policy_tx(&policy_params(&outsider, &members, &account, 1))
+                .expect_err("stranger");
+        assert!(stranger.to_string().contains("not a member"));
+    }
+
+    #[tokio::test]
+    async fn register_tool_formats_success_and_error() {
+        let server = NunchiServer::new(RpcClient::new("http://127.0.0.1:9"), PathBuf::from("."));
+        let (signer, members, account) = one_of_one(7);
+        let signed = server
+            .sdk_build_register_account_policy(Parameters(policy_params(
+                &signer, &members, &account, 1,
+            )))
+            .await;
+        assert!(Transaction::decode(from_hex(&signed).expect("hex").as_ref()).is_ok());
+
+        let rejected = server
+            .sdk_build_register_account_policy(Parameters(policy_params(
+                &signer,
+                &members,
+                &external_account_id(&signer.public_key()),
+                1,
+            )))
+            .await;
+        assert!(rejected.starts_with("Error:"));
+    }
 }

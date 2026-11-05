@@ -7,7 +7,10 @@ use commonware_p2p::simulated::{self, Link, Network};
 use commonware_runtime::{deterministic, Clock, Runner as _, Supervisor};
 use commonware_utils::{probability, NZUsize, NZU32};
 use governor::Quota;
-use nunchi_common::{Address, CommitState, RuntimeContext, StateError, StateStore, MAX_STATE_VALUE_SIZE};
+use nunchi_common::{
+    Address, CommitState, MultisigPolicy, RuntimeContext, StateError, StateStore,
+    MAX_STATE_VALUE_SIZE,
+};
 use nunchi_crypto::PrivateKey;
 
 use nunchi_chain::ConsensusExtension;
@@ -196,6 +199,67 @@ async fn sync_actor_from_ledger(
         .sync_accepted(market, sequence, accepted_orders, order_updates, Vec::new())
         .await
         .unwrap();
+}
+
+#[test]
+fn forged_multisig_cannot_create_market_for_another_account() {
+    run_test(|| async {
+        let victim = PrivateKey::from_seed(1);
+        let attacker = PrivateKey::from_seed(2);
+        let victim_account = Address::external(&victim.public_key());
+        let forged = MultisigPolicy::new(1, vec![attacker.public_key()]).unwrap();
+        let tx = Transaction::sign_multisig(
+            victim_account,
+            forged,
+            &[&attacker],
+            0,
+            ClobOperation::CreateMarket {
+                base_asset: asset(b"base"),
+                quote_asset: asset(b"quote"),
+                tick_size: MARKET_TICK,
+                lot_size: MARKET_LOT,
+            },
+        );
+
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        let err = ledger
+            .apply_transaction(&tx, context(1))
+            .await
+            .expect_err("forged authorization");
+
+        assert!(matches!(err, ClobError::BadSignature(_)));
+        assert!(ledger.market(&market()).await.unwrap().is_none());
+    });
+}
+
+#[test]
+fn policy_derived_multisig_can_create_market() {
+    run_test(|| async {
+        let creator = PrivateKey::from_seed(1);
+        let policy = MultisigPolicy::new(1, vec![creator.public_key()]).unwrap();
+        let account = Address::multisig(&policy);
+        let tx = Transaction::sign_multisig(
+            account.clone(),
+            policy,
+            &[&creator],
+            0,
+            ClobOperation::CreateMarket {
+                base_asset: asset(b"base"),
+                quote_asset: asset(b"quote"),
+                tick_size: MARKET_TICK,
+                lot_size: MARKET_LOT,
+            },
+        );
+
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        ledger
+            .apply_transaction(&tx, context(1))
+            .await
+            .expect("policy-derived multisig");
+
+        let created = ledger.market(&market()).await.unwrap().expect("market");
+        assert_eq!(created.created_by, account);
+    });
 }
 
 #[test]
