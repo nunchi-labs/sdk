@@ -818,6 +818,12 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
         if !self.unsent.contains_key(&player) {
             return false;
         }
+        // Finalize takes the dealer view and leaves `unsent` populated. A late ack must not
+        // be journaled: restart replays every stored ack into a new dealer and can sign a
+        // different log than the one this process already produced.
+        if self.dealer.is_none() {
+            return false;
+        }
         // Persist before the dealer view accepts the ack. `receive_player_ack` cannot be rolled
         // back, and a later restart rebuilds the dealer from the journal. Accepting first and
         // failing the fsync makes this process sign a log the restarted process will not.

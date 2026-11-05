@@ -67,6 +67,9 @@ pub enum ClobError {
     SequenceOverflow,
     #[error("quote quantity overflow")]
     QuoteOverflow,
+    /// The sweep still crosses resting liquidity, so it cannot be capped mid-match.
+    #[error("match fill budget exhausted while the book still crosses")]
+    FillBudgetExceeded,
     #[error("state storage error: {0}")]
     Storage(String),
 }

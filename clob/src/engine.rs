@@ -73,8 +73,9 @@ impl MatchEngine {
 
     /// Replay like [`Self::replay_with_resting`], stopping after `max_fills` fills.
     ///
-    /// One taker can cross more makers than a block extension can carry. The remainder stays
-    /// resting (or expires, for immediate-or-cancel) so a later batch can continue the match.
+    /// A taker that still crosses after that budget is rejected. Resting the leftover
+    /// quantity, or expiring it, would leave executable size unmatched: later batches only
+    /// apply new intents and do not rematch resting orders.
     pub(crate) fn replay_limited(
         resting_orders: &[Order],
         orders: &[Transaction],
@@ -190,7 +191,16 @@ impl MatchEngine {
         let makers = std::mem::take(opposite);
 
         for idx in 0..makers.len() {
-            if taker.remaining_base == 0 || fills.len() >= self.max_fills {
+            if taker.remaining_base == 0 {
+                append_open_orders(&mut remaining_makers, &makers[idx..]);
+                break;
+            }
+            if fills.len() >= self.max_fills {
+                // Resting or expiring here would leave a crossed book. Later batches do not
+                // rematch resting orders, so reject the sweep instead of committing it.
+                if resting_crosses(&taker, &makers[idx..]) {
+                    return Err(ClobError::FillBudgetExceeded);
+                }
                 append_open_orders(&mut remaining_makers, &makers[idx..]);
                 break;
             }
@@ -279,6 +289,14 @@ fn append_open_orders(book: &mut Vec<Order>, orders: &[Order]) {
             book.push(order.clone());
         }
     }
+}
+
+fn resting_crosses(taker: &Order, makers: &[Order]) -> bool {
+    makers.iter().any(|maker| {
+        maker.status.is_open()
+            && maker.remaining_base > 0
+            && taker.side.crosses(taker.price, maker.price)
+    })
 }
 
 fn insert_resting(book: &mut Vec<Order>, order: Order) {

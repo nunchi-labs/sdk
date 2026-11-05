@@ -78,6 +78,25 @@ fn market() -> crate::MarketId {
     market_id(&asset(b"base"), &asset(b"quote"), MARKET_TICK, MARKET_LOT)
 }
 
+fn test_markets() -> BTreeMap<crate::MarketId, Market> {
+    let creator = PrivateKey::from_seed(1);
+    let mut markets = BTreeMap::new();
+    markets.insert(
+        market(),
+        Market {
+            id: market(),
+            base_asset: asset(b"base"),
+            quote_asset: asset(b"quote"),
+            tick_size: MARKET_TICK,
+            lot_size: MARKET_LOT,
+            created_by: Address::external(&creator.public_key()),
+            created_at_height: 0,
+            created_at_ms: 0,
+        },
+    );
+    markets
+}
+
 fn fake_fill_id(seed: u64) -> FillId {
     FillId(Sha256::hash(&[seed.encode().as_ref()]))
 }
@@ -1343,61 +1362,218 @@ fn create_market_rejects_multisig_for_another_account() {
 }
 
 #[test]
-fn matcher_fill_budget_leaves_the_rest_of_the_sweep() {
-    run_test(|| async {
-        let creator = PrivateKey::from_seed(1);
-        let maker_a = PrivateKey::from_seed(2);
-        let maker_b = PrivateKey::from_seed(3);
-        let taker = PrivateKey::from_seed(4);
-        let mut ledger = ClobLedger::new(MemoryStore::default());
-        seed_market(&mut ledger, &creator).await;
-        let market_info = ledger.market(&market()).await.unwrap().unwrap();
-        let mut markets = BTreeMap::new();
-        markets.insert(market_info.id, market_info.clone());
-        let mut sequences = BTreeMap::new();
-        sequences.insert(market(), 0);
+fn fill_budget_rejects_a_sweep_that_still_crosses() {
+    let maker_a = PrivateKey::from_seed(2);
+    let maker_b = PrivateKey::from_seed(3);
+    let taker = PrivateKey::from_seed(4);
+    let markets = test_markets();
+    let mut sequences = BTreeMap::new();
+    sequences.insert(market(), 0);
+    let first = place_tx(
+        &maker_a,
+        0,
+        Side::Ask,
+        100,
+        2,
+        TimeInForce::GoodTilCancelled,
+    );
+    let second = place_tx(
+        &maker_b,
+        0,
+        Side::Ask,
+        100,
+        2,
+        TimeInForce::GoodTilCancelled,
+    );
+    let resting = MatchEngine::replay(
+        &[first, second],
+        &markets,
+        sequences.clone(),
+        context(2),
+    )
+    .unwrap();
+    let resting_orders = resting.orders.values().cloned().collect::<Vec<_>>();
+    sequences.insert(market(), resting.sequences[&market()]);
 
-        let first = place_tx(
+    for time_in_force in [TimeInForce::GoodTilCancelled, TimeInForce::ImmediateOrCancel] {
+        let bid = place_tx(&taker, 0, Side::Bid, 100, 4, time_in_force);
+        let err = MatchEngine::replay_limited(
+            &resting_orders,
+            &[bid],
+            &markets,
+            sequences.clone(),
+            context(3),
+            1,
+        )
+        .unwrap_err();
+        assert_eq!(err, ClobError::FillBudgetExceeded);
+    }
+
+    let bid = place_tx(
+        &taker,
+        0,
+        Side::Bid,
+        100,
+        4,
+        TimeInForce::GoodTilCancelled,
+    );
+    let complete = MatchEngine::replay_limited(
+        &resting_orders,
+        &[bid],
+        &markets,
+        sequences,
+        context(3),
+        2,
+    )
+    .unwrap();
+    assert_eq!(complete.fills.len(), 2);
+    let taker_order = complete
+        .orders
+        .values()
+        .find(|order| order.side == Side::Bid)
+        .unwrap();
+    assert_eq!(taker_order.status, OrderStatus::Filled);
+}
+
+#[test]
+fn fill_budget_rests_only_after_crossing_liquidity_is_gone() {
+    let maker_a = PrivateKey::from_seed(2);
+    let maker_b = PrivateKey::from_seed(3);
+    let taker = PrivateKey::from_seed(4);
+    let markets = test_markets();
+    let mut sequences = BTreeMap::new();
+    sequences.insert(market(), 0);
+    let crossing = place_tx(
+        &maker_a,
+        0,
+        Side::Ask,
+        100,
+        2,
+        TimeInForce::GoodTilCancelled,
+    );
+    let behind = place_tx(
+        &maker_b,
+        0,
+        Side::Ask,
+        110,
+        2,
+        TimeInForce::GoodTilCancelled,
+    );
+    let resting = MatchEngine::replay(
+        &[crossing, behind],
+        &markets,
+        sequences.clone(),
+        context(2),
+    )
+    .unwrap();
+    let resting_orders = resting.orders.values().cloned().collect::<Vec<_>>();
+    sequences.insert(market(), resting.sequences[&market()]);
+
+    let gtc = place_tx(
+        &taker,
+        0,
+        Side::Bid,
+        100,
+        4,
+        TimeInForce::GoodTilCancelled,
+    );
+    let limited = MatchEngine::replay_limited(
+        &resting_orders,
+        &[gtc.clone()],
+        &markets,
+        sequences.clone(),
+        context(3),
+        1,
+    )
+    .unwrap();
+    assert_eq!(limited.fills.len(), 1);
+    let taker_order = &limited.orders[&OrderId(gtc.digest())];
+    assert_eq!(taker_order.status, OrderStatus::PartiallyFilled);
+    assert_eq!(taker_order.remaining_base, 2);
+    assert!(limited.orders.values().all(|order| {
+        order.side != Side::Ask || !order.status.is_open() || order.price > taker_order.price
+    }));
+
+    let ioc = place_tx(
+        &taker,
+        0,
+        Side::Bid,
+        100,
+        4,
+        TimeInForce::ImmediateOrCancel,
+    );
+    let limited = MatchEngine::replay_limited(
+        &resting_orders,
+        &[ioc.clone()],
+        &markets,
+        sequences,
+        context(3),
+        1,
+    )
+    .unwrap();
+    assert_eq!(limited.fills.len(), 1);
+    assert_eq!(
+        limited.orders[&OrderId(ioc.digest())].status,
+        OrderStatus::Expired
+    );
+}
+
+#[test]
+fn bounded_selection_skips_a_sweep_that_would_leave_a_crossed_book() {
+    let maker_a = PrivateKey::from_seed(2);
+    let maker_b = PrivateKey::from_seed(3);
+    let large = PrivateKey::from_seed(4);
+    let small = PrivateKey::from_seed(5);
+    let markets = test_markets();
+    let mut sequences = BTreeMap::new();
+    sequences.insert(market(), 0);
+    let asks = [
+        place_tx(
             &maker_a,
             0,
             Side::Ask,
             100,
             2,
             TimeInForce::GoodTilCancelled,
-        );
-        let second = place_tx(
+        ),
+        place_tx(
             &maker_b,
             0,
             Side::Ask,
             100,
             2,
             TimeInForce::GoodTilCancelled,
-        );
-        let bid = place_tx(
-            &taker,
-            0,
-            Side::Bid,
-            100,
-            4,
-            TimeInForce::GoodTilCancelled,
-        );
-        let resting = MatchEngine::replay(&[first, second], &markets, sequences.clone(), context(2))
-            .unwrap();
-        let resting_orders = resting.orders.values().cloned().collect::<Vec<_>>();
-        sequences.insert(market(), resting.sequences[&market()]);
-
-        let limited = MatchEngine::replay_limited(
-            &resting_orders,
-            &[bid],
-            &markets,
-            sequences,
-            context(3),
-            1,
-        )
-        .unwrap();
-        assert_eq!(limited.fills.len(), 1);
-        assert_eq!(limited.fills[0].base_quantity, 2);
-    });
+        ),
+    ];
+    let resting = MatchEngine::replay(&asks, &markets, sequences.clone(), context(2)).unwrap();
+    let resting_orders = resting.orders.values().cloned().collect::<Vec<_>>();
+    let sequences = resting.sequences.clone();
+    let oversized = place_tx(
+        &large,
+        0,
+        Side::Bid,
+        100,
+        4,
+        TimeInForce::GoodTilCancelled,
+    );
+    let fits = place_tx(&small, 0, Side::Bid, 100, 2, TimeInForce::GoodTilCancelled);
+    let selected = crate::actor::select_bounded_orders(
+        &[oversized, fits.clone()],
+        |batch| {
+            MatchEngine::replay_limited(
+                &resting_orders,
+                batch,
+                &markets,
+                sequences.clone(),
+                context(3),
+                1,
+            )
+            .map(|result| result.fills.len())
+        },
+        8,
+        1,
+    );
+    assert_eq!(selected, vec![fits]);
 }
 
 #[test]
