@@ -1,6 +1,8 @@
 *.swp
 *.DS_Store
 /target
+target/
+node_modules/
 /testnet
 *.vscode
 /assets
