@@ -4,6 +4,11 @@ use crate::{
     ClobError, Fill, FillId, Market, MarketId, Order, OrderId, Side, MAX_ACCOUNT_ORDERS,
     MAX_BOOK_ORDERS, MAX_FILLS_PER_MARKET, MAX_MARKETS, CLOB_NAMESPACE,
 };
+
+/// Accounts whose committed nonces are indexed for proposer recovery.
+///
+/// The encoded address list has to fit in the shared state value cap, same as the fill index.
+pub(crate) const MAX_NONCE_ACCOUNTS: usize = 16_383;
 use async_trait::async_trait;
 use commonware_codec::{Encode, RangeCfg, Read, ReadExt};
 use commonware_cryptography::sha256::Digest;
@@ -23,6 +28,7 @@ enum Table {
     Fill = 6,
     MarketFills = 7,
     MarketSequence = 8,
+    NonceAccounts = 9,
 }
 
 impl From<Table> for u8 {
@@ -78,6 +84,10 @@ fn market_sequence_key(market: &MarketId) -> Digest {
     NS.key(Table::MarketSequence, market.encode().as_ref())
 }
 
+fn nonce_accounts_key() -> Digest {
+    NS.key(Table::NonceAccounts, b"all")
+}
+
 /// Typed state access required by [`crate::ClobLedger`].
 #[async_trait]
 pub trait ClobDB {
@@ -120,6 +130,10 @@ pub trait ClobDB {
     async fn market_sequence(&self, market: &MarketId) -> Result<u64, ClobError>;
 
     fn set_market_sequence(&mut self, market: &MarketId, sequence: u64);
+
+    async fn nonce_accounts(&self) -> Result<Vec<Address>, ClobError>;
+
+    fn set_nonce_accounts(&mut self, accounts: &[Address]);
 }
 
 #[async_trait]
@@ -276,5 +290,24 @@ impl<S: StateStore + Send + Sync> ClobDB for S {
 
     fn set_market_sequence(&mut self, market: &MarketId, sequence: u64) {
         StateStore::set(self, market_sequence_key(market), encoded(&sequence));
+    }
+
+    async fn nonce_accounts(&self) -> Result<Vec<Address>, ClobError> {
+        match StateStore::get(self, &nonce_accounts_key())
+            .await
+            .map_err(|err| ClobError::Storage(err.to_string()))?
+        {
+            Some(bytes) => {
+                let mut buf = bytes.as_ref();
+                // One address is 32 bytes. Stay inside the shared state value cap.
+                Vec::read_cfg(&mut buf, &(RangeCfg::new(0..=MAX_NONCE_ACCOUNTS), ()))
+                    .map_err(|err| ClobError::Storage(err.to_string()))
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn set_nonce_accounts(&mut self, accounts: &[Address]) {
+        StateStore::set(self, nonce_accounts_key(), encoded(&accounts.to_vec()));
     }
 }

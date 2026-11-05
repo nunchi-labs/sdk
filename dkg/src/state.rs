@@ -626,15 +626,22 @@ where
     }
 
     /// Persists a player acknowledgment we received (as a dealer) for crash recovery.
-    /// Returns false if the ack was already stored.
+    ///
+    /// Returns false if this same ack is already stored. A different ack for the player
+    /// replaces it. Journal replay keeps the latest record, which is also what the dealer
+    /// view has accepted.
     pub async fn append_ack(
         &mut self,
         epoch: EpochNum,
         player: P,
         ack: PlayerAck<P>,
     ) -> Result<bool, Error> {
-        // Check if already stored
-        if self.has_cached(epoch, |c| &c.acks, &player) {
+        if self
+            .epochs
+            .get(&epoch)
+            .and_then(|cache| cache.acks.get(&player))
+            == Some(&ack)
+        {
             return Ok(false);
         }
 
@@ -818,24 +825,34 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
         if !self.unsent.contains_key(&player) {
             return false;
         }
-        if let Some(ref mut dealer) = self.dealer {
-            if dealer
-                .receive_player_ack(player.clone(), ack.clone())
-                .is_ok()
-            {
+        // Finalize takes the dealer view and leaves `unsent` populated. A late ack must not
+        // be journaled: restart replays every stored ack into a new dealer and can sign a
+        // different log than the one this process already produced.
+        let Some(dealer) = self.dealer.as_mut() else {
+            return false;
+        };
+        // Rejection leaves the dealer unchanged. Journaling it would keep this player's slot,
+        // so recovery would skip it while a later valid ack could be applied only in memory.
+        if dealer
+            .receive_player_ack(player.clone(), ack.clone())
+            .is_err()
+        {
+            return false;
+        }
+        // The view now records the ack and cannot drop just that player. Persist before
+        // reporting success. A failed fsync drops the whole view so finalize cannot sign a
+        // log the journal does not contain.
+        match storage.append_ack(epoch, player.clone(), ack).await {
+            Ok(true) | Ok(false) => {
                 self.unsent.remove(&player);
-                match storage.append_ack(epoch, player.clone(), ack).await {
-                    Ok(true) => {}
-                    Ok(false) => return false,
-                    Err(err) => {
-                        error!(?epoch, ?player, %err, "failed to persist DKG ack");
-                        return false;
-                    }
-                }
-                return true;
+                true
+            }
+            Err(err) => {
+                error!(?epoch, ?player, %err, "failed to persist DKG ack");
+                self.dealer = None;
+                false
             }
         }
-        false
     }
 
     /// Finalize the dealer and produce a signed log for inclusion in a block.
@@ -907,7 +924,8 @@ impl<V: Variant, C: Signer> Player<V, C> {
             return Some(ack.clone());
         }
 
-        // Otherwise generate a new ack
+        // Otherwise generate a new ack. `dealer_message` records the dealing in the player
+        // view before we can persist it, and a second call then returns `Ok(None)`.
         let Ok(Some(ack)) = self.player.dealer_message::<M>(
             dealer.clone(),
             pub_msg.clone(),
@@ -919,13 +937,13 @@ impl<V: Variant, C: Signer> Player<V, C> {
             .append_dealing(epoch, dealer.clone(), pub_msg, priv_msg)
             .await
         {
-            Ok(true) => {}
-            Ok(false) => return None,
+            Ok(true) | Ok(false) => {}
             Err(err) => {
                 error!(?epoch, ?dealer, %err, "failed to persist DKG dealing");
-                return None;
             }
         }
+        // Cache even when the journal write failed. Dropping the ack here makes every later
+        // delivery of this dealing return `None`, so the dealer finalizes the player as a reveal.
         self.acks.insert(dealer, ack.clone());
         Some(ack)
     }
