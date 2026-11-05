@@ -7,6 +7,7 @@ use commonware_p2p::simulated::{self, Link, Network};
 use commonware_runtime::{deterministic, Clock, Runner as _, Supervisor};
 use commonware_utils::{probability, NZUsize, NZU32};
 use governor::Quota;
+use nunchi_chain::ConsensusExtension;
 use nunchi_common::{
     Address, CommitState, MultisigPolicy, RuntimeContext, StateError, StateStore,
     MAX_STATE_VALUE_SIZE,
@@ -14,10 +15,10 @@ use nunchi_common::{
 use nunchi_crypto::PrivateKey;
 
 use crate::{
-    market_id, AssetId, ClobActor, ClobConfig, ClobDB, ClobError, ClobGenesis, ClobLedger,
-    ClobMailbox, ClobMarketGenesis, ClobOperation, FillId, Market, MatchBatch, MatchEngine, Order,
-    OrderId, OrderStatus, Side, TimeInForce, Transaction, MAX_BOOK_ORDERS, MAX_FILLS_PER_MARKET,
-    MAX_MATCH_BATCH_ORDERS,
+    market_id, AssetId, ClobActor, ClobConfig, ClobDB, ClobError, ClobExtension, ClobGenesis,
+    ClobLedger, ClobMailbox, ClobMarketGenesis, ClobOperation, FillId, Market, MatchBatch,
+    MatchEngine, Order, OrderId, OrderStatus, Side, TimeInForce, Transaction, MAX_BOOK_ORDERS,
+    MAX_FILLS_PER_MARKET, MAX_MATCH_BATCH_ORDERS,
 };
 
 #[derive(Default)]
@@ -1582,6 +1583,92 @@ fn restored_actor_proposes_against_committed_resting_liquidity() {
             .apply_match_batch(&proposed, context(3))
             .await
             .expect("restored proposer matches validator replay");
+    });
+}
+
+#[test]
+fn match_engine_default_uses_the_fill_cap() {
+    assert_eq!(MatchEngine::default(), MatchEngine::new());
+}
+
+#[test]
+fn extension_rejects_unbound_multisig_and_bad_signatures() {
+    deterministic::Runner::default().start(|runtime| async move {
+        let (actor, mailbox) = ClobActor::new(ClobConfig::default());
+        let _actor_handle = actor.start(runtime);
+        let mut extension = ClobExtension::new(mailbox);
+
+        let honest = place_tx(
+            &PrivateKey::from_seed(2),
+            0,
+            Side::Bid,
+            100,
+            2,
+            TimeInForce::GoodTilCancelled,
+        );
+        assert!(extension
+            .verify_payload(&MatchBatch {
+                orders: vec![honest.clone()],
+                fills: Vec::new(),
+            })
+            .await);
+
+        let mut tampered = honest;
+        tampered.payload.nonce = 9;
+        assert!(!extension
+            .verify_payload(&MatchBatch {
+                orders: vec![tampered],
+                fills: Vec::new(),
+            })
+            .await);
+
+        let attacker = PrivateKey::from_seed(3);
+        let policy = MultisigPolicy::new(1, vec![attacker.public_key()]).unwrap();
+        let forged = Transaction::sign_multisig(
+            Address::external(&PrivateKey::from_seed(2).public_key()),
+            policy,
+            &[&attacker],
+            0,
+            ClobOperation::PlaceOrder {
+                market: market(),
+                side: Side::Bid,
+                price: 100,
+                base_quantity: 2,
+                time_in_force: TimeInForce::GoodTilCancelled,
+            },
+        );
+        forged.verify().expect("forged multisig still verifies");
+        assert!(!extension
+            .verify_payload(&MatchBatch {
+                orders: vec![forged.clone()],
+                fills: Vec::new(),
+            })
+            .await);
+
+        let err = extension
+            .mailbox()
+            .submit_order(forged)
+            .await
+            .unwrap_err();
+        assert_eq!(err, ClobError::UnsupportedAuthorization);
+    });
+}
+
+#[test]
+fn corrupt_nonce_account_index_is_a_storage_error() {
+    run_test(|| async {
+        let creator = PrivateKey::from_seed(1);
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        seed_market(&mut ledger, &creator).await;
+        assert!(ledger.db.nonce_accounts().await.unwrap().len() == 1);
+
+        for value in ledger.db.values.values_mut() {
+            if value.is_some() {
+                *value = Some(b"not-an-index".to_vec());
+            }
+        }
+        let err = ledger.db.nonce_accounts().await.unwrap_err();
+        assert!(matches!(err, ClobError::Storage(_)));
     });
 }
 
