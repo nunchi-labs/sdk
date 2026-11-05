@@ -192,11 +192,11 @@ pub struct BuildCreateTokenParams {
 pub struct BuildRegisterAccountPolicyParams {
     /// Hex-encoded curve-tagged private key bytes of the transaction signer.
     pub private_key_hex: String,
-    /// Signer's current nonce (from `coins_nonce`).
+    /// Current nonce of the multisig account (from `coins_nonce` on `account_id`).
     pub nonce: u64,
-    /// Hex-encoded address of the account whose policy is being registered.
+    /// Hex-encoded address derived from the policy being registered.
     pub account_id: String,
-    /// Minimum threshold of signers required.
+    /// Minimum threshold of signers required. This tool can sign only a threshold of 1.
     pub threshold: u16,
     /// Hex-encoded curve-tagged public keys of all policy members.
     pub signer_public_keys_hex: Vec<String>,
@@ -379,9 +379,8 @@ impl NunchiServer {
 
     /// Derive the bootstrap address of a multisig account from its initial policy.
     ///
-    /// The address is deterministically hashed from the sorted public keys and threshold.
-    /// Note: after a policy rotation (`sdk_build_register_account_policy`) the address
-    /// remains the same, but the controlling policy changes.
+    /// The address is the hash of the canonical policy. A different policy is a different
+    /// account. The coin ledger rejects a registration whose account id is not that hash.
     #[tool(
         name = "sdk_derive_multisig_address",
         description = "Derive the Nunchi multisig account address from a threshold and list of \
@@ -549,13 +548,14 @@ impl NunchiServer {
 
     /// Build and sign a RegisterAccountPolicy transaction.
     ///
-    /// Registers or rotates the multisig policy of `account_id`.  After this transaction is
-    /// finalized, future transactions from `account_id` must carry signatures from the new policy.
+    /// Registers the multisig policy whose derived address is `account_id`. The coin ledger
+    /// rejects a policy that does not hash to that account, and it rejects single-key
+    /// authorization for this operation.
     /// Returns hex-encoded transaction bytes ready to pass to `coins_submit_transaction`.
     #[tool(
         name = "sdk_build_register_account_policy",
         description = "Build and sign a Nunchi RegisterAccountPolicy transaction offline. \
-                        Registers or rotates the multisig policy of the given account. \
+                        Registers the multisig policy of the account derived from that policy. \
                         Returns hex-encoded transaction bytes to submit via coins_submit_transaction."
     )]
     async fn sdk_build_register_account_policy(
@@ -566,8 +566,20 @@ impl NunchiServer {
             let signer = decode_value::<PrivateKey>(&p.private_key_hex, "private key")?;
             let account_id = decode_value::<nunchi_coins::Address>(&p.account_id, "account_id")?;
             let policy = build_multisig_policy(p.threshold, &p.signer_public_keys_hex)?;
-            let tx = Transaction::sign(
-                &signer,
+            let derived = multisig_account_id(&policy);
+            if account_id != derived {
+                anyhow::bail!("account_id must be the address derived from the policy");
+            }
+            if policy.threshold() != 1 {
+                anyhow::bail!("this tool signs with one key and requires threshold 1");
+            }
+            if !policy.contains(&signer.public_key()) {
+                anyhow::bail!("signer is not a member of the policy");
+            }
+            let tx = Transaction::sign_multisig(
+                account_id.clone(),
+                policy.clone(),
+                &[&signer],
                 p.nonce,
                 CoinOperation::RegisterAccountPolicy { account_id, policy },
             );
