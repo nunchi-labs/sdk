@@ -1,5 +1,5 @@
 use super::MemoryState;
-use crate::{CustomError, CustomLedger, CustomOperation, Transaction};
+use crate::{CustomLedger, CustomOperation, Transaction};
 use nunchi_common::{Address, MultisigPolicy, NoopEventSink};
 use nunchi_crypto::PrivateKey;
 
@@ -37,16 +37,16 @@ fn ledger_rejects_multisig_authorization_for_another_account() {
             0,
             CustomOperation::SetValue { value: 42 },
         );
-        assert!(tx.verify().is_ok());
+        assert!(tx.verify().is_err());
 
         let mut ledger = CustomLedger::new(&mut state);
-        assert_eq!(
+        assert!(matches!(
             ledger
                 .apply_transaction(&tx, NoopEventSink)
                 .await
                 .unwrap_err(),
-            CustomError::UnsupportedAuthorization
-        );
+            crate::CustomError::BadSignature(_)
+        ));
         assert_eq!(ledger.value(&victim).await.unwrap(), None);
         assert_eq!(ledger.nonce(&victim).await.unwrap(), 0);
     });

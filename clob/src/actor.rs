@@ -396,7 +396,6 @@ impl ClobActor {
 
     fn accept_order(&mut self, tx: Transaction) -> Result<(), ClobError> {
         tx.verify()?;
-        crate::ledger::require_single_authorization(&tx.authorization)?;
         let ClobOperation::PlaceOrder {
             market,
             price,

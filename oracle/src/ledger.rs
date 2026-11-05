@@ -70,16 +70,16 @@ impl<D: OracleDB> OracleLedger<D> {
     /// ([`Transaction::verify`]), which the chain guarantees at mempool
     /// admission and block verification.
     ///
-    /// Only single-key authorization is accepted. `Transaction::verify` binds a
-    /// signature to `account_id`, but for multisig it does not bind `account_id`
-    /// to the transaction-supplied policy. This module has no registered-policy
-    /// lookup, so a caller-chosen policy would authorize writes as any account.
+    /// This method does not verify signatures. Chain execution verifies first, and
+    /// that check binds a multisig account to its policy. The same binding is
+    /// enforced here so a direct caller cannot attribute a record to an account
+    /// the supplied policy does not derive.
     pub async fn apply_transaction(
         &mut self,
         tx: &Transaction,
         context: RuntimeContext,
     ) -> Result<(), OracleError> {
-        if !matches!(tx.authorization, Authorization::Single { .. }) {
+        if !authorization_is_bound(tx) {
             return Err(OracleError::UnsupportedAuthorization);
         }
 
@@ -231,6 +231,13 @@ impl<D: OracleDB> OracleLedger<D> {
             records.push(record);
         }
         Ok(())
+    }
+}
+
+fn authorization_is_bound(tx: &Transaction) -> bool {
+    match &tx.authorization {
+        Authorization::Single { .. } => true,
+        Authorization::Multisig { policy, .. } => Address::multisig(policy) == tx.account_id,
     }
 }
 

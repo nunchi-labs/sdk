@@ -465,8 +465,7 @@ fn runtime_rejects_forged_multisig_oracle_without_charging_a_fee() {
                 proof: None,
             },
         ));
-        // The chain's stateless signature check accepts this transaction.
-        assert!(forged.verify());
+        assert!(!forged.verify());
 
         let err = CoinsRuntime::apply(
             &mut state,

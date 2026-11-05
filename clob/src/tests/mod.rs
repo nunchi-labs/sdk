@@ -8,9 +8,7 @@ use commonware_runtime::{deterministic, Clock, Runner as _, Supervisor};
 use commonware_utils::{probability, NZUsize, NZU32};
 use governor::Quota;
 use nunchi_chain::ConsensusExtension;
-use nunchi_common::{
-    Address, CommitState, MultisigPolicy, RuntimeContext, StateError, StateStore,
-};
+use nunchi_common::{Address, CommitState, MultisigPolicy, RuntimeContext, StateError, StateStore};
 use nunchi_crypto::PrivateKey;
 
 use crate::{
@@ -161,6 +159,67 @@ async fn sync_actor_from_ledger(
 }
 
 #[test]
+fn forged_multisig_cannot_create_market_for_another_account() {
+    run_test(|| async {
+        let victim = PrivateKey::from_seed(1);
+        let attacker = PrivateKey::from_seed(2);
+        let victim_account = Address::external(&victim.public_key());
+        let forged = MultisigPolicy::new(1, vec![attacker.public_key()]).unwrap();
+        let tx = Transaction::sign_multisig(
+            victim_account,
+            forged,
+            &[&attacker],
+            0,
+            ClobOperation::CreateMarket {
+                base_asset: asset(b"base"),
+                quote_asset: asset(b"quote"),
+                tick_size: MARKET_TICK,
+                lot_size: MARKET_LOT,
+            },
+        );
+
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        let err = ledger
+            .apply_transaction(&tx, context(1))
+            .await
+            .expect_err("forged authorization");
+
+        assert!(matches!(err, ClobError::BadSignature(_)));
+        assert!(ledger.market(&market()).await.unwrap().is_none());
+    });
+}
+
+#[test]
+fn policy_derived_multisig_can_create_market() {
+    run_test(|| async {
+        let creator = PrivateKey::from_seed(1);
+        let policy = MultisigPolicy::new(1, vec![creator.public_key()]).unwrap();
+        let account = Address::multisig(&policy);
+        let tx = Transaction::sign_multisig(
+            account.clone(),
+            policy,
+            &[&creator],
+            0,
+            ClobOperation::CreateMarket {
+                base_asset: asset(b"base"),
+                quote_asset: asset(b"quote"),
+                tick_size: MARKET_TICK,
+                lot_size: MARKET_LOT,
+            },
+        );
+
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        ledger
+            .apply_transaction(&tx, context(1))
+            .await
+            .expect("policy-derived multisig");
+
+        let created = ledger.market(&market()).await.unwrap().expect("market");
+        assert_eq!(created.created_by, account);
+    });
+}
+
+#[test]
 fn transaction_codec_round_trips() {
     let signer = PrivateKey::from_seed(1);
     let tx = Transaction::sign(
@@ -238,13 +297,13 @@ fn multisig_authorization_cannot_create_a_market_for_another_account() {
                 lot_size: MARKET_LOT,
             },
         );
-        assert!(tx.verify().is_ok());
+        assert!(tx.verify().is_err());
 
         let mut ledger = ClobLedger::new(MemoryStore::default());
-        assert_eq!(
+        assert!(matches!(
             ledger.apply_transaction(&tx, context(1)).await.unwrap_err(),
-            ClobError::UnsupportedAuthorization
-        );
+            ClobError::BadSignature(_)
+        ));
         assert!(ledger.markets().await.unwrap().is_empty());
         assert_eq!(ledger.nonce(&victim).await.unwrap(), 0);
     });
@@ -259,7 +318,7 @@ fn multisig_match_batch_cannot_trade_as_another_account() {
         seed_market(&mut ledger, &creator).await;
 
         let forged = forged_multisig_order(victim.clone(), 0);
-        assert!(forged.verify().is_ok());
+        assert!(forged.verify().is_err());
         let err = MatchEngine::replay(
             std::slice::from_ref(&forged),
             &BTreeMap::from([(market(), ledger.market(&market()).await.unwrap().unwrap())]),
@@ -267,16 +326,16 @@ fn multisig_match_batch_cannot_trade_as_another_account() {
             context(2),
         )
         .unwrap_err();
-        assert_eq!(err, ClobError::UnsupportedAuthorization);
+        assert!(matches!(err, ClobError::BadSignature(_)));
 
         let batch = MatchBatch {
             orders: vec![forged],
             fills: Vec::new(),
         };
-        assert_eq!(
+        assert!(matches!(
             ledger.apply_match_batch(&batch, context(2)).await.unwrap_err(),
-            ClobError::UnsupportedAuthorization
-        );
+            ClobError::BadSignature(_)
+        ));
         assert!(ledger.market_fills(&market()).await.unwrap().is_empty());
         assert_eq!(ledger.nonce(&victim).await.unwrap(), 0);
         assert!(ledger.book(&market(), Side::Bid).await.unwrap().is_empty());
@@ -1327,7 +1386,7 @@ fn clob_actor_rejects_multisig_order_for_another_account() {
             .submit_order(forged_multisig_order(victim, 0))
             .await
             .unwrap_err();
-        assert_eq!(err, ClobError::UnsupportedAuthorization);
+        assert!(matches!(err, ClobError::BadSignature(_)));
         assert!(mailbox.propose().await.is_empty());
     });
 }
@@ -1360,11 +1419,36 @@ fn extension_verify_payload_rejects_multisig_and_bad_signatures() {
 
         let victim = Address::external(&PrivateKey::from_seed(9).public_key());
         let forged = forged_multisig_order(victim, 0);
-        assert!(forged.verify().is_ok());
+        assert!(forged.verify().is_err());
         assert!(
             !extension
                 .verify_payload(&MatchBatch {
                     orders: vec![forged],
+                    fills: Vec::new(),
+                })
+                .await
+        );
+
+        let signer = PrivateKey::from_seed(4);
+        let policy = MultisigPolicy::new(1, vec![signer.public_key()]).unwrap();
+        let bound = Transaction::sign_multisig(
+            Address::multisig(&policy),
+            policy,
+            &[&signer],
+            0,
+            ClobOperation::PlaceOrder {
+                market: market(),
+                side: Side::Bid,
+                price: 100,
+                base_quantity: 4,
+                time_in_force: TimeInForce::GoodTilCancelled,
+            },
+        );
+        assert!(bound.verify().is_ok());
+        assert!(
+            extension
+                .verify_payload(&MatchBatch {
+                    orders: vec![bound],
                     fills: Vec::new(),
                 })
                 .await

@@ -270,8 +270,7 @@ fn multisig_authorization_cannot_impersonate_another_account() {
                 proof: None,
             },
         );
-        // Stateless verification accepts this: the policy is not bound to account_id.
-        assert!(tx.verify().is_ok());
+        assert!(tx.verify().is_err());
 
         let mut ledger = OracleLedger::new(MemoryStore::default());
         assert_eq!(
@@ -287,6 +286,27 @@ fn multisig_authorization_cannot_impersonate_another_account() {
             .await
             .unwrap()
             .is_empty());
+
+        let writer = PrivateKey::from_seed(4);
+        let policy = MultisigPolicy::new(1, vec![writer.public_key()]).unwrap();
+        let account = Address::multisig(&policy);
+        let bound = Transaction::sign_multisig(
+            account.clone(),
+            policy,
+            &[&writer],
+            0,
+            OracleOperation::AppendRecord {
+                namespace: namespace(),
+                interval: IntervalKey::new(1),
+                payload: b"bound".to_vec(),
+                proof: None,
+            },
+        );
+        ledger
+            .apply_transaction(&bound, context(1_000))
+            .await
+            .expect("policy-derived multisig");
+        assert_eq!(ledger.db().nonce(&account).await.unwrap(), 1);
     });
 }
 
