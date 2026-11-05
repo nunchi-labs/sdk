@@ -1278,9 +1278,12 @@ fn classify_submit_results(
             ok += 1;
             continue;
         }
-        // Pool capacity rejections are backpressure, not failures: dropping
-        // the transaction would leave a permanent nonce hole in its lane.
-        if error.contains("queue is full") || error.contains("pool is full") {
+        // Capacity and shutdown refusals are backpressure, not failures:
+        // dropping the transaction would leave a permanent nonce hole.
+        if error.contains("queue is full")
+            || error.contains("pool is full")
+            || error.contains("shut down")
+        {
             requeue.push(transaction.clone());
             continue;
         }
@@ -1379,6 +1382,18 @@ mod rpc_tests {
             sample.as_deref(),
             Some("nonce 1 is below the account's committed nonce 3")
         );
+    }
+
+    #[test]
+    fn mempool_shutdown_is_retried() {
+        let pending = vec!["tx".to_string()];
+        let (ok, err, requeue, sample) = classify_submit_results(
+            &pending,
+            vec![result(None, Some("the mempool is shut down"))],
+        );
+        assert_eq!((ok, err), (0, 0));
+        assert_eq!(requeue, pending);
+        assert!(sample.is_none());
     }
 
     #[test]
