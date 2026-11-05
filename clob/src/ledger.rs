@@ -326,7 +326,7 @@ impl<D: ClobDB> ClobLedger<D> {
         }
 
         for account in expected_nonces.keys() {
-            self.track_account(account).await?;
+            self.track_match_account(account).await?;
         }
 
         for fill in &replay.fills {
@@ -338,8 +338,8 @@ impl<D: ClobDB> ClobLedger<D> {
                 // A pruned fill may be the last on-ledger reference to an account that
                 // already left the book. Index it before the fill is deleted.
                 if let Some(pruned) = self.db.fill(&fill_id).await? {
-                    self.track_account(&pruned.maker).await?;
-                    self.track_account(&pruned.taker).await?;
+                    self.track_match_account(&pruned.maker).await?;
+                    self.track_match_account(&pruned.taker).await?;
                 }
                 self.db.remove_fill(&fill_id);
             }
@@ -352,10 +352,19 @@ impl<D: ClobDB> ClobLedger<D> {
             self.db.set_market_sequence(&market, sequence);
         }
         for (account, nonce) in &expected_nonces {
-            self.track_account(account).await?;
+            self.track_match_account(account).await?;
             self.db.set_nonce(account, *nonce);
         }
         Ok(())
+    }
+
+    // The index only enumerates accounts for matcher hydration. Nonces live on
+    // their own keys, so a full index must not reject a match.
+    async fn track_match_account(&mut self, account: &Address) -> Result<(), ClobError> {
+        match self.track_account(account).await {
+            Err(ClobError::TrackedAccountsFull) => Ok(()),
+            result => result,
+        }
     }
 
     async fn track_account(&mut self, account: &Address) -> Result<(), ClobError> {

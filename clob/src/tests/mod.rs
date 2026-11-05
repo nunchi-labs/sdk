@@ -18,9 +18,9 @@ use nunchi_chain::ConsensusExtension;
 use crate::db::{testing_clear_tracked_account_count, testing_set_tracked_account_count};
 use crate::{
     market_id, types::TRACKED_ACCOUNT_SHARD, AssetId, ClobActor, ClobConfig, ClobDB, ClobError,
-    ClobExtension, ClobGenesis, ClobLedger, ClobMailbox, ClobMarketGenesis, ClobOperation, FillId,
-    Market, MatchBatch, MatchEngine, OrderId, Side, TimeInForce, Transaction, MAX_FILLS_PER_MARKET,
-    MAX_TRACKED_ACCOUNTS,
+    ClobExtension, ClobGenesis, ClobLedger, ClobMailbox, ClobMarketGenesis, ClobOperation, Fill,
+    FillId, Market, MatchBatch, MatchEngine, OrderId, Side, TimeInForce, Transaction,
+    MAX_FILLS_PER_MARKET, MAX_TRACKED_ACCOUNTS,
 };
 
 #[derive(Clone, Default)]
@@ -1547,6 +1547,137 @@ fn track_account_rejects_a_new_account_when_the_index_is_full() {
 
         assert_eq!(err, ClobError::TrackedAccountsFull);
         assert_eq!(ledger.nonce(&account).await.unwrap(), 0);
+    });
+}
+
+#[test]
+fn full_tracked_account_index_still_applies_a_match_batch() {
+    run_test(|| async {
+        let creator = PrivateKey::from_seed(1);
+        let maker = PrivateKey::from_seed(2);
+        let taker = PrivateKey::from_seed(3);
+        let maker_addr = Address::external(&maker.public_key());
+        let taker_addr = Address::external(&taker.public_key());
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        seed_market(&mut ledger, &creator).await;
+        let mut store = ledger.into_inner();
+        testing_set_tracked_account_count(&mut store, MAX_TRACKED_ACCOUNTS as u64);
+        let mut ledger = ClobLedger::new(store);
+
+        let ask = place_tx(
+            &maker,
+            0,
+            Side::Ask,
+            100,
+            2,
+            TimeInForce::GoodTilCancelled,
+        );
+        let bid = place_tx(
+            &taker,
+            0,
+            Side::Bid,
+            100,
+            2,
+            TimeInForce::ImmediateOrCancel,
+        );
+        let batch = batch_from_orders(&ledger, vec![ask, bid], context(2)).await;
+        ledger
+            .apply_match_batch(&batch, context(2))
+            .await
+            .expect("a full account index must not reject a valid match");
+
+        assert_eq!(ledger.nonce(&maker_addr).await.unwrap(), 1);
+        assert_eq!(ledger.nonce(&taker_addr).await.unwrap(), 1);
+        assert_eq!(ledger.market_fills(&market()).await.unwrap().len(), 1);
+        assert!(!ledger.db.account_tracked(&maker_addr).await.unwrap());
+        assert!(!ledger.db.account_tracked(&taker_addr).await.unwrap());
+    });
+}
+
+#[test]
+fn pruning_an_untracked_fill_does_not_abort_a_match_when_the_index_is_full() {
+    run_test(|| async {
+        let creator = PrivateKey::from_seed(1);
+        let maker = PrivateKey::from_seed(2);
+        let taker = PrivateKey::from_seed(3);
+        let maker_addr = Address::external(&maker.public_key());
+        let taker_addr = Address::external(&taker.public_key());
+        let retired_maker = Address::external(&PrivateKey::from_seed(8).public_key());
+        let retired_taker = Address::external(&PrivateKey::from_seed(9).public_key());
+        let mut ledger = ClobLedger::new(MemoryStore::default());
+        seed_market(&mut ledger, &creator).await;
+
+        let ask = place_tx(
+            &maker,
+            0,
+            Side::Ask,
+            100,
+            2,
+            TimeInForce::GoodTilCancelled,
+        );
+        let bid = place_tx(
+            &taker,
+            0,
+            Side::Bid,
+            100,
+            2,
+            TimeInForce::ImmediateOrCancel,
+        );
+        let first = batch_from_orders(&ledger, vec![ask, bid], context(2)).await;
+        ledger.apply_match_batch(&first, context(2)).await.unwrap();
+
+        let stale_id = fake_fill_id(1);
+        ledger.db.set_fill(&Fill {
+            id: stale_id,
+            market: market(),
+            maker_order: OrderId(Sha256::hash(&[b"retired-maker"])),
+            taker_order: OrderId(Sha256::hash(&[b"retired-taker"])),
+            maker: retired_maker.clone(),
+            taker: retired_taker.clone(),
+            taker_side: Side::Bid,
+            price: 100,
+            base_quantity: 2,
+            quote_quantity: 200,
+            sequence: 1,
+            written_at_height: 1,
+            written_at_ms: 1_000,
+        });
+        let mut fill_ids = vec![stale_id];
+        fill_ids.extend((2..=MAX_FILLS_PER_MARKET as u64).map(fake_fill_id));
+        ledger.db.set_market_fills(&market(), &fill_ids);
+
+        let mut store = ledger.into_inner();
+        testing_set_tracked_account_count(&mut store, MAX_TRACKED_ACCOUNTS as u64);
+        let mut ledger = ClobLedger::new(store);
+
+        let ask = place_tx(
+            &maker,
+            1,
+            Side::Ask,
+            100,
+            2,
+            TimeInForce::GoodTilCancelled,
+        );
+        let bid = place_tx(
+            &taker,
+            1,
+            Side::Bid,
+            100,
+            2,
+            TimeInForce::ImmediateOrCancel,
+        );
+        let batch = batch_from_orders(&ledger, vec![ask, bid], context(3)).await;
+        ledger
+            .apply_match_batch(&batch, context(3))
+            .await
+            .expect("pruning an untracked fill must not reject a match of tracked accounts");
+
+        assert_eq!(ledger.nonce(&maker_addr).await.unwrap(), 2);
+        assert_eq!(ledger.nonce(&taker_addr).await.unwrap(), 2);
+        assert!(ledger.fill(&stale_id).await.unwrap().is_none());
+        assert!(!ledger.db.account_tracked(&retired_maker).await.unwrap());
+        assert!(!ledger.db.account_tracked(&retired_taker).await.unwrap());
+        assert!(ledger.db.account_tracked(&maker_addr).await.unwrap());
     });
 }
 
