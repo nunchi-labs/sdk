@@ -1569,6 +1569,25 @@ fn clob_actor_rejects_gap_nonce_for_unknown_account() {
 }
 
 #[test]
+fn commit_payload_tolerates_a_stopped_actor_while_syncing_nonces() {
+    deterministic::Runner::default().start(|_| async move {
+        let (actor, mailbox) = ClobActor::new(ClobConfig::default());
+        drop(actor);
+        let mut extension = ClobExtension::new(mailbox);
+        let mut state = MemoryStore::default();
+        extension
+            .commit_payload(&mut state, context(1), &MatchBatch::default())
+            .await;
+        let err = extension
+            .mailbox()
+            .sync_nonce_index(Vec::new())
+            .await
+            .unwrap_err();
+        assert_eq!(err, ClobError::ActorStopped);
+    });
+}
+
+#[test]
 fn clob_mailbox_reports_stopped_actor() {
     deterministic::Runner::default().start(|_| async move {
         let (actor, mailbox) = ClobActor::new(ClobConfig::default());

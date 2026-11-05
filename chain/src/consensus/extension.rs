@@ -62,18 +62,6 @@ pub trait ConsensusExtension: BlockExtension + Clone + Send + Sync + 'static {
         context: RuntimeContext,
     ) -> impl Future<Output = Self::Payload> + Send;
 
-    /// Produce the extension payload after runtime transactions are applied to `state`.
-    fn propose_from_state<S>(
-        &mut self,
-        _state: &mut S,
-        context: RuntimeContext,
-    ) -> impl Future<Output = Self::Payload> + Send
-    where
-        S: StateStore + Send + Sync,
-    {
-        self.propose(context)
-    }
-
     /// Verify an extension payload included in a proposed block.
     fn verify_payload(&mut self, _payload: &Self::Payload) -> impl Future<Output = bool> + Send {
         std::future::ready(true)
@@ -153,19 +141,6 @@ where
     async fn propose(&mut self, context: RuntimeContext) -> Self::Payload {
         let left = self.0.propose(context).await;
         let right = self.1.propose(context).await;
-        (left, right)
-    }
-
-    async fn propose_from_state<S>(
-        &mut self,
-        state: &mut S,
-        context: RuntimeContext,
-    ) -> Self::Payload
-    where
-        S: StateStore + Send + Sync,
-    {
-        let left = self.0.propose_from_state(&mut *state, context).await;
-        let right = self.1.propose_from_state(state, context).await;
         (left, right)
     }
 
