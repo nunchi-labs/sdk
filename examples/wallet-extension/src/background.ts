@@ -31,6 +31,20 @@ chrome.runtime.onConnect.addListener((port) => {
     pagePorts.set(origin, ports);
   }
   ports.add(port);
+  // A worker restart drops the in-memory key but the page port comes back.
+  // Push the accounts this origin should see now, unless a newer broadcast
+  // already told the page.
+  const revision = wallet.accountRevision();
+  void wallet.connectedAccounts(origin).then((accounts) => {
+    if (wallet.accountRevision() !== revision || !ports.has(port)) {
+      return;
+    }
+    try {
+      port.postMessage({ event: "accountsChanged", params: accounts });
+    } catch {
+      ports.delete(port);
+    }
+  });
   port.onDisconnect.addListener(() => {
     const remaining = pagePorts.get(origin);
     remaining?.delete(port);

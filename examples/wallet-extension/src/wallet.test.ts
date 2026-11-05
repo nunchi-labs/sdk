@@ -577,6 +577,18 @@ describe("accounts, disconnect, and validation", () => {
     expect(sites.data).toEqual([]);
   });
 
+  it("reports no accounts for a connected site after the worker restarts locked", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    await connectSite(harness);
+    expect(await harness.wallet.connectedAccounts(PAGE_ORIGIN)).toEqual([keyPair(GENERATED_KEY).address]);
+
+    harness.wallet.shutdown();
+    const restarted = harness.restart();
+    expect(await restarted.connectedAccounts(PAGE_ORIGIN)).toEqual([]);
+    expect(await restarted.connectedAccounts("https://other.example")).toEqual([]);
+  });
+
   it("rejects invalid transfer fields before opening approval", async () => {
     const harness = createHarness();
     expect((await createWallet(harness.wallet)).success).toBe(true);

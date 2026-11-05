@@ -210,6 +210,8 @@ export class Wallet {
   private approvalTimers: Set<ReturnType<typeof setTimeout>> = new Set();
   /** Serializes sign+submit so two transfers cannot take the same account nonce. */
   private submitQueue: Promise<void> = Promise.resolve();
+  /** Bumps on every accountsChanged broadcast so a late port snapshot cannot overwrite it. */
+  private accountEpoch = 0;
   /** Next nonce to allocate per account when the chain has not caught up yet. */
   private nonceCursor = new Map<string, bigint>();
   /** Next factory nonce to predict when our own create is still in flight. */
@@ -230,6 +232,24 @@ export class Wallet {
   /** Check and apply auto-lock if timeout exceeded. Called periodically by alarm. */
   checkAutoLock(): void {
     this.applyAutoLock();
+  }
+
+  /** Monotonic count of accountsChanged broadcasts. */
+  accountRevision(): number {
+    return this.accountEpoch;
+  }
+
+  /**
+   * Accounts a freshly connected page port should show. Empty when the worker
+   * restarted and the key is no longer in memory, even if the site stayed connected.
+   */
+  async connectedAccounts(origin: string): Promise<string[]> {
+    await this.hydrate();
+    this.applyAutoLock();
+    if (!this.connectedSites.has(origin) || !this.unlockedWallet) {
+      return [];
+    }
+    return [this.unlockedWallet.address];
   }
 
   rejectWindow(windowId: number): void {
@@ -909,6 +929,7 @@ export class Wallet {
   }
 
   private notifyAccounts(origin: string, accounts: string[]): void {
+    this.accountEpoch += 1;
     this.host.broadcast?.(origin, "accountsChanged", accounts);
   }
 

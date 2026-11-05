@@ -568,7 +568,16 @@ def delete_and_import(driver, private_key: str, expected_address: str, failures:
     wait_click(driver, "import-wallet")
     wait_click(driver, "import-submit")
     import_empty = error_text(driver)
-    failures.check("import requires a private key", "Private key is required" in import_empty, import_empty)
+    failures.check(
+        "empty import asks for a password first",
+        "Password must be at least 8 characters" in import_empty,
+        import_empty,
+    )
+
+    fill(driver, "password", PASSWORD)
+    fill(driver, "confirm-password", PASSWORD)
+    wait_click(driver, "import-submit")
+    failures.check("import requires a private key", "Private key is required" in error_text(driver), error_text(driver))
 
     fill(driver, "import-key", private_key)
     fill(driver, "password", SHORT_PASSWORD)
