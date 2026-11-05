@@ -6,7 +6,7 @@
 
 use axum::{
     body::Bytes,
-    extract::{ws::WebSocketUpgrade, Path, State as AxumState},
+    extract::{ws::WebSocketUpgrade, DefaultBodyLimit, Path, State as AxumState},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -50,6 +50,11 @@ use tower_http::{
 use tracing::warn;
 
 pub const LATEST: &str = "latest";
+/// Largest consensus upload accepted by the indexer HTTP routes.
+///
+/// This matches the coins-chain spool `max_payload_bytes`. Axum's default
+/// `Bytes` limit is 2 MiB, which rejects artifacts the node is allowed to send.
+pub const MAX_UPLOAD_BODY_BYTES: usize = 16 * 1024 * 1024;
 const DKG_OUTPUT_STATE_FILE: &str = "dkg-output.latest";
 const UPLOAD_PENDING: &str = "upload pending";
 
@@ -521,6 +526,7 @@ impl Api {
             .route("/consensus/ws", get(consensus_ws))
             .route("/consensus/summary/latest", get(consensus_summary_latest))
             .route("/consensus/summary/ws", get(consensus_summary_ws))
+            .layer(DefaultBodyLimit::max(MAX_UPLOAD_BODY_BYTES))
             .layer(CorsLayer::permissive())
             .with_state(self.indexer)
     }
@@ -651,47 +657,94 @@ async fn consensus_summary_latest(
 }
 
 async fn handle_consensus_ws(socket: axum::extract::ws::WebSocket, indexer: Arc<Indexer>) {
-    let (mut sender, _receiver) = socket.split();
+    let (mut sender, mut receiver) = socket.split();
     let mut consensus = indexer.consensus_subscriber();
 
     loop {
-        match consensus.recv().await {
-            Ok(data) => {
-                if sender
-                    .send(axum::extract::ws::Message::Binary(data.into()))
-                    .await
-                    .is_err()
-                {
+        tokio::select! {
+            incoming = receiver.next() => {
+                if !forward_socket_control(&mut sender, incoming).await {
                     break;
                 }
             }
-            Err(RecvError::Lagged(_)) => continue,
-            Err(RecvError::Closed) => break,
+            event = consensus.recv() => {
+                match event {
+                    Ok(data) => {
+                        if sender
+                            .send(axum::extract::ws::Message::Binary(data.into()))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    // A lagged broadcast skipped artifacts. Close so the client
+                    // reconnects instead of treating the stream as gapless.
+                    Err(RecvError::Lagged(_)) => {
+                        let _ = sender
+                            .send(axum::extract::ws::Message::Close(None))
+                            .await;
+                        break;
+                    }
+                    Err(RecvError::Closed) => break,
+                }
+            }
         }
     }
 }
 
 async fn handle_consensus_summary_ws(socket: axum::extract::ws::WebSocket, indexer: Arc<Indexer>) {
-    let (mut sender, _receiver) = socket.split();
+    let (mut sender, mut receiver) = socket.split();
     let mut consensus = indexer.summary_subscriber();
 
     loop {
-        match consensus.recv().await {
-            Ok(event) => {
-                let Ok(data) = serde_json::to_string(&event) else {
-                    continue;
-                };
-                if sender
-                    .send(axum::extract::ws::Message::Text(data.into()))
-                    .await
-                    .is_err()
-                {
+        tokio::select! {
+            incoming = receiver.next() => {
+                if !forward_socket_control(&mut sender, incoming).await {
                     break;
                 }
             }
-            Err(RecvError::Lagged(_)) => continue,
-            Err(RecvError::Closed) => break,
+            event = consensus.recv() => {
+                match event {
+                    Ok(event) => {
+                        let Ok(data) = serde_json::to_string(&event) else {
+                            continue;
+                        };
+                        if sender
+                            .send(axum::extract::ws::Message::Text(data.into()))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(RecvError::Lagged(_)) => {
+                        let _ = sender
+                            .send(axum::extract::ws::Message::Close(None))
+                            .await;
+                        break;
+                    }
+                    Err(RecvError::Closed) => break,
+                }
+            }
         }
+    }
+}
+
+async fn forward_socket_control<S>(
+    sender: &mut S,
+    incoming: Option<Result<axum::extract::ws::Message, axum::Error>>,
+) -> bool
+where
+    S: futures::Sink<axum::extract::ws::Message, Error = axum::Error> + Unpin,
+{
+    match incoming {
+        Some(Ok(axum::extract::ws::Message::Ping(payload))) => sender
+            .send(axum::extract::ws::Message::Pong(payload))
+            .await
+            .is_ok(),
+        Some(Ok(axum::extract::ws::Message::Close(_))) | None | Some(Err(_)) => false,
+        Some(Ok(_)) => true,
     }
 }
 

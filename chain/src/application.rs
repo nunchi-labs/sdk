@@ -342,7 +342,8 @@ where
                 .observe_between(validate_start, rng.current());
         }
 
-        let extension = self.consensus.propose().await;
+        self.consensus.prepare(&mut batch).await;
+        let extension = self.consensus.propose(context).await;
         if !self
             .consensus
             .apply_payload(&mut batch, context, &extension)
@@ -921,11 +922,13 @@ where
             "finalized block"
         );
         *self.applied_height.lock().await = block.height();
-        self.submitter.finalized(
-            applied,
-            lane_nonces.into_iter().collect(),
-            block.height().get(),
-        );
+        self.submitter
+            .finalized(
+                applied,
+                lane_nonces.into_iter().collect(),
+                block.height().get(),
+            )
+            .await;
         self.events
             .finalized(Self::block_runtime_context(block))
             .await;

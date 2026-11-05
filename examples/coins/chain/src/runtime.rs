@@ -83,15 +83,36 @@ where
     S: StateStore + Send + Sync,
     Events: EventSink + Send,
 {
-    // Fee ante: charge the authorizing account before module dispatch. The fee is staged in the
-    // same overlay as the operation, so a failed transaction reverts its fee.
-    let mut fees = Ledger::new(&mut *state);
-    fees.charge_fee(
-        transaction.account_id(),
-        transaction.encode_size(),
-        &mut events,
-    )
-    .await?;
+    // One overlay covers the fee and the module write. Dropping it on error reverts both,
+    // including when the caller keeps `state` after `Err` instead of discarding a block batch.
+    let mut overlay = Overlay::new(state);
+    let result = apply_to_overlay(&mut overlay, context, transaction, &mut events).await;
+    if result.is_ok() {
+        overlay.commit();
+    }
+    result
+}
+
+async fn apply_to_overlay<S, Events>(
+    state: &mut S,
+    context: RuntimeContext,
+    transaction: &Transaction,
+    events: &mut Events,
+) -> Result<(), RuntimeError>
+where
+    S: StateStore + Send + Sync,
+    Events: EventSink + Send,
+{
+    // Fee ante: charge the authorizing account before module dispatch.
+    {
+        let mut fees = Ledger::new(&mut *state);
+        fees.charge_fee(
+            transaction.account_id(),
+            transaction.encode_size(),
+            &mut *events,
+        )
+        .await?;
+    }
 
     match transaction {
         Transaction::Coin(transaction) => {

@@ -10,10 +10,12 @@ use governor::Quota;
 use nunchi_common::{Address, CommitState, RuntimeContext, StateError, StateStore};
 use nunchi_crypto::PrivateKey;
 
+use nunchi_chain::ConsensusExtension;
+
 use crate::{
-    market_id, AssetId, ClobActor, ClobConfig, ClobDB, ClobError, ClobGenesis, ClobLedger,
-    ClobMailbox, ClobMarketGenesis, ClobOperation, FillId, Market, MatchBatch, MatchEngine,
-    OrderId, Side, TimeInForce, Transaction, MAX_FILLS_PER_MARKET,
+    market_id, AssetId, ClobActor, ClobConfig, ClobDB, ClobError, ClobExtension, ClobGenesis,
+    ClobLedger, ClobMailbox, ClobMarketGenesis, ClobOperation, FillId, Market, MatchBatch,
+    MatchEngine, OrderId, Side, TimeInForce, Transaction, MAX_FILLS_PER_MARKET,
 };
 
 #[derive(Default)]
@@ -1292,5 +1294,75 @@ fn clob_mailbox_reports_stopped_actor() {
             created_at_height: 0,
             created_at_ms: 0,
         });
+    });
+}
+
+#[test]
+fn prepare_hydrates_a_restarted_matcher_from_the_ledger() {
+    deterministic::Runner::default().start(|runtime| async move {
+        let creator = PrivateKey::from_seed(1);
+        let maker = PrivateKey::from_seed(2);
+        let taker = PrivateKey::from_seed(3);
+        let next_taker = PrivateKey::from_seed(4);
+        let mut state = {
+            let mut ledger = ClobLedger::new(MemoryStore::default());
+            seed_market(&mut ledger, &creator).await;
+            let ask = place_tx(
+                &maker,
+                0,
+                Side::Ask,
+                100,
+                6,
+                TimeInForce::GoodTilCancelled,
+            );
+            let bid = place_tx(
+                &taker,
+                0,
+                Side::Bid,
+                100,
+                2,
+                TimeInForce::ImmediateOrCancel,
+            );
+            let batch = batch_from_orders(&ledger, vec![ask.clone(), bid], context(2)).await;
+            ledger.apply_match_batch(&batch, context(2)).await.unwrap();
+            ledger.into_inner()
+        };
+        let ask = place_tx(
+            &maker,
+            0,
+            Side::Ask,
+            100,
+            6,
+            TimeInForce::GoodTilCancelled,
+        );
+
+        let (actor, mailbox) = ClobActor::new(ClobConfig::default());
+        let _actor = actor.start(runtime.child("clob"));
+        let mut extension = ClobExtension::new(mailbox.clone());
+        // A restarted actor has no book. Without hydration this bid cannot see
+        // the resting ask, so the proposal is empty and the order never matches.
+        extension.prepare(&mut state).await;
+        let bid = place_tx(
+            &next_taker,
+            0,
+            Side::Bid,
+            100,
+            4,
+            TimeInForce::ImmediateOrCancel,
+        );
+        mailbox.submit_order(bid.clone()).await.unwrap();
+        let proposal_context = context(3);
+        let payload = extension.propose(proposal_context).await;
+        assert_eq!(payload.fills.len(), 1);
+        assert_eq!(payload.fills[0].written_at_height, proposal_context.height);
+        assert_eq!(payload.fills[0].written_at_ms, proposal_context.timestamp_ms);
+        assert!(extension
+            .apply_payload(&mut state, proposal_context, &payload)
+            .await);
+        let ledger = ClobLedger::new(&mut state);
+        let fills = ledger.market_fills(&market()).await.unwrap();
+        assert_eq!(fills.len(), 2);
+        assert_eq!(fills[1].maker_order, OrderId(ask.digest()));
+        assert_eq!(fills[1].taker_order, OrderId(bid.digest()));
     });
 }

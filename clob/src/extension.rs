@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 
-use crate::{ClobLedger, ClobMailbox, ClobOperation, MatchBatch, MarketId, Order, OrderId};
+use crate::{
+    BookSnapshot, ClobLedger, ClobMailbox, ClobOperation, MatchBatch, MarketId, Order, OrderId,
+};
 use nunchi_chain::{BlockExtension, ConsensusExtension};
 use nunchi_common::{Address, RuntimeContext, StateStore};
 use tracing::warn;
@@ -31,8 +33,27 @@ impl BlockExtension for ClobExtension {
 }
 
 impl ConsensusExtension for ClobExtension {
-    async fn propose(&mut self) -> Self::Payload {
-        self.mailbox.propose().await
+    async fn prepare<S>(&mut self, state: &mut S)
+    where
+        S: StateStore + Send + Sync,
+    {
+        match load_book_snapshot(state).await {
+            Ok(snapshot) => {
+                if let Err(error) = self.mailbox.hydrate(snapshot).await {
+                    warn!(?error, "clob actor unavailable while hydrating the committed book");
+                }
+            }
+            Err(error) => {
+                warn!(?error, "failed to read the committed clob book; clearing the local matcher");
+                if let Err(error) = self.mailbox.hydrate(BookSnapshot::default()).await {
+                    warn!(?error, "clob actor unavailable while clearing the local matcher");
+                }
+            }
+        }
+    }
+
+    async fn propose(&mut self, context: RuntimeContext) -> Self::Payload {
+        self.mailbox.propose_with_context(context).await
     }
 
     async fn verify_payload(&mut self, payload: &Self::Payload) -> bool {
@@ -141,6 +162,43 @@ fn accepted_order_ids(payload: &MatchBatch) -> Vec<OrderId> {
         orders.insert(fill.taker_order);
     }
     orders.into_iter().collect()
+}
+
+async fn load_book_snapshot<S>(state: &mut S) -> Result<BookSnapshot, crate::ClobError>
+where
+    S: StateStore + Send + Sync,
+{
+    let ledger = ClobLedger::new(&mut *state);
+    let markets = ledger.markets().await?;
+    let mut snapshot = BookSnapshot::default();
+    let mut accounts = BTreeSet::new();
+    for market in markets {
+        accounts.insert(market.created_by.clone());
+        let sequence = ledger.market_sequence(&market.id).await?;
+        for side in [crate::Side::Bid, crate::Side::Ask] {
+            for order in ledger.book(&market.id, side).await? {
+                accounts.insert(order.owner.clone());
+                if order.status.is_open() && order.remaining_base > 0 {
+                    snapshot.orders.push(order);
+                }
+            }
+        }
+        for fill in ledger.market_fills(&market.id).await? {
+            accounts.insert(fill.maker.clone());
+            accounts.insert(fill.taker.clone());
+        }
+        snapshot.markets.push((market, sequence));
+    }
+    for account in ledger.tracked_accounts().await? {
+        accounts.insert(account);
+    }
+    for account in accounts {
+        let nonce = ledger.nonce(&account).await?;
+        if nonce > 0 {
+            snapshot.nonces.push((account, nonce));
+        }
+    }
+    Ok(snapshot)
 }
 
 fn affected_markets(payload: &MatchBatch) -> BTreeSet<MarketId> {

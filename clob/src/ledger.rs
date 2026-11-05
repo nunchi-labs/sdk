@@ -5,8 +5,8 @@ use std::{
 
 use crate::{
     fills_equivalent, AssetId, ClobDB, ClobOperation, Fill, FillId, Market, MarketId, MatchBatch,
-    MatchEngine, Order, OrderId, Side, Transaction, MAX_ACCOUNT_ORDERS, MAX_BOOK_ORDERS,
-    MAX_FILLS_PER_MARKET, MAX_MARKETS, CLOB_NAMESPACE,
+    MatchEngine, Order, OrderId, Side, Transaction,     MAX_ACCOUNT_ORDERS, MAX_BOOK_ORDERS,
+    MAX_FILLS_PER_MARKET, MAX_MARKETS, MAX_TRACKED_ACCOUNTS, CLOB_NAMESPACE,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{Hasher, Sha256};
@@ -93,6 +93,10 @@ impl<D: ClobDB> ClobLedger<D> {
         self.db.nonce(account).await
     }
 
+    pub async fn tracked_accounts(&self) -> Result<Vec<Address>, ClobError> {
+        self.db.tracked_accounts().await
+    }
+
     pub async fn market(&self, id: &MarketId) -> Result<Option<Market>, ClobError> {
         self.db.market(id).await
     }
@@ -159,6 +163,7 @@ impl<D: ClobDB> ClobLedger<D> {
         self.apply_operation(tx, context).await?;
         let next_nonce = expected.checked_add(1).ok_or(ClobError::NonceOverflow)?;
         self.db.set_nonce(&tx.account_id, next_nonce);
+        self.track_account(&tx.account_id).await?;
         Ok(())
     }
 
@@ -317,9 +322,23 @@ impl<D: ClobDB> ClobLedger<D> {
         for (market, sequence) in replay.sequences {
             self.db.set_market_sequence(&market, sequence);
         }
-        for (account, nonce) in expected_nonces {
-            self.db.set_nonce(&account, nonce);
+        for (account, nonce) in &expected_nonces {
+            self.db.set_nonce(account, *nonce);
+            self.track_account(account).await?;
         }
+        Ok(())
+    }
+
+    async fn track_account(&mut self, account: &Address) -> Result<(), ClobError> {
+        let mut accounts = self.db.tracked_accounts().await?;
+        if accounts.iter().any(|existing| existing == account) {
+            return Ok(());
+        }
+        if accounts.len() == MAX_TRACKED_ACCOUNTS {
+            return Ok(());
+        }
+        accounts.push(account.clone());
+        self.db.set_tracked_accounts(&accounts);
         Ok(())
     }
 

@@ -10,6 +10,8 @@ pub const MAX_BOOK_ORDERS: usize = 8192;
 pub const MAX_ACCOUNT_ORDERS: usize = 8192;
 /// Maximum fill ids retained for one market query index.
 pub const MAX_FILLS_PER_MARKET: usize = 16_384;
+/// Maximum accounts whose committed nonces are enumerated for matcher hydration.
+pub const MAX_TRACKED_ACCOUNTS: usize = 1_048_576;
 /// Maximum signed order intents carried by one proposed match batch.
 pub const MAX_MATCH_BATCH_ORDERS: usize = 4_096;
 /// Maximum fills carried by one proposed match batch.

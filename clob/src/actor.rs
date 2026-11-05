@@ -13,6 +13,17 @@ use futures::{
     FutureExt, SinkExt, StreamExt,
 };
 use nunchi_common::{Address, RuntimeContext};
+
+/// Committed book the matcher must replay against.
+///
+/// Loaded from the ledger before each proposal so a restarted validator does
+/// not match against an empty cache.
+#[derive(Clone, Debug, Default)]
+pub struct BookSnapshot {
+    pub markets: Vec<(Market, u64)>,
+    pub orders: Vec<Order>,
+    pub nonces: Vec<(Address, u64)>,
+}
 use tracing::{debug, warn};
 
 /// Runtime settings for the validator-local CLOB actor.
@@ -50,7 +61,12 @@ enum Message {
         responder: oneshot::Sender<Result<(), ClobError>>,
     },
     Propose {
+        context: RuntimeContext,
         responder: oneshot::Sender<MatchBatch>,
+    },
+    Hydrate {
+        snapshot: BookSnapshot,
+        responder: oneshot::Sender<Result<(), ClobError>>,
     },
 }
 
@@ -134,13 +150,42 @@ impl ClobMailbox {
     }
 
     /// Drain currently matchable signed orders into one proposed batch.
+    ///
+    /// Fill timestamps use [`RuntimeContext::default`]. Prefer
+    /// [`Self::propose_with_context`] when the block height and time are known.
     pub async fn propose(&self) -> MatchBatch {
+        self.propose_with_context(RuntimeContext::default()).await
+    }
+
+    /// Drain currently matchable signed orders, stamping fills with `context`.
+    pub async fn propose_with_context(&self, context: RuntimeContext) -> MatchBatch {
         let (responder, receiver) = oneshot::channel();
         let mut sender = self.sender.clone();
-        if sender.send(Message::Propose { responder }).await.is_err() {
+        if sender
+            .send(Message::Propose { context, responder })
+            .await
+            .is_err()
+        {
             return MatchBatch::default();
         }
         receiver.await.unwrap_or_default()
+    }
+
+    /// Replace the committed book, sequences, and nonces.
+    ///
+    /// Pending orders that have not been committed are kept, then dropped when
+    /// their nonce is already below the committed nonce.
+    pub async fn hydrate(&self, snapshot: BookSnapshot) -> Result<(), ClobError> {
+        let (responder, receiver) = oneshot::channel();
+        let mut sender = self.sender.clone();
+        if sender
+            .send(Message::Hydrate { snapshot, responder })
+            .await
+            .is_err()
+        {
+            return Err(ClobError::ActorStopped);
+        }
+        receiver.await.unwrap_or(Err(ClobError::ActorStopped))
     }
 }
 
@@ -260,8 +305,12 @@ impl ClobActor {
                 self.sync_nonce_state(account, nonce);
                 let _ = responder.send(Ok(()));
             }
-            Message::Propose { responder } => {
-                let _ = responder.send(self.propose_batch());
+            Message::Propose { context, responder } => {
+                let _ = responder.send(self.propose_batch(context));
+            }
+            Message::Hydrate { snapshot, responder } => {
+                self.hydrate_snapshot(snapshot);
+                let _ = responder.send(Ok(()));
             }
         }
     }
@@ -299,7 +348,27 @@ impl ClobActor {
         }
     }
 
-    fn propose_batch(&mut self) -> MatchBatch {
+    fn hydrate_snapshot(&mut self, snapshot: BookSnapshot) {
+        self.markets.clear();
+        self.sequences.clear();
+        self.active_orders.clear();
+        for (market, sequence) in snapshot.markets {
+            self.sequences.insert(market.id, sequence);
+            self.markets.insert(market.id, market);
+        }
+        for order in snapshot.orders {
+            if order.status.is_open() && order.remaining_base > 0 {
+                self.active_orders.insert(order.id, order);
+            }
+        }
+        self.nonces.clear();
+        for (account, nonce) in snapshot.nonces {
+            self.nonces.insert(account, nonce);
+        }
+        self.drop_stale_pending_orders();
+    }
+
+    fn propose_batch(&mut self, context: RuntimeContext) -> MatchBatch {
         if self.pending_orders.is_empty() {
             return MatchBatch::default();
         }
@@ -324,7 +393,7 @@ impl ClobActor {
             &orders,
             &self.markets,
             self.sequences.clone(),
-            RuntimeContext::default(),
+            context,
         );
         match replay {
             Ok(result) if result.fills.is_empty() => {

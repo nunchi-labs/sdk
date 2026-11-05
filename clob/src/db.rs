@@ -1,8 +1,8 @@
 //! Persistence layer for the CLOB module.
 
 use crate::{
-    ClobError, Fill, FillId, Market, MarketId, Order, OrderId, Side, MAX_ACCOUNT_ORDERS,
-    MAX_BOOK_ORDERS, MAX_FILLS_PER_MARKET, MAX_MARKETS, CLOB_NAMESPACE,
+    ClobError,     Fill, FillId, Market, MarketId, Order, OrderId, Side, MAX_ACCOUNT_ORDERS,
+    MAX_BOOK_ORDERS, MAX_FILLS_PER_MARKET, MAX_MARKETS, MAX_TRACKED_ACCOUNTS, CLOB_NAMESPACE,
 };
 use async_trait::async_trait;
 use commonware_codec::{Encode, RangeCfg, Read, ReadExt};
@@ -23,6 +23,7 @@ enum Table {
     Fill = 6,
     MarketFills = 7,
     MarketSequence = 8,
+    TrackedAccounts = 9,
 }
 
 impl From<Table> for u8 {
@@ -78,6 +79,10 @@ fn market_sequence_key(market: &MarketId) -> Digest {
     NS.key(Table::MarketSequence, market.encode().as_ref())
 }
 
+fn tracked_accounts_key() -> Digest {
+    NS.key(Table::TrackedAccounts, b"all")
+}
+
 /// Typed state access required by [`crate::ClobLedger`].
 #[async_trait]
 pub trait ClobDB {
@@ -120,6 +125,10 @@ pub trait ClobDB {
     async fn market_sequence(&self, market: &MarketId) -> Result<u64, ClobError>;
 
     fn set_market_sequence(&mut self, market: &MarketId, sequence: u64);
+
+    async fn tracked_accounts(&self) -> Result<Vec<Address>, ClobError>;
+
+    fn set_tracked_accounts(&mut self, accounts: &[Address]);
 }
 
 #[async_trait]
@@ -276,5 +285,27 @@ impl<S: StateStore + Send + Sync> ClobDB for S {
 
     fn set_market_sequence(&mut self, market: &MarketId, sequence: u64) {
         StateStore::set(self, market_sequence_key(market), encoded(&sequence));
+    }
+
+    async fn tracked_accounts(&self) -> Result<Vec<Address>, ClobError> {
+        match StateStore::get(self, &tracked_accounts_key())
+            .await
+            .map_err(|err| ClobError::Storage(err.to_string()))?
+        {
+            Some(bytes) => {
+                let mut buf = bytes.as_ref();
+                Vec::read_cfg(&mut buf, &(RangeCfg::new(0..=MAX_TRACKED_ACCOUNTS), ()))
+                    .map_err(|err| ClobError::Storage(err.to_string()))
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn set_tracked_accounts(&mut self, accounts: &[Address]) {
+        StateStore::set(
+            self,
+            tracked_accounts_key(),
+            encoded(&accounts.to_vec()),
+        );
     }
 }

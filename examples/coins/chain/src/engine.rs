@@ -255,15 +255,15 @@ where
         let retention_policy = history::RetentionPolicy::new(prune_config, config.max_pending_acks)?;
         let (mempool, submitter) = Mempool::<Transaction>::new(config.pool_config.clone());
         let (clob, clob_mailbox) = ClobActor::new(ClobConfig::default());
+        // The matcher is hydrated from committed state in `ClobExtension::prepare`.
+        // Seeding sequence 0 here would make the first post-restart proposal disagree
+        // with the ledger and abort block production.
         if let Some(clob_genesis) = config.genesis.as_ref().and_then(|genesis| genesis.clob.as_ref())
         {
             for market in &clob_genesis.markets {
-                clob_mailbox.upsert_market_state(
-                    market
-                        .market()
-                        .expect("invalid CLOB genesis market should fail genesis validation"),
-                    0,
-                );
+                let _ = market
+                    .market()
+                    .expect("invalid CLOB genesis market should fail genesis validation");
             }
         }
 

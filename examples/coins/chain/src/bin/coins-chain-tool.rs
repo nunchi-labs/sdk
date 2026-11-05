@@ -336,7 +336,7 @@ fn spam(args: SpamArgs) -> Result<(), Box<dyn Error>> {
     let keys = account_keys(args.accounts, args.seed)?;
     let accounts = keys.iter().map(account).collect::<Vec<_>>();
     let spec = spam_token_spec(&args)?;
-    let client = reqwest::blocking::Client::new();
+    let client = blocking_rpc_client();
     let mut rpc_id = 0u64;
     let coin = match args.coin {
         Some(ref coin) => parse_coin(coin)?,
@@ -448,7 +448,7 @@ async fn load(args: LoadArgs) -> Result<(), Box<dyn Error>> {
     let keys = account_keys(args.accounts, args.seed)?;
     let accounts = keys.iter().map(account).collect::<Vec<_>>();
     let spec = load_token_spec(&args)?;
-    let client = reqwest::Client::new();
+    let client = async_rpc_client();
     let rpc_id = Arc::new(AtomicU64::new(0));
     let primary_rpc = args.rpcs[0].clone();
     let coin = match args.coin {
@@ -812,6 +812,26 @@ async fn query_nonces(
     Ok(next_nonces)
 }
 
+const RPC_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const NONCE_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
+
+fn async_rpc_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(RPC_CONNECT_TIMEOUT)
+        .timeout(RPC_REQUEST_TIMEOUT)
+        .build()
+        .expect("valid RPC HTTP client")
+}
+
+fn blocking_rpc_client() -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder()
+        .connect_timeout(RPC_CONNECT_TIMEOUT)
+        .timeout(RPC_REQUEST_TIMEOUT)
+        .build()
+        .expect("valid RPC HTTP client")
+}
+
 async fn wait_for_nonce(
     client: &reqwest::Client,
     rpc_url: &str,
@@ -819,7 +839,11 @@ async fn wait_for_nonce(
     account: &Address,
     target: u64,
 ) -> Result<(), Box<dyn Error>> {
+    let started = Instant::now();
     loop {
+        if started.elapsed() >= NONCE_WAIT_TIMEOUT {
+            return Err(format!("timed out waiting for {account} nonce to reach {target}").into());
+        }
         let response: NonceResponse = rpc_async_retry(
             client,
             rpc_url,

@@ -176,6 +176,49 @@ fn runtime_charges_fee_before_dispatch() {
 }
 
 #[test]
+fn failed_dispatch_reverts_the_fee() {
+    deterministic::Runner::default().start(|context| async move {
+        let alice_key = PrivateKey::ed25519_from_seed(1);
+        let alice = Address::external(&alice_key.public_key());
+        let bob = Address::external(&PrivateKey::ed25519_from_seed(2).public_key());
+        let collector = Address::external(&PrivateKey::ed25519_from_seed(9).public_key());
+
+        let genesis = fee_genesis(alice.clone(), collector.clone(), 7, 3);
+        let mut state = fee_state(context, "coins-runtime-fee-revert", &genesis).await;
+        let spec = &genesis.tokens[0].spec;
+        let coin = TokenFactory::derive_coin_id(&alice, 0, spec);
+
+        let tx = Transaction::from(nunchi_coins::Transaction::sign(
+            &alice_key,
+            0,
+            CoinOperation::Transfer {
+                coin,
+                from: alice.clone(),
+                to: bob,
+                amount: 1_000,
+            },
+        ));
+        let err = CoinsRuntime::apply(
+            &mut state,
+            RuntimeContext::default(),
+            &tx,
+            &mut VecEventSink::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            RuntimeError::Coins(LedgerError::InsufficientBalance { .. })
+        ));
+
+        let ledger = Ledger::new(&mut state);
+        assert_eq!(ledger.balance(&alice, &coin).await.unwrap(), 1_000);
+        assert_eq!(ledger.balance(&collector, &coin).await.unwrap(), 0);
+        assert_eq!(ledger.nonce(&alice).await.unwrap(), 0);
+    });
+}
+
+#[test]
 fn bridge_lock_escrows_funds_and_records_transfer() {
     deterministic::Runner::default().start(|context| async move {
         let mut state = QmdbState::init(context, "bridge-lock-escrow").await.unwrap();

@@ -7,6 +7,10 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::time::Duration;
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A bare-minimum JSON-RPC 2.0 request envelope.
 #[derive(Serialize)]
@@ -43,9 +47,22 @@ pub struct RpcClient {
 
 impl RpcClient {
     pub fn new(url: impl Into<String>) -> Self {
+        Self::with_timeout(url, CONNECT_TIMEOUT, REQUEST_TIMEOUT)
+    }
+
+    pub fn with_timeout(
+        url: impl Into<String>,
+        connect_timeout: Duration,
+        request_timeout: Duration,
+    ) -> Self {
+        let http = reqwest::Client::builder()
+            .connect_timeout(connect_timeout)
+            .timeout(request_timeout)
+            .build()
+            .expect("valid MCP HTTP client configuration");
         Self {
             url: url.into(),
-            http: reqwest::Client::new(),
+            http,
         }
     }
 
@@ -74,5 +91,40 @@ impl RpcClient {
 
         resp.result
             .ok_or_else(|| anyhow::anyhow!("JSON-RPC response has neither result nor error"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn call_times_out_when_the_peer_accepts_and_never_responds() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buffer = [0u8; 1024];
+                let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buffer).await;
+                std::future::pending::<()>().await;
+            }
+        });
+
+        let client = RpcClient::with_timeout(
+            format!("http://{address}"),
+            Duration::from_millis(200),
+            Duration::from_millis(200),
+        );
+        let started = std::time::Instant::now();
+        let error = client
+            .call("coins.nonce", serde_json::json!({}))
+            .await
+            .expect_err("hung peer should time out");
+        assert!(started.elapsed() < Duration::from_secs(2), "{error}");
+        let timed_out = error
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(reqwest::Error::is_timeout)
+            || error.to_string().to_lowercase().contains("timed out");
+        assert!(timed_out, "{error}");
     }
 }
