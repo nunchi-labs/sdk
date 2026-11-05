@@ -138,12 +138,14 @@ type StoredTransaction = Omit<TransactionRequest, "id"> & { id: string; windowId
 
 /** In-flight nonce for one account or the factory on a single RPC endpoint. */
 type NonceCursor = {
-  /** Next nonce to assign while `hash` is still known to this chain. */
+  /** Next nonce to assign while a live submit or a dapp signature still reserves one. */
   next: number;
   /** Highest chain nonce observed for this cursor. */
   seen: number;
-  /** Submit that advanced `next`. */
+  /** Latest wallet submit. Empty when the reservation is only a local signature. */
   hash: string;
+  /** Nonces signed for a dapp and not yet consumed by the chain. */
+  held?: number[];
 };
 
 const DEFAULT_SETTINGS: Settings = {
@@ -164,7 +166,7 @@ export class Wallet {
   private submissionTail: Promise<unknown> = Promise.resolve();
   private storageTail: Promise<void> = Promise.resolve();
   /**
-   * Next nonce to use after a successful submit, before that chain's nonce advances.
+   * Next nonce to use after a submit or a sign-only request, before that chain's nonce advances.
    * Keyed by RPC so a network switch cannot reuse a cursor from another chain.
    */
   private reservedNonce = new Map<string, NonceCursor>();
@@ -542,6 +544,7 @@ export class Wallet {
               return { success: true, data: submitted };
             }
             const signed = await this.signOnly(wallet, nonce, request.coin, request.from, request.to, request.amount);
+            this.noteSignedNonce(settings.rpcUrl, wallet.address, nonce);
             this.settlePending(this.pendingTransactions, requestId, { success: true, data: signed });
             return { success: true, data: signed };
           });
@@ -826,6 +829,10 @@ export class Wallet {
     this.rememberSubmittedNonce(this.reservedNonce, this.accountNonceKey(rpcUrl, address), nonce, hash);
   }
 
+  private noteSignedNonce(rpcUrl: string, address: string, nonce: number): void {
+    this.rememberSignedNonce(this.reservedNonce, this.accountNonceKey(rpcUrl, address), nonce);
+  }
+
   private async allocateFactoryNonce(rpcUrl: string): Promise<number> {
     const chainNonce = await this.fetchFactoryNonce(rpcUrl);
     return this.takeReservedNonce(this.reservedFactoryNonce, rpcUrl, rpcUrl, chainNonce);
@@ -850,8 +857,9 @@ export class Wallet {
 
   /**
    * Use a reserved nonce only while this endpoint is still the chain that issued it.
-   * A lower `coins.nonce` / `coins.factory_nonce`, or a submit the chain no longer
-   * knows, means the chain was restarted or replaced.
+   * A lower chain nonce releases the cursor. A wallet submit that is `unknown` or
+   * `dropped` no longer occupies its nonce. A nonce signed for a dapp stays reserved
+   * until the chain nonce passes it.
    */
   private async takeReservedNonce(
     cursors: Map<string, NonceCursor>,
@@ -863,20 +871,32 @@ export class Wallet {
     if (!cursor) {
       return chainNonce;
     }
-    const rewound = chainNonce < cursor.seen;
-    const ahead = chainNonce < cursor.next;
-    if (rewound || (ahead && !(await this.submissionOnChain(rpcUrl, cursor.hash)))) {
+    if (chainNonce < cursor.seen || chainNonce >= cursor.next) {
       cursors.delete(key);
       return chainNonce;
     }
     if (chainNonce > cursor.seen) {
       cursor.seen = chainNonce;
     }
-    if (!ahead) {
+    const held = (cursor.held ?? []).filter((nonce) => nonce >= chainNonce);
+    if (held.length === 0) {
+      delete cursor.held;
+    } else {
+      cursor.held = held;
+    }
+    const submitLive = cursor.hash !== "" && (await this.submissionOnChain(rpcUrl, cursor.hash));
+    if (submitLive) {
+      return cursor.next;
+    }
+    if (held.length === 0) {
       cursors.delete(key);
       return chainNonce;
     }
-    return cursor.next;
+    let nonce = chainNonce;
+    while (held.includes(nonce)) {
+      nonce += 1;
+    }
+    return Math.min(nonce, cursor.next);
   }
 
   private rememberSubmittedNonce(
@@ -895,12 +915,35 @@ export class Wallet {
       cursor.next = next;
     }
     cursor.hash = hash;
+    if (cursor.held) {
+      cursor.held = cursor.held.filter((reserved) => reserved !== nonce);
+      if (cursor.held.length === 0) {
+        delete cursor.held;
+      }
+    }
   }
 
-  /** `unknown` means this chain no longer has the submit. A failed status query keeps the cursor. */
+  private rememberSignedNonce(cursors: Map<string, NonceCursor>, key: string, nonce: number): void {
+    const next = nonce + 1;
+    const cursor = cursors.get(key);
+    if (!cursor) {
+      cursors.set(key, { next, seen: nonce, hash: "", held: [nonce] });
+      return;
+    }
+    if (next > cursor.next) {
+      cursor.next = next;
+    }
+    const held = cursor.held ?? [];
+    if (!held.includes(nonce)) {
+      held.push(nonce);
+    }
+    cursor.held = held;
+  }
+
+  /** `unknown` and `dropped` mean this chain did not consume the submit. A failed status query keeps the cursor. */
   private async submissionOnChain(rpcUrl: string, hash: string): Promise<boolean> {
     const status = await this.fetchTransactionStatus(rpcUrl, hash);
-    return status !== "unknown";
+    return status !== "unknown" && status !== "dropped";
   }
 
   private async fetchTransactionStatus(rpcUrl: string, hash: string): Promise<string | undefined> {
