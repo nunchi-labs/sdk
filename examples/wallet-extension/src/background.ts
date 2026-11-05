@@ -1,5 +1,5 @@
 import type { Message } from "./types";
-import { isAllowedPageOrigin } from "./origin";
+import { isAllowedPageOrigin, senderOrigin } from "./origin";
 import { parseRpcResponse } from "./rpc";
 import { Wallet, type WalletHost, type WalletWasm } from "./wallet";
 // Static import: Vite wraps dynamic import() with a window-based preload helper
@@ -20,7 +20,7 @@ chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "nunchi-page") {
     return;
   }
-  const origin = port.sender?.origin || "";
+  const origin = senderOrigin(port.sender ?? {});
   if (!isAllowedPageOrigin(origin)) {
     port.disconnect();
     return;
