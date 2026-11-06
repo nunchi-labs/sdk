@@ -1,7 +1,7 @@
 {
     "mcpServers": {
-        "commonware-library": {
-            "url": "https://mcp.commonware.xyz"
+        "nunchi-sdk": {
+            "url": "http://127.0.0.1:8787"
         }
     }
 }
