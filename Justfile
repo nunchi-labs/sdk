@@ -12,6 +12,34 @@ test:
     @echo "Running wallet wasm-crypto tests..."
     @cargo test --locked --manifest-path examples/wallet-extension/wasm-crypto/Cargo.toml
 
+mcp-build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd mcp
+    npm ci
+    npm run build
+
+mcp:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd mcp
+    if [[ ! -d node_modules ]]; then
+        npm ci
+    fi
+    npx wrangler d1 migrations apply nunchi-mcp-search --local
+    echo "Server will listen on http://127.0.0.1:8787."
+    echo "In another terminal, index this checkout: just mcp-index"
+    npm run dev
+
+mcp-index:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd mcp
+    if [[ ! -d node_modules ]]; then
+        npm ci
+    fi
+    node --experimental-strip-types scripts/index-repo.mjs
+
 wallet-test:
     @echo "Running wallet extension tests..."
     cd examples/wallet-extension && npm test
