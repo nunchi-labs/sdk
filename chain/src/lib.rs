@@ -20,7 +20,7 @@ mod tests;
 pub use application::{Application, SharedAppliedHeight};
 pub use block::{
     dummy_genesis_parent, genesis_parent, Block, BlockCommitment, BlockHeader, CodingBlock,
-    CodingContext, Finalized, Notarized, StateCommitment, MAX_TRANSACTIONS,
+    CodingContext, Finalized, Notarized, StateCommitment, MAX_BLOCK_TX_BYTES, MAX_TRANSACTIONS,
 };
 pub use consensus::{
     dkg_reporters, BlockExtension, Composite, ConsensusExtension, DkgActor, DkgMailbox,

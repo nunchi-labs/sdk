@@ -27,6 +27,20 @@ use crate::{BlockExtension, NoConsensusExtension};
 /// Bounds the work a peer can force us to do when decoding an untrusted block.
 pub const MAX_TRANSACTIONS: u64 = 4_096;
 
+/// Largest encoded transaction the block body will read.
+///
+/// This is above [`nunchi_mempool::DEFAULT_MAX_TX_BYTES`]. A maximum oracle append
+/// (64 KiB payload and 16 KiB proof) with a full multisig authorization is wider
+/// than that default, and the coins-chain pool admits it. It is far below a bridge
+/// claim `StateProof` or a CLOB `ApplyMatchBatch`. [`MAX_TRANSACTIONS`] copies of
+/// either of those codecs is about 10^12 bytes, which marshal would hold and forward.
+pub const MAX_BLOCK_TX_BYTES: usize = 128 * 1024;
+
+const _: () = {
+    assert!(MAX_BLOCK_TX_BYTES > nunchi_mempool::DEFAULT_MAX_TX_BYTES);
+    assert!((MAX_TRANSACTIONS as usize).saturating_mul(MAX_BLOCK_TX_BYTES) <= u32::MAX as usize);
+};
+
 /// Consensus commitment over a [`CodingBlock`].
 pub type BlockCommitment<Tx, Ext = NoConsensusExtension> =
     Commitment<CodingBlock<Tx, Ext>, ReedSolomon<Sha256>, Sha256>;
@@ -369,12 +383,11 @@ where
 /// Encoded-size cap for one transaction [`Block::read_cfg`] will materialize.
 ///
 /// [`MaxEncodeSize::MAX_ENCODE_SIZE`] is the widest bytes the transaction codec can parse.
-/// On a coins chain that width is a bridge claim proof or a CLOB match batch, far above the
-/// 64 KiB mempool admission limit. Marshal disseminates every body under the block bound, so
-/// using the codec width for every [`MAX_TRANSACTIONS`] slot would admit bodies honest
-/// admission never produces. The block cap is the tighter of the two.
+/// On a coins chain that width is a bridge claim proof or a CLOB match batch. Marshal
+/// disseminates every body under the block bound, so the slot is the tighter of that
+/// codec maximum and [`MAX_BLOCK_TX_BYTES`].
 pub(crate) fn tx_encode_limit<Tx: MaxEncodeSize>() -> usize {
-    Tx::MAX_ENCODE_SIZE.min(nunchi_mempool::DEFAULT_MAX_TX_BYTES)
+    Tx::MAX_ENCODE_SIZE.min(MAX_BLOCK_TX_BYTES)
 }
 
 /// Upper bound on the transaction list `Block::read_cfg` admits.
@@ -609,9 +622,9 @@ where
         // `read_cfg` rejects a transaction wider than `tx_encode_limit` and a block wider than
         // this sum. Header fields use their codec maxima, including the dealer log for `cfg`'s
         // participant cap and the extension payload bound. The transaction section is
-        // `MAX_TRANSACTIONS` entries at the mempool admission limit when the transaction codec
-        // is wider than that. A bridge claim proof or a CLOB match batch must not be multiplied
-        // into every slot: marshal holds and forwards every body under this bound.
+        // `MAX_TRANSACTIONS` entries at that per-transaction cap. A bridge claim proof or a
+        // CLOB match batch is not that cap: marshal holds and forwards every body under this
+        // bound.
         block_max_encode_size::<Tx, Ext, BlockCommitment<Tx, Ext>>(cfg)
     }
 }

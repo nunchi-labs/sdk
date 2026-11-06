@@ -15,7 +15,7 @@ use nunchi_mempool::DEFAULT_MAX_TX_BYTES;
 
 use crate::{
     dummy_genesis_parent, CodingBlock, CodingContext, EmptyPayload, NoConsensusExtension,
-    StateCommitment, MAX_TRANSACTIONS,
+    StateCommitment, MAX_BLOCK_TX_BYTES, MAX_TRANSACTIONS,
 };
 
 /// Stand-in for a mempool transaction at the default admission cap.
@@ -125,7 +125,7 @@ impl Read for ExplosiveTx {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        if buf.remaining() > DEFAULT_MAX_TX_BYTES {
+        if buf.remaining() > MAX_BLOCK_TX_BYTES {
             return Err(CodecError::Invalid(
                 "explosive",
                 "block reader was not capped",
@@ -187,33 +187,59 @@ fn max_encode_size_covers_mempool_width_transaction() {
 fn max_encode_size_does_not_multiply_codec_maximum() {
     let capped = CodingBlock::<WideTx, NoConsensusExtension>::max_encode_size(&cfg());
     let explosive = CodingBlock::<ExplosiveTx, NoConsensusExtension>::max_encode_size(&cfg());
-    assert_eq!(capped, explosive);
+    // WideTx's codec maximum is the mempool default. ExplosiveTx is capped at the block slot.
+    assert!(explosive > capped);
+    let slot_body = (MAX_TRANSACTIONS as usize) * MAX_BLOCK_TX_BYTES;
+    assert!(explosive <= slot_body + 1024 * 1024);
+    assert!(explosive < u32::MAX as usize);
 
     let product = (MAX_TRANSACTIONS as usize).saturating_mul(ExplosiveTx::MAX_ENCODE_SIZE);
+    assert!(product > u32::MAX as usize);
     assert!(explosive < product / 1024);
 }
 
 #[test]
-fn decode_rejects_transaction_wider_than_mempool_cap_before_allocating_it() {
+fn decode_rejects_transaction_wider_than_block_slot_before_allocating_it() {
     let block = CodingBlock::<ExplosiveTx>::new(
         context(),
         sha256::Digest::EMPTY,
         Height::zero(),
         1,
         vec![ExplosiveTx {
-            bytes: vec![0xcd; DEFAULT_MAX_TX_BYTES],
+            bytes: vec![0xcd; MAX_BLOCK_TX_BYTES],
         }],
         None,
         EmptyPayload,
         state(),
     );
-    assert!(block.transactions[0].encode_size() > DEFAULT_MAX_TX_BYTES);
+    assert!(block.transactions[0].encode_size() > MAX_BLOCK_TX_BYTES);
     let error = CodingBlock::<ExplosiveTx>::decode_cfg(block.encode(), &cfg()).unwrap_err();
     assert!(
         matches!(error, CodecError::Invalid(context, message)
             if context.contains("Block") && message.contains("transaction")),
         "{error:?}"
     );
+}
+
+#[test]
+fn decode_accepts_transaction_wider_than_the_default_mempool_cap() {
+    let payload = vec![0xef; DEFAULT_MAX_TX_BYTES];
+    let transaction = ExplosiveTx { bytes: payload };
+    assert!(transaction.encode_size() > DEFAULT_MAX_TX_BYTES);
+    assert!(transaction.encode_size() <= MAX_BLOCK_TX_BYTES);
+    let block = CodingBlock::<ExplosiveTx>::new(
+        context(),
+        sha256::Digest::EMPTY,
+        Height::zero(),
+        1,
+        vec![transaction],
+        None,
+        EmptyPayload,
+        state(),
+    );
+    let decoded = CodingBlock::<ExplosiveTx>::decode_cfg(block.encode(), &cfg())
+        .expect("oracle-sized transaction decodes");
+    assert_eq!(decoded.transactions[0].bytes.len(), DEFAULT_MAX_TX_BYTES);
 }
 
 #[test]

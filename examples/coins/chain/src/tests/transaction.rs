@@ -11,7 +11,8 @@ use commonware_codec::DecodeExt;
 use commonware_cryptography::{ed25519, Hasher, Sha256, Signer as _};
 use nunchi_authority::MultisigPolicy;
 use nunchi_coins::{CoinSpec, PrivateKey, TokenName, TokenSymbol};
-use nunchi_chain::{CodingBlock, MAX_TRANSACTIONS};
+use nunchi_bridge::BridgeOperation;
+use nunchi_chain::{CodingBlock, MAX_BLOCK_TX_BYTES, MAX_TRANSACTIONS};
 use nunchi_clob::{ClobExtension, MatchBatch};
 use nunchi_mempool::DEFAULT_MAX_TX_BYTES;
 use nunchi_oracle::{
@@ -90,6 +91,7 @@ fn widest_oracle_transaction_fits_the_chain_pool() {
     let config = crate::transaction::pool_config();
     assert!(widest > PoolConfig::default().max_tx_bytes);
     assert!(config.max_tx_bytes >= widest);
+    assert!(widest <= MAX_BLOCK_TX_BYTES);
 }
 
 #[test]
@@ -182,9 +184,17 @@ fn aggregate_transaction_bound_covers_mempool_oracle_and_clob() {
 
     let wrapped = Transaction::from(oracle);
     assert!(wrapped.encode_size() <= Transaction::MAX_ENCODE_SIZE);
+    assert!(wrapped.encode_size() <= MAX_BLOCK_TX_BYTES);
     const {
         assert!(Transaction::MAX_ENCODE_SIZE >= DEFAULT_MAX_TX_BYTES);
         assert!(Transaction::MAX_ENCODE_SIZE >= OracleTransaction::MAX_ENCODE_SIZE);
+        // The aggregate tag is one byte, so each honest module maximum sits under the slot.
+        assert!(OracleTransaction::MAX_ENCODE_SIZE < MAX_BLOCK_TX_BYTES);
+        assert!(CoinTransaction::MAX_ENCODE_SIZE < MAX_BLOCK_TX_BYTES);
+        assert!(AuthorityTransaction::MAX_ENCODE_SIZE < MAX_BLOCK_TX_BYTES);
+        assert!(Transaction::MAX_ENCODE_SIZE > MAX_BLOCK_TX_BYTES);
+        assert!(BridgeOperation::MAX_ENCODE_SIZE > MAX_BLOCK_TX_BYTES);
+        assert!(MatchBatch::MAX_ENCODE_SIZE > MAX_BLOCK_TX_BYTES);
     }
 
     let bound = CodingBlock::<Transaction, ClobExtension>::max_encode_size(&(NZU32!(4), ()));
@@ -197,4 +207,7 @@ fn aggregate_transaction_bound_covers_mempool_oracle_and_clob() {
     assert!(bound / (MAX_TRANSACTIONS as usize) < Transaction::MAX_ENCODE_SIZE);
     let product = (MAX_TRANSACTIONS as usize).saturating_mul(Transaction::MAX_ENCODE_SIZE);
     assert!(bound < product / 64);
+    assert!(bound < u32::MAX as usize);
+    let slot_body = (MAX_TRANSACTIONS as usize) * MAX_BLOCK_TX_BYTES;
+    assert!(bound <= slot_body + MatchBatch::MAX_ENCODE_SIZE + 8 * 1024 * 1024);
 }
