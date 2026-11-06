@@ -733,6 +733,10 @@ fn test_dealer_handle_returns_false_when_player_not_in_unsent() {
             !result,
             "handle should return false when player not in unsent"
         );
+        assert!(
+            storage.acks(Epoch::zero()).is_empty(),
+            "rejected ack must not be journaled"
+        );
     });
 }
 
@@ -781,6 +785,70 @@ fn test_dealer_handle_returns_false_when_crypto_dealer_is_none() {
             !result,
             "handle should return false when crypto dealer is None"
         );
+        assert!(
+            storage.acks(Epoch::zero()).is_empty(),
+            "an ack for a missing dealer must not be journaled"
+        );
+    });
+}
+
+#[test_traced]
+fn test_late_ack_after_finalize_is_not_persisted() {
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        let signers = create_test_signers(4);
+        let round_info = create_round_info(&signers);
+
+        let mut storage = Storage::<_, MinPk, _>::init(
+            context.child("storage"),
+            "test",
+            StorageProtector::new(TEST_STORAGE_KEY),
+            TEST_NAMESPACE.to_vec(),
+            signers[0].public_key(),
+            NZU32!(10),
+            crate::MAX_SUPPORTED_MODE,
+        )
+        .await
+        .expect("storage init should succeed");
+
+        let dealer_signer = signers[0].clone();
+        let mut rng = test_rng();
+        let (crypto_dealer, pub_msg, priv_msgs) =
+            commonware_cryptography::bls12381::dkg::feldman_desmedt::Dealer::<MinPk, _>::start::<
+                N3f1,
+            >(&mut rng, round_info.clone(), dealer_signer.clone(), None)
+            .expect("valid dealer");
+
+        let unsent: BTreeMap<_, _> = priv_msgs.into_iter().collect();
+        let mut dealer = Dealer::new(Some(crypto_dealer), pub_msg.clone(), unsent);
+
+        let player_signer = signers[1].clone();
+        let player_pk = player_signer.public_key();
+        let player_priv_msg = dealer
+            .shares_to_distribute()
+            .find(|(player, _, _)| *player == player_pk)
+            .map(|(_, _, priv_msg)| priv_msg)
+            .expect("player should have a share");
+
+        let mut crypto_player = Player::new(round_info, player_signer).expect("valid player");
+        let ack = crypto_player
+            .dealer_message::<N3f1>(dealer_signer.public_key(), pub_msg, player_priv_msg)
+            .expect("valid dealing")
+            .expect("valid ack");
+
+        dealer.finalize::<N3f1>();
+        let log = dealer.finalized().expect("finalized log");
+
+        let result = dealer
+            .handle(&mut storage, Epoch::zero(), player_pk, ack)
+            .await;
+
+        assert!(!result, "late ack must not be applied after finalize");
+        assert!(
+            storage.acks(Epoch::zero()).is_empty(),
+            "late ack must not be journaled"
+        );
+        assert_eq!(dealer.finalized().expect("log").encode(), log.encode());
     });
 }
 
@@ -907,5 +975,86 @@ fn test_dealer_handle_returns_false_for_duplicate_ack() {
             .handle(&mut storage, Epoch::zero(), player_pk, ack)
             .await;
         assert!(!result, "duplicate ack should return false");
+    });
+}
+
+#[test_traced]
+fn invalid_ack_does_not_change_the_recovered_dealer_log() {
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        let signers = create_test_signers(4);
+        let round_info = create_round_info(&signers);
+        let epoch = Epoch::zero();
+        let dealer_signer = signers[0].clone();
+        let dealer_pk = dealer_signer.public_key();
+        let seed = Summary::random(&mut context);
+
+        let mut storage = init_storage(
+            context.child("storage"),
+            "invalid_ack_recovery",
+            TEST_STORAGE_KEY,
+            TEST_NAMESPACE.to_vec(),
+            dealer_pk.clone(),
+        )
+        .await;
+        let mut dealer = storage
+            .create_dealer::<_, N3f1>(
+                epoch,
+                dealer_signer.clone(),
+                round_info.clone(),
+                None,
+                seed,
+            )
+            .expect("dealer");
+
+        let player_signer = signers[1].clone();
+        let player_pk = player_signer.public_key();
+        let (pub_msg, priv_msg) = dealer
+            .shares_to_distribute()
+            .find(|(player, _, _)| *player == player_pk)
+            .map(|(_, pub_msg, priv_msg)| (pub_msg, priv_msg))
+            .expect("player share");
+        let fake_ack = PlayerAck::read(&mut player_signer.sign(b"ns", b"msg").encode().as_ref())
+            .expect("ack bytes");
+        assert!(
+            !dealer
+                .handle(&mut storage, epoch, player_pk.clone(), fake_ack)
+                .await,
+            "invalid ack must be rejected"
+        );
+        assert!(
+            storage.acks(epoch).is_empty(),
+            "rejected ack must not occupy the player slot"
+        );
+
+        let mut crypto_player = Player::new(round_info.clone(), player_signer).expect("player");
+        let ack = crypto_player
+            .dealer_message::<N3f1>(dealer_pk, pub_msg, priv_msg)
+            .expect("valid dealing")
+            .expect("valid ack");
+        assert!(
+            dealer
+                .handle(&mut storage, epoch, player_pk.clone(), ack.clone())
+                .await,
+            "later valid ack must be applied"
+        );
+        assert_eq!(storage.acks(epoch), vec![(player_pk.clone(), ack)]);
+
+        let mut recovered = storage
+            .create_dealer::<_, N3f1>(epoch, dealer_signer, round_info, None, seed)
+            .expect("recovered dealer");
+        assert!(
+            recovered
+                .shares_to_distribute()
+                .all(|(player, _, _)| player != player_pk),
+            "recovery must replay the valid ack"
+        );
+        dealer.finalize::<N3f1>();
+        recovered.finalize::<N3f1>();
+        assert_eq!(
+            dealer.finalized().expect("live log").encode(),
+            recovered.finalized().expect("recovered log").encode(),
+            "restart must sign the same dealer log"
+        );
     });
 }

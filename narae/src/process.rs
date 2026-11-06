@@ -70,14 +70,18 @@ impl Node {
         workspace: PathBuf,
         should_quit: Arc<AtomicBool>,
     ) -> Result<(), std::io::Error> {
-        let (spec, command_line) = {
+        let (spec, command_line, previous) = {
             let mut node = node.lock().unwrap();
-            node.stop();
+            let previous = node.detach_child();
             node.status = NodeStatus::Starting;
             let command_line = node.command_line();
             node.add_log(format!("$ {command_line}"));
-            (node.spec.clone(), command_line)
+            (node.spec.clone(), command_line, previous)
         };
+        if let Some(previous) = previous {
+            reap_child(previous);
+            node.lock().unwrap().add_log("stopped");
+        }
 
         let mut command = Command::new(&spec.command);
         command.args(&spec.args);
@@ -109,13 +113,26 @@ impl Node {
         Ok(())
     }
 
-    pub fn stop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-            self.status = NodeStatus::Stopped;
-            self.add_log("stopped");
+    /// Stop the child without waiting while a caller holds `node`'s mutex.
+    ///
+    /// `wait` blocks until the process exits. Log readers need that same mutex to record output,
+    /// and a child blocked on a full stdout pipe cannot exit until a reader drains it. Waiting
+    /// under the lock deadlocks that pair and freezes every other node sharing the dashboard.
+    pub fn stop_shared(node: &Arc<Mutex<Self>>) {
+        let child = {
+            let mut node = node.lock().unwrap();
+            node.detach_child()
+        };
+        if let Some(child) = child {
+            reap_child(child);
+            let mut node = node.lock().unwrap();
+            node.status = NodeStatus::Stopped;
+            node.add_log("stopped");
         }
+    }
+
+    fn detach_child(&mut self) -> Option<Child> {
+        self.child.take()
     }
 
     pub fn refresh(&mut self) {
@@ -142,6 +159,11 @@ impl Node {
     }
 }
 
+fn reap_child(mut child: Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn spawn_reader<R>(node: Arc<Mutex<Node>>, should_quit: Arc<AtomicBool>, reader: R)
 where
     R: std::io::Read + Send + 'static,
@@ -163,4 +185,73 @@ where
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{EnvVar, NodeSpec};
+    use std::{
+        sync::{atomic::AtomicBool, Arc, Mutex},
+        thread,
+        time::{Duration, Instant},
+    };
+
+    fn spec(command: &str, args: &[&str]) -> NodeSpec {
+        NodeSpec {
+            name: "probe".to_string(),
+            command: command.to_string(),
+            args: args.iter().map(|arg| (*arg).to_string()).collect(),
+            cwd: None,
+            env: vec![EnvVar {
+                key: "RUST_LOG".to_string(),
+                value: "error".to_string(),
+            }],
+        }
+    }
+
+    #[test]
+    fn stop_shared_reaps_a_running_child() {
+        let node = Arc::new(Mutex::new(Node::new(spec("sleep", &["30"]))));
+        Node::start(
+            &node,
+            std::env::temp_dir(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        assert_eq!(node.lock().unwrap().status, NodeStatus::Running);
+
+        let started = Instant::now();
+        Node::stop_shared(&node);
+        assert!(started.elapsed() < Duration::from_secs(2));
+
+        let guard = node.lock().unwrap();
+        assert_eq!(guard.status, NodeStatus::Stopped);
+        assert!(guard.logs.iter().any(|line| line == "stopped"));
+    }
+
+    #[test]
+    fn stop_shared_reaps_a_child_that_is_filling_its_stdout_pipe() {
+        let node = Arc::new(Mutex::new(Node::new(spec(
+            "sh",
+            &["-c", "while true; do echo line; done"],
+        ))));
+        Node::start(
+            &node,
+            std::env::temp_dir(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        thread::sleep(Duration::from_millis(50));
+
+        let probe = Arc::clone(&node);
+        let handle = thread::spawn(move || {
+            let _guard = probe.lock().unwrap();
+        });
+        let started = Instant::now();
+        Node::stop_shared(&node);
+        handle.join().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(node.lock().unwrap().status, NodeStatus::Stopped);
+    }
 }

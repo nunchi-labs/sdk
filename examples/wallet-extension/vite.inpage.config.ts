@@ -6,6 +6,7 @@ export default defineConfig({
   build: {
     emptyOutDir: false,
     outDir: "dist",
+    sourcemap: false,
     lib: {
       entry: resolve(__dirname, "src/inpage.ts"),
       name: "nunchiWalletInpage",

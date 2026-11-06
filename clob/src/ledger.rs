@@ -1,12 +1,13 @@
 use std::{
     cmp::Ordering,
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
 };
 
 use crate::{
     fills_equivalent, AssetId, ClobDB, ClobOperation, Fill, FillId, Market, MarketId, MatchBatch,
     MatchEngine, Order, OrderId, Side, Transaction, MAX_ACCOUNT_ORDERS, MAX_BOOK_ORDERS,
     MAX_FILLS_PER_MARKET, MAX_MARKETS, CLOB_NAMESPACE,
+    db::MAX_NONCE_ACCOUNTS,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{Hasher, Sha256};
@@ -27,6 +28,8 @@ pub enum ClobError {
     },
     #[error("nonce overflow")]
     NonceOverflow,
+    #[error("nonce account index is full")]
+    NonceIndexFull,
     #[error("market already exists")]
     MarketAlreadyExists,
     #[error("market not found")]
@@ -63,8 +66,22 @@ pub enum ClobError {
     SequenceOverflow,
     #[error("quote quantity overflow")]
     QuoteOverflow,
+    /// The sweep still crosses resting liquidity, so it cannot be capped mid-match.
+    #[error("match fill budget exhausted while the book still crosses")]
+    FillBudgetExceeded,
     #[error("state storage error: {0}")]
     Storage(String),
+}
+
+/// Committed CLOB state a validator-local proposer must reload after restart.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ClobActorSnapshot {
+    /// Markets and their committed match sequences.
+    pub markets: Vec<(Market, u64)>,
+    /// Resting orders still open on those markets.
+    pub orders: Vec<Order>,
+    /// Committed account nonces, including accounts with no open order.
+    pub nonces: Vec<(Address, u64)>,
 }
 
 /// Deterministic state machine for the central limit order book.
@@ -155,10 +172,11 @@ impl<D: ClobDB> ClobLedger<D> {
                 actual: tx.payload.nonce,
             });
         }
+        self.ensure_nonce_index_fits([&tx.account_id]).await?;
 
         self.apply_operation(tx, context).await?;
         let next_nonce = expected.checked_add(1).ok_or(ClobError::NonceOverflow)?;
-        self.db.set_nonce(&tx.account_id, next_nonce);
+        self.record_nonce(&tx.account_id, next_nonce).await?;
         Ok(())
     }
 
@@ -277,6 +295,7 @@ impl<D: ClobDB> ClobLedger<D> {
                 starting_sequences.insert(*market, self.db.market_sequence(market).await?);
             }
         }
+        self.ensure_nonce_index_fits(expected_nonces.keys()).await?;
         let resting_orders = self.load_resting_orders(markets.keys().copied().collect()).await?;
 
         let replay = MatchEngine::replay_with_resting(
@@ -311,16 +330,87 @@ impl<D: ClobDB> ClobLedger<D> {
             }
             self.db.set_market_fills(&fill.market, &market_fills);
         }
-        for (order_id, order) in replay.orders {
+        // Removals first. `replay.orders` is ordered by id, so a new resting order can sort
+        // before the fill that frees its slot and trip the book cap on a batch that still fits.
+        let updates = split_order_updates(replay.orders);
+        for (order_id, order) in updates.removals {
+            self.persist_order_update(order_id, &order).await?;
+        }
+        for (order_id, order) in updates.upserts {
             self.persist_order_update(order_id, &order).await?;
         }
         for (market, sequence) in replay.sequences {
             self.db.set_market_sequence(&market, sequence);
         }
         for (account, nonce) in expected_nonces {
-            self.db.set_nonce(&account, nonce);
+            self.record_nonce(&account, nonce).await?;
         }
         Ok(())
+    }
+
+    async fn ensure_nonce_index_fits<'a>(
+        &self,
+        accounts: impl IntoIterator<Item = &'a Address>,
+    ) -> Result<(), ClobError> {
+        let indexed = self.db.nonce_accounts().await?;
+        let mut extra = BTreeSet::new();
+        for account in accounts {
+            if indexed.iter().any(|existing| existing == account) || !extra.insert(account) {
+                continue;
+            }
+            if indexed.len() + extra.len() > MAX_NONCE_ACCOUNTS {
+                return Err(ClobError::NonceIndexFull);
+            }
+        }
+        Ok(())
+    }
+
+    async fn record_nonce(&mut self, account: &Address, nonce: u64) -> Result<(), ClobError> {
+        let mut accounts = self.db.nonce_accounts().await?;
+        let indexed = accounts.iter().any(|existing| existing == account);
+        // Recovery enumerates this index only. An account that does not fit keeps
+        // the default nonce instead of a value the snapshot cannot reload.
+        if !indexed && accounts.len() >= MAX_NONCE_ACCOUNTS {
+            return Err(ClobError::NonceIndexFull);
+        }
+        if !indexed {
+            accounts.push(account.clone());
+            self.db.set_nonce_accounts(&accounts);
+        }
+        self.db.set_nonce(account, nonce);
+        Ok(())
+    }
+
+    /// Committed markets, resting orders, and nonces the proposer must reload after a restart.
+    pub async fn actor_snapshot(&self) -> Result<ClobActorSnapshot, ClobError> {
+        let mut markets = Vec::new();
+        let market_ids = self.db.market_index().await?;
+        for id in &market_ids {
+            let Some(market) = self.db.market(id).await? else {
+                continue;
+            };
+            let sequence = self.db.market_sequence(id).await?;
+            markets.push((market, sequence));
+        }
+        let orders = self.load_resting_orders(market_ids).await?;
+        let mut nonces = Vec::new();
+        let mut seen = BTreeSet::new();
+        for account in self.db.nonce_accounts().await? {
+            let nonce = self.db.nonce(&account).await?;
+            seen.insert(account.clone());
+            nonces.push((account, nonce));
+        }
+        for order in &orders {
+            if seen.insert(order.owner.clone()) {
+                let nonce = self.db.nonce(&order.owner).await?;
+                nonces.push((order.owner.clone(), nonce));
+            }
+        }
+        Ok(ClobActorSnapshot {
+            markets,
+            orders,
+            nonces,
+        })
     }
 
     async fn load_orders(&self, ids: Vec<OrderId>) -> Result<Vec<Order>, ClobError> {
@@ -486,6 +576,24 @@ pub(crate) fn validate_market(
         return Err(ClobError::InvalidMarket("lot size must be non-zero"));
     }
     Ok(())
+}
+
+struct OrderUpdateBatches {
+    removals: Vec<(OrderId, Order)>,
+    upserts: Vec<(OrderId, Order)>,
+}
+
+fn split_order_updates(orders: BTreeMap<OrderId, Order>) -> OrderUpdateBatches {
+    let mut removals = Vec::new();
+    let mut upserts = Vec::new();
+    for (order_id, order) in orders {
+        if order.status.is_open() && order.remaining_base > 0 {
+            upserts.push((order_id, order));
+        } else {
+            removals.push((order_id, order));
+        }
+    }
+    OrderUpdateBatches { removals, upserts }
 }
 
 fn prune_oldest_fill_ids(fill_ids: &mut Vec<FillId>) -> Vec<FillId> {

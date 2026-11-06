@@ -89,6 +89,38 @@ mod spool_tests {
             Some(limits.max_bytes + 127 * limits.max_payload_bytes)
         );
     }
+
+    #[test]
+    fn indexer_http_errors_distinguish_retryable_statuses() {
+        use reqwest::StatusCode;
+
+        for status in [
+            StatusCode::REQUEST_TIMEOUT,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::GATEWAY_TIMEOUT,
+        ] {
+            assert!(
+                Error::Failed(status).is_retryable(),
+                "{status} should be retried"
+            );
+        }
+        for status in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::NOT_FOUND,
+            StatusCode::CONFLICT,
+            StatusCode::PAYLOAD_TOO_LARGE,
+        ] {
+            assert!(
+                !Error::Failed(status).is_retryable(),
+                "{status} should be terminal"
+            );
+            assert!(!HttpClient::is_retryable(&Error::Failed(status)));
+        }
+    }
 }
 
 /// Errors returned by the HTTP indexer client.
@@ -98,6 +130,25 @@ pub enum Error {
     Reqwest(#[from] reqwest::Error),
     #[error("indexer returned {0}")]
     Failed(reqwest::StatusCode),
+}
+
+impl Error {
+    /// Transport failures and overloaded or unavailable servers are retryable.
+    /// Other 4xx responses reject this payload and will not succeed on retry.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Reqwest(error) => {
+                error.is_timeout()
+                    || error.is_connect()
+                    || error.is_request()
+                    || error.is_body()
+                    || error.is_decode()
+            }
+            Self::Failed(status) => {
+                matches!(status.as_u16(), 408 | 425 | 429) || status.is_server_error()
+            }
+        }
+    }
 }
 
 /// Trait for uploading coins-chain artifacts to an indexer backend.
@@ -121,6 +172,14 @@ pub trait Client: Clone + Send + Sync + 'static {
         &self,
         finalized: Finalized,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// Whether `error` is worth attempting again.
+    ///
+    /// Permanent client errors must not occupy a backfill slot until the spool
+    /// age bound. The default keeps unknown client errors retryable.
+    fn is_retryable(_error: &Self::Error) -> bool {
+        true
+    }
 }
 
 /// HTTP client for a Constantinople-compatible coins-chain indexer API.
@@ -179,6 +238,11 @@ impl HttpClient {
         };
 
         let status = response.status();
+        // Read the body before deciding. Dropping an unread body discards the
+        // connection instead of returning it to the pool.
+        if let Err(error) = response.text().await {
+            return Err(Error::Reqwest(error));
+        }
         if status.is_success() {
             if let Some(request) = request.as_mut() {
                 request.succeed();
@@ -195,6 +259,10 @@ impl HttpClient {
 
 impl Client for HttpClient {
     type Error = Error;
+
+    fn is_retryable(error: &Self::Error) -> bool {
+        error.is_retryable()
+    }
 
     async fn dkg_output_upload(
         &self,
