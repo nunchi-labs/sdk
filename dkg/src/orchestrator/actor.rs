@@ -34,7 +34,7 @@ use commonware_runtime::{
 };
 use commonware_storage::metadata::{self, Metadata};
 use commonware_utils::sequence::U64;
-use commonware_utils::{vec::NonEmptyVec, NZUsize};
+use commonware_utils::{vec::NonEmptyVec, NonZeroDuration, NZUsize};
 use rand::CryptoRng;
 use std::{
     collections::BTreeMap,
@@ -45,6 +45,35 @@ use std::{
 use tracing::{debug, error, info, warn};
 
 const CLEANUP_WATERMARK_KEY: U64 = U64::new(0);
+
+/// Fetch and skip deadlines derived from the configured round timeouts.
+///
+/// Simplex requires the skip timeout to outlast both the certification timeout
+/// and `timeout_retry`. A fixed one-second fetch and twenty-second skip cannot
+/// elapse inside a shorter recovery window, so a restarted view can wait out
+/// the runtime deadline without certifying. The fetch timeout follows the
+/// leader timeout and is retried after one fifth of it. The skip timeout is
+/// one leader timeout after the later of the certification timeout and the
+/// nullify retry.
+struct SimplexLiveness {
+    fetch_timeout: NonZeroDuration,
+    fetch_retry_delay: Duration,
+    skip_timeout: Duration,
+}
+
+fn simplex_liveness(
+    leader_timeout: Duration,
+    certification_timeout: Duration,
+    timeout_retry: Duration,
+) -> SimplexLiveness {
+    SimplexLiveness {
+        fetch_timeout: NonZeroDuration::new_panic(leader_timeout),
+        fetch_retry_delay: leader_timeout / 5,
+        skip_timeout: certification_timeout
+            .max(timeout_retry)
+            .saturating_add(leader_timeout),
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, EncodeLabelSet)]
 struct CleanupStatusLabel {
@@ -622,6 +651,11 @@ where
             .context
             .child("consensus_engine")
             .with_attribute("epoch", epoch);
+        let liveness = simplex_liveness(
+            self.leader_timeout,
+            self.certification_timeout,
+            self.timeout_retry,
+        );
         let engine = simplex::Engine::new(
             context,
             simplex::Config {
@@ -641,11 +675,11 @@ where
                 leader_timeout: self.leader_timeout,
                 certification_timeout: self.certification_timeout,
                 timeout_retry: self.timeout_retry,
-                fetch_timeout: commonware_utils::NonZeroDuration::new_panic(Duration::from_secs(1)),
-                fetch_retry_delay: Duration::from_millis(200),
+                fetch_timeout: liveness.fetch_timeout,
+                fetch_retry_delay: liveness.fetch_retry_delay,
                 view_retention: ViewDelta::new(256),
                 skip: SkipPolicy::Enabled {
-                    timeout: Duration::from_secs(20),
+                    timeout: liveness.skip_timeout,
                     budget: Default::default(),
                 },
                 page_cache: self.page_cache_ref.clone(),
@@ -693,6 +727,37 @@ mod tests {
         };
 
         assert_eq!(floor.digest_for_epoch(&epocher, Epoch::new(2)), None);
+    }
+
+    #[test]
+    fn simplex_liveness_fits_the_unclean_recovery_window() {
+        // `recovers_unclean_shutdown` restarts every 250..1_000ms with these
+        // deadlines so a recovered view can certify or nullify first.
+        let leader = Duration::from_millis(250);
+        let certification = Duration::from_millis(500);
+        let timeout_retry = Duration::from_millis(50);
+        let window = Duration::from_secs(1);
+        let liveness = simplex_liveness(leader, certification, timeout_retry);
+
+        assert_eq!(liveness.fetch_timeout.get(), leader);
+        assert!(liveness.fetch_retry_delay < liveness.fetch_timeout.get());
+        assert!(liveness.fetch_timeout.get() < window);
+        assert!(liveness.skip_timeout > certification);
+        assert!(liveness.skip_timeout > timeout_retry);
+        assert!(liveness.skip_timeout < window);
+    }
+
+    #[test]
+    fn simplex_liveness_keeps_default_fetch_pacing() {
+        let liveness = simplex_liveness(
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+            Duration::from_secs(10),
+        );
+
+        assert_eq!(liveness.fetch_timeout.get(), Duration::from_secs(1));
+        assert_eq!(liveness.fetch_retry_delay, Duration::from_millis(200));
+        assert_eq!(liveness.skip_timeout, Duration::from_secs(11));
     }
 
 }
