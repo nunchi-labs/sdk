@@ -24,6 +24,7 @@ jobs:
       wallet: ${{ steps.filter.outputs.wallet }}
       wallet-live: ${{ steps.filter.outputs.wallet-live }}
       frontend: ${{ steps.filter.outputs.frontend }}
+      mcp: ${{ steps.filter.outputs.mcp }}
 
     steps:
       - name: Checkout Repository
@@ -62,6 +63,8 @@ jobs:
               - 'rpc/**'
               - 'chain/**'
               - 'xtask/**'
+            mcp:
+              - 'mcp/**'
 
   fmt:
     needs: changes
@@ -121,7 +124,7 @@ jobs:
 
       - name: Upload Coverage Data
         if: github.actor != 'dependabot[bot]'
-        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           fail_ci_if_error: false
           files: codecov.info
@@ -261,3 +264,27 @@ jobs:
       - name: Typecheck coins frontend
         working-directory: examples/coins/frontend
         run: npm ci && npx tsc --noEmit
+
+  mcp:
+    needs: changes
+    if: ${{ always() && !cancelled() && (needs.changes.result == 'failure' || needs.changes.outputs.mcp == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: mcp/package-lock.json
+
+      - name: Install, lint, build, and test
+        working-directory: mcp
+        run: npm ci && npm run ci
+
+      - name: Check package-lock.json unchanged
+        run: git diff --exit-code -- mcp/package-lock.json

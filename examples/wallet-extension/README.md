@@ -5,7 +5,7 @@ A Manifest V3 Chrome extension wallet for Nunchi chains.
 ## Features
 
 - **Key Management**: Create or import Ed25519 and Secp256r1 (P-256) keys
-- **Secure Storage**: Private keys encrypted at rest with password and PBKDF2-SHA256 (100k iterations)
+- **Secure Storage**: Private keys encrypted at rest with password and PBKDF2-SHA256 (210,000 iterations)
 - **Address Derivation**: Byte-identical `nch...` Bech32 addresses matching `Address::external`
 - **Transaction Signing**: Sign and submit coin transfers with proper namespace and codec
 - **In-Page Provider**: `window.nunchi` and `window.nunchi.coins` API for dApps
@@ -24,7 +24,7 @@ A Manifest V3 Chrome extension wallet for Nunchi chains.
 
 ### Prerequisites
 
-- Rust 1.97+ (stable) with `wasm-pack` installed: `cargo install wasm-pack`
+- Rust 1.95+ (stable) with `wasm-pack` installed: `cargo install wasm-pack`
 - Node.js and npm
 - `wasm32-unknown-unknown` target: `rustup target add wasm32-unknown-unknown`
 
@@ -45,6 +45,29 @@ npm run build
 
 The built extension will be in `dist/`.
 
+### Tests
+
+```bash
+# Unit tests (wallet, validation, privilege, crypto)
+npm test
+
+# Headless Chromium popup + in-page provider
+npm run build
+npm run test:selenium
+```
+
+Selenium covers onboarding, backup, send validation, mock-RPC transfers, export/lock, connection and transaction approval, disconnect, delete, and import.
+
+### Chrome Web Store package
+
+```bash
+cd examples/wallet-extension
+npm install
+npm run build:store
+```
+
+This resizes store PNG icons, builds release WASM, bundles the MV3 extension, and writes `store/nunchi-wallet-<version>.zip` with `manifest.json` at the zip root. Upload that zip in the Chrome Web Store developer dashboard. Listing copy, permission justifications, and the privacy policy are in `store/`.
+
 ## Load Extension
 
 1. Open Chrome and navigate to `chrome://extensions/`
@@ -58,8 +81,14 @@ The built extension will be in `dist/`.
 ### Start Coins Chain
 
 ```bash
-cd examples/coins/chain
-cargo run --bin coins-chain -- --config node0.json
+cargo build -p nunchi-coins-chain --bin coins-chain-node
+cargo run -p narae -- up coins-chain
+```
+
+The first validator serves JSON-RPC at http://127.0.0.1:8545, which is the wallet's default RPC URL. To run one generated node directly:
+
+```bash
+cargo run -p nunchi-coins-chain --bin coins-chain-node -- --config testnet/validator-0.toml
 ```
 
 ### Start Coins Frontend
@@ -108,7 +137,7 @@ const accounts = await window.nunchi.request({
   method: 'nunchi_requestAccounts' 
 });
 
-// Get connected accounts
+// Get connected accounts for this origin (empty if locked or not connected)
 const accounts = await window.nunchi.request({ 
   method: 'nunchi_accounts' 
 });
@@ -129,7 +158,10 @@ const { hash } = await window.nunchi.request({
   }]
 });
 
-// Listen for account changes
+// Disconnect this origin
+await window.nunchi.request({ method: 'nunchi_disconnect' });
+
+// Listen for account changes (connect, disconnect, lock, unlock)
 window.nunchi.on('accountsChanged', (accounts) => {
   console.log('Accounts changed:', accounts);
 });
@@ -137,7 +169,7 @@ window.nunchi.on('accountsChanged', (accounts) => {
 
 ### Coins Provider
 
-A convenience wrapper is available at `window.nunchi.coins` with the same API.
+A convenience wrapper is available at `window.nunchi.coins`. It forwards `request` to the same methods. Account events stay on `window.nunchi.on`.
 
 ## Test Fixtures
 
@@ -165,10 +197,10 @@ console.log('Address:', keyPair.address);
 ## Security Notes
 
 - **Private Keys**: Never shared outside the extension. Encrypted at rest with AES-GCM.
-- **Passwords**: Derived with PBKDF2-SHA256 (100k iterations) for encryption keys.
+- **Passwords**: Derived with PBKDF2-SHA256 (210,000 iterations) for encryption keys.
 - **Site Isolation**: Each site requires explicit user approval to connect.
 - **No Remote Code**: All crypto operations use local WASM, no external dependencies.
-- **Audit Needed**: This is demo code. Production use requires a security audit.
+- **Audit**: Unaudited software. Do not store significant value until it has been independently reviewed.
 
 ## Development
 
@@ -226,4 +258,4 @@ cargo test --package nunchi-common address_derivation
 
 ## License
 
-See repository root LICENSE.MD.
+See the repository root `LICENSE-MIT` and `LICENSE-APACHE` files. The code is dual-licensed.

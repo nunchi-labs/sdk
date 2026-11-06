@@ -47,7 +47,7 @@ use thiserror::Error;
 
 /// Maximum encoded value accepted by the shared state database and peer state sync.
 ///
-/// The largest current value is a CLOB book index (about 256 KiB). This leaves headroom while
+/// The largest current value is a CLOB fill-id index. This leaves headroom while
 /// keeping every untrusted state-sync allocation below the examples' 1 MiB network message cap.
 pub const MAX_STATE_VALUE_SIZE: usize = 512 * 1024;
 
@@ -296,28 +296,38 @@ impl<E: Context + Spawner> StateStore for QmdbState<E> {
 
 impl<E: Context + Spawner> CommitState for QmdbState<E> {
     async fn commit(&mut self) -> Result<Digest, StateError> {
+        // Reject oversized values before taking the database. `take` leaves `self.db` empty, so a
+        // later `?` would drop the only handle and the next read would panic.
+        validate_state_values(self.overlay.values())?;
         let mut db = self.db.take().expect("state db");
         if !self.overlay.is_empty() {
-            validate_state_values(self.overlay.values())?;
             // Stage the write-set keys so merkleize reuses locations resolved at read time
             // instead of re-probing the index for each mutation.
             let overlay = std::mem::take(&mut self.overlay);
             let keys: Vec<Digest> = overlay.keys().copied().collect();
             let key_refs: Vec<&Digest> = keys.iter().collect();
-            let (_values, staged) = db
-                .new_batch()
-                .stage(&key_refs, &db)
-                .await
-                .map_err(backend_err)?;
+            let staged = match db.new_batch().stage(&key_refs, &db).await {
+                Ok(staged) => staged,
+                Err(err) => {
+                    self.overlay = overlay;
+                    self.db = Some(db);
+                    return Err(backend_err(err));
+                }
+            };
+            let (_values, staged) = staged;
             let updates: Vec<(usize, Option<Vec<u8>>)> = keys
                 .iter()
                 .enumerate()
                 .map(|(i, key)| (i, overlay[key].clone()))
                 .collect();
-            let merkleized = staged
-                .merkleize(updates, Vec::new(), None, &db)
-                .await
-                .map_err(backend_err)?;
+            let merkleized = match staged.merkleize(updates, Vec::new(), None, &db).await {
+                Ok(merkleized) => merkleized,
+                Err(err) => {
+                    self.overlay = overlay;
+                    self.db = Some(db);
+                    return Err(backend_err(err));
+                }
+            };
             db = db.apply_batch(merkleized).await.map_err(backend_err)?.0;
         }
         db = db.commit().await.map_err(backend_err)?;
@@ -506,11 +516,13 @@ impl<E: Context> QmdbBatch<E> {
     where
         E: Spawner,
     {
+        // Validate before taking `inner`. On failure `self` is dropped with the database still
+        // attached, so the caller's batch guard can abort without losing the handle.
+        validate_state_values(self.pending.values())?;
         let batch = self.inner.take().expect("QMDB batch already consumed");
         if self.pending.is_empty() {
             return batch.merkleize().await.map_err(backend_err);
         }
-        validate_state_values(self.pending.values())?;
         let pending = std::mem::take(&mut self.pending);
         let keys: Vec<Digest> = pending.keys().copied().collect();
         let key_refs: Vec<&Digest> = keys.iter().collect();

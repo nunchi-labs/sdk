@@ -185,5 +185,10 @@ fn state_commit_rejects_oversized_values() {
                 max: MAX_STATE_VALUE_SIZE,
             }) if size == MAX_STATE_VALUE_SIZE + 1
         ));
+
+        // The rejected write must not drop the database handle.
+        state.set(key, b"ok".to_vec());
+        state.commit().await.expect("commit after rejected value");
+        assert_eq!(state.get(&key).await.expect("get").expect("value"), b"ok");
     });
 }
