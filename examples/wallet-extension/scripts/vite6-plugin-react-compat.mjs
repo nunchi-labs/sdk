@@ -4,18 +4,22 @@
 // Point the missing subpath at a no-op wrapper so the plugin can load.
 // Production JSX still goes through Vite 6's esbuild.
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const vitePkgPath = join(root, "node_modules/vite/package.json");
 
-if (!existsSync(vitePkgPath)) {
-  process.exit(0);
+let raw;
+try {
+  raw = readFileSync(vitePkgPath, "utf8");
+} catch (error) {
+  if (error && error.code === "ENOENT") process.exit(0);
+  throw error;
 }
 
-const pkg = JSON.parse(readFileSync(vitePkgPath, "utf8"));
+const pkg = JSON.parse(raw);
 const version = String(pkg.version ?? "");
 if (!version.startsWith("6.") || pkg.exports?.["./internal"]) {
   process.exit(0);
