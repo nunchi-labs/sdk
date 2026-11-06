@@ -9,7 +9,7 @@
  * generated geometric mark on a coloured disc. The same fallback covers an
  * image that fails to decode, so a row is never left blank.
  */
-import { useState } from "react";
+import { useState, type JSX } from "react";
 import { tokenByCoinId, type Token } from "./tokens";
 
 const GLYPHS: Record<Token["glyph"], JSX.Element> = {
