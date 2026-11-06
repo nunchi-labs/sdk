@@ -24,11 +24,11 @@ fn addr(seed: u64) -> Address {
 }
 
 fn source_chain() -> ChainId {
-    ChainId(Sha256::hash(b"source-chain"))
+    ChainId(Sha256::hash(&[b"source-chain"]))
 }
 
 fn dest_chain() -> ChainId {
-    ChainId(Sha256::hash(b"dest-chain"))
+    ChainId(Sha256::hash(&[b"dest-chain"]))
 }
 
 fn spec(symbol: &str, name: &str, supply: u128) -> CoinSpec {
@@ -50,7 +50,7 @@ fn bridge_claim_verifies_proof_and_mints_mapped_asset() {
         let mut source = QmdbState::init(context.child("src"), "claim-src")
             .await
             .unwrap();
-        let src_local_asset = Sha256::hash(b"src-coin");
+        let src_local_asset = Sha256::hash(&[b"src-coin"]);
         let record = BridgeTransferRecord {
             source_chain_id: source_chain(),
             destination_chain_id: dest_chain(),
@@ -163,7 +163,7 @@ fn bridge_claim_rejects_unmapped_asset_without_minting() {
         let record = BridgeTransferRecord {
             source_chain_id: source_chain(),
             destination_chain_id: dest_chain(),
-            source_asset: AssetId::derive(&source_chain(), &Sha256::hash(b"coin")),
+            source_asset: AssetId::derive(&source_chain(), &Sha256::hash(&[b"coin"])),
             amount: 400,
             sender: addr(9),
             recipient: recipient.clone(),
@@ -248,7 +248,7 @@ fn bridge_claim_settlement_failure_leaves_no_event_or_consumption() {
         let record = BridgeTransferRecord {
             source_chain_id: source_chain(),
             destination_chain_id: dest_chain(),
-            source_asset: AssetId::derive(&source_chain(), &Sha256::hash(b"coin")),
+            source_asset: AssetId::derive(&source_chain(), &Sha256::hash(&[b"coin"])),
             amount: 400,
             sender: addr(9),
             recipient,

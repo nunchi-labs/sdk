@@ -82,7 +82,7 @@ impl ChainGenesis {
     }
 
     pub fn fingerprint(&self) -> Result<Digest, GenesisError> {
-        Ok(Sha256::hash(&serde_json::to_vec(self)?))
+        Ok(Sha256::hash(&[serde_json::to_vec(self)?.as_slice()]))
     }
 
     pub async fn apply_to_state<S>(
@@ -139,7 +139,7 @@ pub async fn genesis_target<E>(
     empty: &StateCommitment,
 ) -> Result<StateCommitment, GenesisError>
 where
-    E: Context + commonware_runtime::BufferPooler,
+    E: Context + commonware_runtime::BufferPooler + commonware_runtime::Spawner,
 {
     let mut state = QmdbState::init_with_config(context, config).await?;
     genesis.apply_to_state(&mut state, empty).await?;
@@ -157,7 +157,7 @@ pub async fn authenticated_genesis_target<E>(
     empty: &StateCommitment,
 ) -> Result<StateCommitment, GenesisError>
 where
-    E: Context + commonware_runtime::BufferPooler,
+    E: Context + commonware_runtime::BufferPooler + commonware_runtime::Spawner,
 {
     let mut state = QmdbState::init_with_config(context, config).await?;
     dkg.seed(&mut state, empty.root, initial_output).await?;

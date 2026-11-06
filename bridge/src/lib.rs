@@ -44,6 +44,7 @@ use futures::{
     SinkExt, StreamExt,
 };
 use nunchi_chain::{Block, BlockExtension, ConsensusExtension, Finalized, Notarized};
+use nunchi_common::RuntimeContext;
 use nunchi_dkg::{Finalization, Scheme};
 use rand::{CryptoRng, Rng};
 use tracing::warn;
@@ -264,7 +265,7 @@ impl BlockExtension for BridgeExtension {
 }
 
 impl ConsensusExtension for BridgeExtension {
-    async fn propose(&mut self) -> Self::Payload {
+    async fn propose(&mut self, _context: RuntimeContext) -> Self::Payload {
         self.mailbox.latest().await
     }
 

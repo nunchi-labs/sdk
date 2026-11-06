@@ -1,7 +1,6 @@
 //! JSON-RPC for the bridge-chain example.
 
 use commonware_consensus::{marshal::Identifier, types::Height, Viewable};
-use commonware_cryptography::sha256::Digest;
 use jsonrpsee::{
     core::{RegisterMethodError, RpcResult},
     RpcModule,
@@ -104,7 +103,7 @@ where
         let latest_local_height = context
             .node
             .marshal
-            .get_info(Identifier::<Digest>::Latest)
+            .get_info(Identifier::Latest)
             .await
             .map(|(height, _)| height.get());
         let latest_foreign_view = context.node.bridge.latest().await.map(|f| f.view().get());
@@ -126,7 +125,7 @@ where
         let Some((height, _)) = context
             .node
             .marshal
-            .get_info(Identifier::<Digest>::Latest)
+            .get_info(Identifier::Latest)
             .await
         else {
             return RpcResult::Ok(None::<String>);

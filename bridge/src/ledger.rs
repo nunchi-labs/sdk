@@ -119,12 +119,9 @@ impl<S: StateStore> BridgeLedger<S> {
         Events: EventSink + Send,
     {
         tx.verify()?;
-        // Only single-key authorization is supported. `tx.verify()` binds the signature(s) to
-        // `account_id`, but for multisig it does not bind `account_id` to the policy, so trusting a
-        // transaction-supplied policy would let a forged policy authorize spending from an arbitrary
-        // account. Safely resolving a multisig account's registered policy is a coins concern; until
-        // the bridge does that cross-module lookup, multisig authorization is rejected outright
-        // rather than accepted unsoundly.
+        // Bridge locks currently accept only external accounts. Multisig verification binds the
+        // account id to the policy that derives it, but this module does not yet spend
+        // policy-derived accounts.
         if !matches!(tx.authorization, Authorization::Single { .. }) {
             return Err(BridgeError::UnsupportedAuthorization);
         }

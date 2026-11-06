@@ -5,7 +5,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends mold \
     && rm -rf /var/lib/apt/lists/*
 COPY . .
-RUN cargo build --release \
+RUN cargo build --locked --release \
     -p nunchi-coins-chain --bin coins-chain-node \
     -p nunchi-coins-chain --bin coins-chain-tool \
     -p nunchi-coins-indexer --bin coins-chain-indexer \
@@ -61,3 +61,7 @@ COPY --from=builder /workspace/target/release/coins-chain-tool /usr/local/bin/co
 
 WORKDIR /workspace
 ENTRYPOINT ["/usr/local/bin/xtask"]
+
+# Default `docker build` output is the node. The indexer and tools images stay
+# available as `--target indexer` and `--target tools`.
+FROM runtime

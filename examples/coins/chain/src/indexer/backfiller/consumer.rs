@@ -61,7 +61,7 @@ pub struct Consumer<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Cl
     writer: queue::Writer<E, Entry>,
     reader: queue::Reader<E, Entry>,
     admission: AdmissionReceiver,
-    active: Pool<Completion>,
+    active: Pool<'static, Completion>,
     max_active: NonZeroUsize,
     retry: Duration,
     spool_limits: SpoolLimits,
@@ -199,7 +199,9 @@ impl<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> Consumer<
             });
             self.metrics
                 .queue_synced(QueueStatus::Success, sync_started.elapsed());
-            self.reader.reset().await;
+            self.reader.reset().await.unwrap_or_else(|error| {
+                panic!("failed to reset indexer spool reader: {error:?}")
+            });
             let expired = self.uploads.lock().expire_through(position);
             for (_, _, _) in &expired {
                 self.metrics.producer_recorded(status, Duration::ZERO);
@@ -400,6 +402,18 @@ impl<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> Consumer<
                         }
                         Err(e) => {
                             upload_results.inc(status::Status::Failure);
+                            if !C::is_retryable(&e) {
+                                warn!(
+                                    ?e,
+                                    ?digest,
+                                    "terminal indexer upload failure; dropping finalized payload"
+                                );
+                                return Completion::Skipped {
+                                    position,
+                                    height,
+                                    digest,
+                                };
+                            }
                             warn!(?e, ?digest, "retrying finalized block upload by digest");
                             Self::wait(&context, &metrics, BackfillWaitReason::HttpError, retry)
                                 .await;
@@ -457,7 +471,7 @@ impl<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> Consumer<
         };
         self.uploads.lock().finish_queued(&digest);
 
-        let floor = self.reader.ack_floor().await;
+        let floor = self.reader.ack_floor().await.expect("ack floor");
         match self.reader.ack(position).await {
             Ok(()) => self.metrics.queue_acked(QueueStatus::Success),
             Err(err) => {
@@ -465,7 +479,7 @@ impl<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> Consumer<
                 panic!("failed to ack: {err:?}");
             }
         }
-        let floor_advanced = self.reader.ack_floor().await > floor;
+        let floor_advanced = self.reader.ack_floor().await.expect("ack floor") > floor;
         let sync_started = Instant::now();
         match self.writer.sync().await {
             Ok(()) => self

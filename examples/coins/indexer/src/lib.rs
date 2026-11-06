@@ -1,12 +1,12 @@
 //! In-memory indexer for coins-chain consensus artifacts.
 //!
-//! The API mirrors Alto's binary indexer shape so configured nodes can upload
+//! The API mirrors Constantinople's binary indexer shape so configured nodes can upload
 //! encoded consensus artifacts and browsers or tooling can fetch the same
 //! encoded bytes for local verification.
 
 use axum::{
     body::Bytes,
-    extract::{ws::WebSocketUpgrade, Path, State as AxumState},
+    extract::{ws::WebSocketUpgrade, DefaultBodyLimit, Path, State as AxumState},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -50,8 +50,16 @@ use tower_http::{
 use tracing::warn;
 
 pub const LATEST: &str = "latest";
+/// Largest consensus upload accepted by the indexer HTTP routes.
+///
+/// This matches the coins-chain spool `max_payload_bytes`. Axum's default
+/// `Bytes` limit is 2 MiB, which rejects artifacts the node is allowed to send.
+pub const MAX_UPLOAD_BODY_BYTES: usize = 16 * 1024 * 1024;
 const DKG_OUTPUT_STATE_FILE: &str = "dkg-output.latest";
 const UPLOAD_PENDING: &str = "upload pending";
+const CONFLICT_SEED: &str = "conflicting seed";
+const CONFLICT_NOTARIZATION: &str = "conflicting notarization";
+const CONFLICT_FINALIZATION: &str = "conflicting finalization";
 
 type BlockCfg = (NonZeroU32, ());
 type DkgOutputCfg = (NonZeroU32, ModeVersion);
@@ -217,8 +225,8 @@ impl Indexer {
         let view = seed.view();
         let scheme = {
             let mut store = self.store.write().unwrap();
-            if store.seeds.contains_key(&round) {
-                return Ok(());
+            if let Some(outcome) = stored_outcome(store.seeds.get(&round), &seed, CONFLICT_SEED) {
+                return outcome;
             }
             if !store.seed_uploads.insert(round) {
                 return Err(UPLOAD_PENDING);
@@ -232,9 +240,10 @@ impl Indexer {
 
         let mut store = self.store.write().unwrap();
         store.seed_uploads.remove(&round);
-        if store.seeds.insert(round, seed.clone()).is_some() {
-            return Ok(());
+        if let Some(outcome) = stored_outcome(store.seeds.get(&round), &seed, CONFLICT_SEED) {
+            return outcome;
         }
+        store.seeds.insert(round, seed.clone());
 
         let mut data = vec![0u8; u8::SIZE + seed.encode_size()];
         data[0] = Kind::Seed as u8;
@@ -275,8 +284,12 @@ impl Indexer {
         let key = ArtifactKey { epoch, view };
         let scheme = {
             let mut store = self.store.write().unwrap();
-            if store.notarizations.contains_key(&key) {
-                return Ok(());
+            if let Some(outcome) = stored_outcome(
+                store.notarizations.get(&key),
+                &notarized,
+                CONFLICT_NOTARIZATION,
+            ) {
+                return outcome;
             }
             if !store.notarization_uploads.insert(key) {
                 return Err(UPLOAD_PENDING);
@@ -294,13 +307,17 @@ impl Indexer {
 
         let mut store = self.store.write().unwrap();
         store.notarization_uploads.remove(&key);
+        if let Some(outcome) = stored_outcome(
+            store.notarizations.get(&key),
+            &notarized,
+            CONFLICT_NOTARIZATION,
+        ) {
+            return outcome;
+        }
         store
             .blocks_by_digest
             .insert(notarized.block.digest(), notarized.block.clone());
-
-        if store.notarizations.insert(key, notarized.clone()).is_some() {
-            return Ok(());
-        }
+        store.notarizations.insert(key, notarized.clone());
 
         let mut data = vec![0u8; u8::SIZE + notarized.encode_size()];
         data[0] = Kind::Notarization as u8;
@@ -338,8 +355,12 @@ impl Indexer {
         let key = ArtifactKey { epoch, view };
         let scheme = {
             let mut store = self.store.write().unwrap();
-            if store.finalizations.contains_key(&key) {
-                return Ok(());
+            if let Some(outcome) = stored_outcome(
+                store.finalizations.get(&key),
+                &finalized,
+                CONFLICT_FINALIZATION,
+            ) {
+                return outcome;
             }
             if !store.finalization_uploads.insert(key) {
                 return Err(UPLOAD_PENDING);
@@ -357,13 +378,17 @@ impl Indexer {
 
         let mut store = self.store.write().unwrap();
         store.finalization_uploads.remove(&key);
+        if let Some(outcome) = stored_outcome(
+            store.finalizations.get(&key),
+            &finalized,
+            CONFLICT_FINALIZATION,
+        ) {
+            return outcome;
+        }
         store
             .blocks_by_digest
             .insert(finalized.block.digest(), finalized.block.clone());
-
-        if store.finalizations.insert(key, finalized.clone()).is_some() {
-            return Ok(());
-        }
+        store.finalizations.insert(key, finalized.clone());
         store
             .finalized_height_to_key
             .insert(finalized.block.header.height.get(), key);
@@ -521,6 +546,7 @@ impl Api {
             .route("/consensus/ws", get(consensus_ws))
             .route("/consensus/summary/latest", get(consensus_summary_latest))
             .route("/consensus/summary/ws", get(consensus_summary_ws))
+            .layer(DefaultBodyLimit::max(MAX_UPLOAD_BODY_BYTES))
             .layer(CorsLayer::permissive())
             .with_state(self.indexer)
     }
@@ -619,10 +645,25 @@ async fn dkg_output_upload(
     }
 }
 
+fn stored_outcome<T: Encode>(
+    existing: Option<&T>,
+    incoming: &T,
+    conflict: &'static str,
+) -> Option<Result<(), &'static str>> {
+    existing.map(|existing| {
+        if existing.encode().as_ref() == incoming.encode().as_ref() {
+            Ok(())
+        } else {
+            Err(conflict)
+        }
+    })
+}
+
 fn upload_status(result: Result<(), &'static str>) -> StatusCode {
     match result {
         Ok(()) => StatusCode::OK,
         Err(UPLOAD_PENDING) => StatusCode::SERVICE_UNAVAILABLE,
+        Err(CONFLICT_SEED | CONFLICT_NOTARIZATION | CONFLICT_FINALIZATION) => StatusCode::CONFLICT,
         Err(_) => StatusCode::UNAUTHORIZED,
     }
 }
@@ -651,47 +692,96 @@ async fn consensus_summary_latest(
 }
 
 async fn handle_consensus_ws(socket: axum::extract::ws::WebSocket, indexer: Arc<Indexer>) {
-    let (mut sender, _receiver) = socket.split();
+    let (mut sender, mut receiver) = socket.split();
     let mut consensus = indexer.consensus_subscriber();
 
     loop {
-        match consensus.recv().await {
-            Ok(data) => {
-                if sender
-                    .send(axum::extract::ws::Message::Binary(data.into()))
-                    .await
-                    .is_err()
-                {
+        tokio::select! {
+            incoming = receiver.next() => {
+                if !forward_socket_control(&mut sender, incoming).await {
                     break;
                 }
             }
-            Err(RecvError::Lagged(_)) => continue,
-            Err(RecvError::Closed) => break,
+            message = consensus.recv() => {
+                match message {
+                    Ok(data) => {
+                        if sender
+                            .send(axum::extract::ws::Message::Binary(data.into()))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    // A lagged broadcast skipped artifacts. Close so the client
+                    // reconnects instead of treating the stream as gapless.
+                    Err(RecvError::Lagged(skipped)) => {
+                        warn!(skipped, "consensus websocket lagged");
+                        let _ = sender
+                            .send(axum::extract::ws::Message::Close(None))
+                            .await;
+                        break;
+                    }
+                    Err(RecvError::Closed) => break,
+                }
+            }
         }
     }
 }
 
 async fn handle_consensus_summary_ws(socket: axum::extract::ws::WebSocket, indexer: Arc<Indexer>) {
-    let (mut sender, _receiver) = socket.split();
+    let (mut sender, mut receiver) = socket.split();
     let mut consensus = indexer.summary_subscriber();
 
     loop {
-        match consensus.recv().await {
-            Ok(event) => {
-                let Ok(data) = serde_json::to_string(&event) else {
-                    continue;
-                };
-                if sender
-                    .send(axum::extract::ws::Message::Text(data.into()))
-                    .await
-                    .is_err()
-                {
+        tokio::select! {
+            incoming = receiver.next() => {
+                if !forward_socket_control(&mut sender, incoming).await {
                     break;
                 }
             }
-            Err(RecvError::Lagged(_)) => continue,
-            Err(RecvError::Closed) => break,
+            message = consensus.recv() => {
+                match message {
+                    Ok(event) => {
+                        let Ok(data) = serde_json::to_string(&event) else {
+                            continue;
+                        };
+                        if sender
+                            .send(axum::extract::ws::Message::Text(data.into()))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(RecvError::Lagged(skipped)) => {
+                        warn!(skipped, "consensus summary websocket lagged");
+                        let _ = sender
+                            .send(axum::extract::ws::Message::Close(None))
+                            .await;
+                        break;
+                    }
+                    Err(RecvError::Closed) => break,
+                }
+            }
         }
+    }
+}
+
+async fn forward_socket_control<S>(
+    sender: &mut S,
+    incoming: Option<Result<axum::extract::ws::Message, axum::Error>>,
+) -> bool
+where
+    S: futures::Sink<axum::extract::ws::Message, Error = axum::Error> + Unpin,
+{
+    match incoming {
+        Some(Ok(axum::extract::ws::Message::Ping(payload))) => sender
+            .send(axum::extract::ws::Message::Pong(payload))
+            .await
+            .is_ok(),
+        Some(Ok(axum::extract::ws::Message::Close(_))) | None | Some(Err(_)) => false,
+        Some(Ok(_)) => true,
     }
 }
 
@@ -751,6 +841,9 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_consensus::marshal::coding::types::{
+        coding_config_for_participants, CodedBlock,
+    };
     use commonware_consensus::simplex::{
         scheme::bls12381_threshold::vrf as bls12381_threshold,
         types::{
@@ -760,12 +853,17 @@ mod tests {
     };
     use commonware_consensus::types::Height;
     use commonware_cryptography::{
-        bls12381::dkg::feldman_desmedt::deal, certificate::mocks::Fixture, ed25519, sha256::Sha256,
-        Digest as _, Hasher, Signer,
+        bls12381::{dkg::feldman_desmedt::deal, primitives::sharing::Mode},
+        certificate::mocks::Fixture,
+        ed25519,
+        sha256::Sha256,
+        Committable, Hasher, Signer,
     };
     use commonware_storage::mmr::Location;
-    use commonware_utils::{ordered::Set, range::NonEmptyRange, test_rng, N3f1, TestRng, NZU32};
-    use nunchi_coins_chain::{Context, Seedable, StateCommitment};
+    use commonware_utils::{
+        non_empty, ordered::Set, range::NonEmptyRange, test_rng, N3f1, TestRng, NZU32,
+    };
+    use nunchi_coins_chain::{dummy_genesis_parent, Context, Seedable, StateCommitment};
 
     fn schemes() -> Vec<Scheme> {
         let mut rng = test_rng();
@@ -777,14 +875,22 @@ mod tests {
 
     fn seed(schemes: &[Scheme], epoch: u64, view: u64) -> Seed {
         let round = Round::new(Epoch::new(epoch), View::new(view));
-        let proposal = Proposal::new(round, View::zero(), Sha256::hash(&round.encode()));
+        let proposal = Proposal::new(
+            round,
+            View::zero(),
+            Sha256::hash(&[round.encode().as_ref()]),
+        );
         let notarizes = schemes
             .iter()
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).expect("sign notarize"))
             .collect::<Vec<_>>();
-        ConsensusNotarization::from_notarizes(&schemes[0], &notarizes, &Sequential)
-            .expect("build notarization")
-            .seed()
+        ConsensusNotarization::from_notarizes(
+            &schemes[0],
+            non_empty![@notarizes.iter()],
+            &Sequential,
+        )
+        .expect("build notarization")
+        .seed()
     }
 
     fn output(seed: u64) -> DkgOutput {
@@ -792,7 +898,7 @@ mod tests {
             (0..4).map(|offset| ed25519::PrivateKey::from_seed(seed + offset).public_key()),
         );
         let mut rng = TestRng::new(seed);
-        deal::<MinSig, _, N3f1>(&mut rng, Default::default(), players)
+        deal::<MinSig, _, N3f1>(&mut rng, Mode::NonZeroCounter, players)
             .expect("deal")
             .0
     }
@@ -803,27 +909,37 @@ mod tests {
             Context {
                 round,
                 leader: ed25519::PrivateKey::from_seed(100).public_key(),
-                parent: (View::zero(), Digest::EMPTY),
+                parent: (View::zero(), dummy_genesis_parent()),
             },
-            Sha256::hash(b"parent"),
+            Sha256::hash(&[b"parent"]),
             Height::new(height),
             1_000,
             Vec::new(),
             None,
             Default::default(),
             StateCommitment {
-                root: Sha256::hash(b"state"),
+                root: Sha256::hash(&[b"state"]),
                 range: NonEmptyRange::new(Location::new(1)..Location::new(2)).unwrap(),
             },
         );
-        let proposal = Proposal::new(round, View::zero(), block.digest());
+        let commitment = CodedBlock::new(
+            block.clone(),
+            coding_config_for_participants(4),
+            &Sequential,
+        )
+        .commitment();
+        let proposal = Proposal::new(round, View::zero(), commitment);
         let finalizes = schemes
             .iter()
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("sign finalize"))
             .collect::<Vec<_>>();
         Finalized::new(
-            ConsensusFinalization::from_finalizes(&schemes[0], &finalizes, &Sequential)
-                .expect("build finalization"),
+            ConsensusFinalization::from_finalizes(
+                &schemes[0],
+                non_empty![@finalizes.iter()],
+                &Sequential,
+            )
+            .expect("build finalization"),
             block,
         )
     }
@@ -919,5 +1035,64 @@ mod tests {
 
         assert_eq!(result, Err(UPLOAD_PENDING));
         assert_eq!(upload_status(result), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn identical_finalization_is_idempotent_and_a_different_one_conflicts() {
+        let schemes = schemes();
+        let indexer = Indexer::new(*schemes[0].identity(), NZU32!(4));
+        let first = finalized(&schemes, 0, 1, 1);
+        let again = finalized(&schemes, 0, 1, 1);
+        let mut other = first.clone();
+        other.block.0.header.timestamp += 1;
+        assert_ne!(first.encode().as_ref(), other.encode().as_ref());
+
+        indexer.submit_finalization(first).unwrap();
+        assert_eq!(indexer.submit_finalization(again), Ok(()));
+        assert_eq!(
+            indexer.submit_finalization(other),
+            Err(CONFLICT_FINALIZATION)
+        );
+        assert_eq!(
+            upload_status(Err(CONFLICT_FINALIZATION)),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(indexer.store.read().unwrap().finalizations.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn summary_websocket_delivers_events_and_completes_client_close() {
+        use futures::StreamExt;
+
+        let schemes = schemes();
+        let indexer = Arc::new(Indexer::new(*schemes[0].identity(), NZU32!(4)));
+        let app = Api::new(Arc::clone(&indexer)).router();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let (mut socket, _) =
+            tokio_tungstenite::connect_async(format!("ws://{address}/consensus/summary/ws"))
+                .await
+                .expect("connect summary websocket");
+
+        indexer.submit_seed(seed(&schemes, 0, 1)).unwrap();
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(2), socket.next())
+            .await
+            .expect("timed out waiting for a summary event")
+            .expect("websocket closed before a summary event")
+            .expect("summary frame");
+        let text = frame.to_text().expect("text summary");
+        assert!(text.contains("\"kind\":\"seed\""), "{text}");
+
+        let closed =
+            tokio::time::timeout(std::time::Duration::from_secs(2), socket.close(None)).await;
+        assert!(
+            closed.is_ok(),
+            "server did not finish the websocket close handshake"
+        );
+        server.abort();
     }
 }

@@ -29,11 +29,11 @@ fn addr(key: &PrivateKey) -> Address {
 }
 
 fn source_chain() -> ChainId {
-    ChainId(Sha256::hash(b"source-chain"))
+    ChainId(Sha256::hash(&[b"source-chain"]))
 }
 
 fn dest_chain() -> ChainId {
-    ChainId(Sha256::hash(b"dest-chain"))
+    ChainId(Sha256::hash(&[b"dest-chain"]))
 }
 
 fn sample_record(recipient: Address) -> BridgeTransferRecord {
@@ -41,7 +41,7 @@ fn sample_record(recipient: Address) -> BridgeTransferRecord {
     BridgeTransferRecord {
         source_chain_id: source,
         destination_chain_id: dest_chain(),
-        source_asset: AssetId::derive(&source, &Sha256::hash(b"coin")),
+        source_asset: AssetId::derive(&source, &Sha256::hash(&[b"coin"])),
         amount: 1_000,
         sender: addr(&signer(9)),
         recipient,
@@ -132,7 +132,7 @@ fn lock_produces_a_claimable_record_proof() {
 
         let alice = signer(1);
         let recipient = addr(&signer(2));
-        let local_asset = Sha256::hash(b"coin");
+        let local_asset = Sha256::hash(&[b"coin"]);
         let mut ledger = BridgeLedger::new(source);
         let lock = Transaction::sign(
             &alice,
@@ -307,7 +307,7 @@ fn claim_rejects_wrong_destination() {
         let recipient = addr(&signer(2));
         // Record destined for a different chain than this ledger's local chain.
         let mut record = sample_record(recipient);
-        record.destination_chain_id = ChainId(Sha256::hash(b"other-dest"));
+        record.destination_chain_id = ChainId(Sha256::hash(&[b"other-dest"]));
         let (root, proof) = source_root_and_proof(&context, &record).await;
 
         let attestor = signer(1);
@@ -369,7 +369,7 @@ fn anchor_rejects_non_attestor() {
         let impostor = signer(4);
         let err = ledger
             .apply_transaction(
-                &anchor_tx(&impostor, 0, source_chain(), 7, Sha256::hash(b"root")),
+                &anchor_tx(&impostor, 0, source_chain(), 7, Sha256::hash(&[b"root"])),
                 NoopEventSink,
             )
             .await
@@ -386,7 +386,7 @@ fn anchor_rejects_stale_view() {
 
         ledger
             .apply_transaction(
-                &anchor_tx(&attestor, 0, source_chain(), 7, Sha256::hash(b"root-7")),
+                &anchor_tx(&attestor, 0, source_chain(), 7, Sha256::hash(&[b"root-7"])),
                 NoopEventSink,
             )
             .await
@@ -395,7 +395,7 @@ fn anchor_rejects_stale_view() {
         // Re-anchoring the same view is stale.
         let err = ledger
             .apply_transaction(
-                &anchor_tx(&attestor, 1, source_chain(), 7, Sha256::hash(b"root-7b")),
+                &anchor_tx(&attestor, 1, source_chain(), 7, Sha256::hash(&[b"root-7b"])),
                 NoopEventSink,
             )
             .await
@@ -415,12 +415,12 @@ fn anchor_is_monotonic_per_source_chain() {
     deterministic::Runner::default().start(|context| async move {
         let attestor = signer(1);
         let mut ledger = dest_ledger(&context, &addr(&attestor)).await;
-        let other_source = ChainId(Sha256::hash(b"other-source"));
+        let other_source = ChainId(Sha256::hash(&[b"other-source"]));
 
         // Anchor chain A at a high view.
         ledger
             .apply_transaction(
-                &anchor_tx(&attestor, 0, source_chain(), 100, Sha256::hash(b"a-100")),
+                &anchor_tx(&attestor, 0, source_chain(), 100, Sha256::hash(&[b"a-100"])),
                 NoopEventSink,
             )
             .await
@@ -429,7 +429,7 @@ fn anchor_is_monotonic_per_source_chain() {
         // A different source chain is unaffected: it can anchor at a low view.
         let anchored = ledger
             .apply_transaction(
-                &anchor_tx(&attestor, 1, other_source, 1, Sha256::hash(b"b-1")),
+                &anchor_tx(&attestor, 1, other_source, 1, Sha256::hash(&[b"b-1"])),
                 NoopEventSink,
             )
             .await
@@ -457,7 +457,7 @@ fn anchor_rejects_when_attestor_not_configured() {
         let attestor = signer(1);
         let err = ledger
             .apply_transaction(
-                &anchor_tx(&attestor, 0, source_chain(), 7, Sha256::hash(b"root")),
+                &anchor_tx(&attestor, 0, source_chain(), 7, Sha256::hash(&[b"root"])),
                 NoopEventSink,
             )
             .await
@@ -481,7 +481,7 @@ fn claim_rejects_source_chain_mismatch() {
             .expect("anchor");
 
         // The claim declares a different source chain than the record carries.
-        let other_source = ChainId(Sha256::hash(b"other-source"));
+        let other_source = ChainId(Sha256::hash(&[b"other-source"]));
         let claimer = signer(3);
         let err = ledger
             .apply_transaction(
@@ -500,7 +500,7 @@ fn anchor_emits_foreign_root_anchored_event() {
         let attestor = signer(1);
         let mut ledger = dest_ledger(&context, &addr(&attestor)).await;
 
-        let root = Sha256::hash(b"anchored-root");
+        let root = Sha256::hash(&[b"anchored-root"]);
         let mut sink = VecEventSink::new();
         ledger
             .apply_transaction(&anchor_tx(&attestor, 0, source_chain(), 9, root), &mut sink)
@@ -522,7 +522,7 @@ fn anchor_and_claim_codec_round_trip() {
     let anchor = BridgeOperation::AnchorForeignRoot {
         source_chain_id: source_chain(),
         view: 42,
-        state_root: Sha256::hash(b"root"),
+        state_root: Sha256::hash(&[b"root"]),
     };
     assert_eq!(
         BridgeOperation::decode(anchor.encode().as_ref()).expect("decode anchor"),
@@ -565,7 +565,7 @@ fn operation_ids_round_trip_and_reject_unknown() {
     let anchor = BridgeOperation::AnchorForeignRoot {
         source_chain_id: source_chain(),
         view: 1,
-        state_root: Sha256::hash(b"root"),
+        state_root: Sha256::hash(&[b"root"]),
     };
     let encoded = anchor.encode();
     assert_eq!(encoded.len(), anchor.encode_size());
@@ -616,7 +616,7 @@ fn anchor_rejects_view_below_latest() {
         let mut ledger = dest_ledger(&context, &addr(&attestor)).await;
         ledger
             .apply_transaction(
-                &anchor_tx(&attestor, 0, source_chain(), 9, Sha256::hash(b"root-9")),
+                &anchor_tx(&attestor, 0, source_chain(), 9, Sha256::hash(&[b"root-9"])),
                 NoopEventSink,
             )
             .await
@@ -624,7 +624,7 @@ fn anchor_rejects_view_below_latest() {
 
         let err = ledger
             .apply_transaction(
-                &anchor_tx(&attestor, 1, source_chain(), 4, Sha256::hash(b"root-4")),
+                &anchor_tx(&attestor, 1, source_chain(), 4, Sha256::hash(&[b"root-4"])),
                 NoopEventSink,
             )
             .await
@@ -721,14 +721,14 @@ fn anchor_accepts_strictly_higher_view() {
         let mut ledger = dest_ledger(&context, &addr(&attestor)).await;
         ledger
             .apply_transaction(
-                &anchor_tx(&attestor, 0, source_chain(), 5, Sha256::hash(b"root-5")),
+                &anchor_tx(&attestor, 0, source_chain(), 5, Sha256::hash(&[b"root-5"])),
                 NoopEventSink,
             )
             .await
             .expect("anchor view 5");
         let receipt = ledger
             .apply_transaction(
-                &anchor_tx(&attestor, 1, source_chain(), 8, Sha256::hash(b"root-8")),
+                &anchor_tx(&attestor, 1, source_chain(), 8, Sha256::hash(&[b"root-8"])),
                 NoopEventSink,
             )
             .await
@@ -753,7 +753,7 @@ fn apply_rejects_nonce_overflow() {
         let mut ledger = BridgeLedger::new(dest);
         let err = ledger
             .apply_transaction(
-                &anchor_tx(&attestor, u64::MAX, source_chain(), 1, Sha256::hash(b"root")),
+                &anchor_tx(&attestor, u64::MAX, source_chain(), 1, Sha256::hash(&[b"root"])),
                 NoopEventSink,
             )
             .await
@@ -777,7 +777,7 @@ fn apply_surfaces_injected_storage_errors() {
         });
         let err = ledger
             .apply_transaction(
-                &anchor_tx(&attestor, 0, source_chain(), 1, Sha256::hash(b"root")),
+                &anchor_tx(&attestor, 0, source_chain(), 1, Sha256::hash(&[b"root"])),
                 NoopEventSink,
             )
             .await
@@ -790,7 +790,7 @@ fn apply_surfaces_injected_storage_errors() {
         });
         let err = ledger
             .apply_transaction(
-                &anchor_tx(&attestor, 0, source_chain(), 1, Sha256::hash(b"root")),
+                &anchor_tx(&attestor, 0, source_chain(), 1, Sha256::hash(&[b"root"])),
                 NoopEventSink,
             )
             .await

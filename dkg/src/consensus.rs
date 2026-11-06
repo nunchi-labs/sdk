@@ -17,7 +17,7 @@ use commonware_cryptography::{
 use commonware_utils::sync::Mutex;
 use std::{collections::HashMap, sync::Arc};
 
-pub type Context = CContext<Digest, PublicKey>;
+pub type Context<D = Digest> = CContext<D, PublicKey>;
 
 pub type ThresholdScheme<V> =
     simplex::scheme::bls12381_threshold::vrf::Scheme<ed25519::PublicKey, V>;
@@ -25,9 +25,9 @@ pub type EdScheme = simplex::scheme::ed25519::Scheme;
 pub type Scheme = ThresholdScheme<MinSig>;
 pub type Seed = simplex::scheme::bls12381_threshold::vrf::Seed<MinSig>;
 pub use simplex::scheme::bls12381_threshold::vrf::Seedable;
-pub type Notarization = CNotarization<Scheme, Digest>;
-pub type Finalization = CFinalization<Scheme, Digest>;
-pub type Activity = CActivity<Scheme, Digest>;
+pub type Notarization<D = Digest> = CNotarization<Scheme, D>;
+pub type Finalization<D = Digest> = CFinalization<Scheme, D>;
+pub type Activity<D = Digest> = CActivity<Scheme, D>;
 
 pub type PublicKey = ed25519::PublicKey;
 pub type Identity = <MinSig as Variant>::Public;

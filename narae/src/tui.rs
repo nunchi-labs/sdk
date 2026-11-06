@@ -129,13 +129,13 @@ impl App {
 
     fn shutdown_selected(&mut self) {
         if let Some(node) = self.nodes.get(self.selected) {
-            node.lock().unwrap().stop();
+            Node::stop_shared(node);
         }
     }
 
     fn shutdown_all(&mut self) {
         for node in &self.nodes {
-            node.lock().unwrap().stop();
+            Node::stop_shared(node);
         }
     }
 }

@@ -1,7 +1,7 @@
 //! Coins-chain node-facing handles and query adapter.
 
-use crate::{application::Application, Block, Scheme, Transaction};
-use commonware_consensus::marshal::{core::Mailbox as MarshalMailbox, standard::Standard};
+use crate::{application::Application, Scheme, Transaction};
+use commonware_consensus::marshal::core::Mailbox as MarshalMailbox;
 use commonware_cryptography::sha256::Digest;
 use commonware_glue::stateful::Mailbox as StatefulMailbox;
 use commonware_runtime::{Clock, Metrics, Spawner};
@@ -23,7 +23,7 @@ where
     pub submitter: MempoolHandle<Transaction>,
     pub clob: ClobMailbox,
     pub stateful: StatefulMailbox<E, Application>,
-    pub marshal: MarshalMailbox<Scheme, Standard<Block>>,
+    pub marshal: MarshalMailbox<Scheme, crate::EngineVariant>,
     pub applied_height: SharedAppliedHeight,
 }
 
@@ -35,7 +35,7 @@ where
         submitter: MempoolHandle<Transaction>,
         clob: ClobMailbox,
         stateful: StatefulMailbox<E, Application>,
-        marshal: MarshalMailbox<Scheme, Standard<Block>>,
+        marshal: MarshalMailbox<Scheme, crate::EngineVariant>,
         applied_height: SharedAppliedHeight,
     ) -> Self {
         Self {

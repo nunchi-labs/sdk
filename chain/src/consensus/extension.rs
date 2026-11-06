@@ -1,6 +1,7 @@
 use std::{fmt::Debug, future::Future};
 
-use commonware_codec::{EncodeSize, Read, Write};
+use bytes::{Buf, BufMut};
+use commonware_codec::{EncodeSize, Error as CodecError, Read, Write};
 use nunchi_common::{RuntimeContext, StateStore};
 
 /// Consensus-side payload carried by blocks but driven outside ordinary runtime transactions.
@@ -27,9 +28,39 @@ pub trait BlockExtension: 'static {
 /// Finalization/reporting is intentionally not part of this trait. Extensions that need finalized
 /// block notifications should wire that through the consensus/marshal reporter path that owns
 /// acknowledgements for those notifications.
-pub trait ConsensusExtension: BlockExtension + Clone + Send + 'static {
+pub trait ConsensusExtension: BlockExtension + Clone + Send + Sync + 'static {
+    /// Load extension state that proposals must match before [`Self::propose`].
+    ///
+    /// The default is a no-op. Extensions whose proposal state is rebuilt from
+    /// the parent chain state should override this so a restarted process does
+    /// not propose from an empty cache.
+    fn prepare<S>(&mut self, _state: &mut S) -> impl Future<Output = ()> + Send
+    where
+        S: StateStore + Send + Sync,
+    {
+        std::future::ready(())
+    }
+
+    /// Read state staged for the block being proposed.
+    ///
+    /// Called after in-block transactions are applied and before [`Self::propose`].
+    /// `prepare` has already loaded the parent state. The default is a no-op.
+    /// Overrides must not publish this view on any path that outlives the attempt.
+    fn preview<S>(&mut self, _state: &mut S) -> impl Future<Output = ()> + Send
+    where
+        S: StateStore + Send + Sync,
+    {
+        std::future::ready(())
+    }
+
     /// Produce the extension payload for the next proposal.
-    fn propose(&mut self) -> impl Future<Output = Self::Payload> + Send;
+    ///
+    /// `context` is the block being proposed. Payloads that record height or
+    /// time must use it so verification replays the same values.
+    fn propose(
+        &mut self,
+        context: RuntimeContext,
+    ) -> impl Future<Output = Self::Payload> + Send;
 
     /// Verify an extension payload included in a proposed block.
     fn verify_payload(&mut self, _payload: &Self::Payload) -> impl Future<Output = bool> + Send {
@@ -91,9 +122,25 @@ where
     A: ConsensusExtension,
     B: ConsensusExtension,
 {
-    async fn propose(&mut self) -> Self::Payload {
-        let left = self.0.propose().await;
-        let right = self.1.propose().await;
+    async fn prepare<S>(&mut self, state: &mut S)
+    where
+        S: StateStore + Send + Sync,
+    {
+        self.0.prepare(state).await;
+        self.1.prepare(state).await;
+    }
+
+    async fn preview<S>(&mut self, state: &mut S)
+    where
+        S: StateStore + Send + Sync,
+    {
+        self.0.preview(state).await;
+        self.1.preview(state).await;
+    }
+
+    async fn propose(&mut self, context: RuntimeContext) -> Self::Payload {
+        let left = self.0.propose(context).await;
+        let right = self.1.propose(context).await;
         (left, right)
     }
 
@@ -131,15 +178,39 @@ where
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoConsensusExtension;
 
+/// Zero-byte payload used when a block has no extra consensus extension.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct EmptyPayload;
+
+impl Write for EmptyPayload {
+    fn write(&self, _buf: &mut impl BufMut) {}
+}
+
+impl EncodeSize for EmptyPayload {
+    fn encode_size(&self) -> usize {
+        0
+    }
+}
+
+impl Read for EmptyPayload {
+    type Cfg = ();
+
+    fn read_cfg(_buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        Ok(Self)
+    }
+}
+
 impl BlockExtension for NoConsensusExtension {
-    type Payload = ();
+    type Payload = EmptyPayload;
     type ReadCfg = ();
 
-    fn genesis_payload() -> Self::Payload {}
+    fn genesis_payload() -> Self::Payload {
+        EmptyPayload
+    }
 }
 
 impl ConsensusExtension for NoConsensusExtension {
-    fn propose(&mut self) -> impl Future<Output = Self::Payload> + Send {
-        std::future::ready(())
+    fn propose(&mut self, _context: RuntimeContext) -> impl Future<Output = Self::Payload> + Send {
+        std::future::ready(EmptyPayload)
     }
 }

@@ -37,11 +37,11 @@ pub struct Address(Digest);
 
 impl Address {
     pub fn external(public_key: &PublicKey) -> Self {
-        let mut hasher = Sha256::new();
+        let mut hasher = Sha256::default();
         hasher.update(ADDRESS_DOMAIN);
         hasher.update(&[ADDRESS_EXTERNAL]);
         hasher.update(&public_key.encode());
-        Self(hasher.finalize())
+        Self(hasher.finalize().1)
     }
 
     pub fn to_bech32(&self) -> String {
@@ -270,6 +270,39 @@ fn parse_policy(
     MultisigPolicy::new(threshold, keys).map_err(|e| e.to_string())
 }
 
+pub fn register_account_policy_transaction(
+    private_key: &PrivateKey,
+    nonce: u64,
+    threshold: u16,
+    signer_pub_keys: &str,
+) -> Result<Transaction, String> {
+    if threshold != 1 {
+        return Err(
+            "a single wallet key can only register a threshold-1 policy; collect every required signature before submitting"
+                .to_string(),
+        );
+    }
+    let policy = parse_policy(threshold, signer_pub_keys, Some(&private_key.public_key()))?;
+    if !policy.contains(&private_key.public_key()) {
+        return Err("signing key is not a member of the policy".to_string());
+    }
+    let account_id = multisig_account_id(&policy);
+    let transaction = Transaction::sign_multisig(
+        account_id.clone(),
+        policy.clone(),
+        &[private_key],
+        nonce,
+        CoinOperation::RegisterAccountPolicy {
+            account_id: account_id.clone(),
+            policy,
+        },
+    );
+    transaction
+        .verify()
+        .map_err(|error| format!("registration transaction is not valid: {error}"))?;
+    Ok(transaction)
+}
+
 pub fn sign_transfer_internal(
     private_key: &PrivateKey,
     nonce: u64,
@@ -399,19 +432,10 @@ pub fn sign_register_account_policy(
     signer_pub_keys: &str,
 ) -> Result<JsValue, JsValue> {
     let private_key = parse_private_key(private_key_hex).map_err(|e| JsValue::from_str(&e))?;
-    let policy = parse_policy(threshold, signer_pub_keys, Some(&private_key.public_key()))
-        .map_err(|e| JsValue::from_str(&e))?;
-    let account_id = multisig_account_id(&policy);
-    let transaction = Transaction::sign_multisig(
-        account_id.clone(),
-        policy.clone(),
-        &[&private_key],
-        nonce,
-        CoinOperation::RegisterAccountPolicy {
-            account_id: account_id.clone(),
-            policy,
-        },
-    );
+    let transaction =
+        register_account_policy_transaction(&private_key, nonce, threshold, signer_pub_keys)
+            .map_err(|e| JsValue::from_str(&e))?;
+    let account_id = transaction.account_id.clone();
     to_js(SignedTransaction {
         transaction_hex: hex::encode(transaction.encode()),
         digest_hex: hex::encode(transaction.digest().as_ref()),

@@ -17,11 +17,11 @@ fn addr(seed: u64) -> Address {
 }
 
 fn record() -> BridgeTransferRecord {
-    let source_chain_id = ChainId(Sha256::hash(b"chain-a"));
+    let source_chain_id = ChainId(Sha256::hash(&[b"chain-a"]));
     BridgeTransferRecord {
         source_chain_id,
-        destination_chain_id: ChainId(Sha256::hash(b"chain-b")),
-        source_asset: AssetId::derive(&source_chain_id, &Sha256::hash(b"coin")),
+        destination_chain_id: ChainId(Sha256::hash(&[b"chain-b"])),
+        source_asset: AssetId::derive(&source_chain_id, &Sha256::hash(&[b"coin"])),
         amount: 1_000,
         sender: addr(1),
         recipient: addr(2),
@@ -38,9 +38,9 @@ fn transfer_record_codec_round_trips() {
 
 #[test]
 fn digest_newtypes_round_trip_through_codec() {
-    let chain = ChainId(Sha256::hash(b"chain-a"));
-    let asset = AssetId::derive(&chain, &Sha256::hash(b"coin"));
-    let record_id = TransferRecordId(Sha256::hash(b"record"));
+    let chain = ChainId(Sha256::hash(&[b"chain-a"]));
+    let asset = AssetId::derive(&chain, &Sha256::hash(&[b"coin"]));
+    let record_id = TransferRecordId(Sha256::hash(&[b"record"]));
 
     assert_eq!(ChainId::decode(chain.encode().as_ref()).unwrap(), chain);
     let decoded_asset = AssetId::decode(asset.encode().as_ref()).unwrap();
@@ -67,15 +67,15 @@ fn record_id_changes_with_every_field() {
 
     let mutations: Vec<BridgeTransferRecord> = vec![
         BridgeTransferRecord {
-            source_chain_id: ChainId(Sha256::hash(b"other")),
+            source_chain_id: ChainId(Sha256::hash(&[b"other"])),
             ..base.clone()
         },
         BridgeTransferRecord {
-            destination_chain_id: ChainId(Sha256::hash(b"other")),
+            destination_chain_id: ChainId(Sha256::hash(&[b"other"])),
             ..base.clone()
         },
         BridgeTransferRecord {
-            source_asset: AssetId::derive(&base.source_chain_id, &Sha256::hash(b"other")),
+            source_asset: AssetId::derive(&base.source_chain_id, &Sha256::hash(&[b"other"])),
             ..base.clone()
         },
         BridgeTransferRecord {
@@ -103,9 +103,9 @@ fn record_id_changes_with_every_field() {
 
 #[test]
 fn asset_id_is_chain_scoped() {
-    let coin = Sha256::hash(b"coin");
-    let chain_a = ChainId(Sha256::hash(b"chain-a"));
-    let chain_b = ChainId(Sha256::hash(b"chain-b"));
+    let coin = Sha256::hash(&[b"coin"]);
+    let chain_a = ChainId(Sha256::hash(&[b"chain-a"]));
+    let chain_b = ChainId(Sha256::hash(&[b"chain-b"]));
 
     // Deterministic for a given (chain, local asset).
     assert_eq!(
@@ -121,10 +121,10 @@ fn asset_id_is_chain_scoped() {
 
 #[test]
 fn keys_are_deterministic_and_scoped() {
-    let id = TransferRecordId(Sha256::hash(b"record"));
-    let other_id = TransferRecordId(Sha256::hash(b"other-record"));
-    let chain = ChainId(Sha256::hash(b"chain-a"));
-    let other_chain = ChainId(Sha256::hash(b"chain-b"));
+    let id = TransferRecordId(Sha256::hash(&[b"record"]));
+    let other_id = TransferRecordId(Sha256::hash(&[b"other-record"]));
+    let chain = ChainId(Sha256::hash(&[b"chain-a"]));
+    let other_chain = ChainId(Sha256::hash(&[b"chain-b"]));
 
     // Deterministic.
     assert_eq!(transfer_record_key(&id), transfer_record_key(&id));
@@ -164,7 +164,7 @@ fn record_persists_and_reads_back() {
             Some(record)
         );
         // An unknown id reads back as absent.
-        let unknown = TransferRecordId(Sha256::hash(b"unknown"));
+        let unknown = TransferRecordId(Sha256::hash(&[b"unknown"]));
         assert_eq!(transfer_record(&state, &unknown).await.expect("read"), None);
     });
 }
@@ -176,8 +176,8 @@ fn consumed_marker_is_set_and_checked() {
             .await
             .expect("init state");
 
-        let chain = ChainId(Sha256::hash(b"chain-a"));
-        let id = TransferRecordId(Sha256::hash(b"record"));
+        let chain = ChainId(Sha256::hash(&[b"chain-a"]));
+        let id = TransferRecordId(Sha256::hash(&[b"record"]));
 
         assert!(!is_consumed(&state, &chain, &id).await.expect("read"));
 
@@ -186,7 +186,7 @@ fn consumed_marker_is_set_and_checked() {
 
         assert!(is_consumed(&state, &chain, &id).await.expect("read"));
         // A different record id from the same chain is independent.
-        let other = TransferRecordId(Sha256::hash(b"other-record"));
+        let other = TransferRecordId(Sha256::hash(&[b"other-record"]));
         assert!(!is_consumed(&state, &chain, &other).await.expect("read"));
     });
 }
@@ -198,8 +198,8 @@ fn foreign_root_and_config_accessors_roundtrip() {
             .await
             .expect("init state");
 
-        let source = ChainId(Sha256::hash(b"foreign-chain"));
-        let other = ChainId(Sha256::hash(b"other-chain"));
+        let source = ChainId(Sha256::hash(&[b"foreign-chain"]));
+        let other = ChainId(Sha256::hash(&[b"other-chain"]));
 
         // Absent until anchored/configured.
         assert_eq!(foreign_root(&state, &source, 5).await.expect("read"), None);
@@ -207,7 +207,7 @@ fn foreign_root_and_config_accessors_roundtrip() {
         assert_eq!(attestor(&state).await.expect("read"), None);
 
         let root = ForeignRoot {
-            state_root: Sha256::hash(b"root-5"),
+            state_root: Sha256::hash(&[b"root-5"]),
         };
         put_foreign_root(&mut state, &source, 5, &root);
         set_latest_foreign_view(&mut state, &source, 5);
@@ -234,7 +234,7 @@ fn foreign_root_and_config_accessors_roundtrip() {
 #[test]
 fn foreign_root_codec_round_trips_and_rejects_truncation() {
     let root = ForeignRoot {
-        state_root: Sha256::hash(b"root"),
+        state_root: Sha256::hash(&[b"root"]),
     };
     assert_eq!(ForeignRoot::decode(root.encode().as_ref()).unwrap(), root);
     let encoded = root.encode();
@@ -247,7 +247,7 @@ fn corrupt_state_values_surface_as_backend_errors() {
         let mut state = QmdbState::init(context, "bridge-corrupt-state")
             .await
             .expect("init state");
-        let source = ChainId(Sha256::hash(b"foreign-chain"));
+        let source = ChainId(Sha256::hash(&[b"foreign-chain"]));
         let garbage = vec![0xff];
 
         state.set(foreign_root_key(&source, 5), garbage.clone());
@@ -294,7 +294,7 @@ impl StateStore for FailStore {
 #[test]
 fn foreign_root_rejects_every_truncated_prefix() {
     let root = ForeignRoot {
-        state_root: Sha256::hash(b"root"),
+        state_root: Sha256::hash(&[b"root"]),
     };
     let encoded = root.encode();
     for i in 0..encoded.len() {
@@ -305,7 +305,7 @@ fn foreign_root_rejects_every_truncated_prefix() {
 #[test]
 fn destination_accessors_propagate_storage_errors() {
     deterministic::Runner::default().start(|_context| async move {
-        let source = ChainId(Sha256::hash(b"foreign-chain"));
+        let source = ChainId(Sha256::hash(&[b"foreign-chain"]));
         let store = FailStore;
         assert!(foreign_root(&store, &source, 1).await.is_err());
         assert!(latest_foreign_view(&store, &source).await.is_err());

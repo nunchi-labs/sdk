@@ -10,7 +10,7 @@ use commonware_glue::stateful::PruneConfig;
 use commonware_macros::{select, test_traced};
 use commonware_p2p::simulated::Link;
 use commonware_runtime::{deterministic, Clock, Runner as _, Spawner as _, Supervisor as _};
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::{probability, NZUsize, NZU64};
 use nunchi_authority::{
     proposal_id, AuthorityOperation, MultisigPolicy, RegistryChange,
     Transaction as AuthorityTransaction,
@@ -68,7 +68,7 @@ fn gold_coin() -> CoinId {
 }
 
 fn oracle_namespace() -> NamespaceId {
-    NamespaceId(Sha256::hash(b"coins-chain-integration-oracle-namespace"))
+    NamespaceId(Sha256::hash(&[b"coins-chain-integration-oracle-namespace"]))
 }
 
 #[test_traced]
@@ -140,7 +140,7 @@ fn reaches_height_100() {
         let link = Link {
             latency: Duration::from_millis(80),
             jitter: Duration::from_millis(10),
-            success_rate: 0.98,
+            success_rate: probability!(0.98),
         };
         deterministic_state(10, 0, link, 100);
     });
@@ -153,7 +153,6 @@ fn configurable_pruning_policy_remains_live() {
         executor.start(|mut context| async move {
             let cfg = ValidatorConfig {
                 prune_config: PruneConfig {
-                    max_pending_acks: NZUsize!(1),
                     maintenance_interval: NZUsize!(3),
                     retained_marshal_blocks: 5,
                     retained_qmdb_blocks: 1,
@@ -797,9 +796,17 @@ fn mempool_replaces_same_nonce_resubmission() {
     with_large_stack(|| {
         let executor = deterministic::Runner::timed(Duration::from_secs(120));
         executor.start(|mut context| async move {
-            // Single validator: this asserts mempool replacement, not multi-peer
-            // gossip races where another proposer can still include the original.
-            let mut network = TestNetworkBuilder::new(1).build(&mut context).await;
+            // Erasure-coded marshal needs at least 4 validators. Hold the first proposal
+            // until every mempool has the replacement, otherwise another leader can
+            // finalize the original and drop the replacement as a stale nonce.
+            let cfg = ValidatorConfig {
+                min_block_interval_ms: NZU64!(5_000),
+                ..ValidatorConfig::default()
+            };
+            let mut network = TestNetworkBuilder::new(4)
+                .with_validator_config(cfg)
+                .build(&mut context)
+                .await;
             network.start_all().await;
 
             let alice = key(ALICE);
@@ -820,19 +827,28 @@ fn mempool_replaces_same_nonce_resubmission() {
                 )
                 .await
                 .expect("admit original");
+            let replacement_tx: nunchi_coins_chain::Transaction = Transaction::sign(
+                &alice,
+                0,
+                CoinOperation::CreateToken {
+                    spec: silver_spec.clone(),
+                },
+            )
+            .into();
             let replacement = node0
-                .submit(
-                    Transaction::sign(
-                        &alice,
-                        0,
-                        CoinOperation::CreateToken {
-                            spec: silver_spec.clone(),
-                        },
-                    )
-                    .into(),
-                )
+                .submit(replacement_tx.clone())
                 .await
                 .expect("admit replacement");
+            for index in 1..4 {
+                match network
+                    .submitter(index)
+                    .submit(replacement_tx.clone())
+                    .await
+                {
+                    Ok(_) | Err(nunchi_mempool::AdmissionError::Duplicate) => {}
+                    Err(error) => panic!("admit replacement replica: {error:?}"),
+                }
+            }
 
             assert_eq!(
                 node0.status(original).await,

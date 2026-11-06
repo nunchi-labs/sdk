@@ -3,7 +3,7 @@ use crate::{AdmissionError, Mempool, PoolConfig, TxStatus};
 use commonware_cryptography::{ed25519, Signer};
 use commonware_p2p::simulated::{self, Link, Network};
 use commonware_runtime::{deterministic, Clock, Metrics, Runner as _, Supervisor};
-use commonware_utils::{NZUsize, NZU32};
+use commonware_utils::{probability, NZUsize, NZU32};
 use governor::Quota;
 use std::time::Duration;
 
@@ -21,7 +21,7 @@ fn submit_pending_finalize_status_roundtrip() {
         let pending = handle.pending(10).await;
         assert_eq!(pending.len(), 1);
 
-        handle.finalized(vec![expected], vec![(1, 1)], 5);
+        handle.finalized(vec![expected], vec![(1, 1)], 5).await;
         assert_eq!(
             handle.status(expected).await,
             Some(TxStatus::Finalized { height: 5 })
@@ -54,7 +54,7 @@ fn metrics_are_exposed() {
         handle.submit(tx(1, 0, 10)).await.unwrap();
         let pending = handle.pending(10).await;
         assert_eq!(pending.len(), 1);
-        handle.finalized(vec![expected], vec![(1, 1)], 5);
+        handle.finalized(vec![expected], vec![(1, 1)], 5).await;
         context.sleep(Duration::from_millis(1)).await;
 
         let encoded = context.encode();
@@ -86,6 +86,7 @@ fn p2p_gossips_submitted_transactions() {
             context.child("network"),
             simulated::Config {
                 max_size: 1024 * 1024,
+                max_peers_per_set: NZUsize!(2),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
             },
@@ -108,7 +109,7 @@ fn p2p_gossips_submitted_transactions() {
         let link = Link {
             latency: Duration::from_millis(10),
             jitter: Duration::ZERO,
-            success_rate: 1.0,
+            success_rate: probability!(1.0),
         };
         oracle
             .add_link(peer_a.clone(), peer_b.clone(), link.clone())

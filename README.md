@@ -78,13 +78,33 @@ This repository will contain modules for building public and private blockchains
 
 ## Commonware compatibility
 
-This workspace pins `commonware-*` crates to **2026.7.0**.
+This workspace pins `commonware-*` crates to **2026.9.0**.
 
 When upgrading nodes:
 
 * Do not run mixed commonware versions in the same peer set (marshal coding / ZODA shards and other wire formats are not interchangeable).
-* Mid-sync glue metadata from v2026.5.0 cannot resume after upgrading to v2026.7.0; clear or re-sync any node that crashed mid state-sync before the bump.
+* Mid-sync glue metadata from v2026.7.0 cannot resume after upgrading to v2026.9.0; clear or re-sync any node that crashed mid state-sync before the bump.
 * Fresh joining nodes can enable peer QMDB state sync with `state_sync = true`. Nunchi's resolver preserves Commonware's standard wire layout while decoding variable-value operations with the chain-wide 512 KiB value bound.
+
+## Nunchi SDK MCP
+
+[`mcp/`](mcp/) is the SDK's MCP server. It is a TypeScript Cloudflare Worker (the Commonware MCP server architecture: Durable Object sessions, D1 full-text search, a scheduled indexer) retargeted at this repository. It is not a Cargo workspace member. `cargo build` does not compile it. Node.js 22 is required.
+
+Build, run, and index:
+
+```bash
+just mcp-build
+just mcp
+just mcp-index
+```
+
+`just mcp-build` runs `npm ci` and `npm run build` in `mcp/`. `just mcp` applies the local D1 migration and runs `npm run dev` on `http://127.0.0.1:8787`. `just mcp-index` asks that server to index the working tree (`HEAD`) and every git tag. Run it from a second terminal after the server is up, and again after the tree changes.
+
+Cursor ([`.cursor/mcp.json`](.cursor/mcp.json)) and Claude Code ([`.mcp.json`](.mcp.json)) use that URL under the name `nunchi-sdk`. Start `just mcp` first. Tools default to `HEAD`. Pass `version` set to a git tag to read that tag instead.
+
+`get_file`, `search_code`, `list_versions`, `list_crates`, `get_crate_readme`, `get_overview`, and `list_files` read this index. Paths look like `coins/src/lib.rs`. Crate names look like `nunchi-coins`.
+
+Chain queries and transaction building stay on the node's JSON-RPC API (narae's default base port is 8545). Details are in [`mcp/README.md`](mcp/README.md).
 
 ## License
 

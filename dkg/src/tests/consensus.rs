@@ -6,15 +6,15 @@ use commonware_consensus::{
 use commonware_cryptography::{
     bls12381::{
         dkg::feldman_desmedt::deal,
-        primitives::variant::MinSig,
+        primitives::{sharing::Mode, variant::MinSig},
     },
     certificate::{Scheme as _, Verifier as _},
     ed25519::PrivateKey,
-    sha256::{Digest, Sha256},
+    sha256::Sha256,
     Hasher, Signer,
 };
 use commonware_parallel::Sequential;
-use commonware_utils::{ordered::Set, test_rng, N3f1};
+use commonware_utils::{non_empty, ordered::Set, test_rng, N3f1};
 
 #[test]
 fn shareless_epoch_scheme_verifies_but_cannot_vote() {
@@ -24,7 +24,7 @@ fn shareless_epoch_scheme_verifies_but_cannot_vote() {
     let mut rng = test_rng();
     let (output, shares) = deal::<MinSig, _, N3f1>(
         &mut rng,
-        Default::default(),
+        Mode::NonZeroCounter,
         participants.clone(),
     )
     .unwrap();
@@ -41,7 +41,7 @@ fn shareless_epoch_scheme_verifies_but_cannot_vote() {
     let proposal = Proposal::new(
         Round::new(Epoch::new(3), View::new(2)),
         View::new(1),
-        Sha256::hash(b"proposal"),
+        Sha256::hash(&[b"proposal"]),
     );
     let subject = Subject::Notarize { proposal: &proposal };
 
@@ -64,9 +64,9 @@ fn shareless_epoch_scheme_verifies_but_cannot_vote() {
         })
         .collect::<Vec<_>>();
     let certificate = verifier
-        .assemble::<_, N3f1>(votes, &Sequential)
+        .assemble(non_empty![@votes.into_iter()], &Sequential)
         .expect("quorum votes should assemble");
-    assert!(verifier.verify_certificate::<_, Digest, N3f1>(
+    assert!(verifier.verify_certificate(
         &mut rng,
         subject,
         &certificate,

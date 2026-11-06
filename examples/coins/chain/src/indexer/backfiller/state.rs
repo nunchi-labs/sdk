@@ -433,7 +433,7 @@ mod tests {
 
     fn state(height: u64) -> StateCommitment {
         StateCommitment {
-            root: Sha256::hash(&height.to_be_bytes()),
+            root: Sha256::hash(&[height.to_be_bytes().as_slice()]),
             range: NonEmptyRange::new(Location::new(height)..Location::new(height + 1))
                 .expect("non-empty range"),
         }
@@ -446,10 +446,10 @@ mod tests {
                 leader: ed25519::PrivateKey::from_seed(view).public_key(),
                 parent: (
                     View::new(view.saturating_sub(1)),
-                    Sha256::hash(format!("parent-{view}").as_bytes()),
+                    nunchi_chain::dummy_genesis_parent(),
                 ),
             },
-            Sha256::hash(label),
+            Sha256::hash(&[label]),
             Height::new(height),
             height,
             Vec::<Transaction>::new(),
@@ -469,7 +469,10 @@ mod tests {
 
         assert_eq!(entry.height, 1);
         assert_eq!(entry.digest, digest);
-        assert_eq!(state.cached_block(&digest).as_ref(), Some(&block));
+        assert_eq!(
+            state.cached_block(&digest).as_ref().map(|block| block.digest()),
+            Some(digest)
+        );
 
         state.mark_uploaded(digest, 1);
 
@@ -524,7 +527,10 @@ mod tests {
         state.start_certificate_upload(digest);
 
         assert!(matches!(state.should_upload(&digest), Decision::Wait));
-        assert_eq!(state.cached_block(&digest).as_ref(), Some(&block));
+        assert_eq!(
+            state.cached_block(&digest).as_ref().map(|block| block.digest()),
+            Some(digest)
+        );
 
         state.finish_certificate_upload(&digest, Some(block.header.height.get()));
 
@@ -543,7 +549,10 @@ mod tests {
         state.finish_certificate_upload(&digest, None);
 
         assert!(matches!(state.should_upload(&digest), Decision::Proceed));
-        assert_eq!(state.cached_block(&digest).as_ref(), Some(&block));
+        assert_eq!(
+            state.cached_block(&digest).as_ref().map(|block| block.digest()),
+            Some(digest)
+        );
     }
 
     #[test]
@@ -567,8 +576,8 @@ mod tests {
     #[test]
     fn uploaded_dedupe_prunes_behind_queue_floor() {
         let mut state = State::new();
-        let digest_10 = Sha256::hash(b"10");
-        let digest_11 = Sha256::hash(b"11");
+        let digest_10 = Sha256::hash(&[b"10"]);
+        let digest_11 = Sha256::hash(&[b"11"]);
 
         state.mark_uploaded(digest_10, 10);
         state.mark_uploaded(digest_11, 11);

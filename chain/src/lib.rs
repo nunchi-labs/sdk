@@ -17,15 +17,21 @@ mod macros;
 mod tests;
 
 pub use application::{Application, SharedAppliedHeight};
-pub use block::{Block, BlockHeader, Finalized, Notarized, StateCommitment, MAX_TRANSACTIONS};
+pub use block::{
+    dummy_genesis_parent, genesis_parent, Block, BlockCommitment, BlockHeader, CodingBlock,
+    CodingContext, Finalized, Notarized, StateCommitment, MAX_TRANSACTIONS,
+};
 pub use consensus::{
     dkg_reporters, BlockExtension, Composite, ConsensusExtension, DkgActor, DkgMailbox,
-    DkgReporters, NoConsensusExtension,
+    DkgReporters, EmptyPayload, NoConsensusExtension,
 };
 pub use consensus::dkg_state::{DkgState, Error as DkgStateError};
 pub use events::{
     EventConsumer, FinalizedEvents, InMemoryEventConsumer, IndexedEvent, NoopEventConsumer,
     TransactionEventContext, TransactionEvents,
+};
+pub use engine::{
+    EngineBlock, EngineCodedBlock, EngineCommitment, EngineStoredBlock, EngineVariant,
 };
 pub use execution::{NodeHandle, StatefulQuery};
 });

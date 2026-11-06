@@ -11,17 +11,18 @@ use commonware_cryptography::{
     bls12381::{
         dkg::feldman_desmedt::{
             Dealer as CryptoDealer, DealerLog, DealerPrivMsg, DealerPubMsg, Info, Logs, Output,
-            Player as CryptoPlayer, PlayerAck, SignedDealerLog, Verdict,
+            Player as CryptoPlayer, PlayerAck, SignedDealerLog, FinalizeError,
         },
         primitives::{group::Share, sharing::ModeVersion, variant::Variant},
     },
     sha256::Digest,
-    transcript::{Summary, Transcript},
+    transcript::{Summary, Transcript, Version},
     BatchVerifier, PublicKey, Signer,
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    buffer::paged::CacheRef, Buf, BufMut, BufferPooler, Clock, Metrics, Storage as RuntimeStorage,
+    buffer::paged::{page_size, CacheRef}, Buf, BufMut, BufferPooler, Clock, Metrics, ReadOptions,
+    Storage as RuntimeStorage,
 };
 use commonware_storage::{
     journal::{
@@ -30,17 +31,15 @@ use commonware_storage::{
     },
     metadata::{self, Config as MetadataConfig, Metadata},
 };
-use commonware_utils::{Faults, NZUsize, NZU16};
-use futures::StreamExt;
+use commonware_utils::{Faults, NZUsize};
 use rand::CryptoRng;
 use std::{
     collections::BTreeMap,
-    num::{NonZeroU16, NonZeroU32, NonZeroUsize},
+    num::{NonZeroU32, NonZeroUsize},
 };
 use tracing::{debug, error, warn};
 
 // Configure 32MB page cache
-const PAGE_SIZE: NonZeroU16 = NZU16!(1 << 12);
 const PAGE_CACHE_CAPACITY: NonZeroUsize = NZUsize!(1 << 13);
 
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1 << 12);
@@ -293,9 +292,9 @@ where
     namespace: Vec<u8>,
     public_key: P,
 
-    states: Metadata<E, u64, SealedRecord>,
-    reconciliation: Metadata<E, u8, Reconciliation>,
-    msgs: SVJournal<E, SealedRecord>,
+    states: Option<Metadata<E, u64, SealedRecord>>,
+    reconciliation: Option<Metadata<E, u8, Reconciliation>>,
+    msgs: Option<SVJournal<E, SealedRecord>>,
 
     // In-memory state
     current: Option<(EpochNum, Epoch<V, P>)>,
@@ -319,7 +318,7 @@ where
         max_read_size: NonZeroU32,
         max_supported_mode: ModeVersion,
     ) -> Result<Self, Error> {
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_CAPACITY);
+        let page_cache = CacheRef::from_pooler(&context, page_size(1 << 12), PAGE_CACHE_CAPACITY);
 
         let states: Metadata<E, u64, SealedRecord> = Metadata::init(
             context.child("states"),
@@ -338,7 +337,7 @@ where
         )
         .await?;
 
-        let mut msgs = SVJournal::init(
+        let msgs = SVJournal::init(
             context.child("msgs"),
             SVConfig {
                 partition: format!("{partition_prefix}_msgs"),
@@ -372,36 +371,35 @@ where
 
         // Replay msgs to populate epoch caches
         let mut epochs = BTreeMap::<EpochNum, EpochCache<V, P>>::new();
-        {
-            let replay = msgs.replay(0, 0, READ_BUFFER).await?;
-            futures::pin_mut!(replay);
-
-            while let Some(result) = replay.next().await {
-                let (section, _, _, record) = result?;
-                let epoch = EpochNum::new(section);
-                let event = Self::open_event_record(
-                    &protector,
-                    &partition_prefix,
-                    &namespace,
-                    &public_key,
-                    max_read_size,
-                    epoch,
-                    &record,
-                )?;
-                let cache = epochs.entry(epoch).or_default();
-                match event {
-                    Event::Dealing(dealer, pub_msg, priv_msg) => {
-                        cache.dealings.insert(dealer, (pub_msg, priv_msg));
-                    }
-                    Event::Ack(player, ack) => {
-                        cache.acks.insert(player, ack);
-                    }
-                    Event::Log(dealer, log) => {
-                        cache.logs.insert(dealer, log);
-                    }
+        let mut replay = msgs
+            .replay(0, 0, READ_BUFFER, ReadOptions::default())
+            .await?;
+        while let Some(result) = replay.next().await {
+            let (section, _, _, record) = result?;
+            let epoch = EpochNum::new(section);
+            let event = Self::open_event_record(
+                &protector,
+                &partition_prefix,
+                &namespace,
+                &public_key,
+                max_read_size,
+                epoch,
+                &record,
+            )?;
+            let cache = epochs.entry(epoch).or_default();
+            match event {
+                Event::Dealing(dealer, pub_msg, priv_msg) => {
+                    cache.dealings.insert(dealer, (pub_msg, priv_msg));
+                }
+                Event::Ack(player, ack) => {
+                    cache.acks.insert(player, ack);
+                }
+                Event::Log(dealer, log) => {
+                    cache.logs.insert(dealer, log);
                 }
             }
         }
+        let msgs = replay.finish()?;
 
         Ok(Self {
             context,
@@ -409,9 +407,9 @@ where
             partition_prefix,
             namespace,
             public_key,
-            states,
-            reconciliation,
-            msgs,
+            states: Some(states),
+            reconciliation: Some(reconciliation),
+            msgs: Some(msgs),
             current,
             epochs,
         })
@@ -561,7 +559,9 @@ where
 
     /// Return the durable authenticated-state reconciliation marker.
     pub fn reconciliation(&self) -> Option<Reconciliation> {
-        self.reconciliation.get(&RECONCILIATION_KEY).cloned()
+        self.reconciliation
+            .as_ref()
+            .and_then(|reconciliation| reconciliation.get(&RECONCILIATION_KEY).cloned())
     }
 
     /// Persist and sync an authenticated-state reconciliation phase.
@@ -569,9 +569,16 @@ where
         &mut self,
         reconciliation: Reconciliation,
     ) -> Result<(), Error> {
-        self.reconciliation
-            .put(RECONCILIATION_KEY, reconciliation);
-        self.reconciliation.sync().await?;
+        let mut store = self.reconciliation.take().expect("reconciliation");
+        store.put(RECONCILIATION_KEY, reconciliation);
+        self.reconciliation = Some(store.sync().await?);
+        Ok(())
+    }
+
+    async fn persist_event(&mut self, section: u64, record: &SealedRecord) -> Result<(), Error> {
+        let msgs = self.msgs.take().expect("msgs");
+        let (msgs, _, _) = msgs.append(section, record).await?;
+        self.msgs = Some(msgs.sync(section).await?);
         Ok(())
     }
 
@@ -609,8 +616,7 @@ where
         let section = epoch.get();
         let event = Event::Dealing(dealer.clone(), pub_msg.clone(), priv_msg.clone());
         let record = self.seal_record(RECORD_KIND_EVENT, epoch, &event.encode())?;
-        self.msgs.append(section, &record).await?;
-        self.msgs.sync(section).await?;
+        self.persist_event(section, &record).await?;
 
         // Update in-memory cache
         self.get_or_create_epoch(epoch)
@@ -620,15 +626,22 @@ where
     }
 
     /// Persists a player acknowledgment we received (as a dealer) for crash recovery.
-    /// Returns false if the ack was already stored.
+    ///
+    /// Returns false if this same ack is already stored. A different ack for the player
+    /// replaces it. Journal replay keeps the latest record, which is also what the dealer
+    /// view has accepted.
     pub async fn append_ack(
         &mut self,
         epoch: EpochNum,
         player: P,
         ack: PlayerAck<P>,
     ) -> Result<bool, Error> {
-        // Check if already stored
-        if self.has_cached(epoch, |c| &c.acks, &player) {
+        if self
+            .epochs
+            .get(&epoch)
+            .and_then(|cache| cache.acks.get(&player))
+            == Some(&ack)
+        {
             return Ok(false);
         }
 
@@ -636,8 +649,7 @@ where
         let section = epoch.get();
         let event: Event<V, P> = Event::Ack(player.clone(), ack.clone());
         let record = self.seal_record(RECORD_KIND_EVENT, epoch, &event.encode())?;
-        self.msgs.append(section, &record).await?;
-        self.msgs.sync(section).await?;
+        self.persist_event(section, &record).await?;
 
         // Update in-memory cache
         self.get_or_create_epoch(epoch).acks.insert(player, ack);
@@ -661,8 +673,7 @@ where
         let section = epoch.get();
         let event = Event::Log(dealer.clone(), log.clone());
         let record = self.seal_record(RECORD_KIND_EVENT, epoch, &event.encode())?;
-        self.msgs.append(section, &record).await?;
-        self.msgs.sync(section).await?;
+        self.persist_event(section, &record).await?;
 
         // Update in-memory cache
         self.get_or_create_epoch(epoch).logs.insert(dealer, log);
@@ -674,10 +685,11 @@ where
         // Persist to metadata using epoch number as key
         let epoch_key = epoch.get();
         let record = self.seal_record(RECORD_KIND_EPOCH, epoch, &state.encode())?;
-        if self.states.put(epoch_key, record).is_some() {
+        let mut states = self.states.take().expect("states");
+        if states.put(epoch_key, record).is_some() {
             warn!(%epoch, "overwriting existing epoch state");
         }
-        self.states.sync().await?;
+        self.states = Some(states.sync().await?);
 
         // Update in-memory state
         self.current = Some((epoch, state));
@@ -689,11 +701,14 @@ where
         let min_epoch = min.get();
 
         // Prune msgs journal
-        self.msgs.prune(min_epoch).await?;
+        let msgs = self.msgs.take().expect("msgs");
+        let (msgs, _) = msgs.prune(min_epoch).await?;
+        self.msgs = Some(msgs);
 
         // Prune states metadata - remove all epochs < min
-        self.states.retain(|&epoch_key, _| epoch_key >= min_epoch);
-        self.states.sync().await?;
+        let mut states = self.states.take().expect("states");
+        states.retain(|&epoch_key, _| epoch_key >= min_epoch);
+        self.states = Some(states.sync().await?);
 
         // Remove old epoch caches
         self.epochs.retain(|&epoch, _| epoch >= min);
@@ -717,7 +732,7 @@ where
 
         // Start a new dealer
         let (mut crypto_dealer, pub_msg, priv_msgs) = CryptoDealer::start::<M>(
-            Transcript::resume(rng_seed).noise(b"dealer-rng"),
+            Transcript::resume(rng_seed, Version::V0).noise(b"dealer-rng"),
             round_info,
             signer,
             share,
@@ -810,24 +825,34 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
         if !self.unsent.contains_key(&player) {
             return false;
         }
-        if let Some(ref mut dealer) = self.dealer {
-            if dealer
-                .receive_player_ack(player.clone(), ack.clone())
-                .is_ok()
-            {
+        // Finalize takes the dealer view and leaves `unsent` populated. A late ack must not
+        // be journaled: restart replays every stored ack into a new dealer and can sign a
+        // different log than the one this process already produced.
+        let Some(dealer) = self.dealer.as_mut() else {
+            return false;
+        };
+        // Rejection leaves the dealer unchanged. Journaling it would keep this player's slot,
+        // so recovery would skip it while a later valid ack could be applied only in memory.
+        if dealer
+            .receive_player_ack(player.clone(), ack.clone())
+            .is_err()
+        {
+            return false;
+        }
+        // The view now records the ack and cannot drop just that player. Persist before
+        // reporting success. A failed fsync drops the whole view so finalize cannot sign a
+        // log the journal does not contain.
+        match storage.append_ack(epoch, player.clone(), ack).await {
+            Ok(true) | Ok(false) => {
                 self.unsent.remove(&player);
-                match storage.append_ack(epoch, player.clone(), ack).await {
-                    Ok(true) => {}
-                    Ok(false) => return false,
-                    Err(err) => {
-                        error!(?epoch, ?player, %err, "failed to persist DKG ack");
-                        return false;
-                    }
-                }
-                return true;
+                true
+            }
+            Err(err) => {
+                error!(?epoch, ?player, %err, "failed to persist DKG ack");
+                self.dealer = None;
+                false
             }
         }
-        false
     }
 
     /// Finalize the dealer and produce a signed log for inclusion in a block.
@@ -875,6 +900,9 @@ pub struct Player<V: Variant, C: Signer> {
     acks: BTreeMap<C::PublicKey, PlayerAck<C::PublicKey>>,
 }
 
+/// Public DKG output together with this player's secret share.
+type PlayerOutput<V, P> = (Output<V, P>, Share);
+
 impl<V: Variant, C: Signer> Player<V, C> {
     /// Handle an incoming dealer message.
     ///
@@ -896,8 +924,9 @@ impl<V: Variant, C: Signer> Player<V, C> {
             return Some(ack.clone());
         }
 
-        // Otherwise generate a new ack
-        let Verdict::Valid(ack) = self.player.dealer_message::<M>(
+        // Otherwise generate a new ack. `dealer_message` records the dealing in the player
+        // view before we can persist it, and a second call then returns `Ok(None)`.
+        let Ok(Some(ack)) = self.player.dealer_message::<M>(
             dealer.clone(),
             pub_msg.clone(),
             priv_msg.clone(),
@@ -908,13 +937,13 @@ impl<V: Variant, C: Signer> Player<V, C> {
             .append_dealing(epoch, dealer.clone(), pub_msg, priv_msg)
             .await
         {
-            Ok(true) => {}
-            Ok(false) => return None,
+            Ok(true) | Ok(false) => {}
             Err(err) => {
                 error!(?epoch, ?dealer, %err, "failed to persist DKG dealing");
-                return None;
             }
         }
+        // Cache even when the journal write failed. Dropping the ack here makes every later
+        // delivery of this dealing return `None`, so the dealer finalizes the player as a reveal.
         self.acks.insert(dealer, ack.clone());
         Some(ack)
     }
@@ -925,10 +954,7 @@ impl<V: Variant, C: Signer> Player<V, C> {
         rng: &mut impl CryptoRng,
         logs: Logs<V, C::PublicKey, M>,
         strategy: &impl Strategy,
-    ) -> Result<
-        (Output<V, C::PublicKey>, Share),
-        commonware_cryptography::bls12381::dkg::feldman_desmedt::Error,
-    > {
+    ) -> Result<PlayerOutput<V, C::PublicKey>, FinalizeError<C::PublicKey>> {
         self.player.finalize::<M, B>(rng, logs, strategy)
     }
 }

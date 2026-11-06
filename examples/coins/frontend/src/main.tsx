@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Activity, CircleAlert, PlugZap, RefreshCw, Search, Server, Wifi, WifiOff, Wallet } from "lucide-react";
-import { compactHex, httpBase, wsBase } from "./utils";
+import { compactHex, httpBase, nextReconnectDelay, wsBase } from "./utils";
 import { detectWallet, connectWallet } from "./wallet";
 import "./styles.css";
 
@@ -175,24 +175,43 @@ function App() {
     let stopped = false;
     let socket: WebSocket | null = null;
     let retry: number | undefined;
+    let generation = 0;
+    let backoff = 1000;
 
     const connect = () => {
       if (stopped) return;
+      const current = ++generation;
       setConnection("connecting");
-      socket = new WebSocket(`${wsBase(backend)}/consensus/summary/ws`);
+      let url: string;
+      try {
+        url = `${wsBase(backend)}/consensus/summary/ws`;
+      } catch (err) {
+        setConnection("offline");
+        setError(err instanceof Error ? err.message : "websocket connection failed");
+        return;
+      }
+      const next = new WebSocket(url);
+      socket = next;
 
-      socket.onopen = () => setConnection("online");
-      socket.onerror = () => {
+      next.onopen = () => {
+        if (current !== generation) return;
+        backoff = 1000;
+        setConnection("online");
+        setError("");
+      };
+      next.onerror = () => {
+        if (current !== generation) return;
         setConnection("offline");
         setError("websocket connection failed");
       };
-      socket.onclose = () => {
+      next.onclose = () => {
+        if (stopped || current !== generation) return;
         setConnection("offline");
-        if (!stopped) {
-          retry = window.setTimeout(connect, 1000);
-        }
+        const delay = backoff;
+        backoff = nextReconnectDelay(backoff);
+        retry = window.setTimeout(connect, delay);
       };
-      socket.onmessage = (message) => {
+      next.onmessage = (message) => {
         const displayAt = Date.now();
         const parsed = parseSummaryMessage(message.data);
         if (!parsed) return;
@@ -230,6 +249,7 @@ function App() {
 
     return () => {
       stopped = true;
+      generation += 1;
       if (retry !== undefined) {
         window.clearTimeout(retry);
       }

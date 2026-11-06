@@ -1,18 +1,25 @@
 use crate::execution::NodeHandle;
 use crate::{
-    application, Block, EpochProvider, Finalization, NoopTransaction, Provider, PublicKey, Scheme,
-    BLOCKS_PER_EPOCH,
+    application, Block, BlockCommitment, EngineVariant, EpochProvider, Finalization,
+    NoopTransaction, Provider, PublicKey, Scheme, BLOCKS_PER_EPOCH,
 };
-use commonware_broadcast::buffered;
+use commonware_coding::{CodecConfig, ReedSolomon};
 use commonware_consensus::{
     marshal::{
         self,
+        coding::{
+            shards,
+            types::{coding_config_for_participants, CodedBlock},
+            Marshaled, MarshaledConfig,
+        },
         core::Actor as MarshalActor,
         resolver,
-        standard::{Inline, Standard},
         store::Certificates,
     },
-    simplex::elector::Random,
+    simplex::{
+        elector::{Random, RandomVersion},
+        types::Activity as SimplexActivity,
+    },
     types::{Epoch, FixedEpocher, Height, ViewDelta},
 };
 use commonware_cryptography::{
@@ -20,10 +27,9 @@ use commonware_cryptography::{
         dkg::feldman_desmedt::Output,
         primitives::{group, variant::MinSig},
     },
-    certificate::Verifier as _,
     ed25519::{self, Batch},
     sha256::Digest,
-    BatchVerifier, Digestible, Hasher, Signer,
+    BatchVerifier, Committable, Hasher, Sha256, Signer,
 };
 use commonware_glue::stateful::{
     db::ManagedDb as _,
@@ -44,16 +50,14 @@ use governor::clock::Clock as GClock;
 use nunchi_bridge::{BridgeExtension, BridgeMailbox};
 use nunchi_chain::engine::*;
 use nunchi_chain::state_sync::{
-    Actor as StateSyncActor, Config as StateSyncConfig, FloorProvider,
-    Mailbox as StateSyncMailbox,
+    Actor as StateSyncActor, Config as StateSyncConfig, FloorProvider, Mailbox as StateSyncMailbox,
 };
 use nunchi_common::{QmdbBackend, QmdbState};
 use nunchi_dkg::{self as dkg, orchestrator, PeerConfig, UpdateCallBack, MAX_SUPPORTED_MODE};
 use nunchi_mempool::{Mempool, PoolConfig};
 use rand::{CryptoRng, Rng};
 use std::{
-    marker::PhantomData,
-    num::NonZeroU64,
+    num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -79,6 +83,8 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
     pub strategy: S,
     /// Discover a finalized floor and perform peer QMDB state sync on a fresh database.
     pub state_sync: bool,
+    /// Maximum number of marshal acknowledgements that may remain pending.
+    pub max_pending_acks: NonZeroUsize,
     pub prune_config: PruneConfig,
     pub pool_config: PoolConfig,
     pub bridge: BridgeMailbox,
@@ -103,24 +109,59 @@ pub fn validate_state_sync(enabled: bool) -> Result<(), StartupError> {
 type DkgActor<E, P> = nunchi_chain::DkgActor<E, P, NoopTransaction, BridgeExtension>;
 type DkgMailbox = nunchi_chain::DkgMailbox<NoopTransaction, BridgeExtension>;
 type StatefulApp<E> =
-    StatefulActor<E, crate::Application, Scheme, Standard<Block>, StateSyncMailbox<E>>;
+    StatefulActor<E, crate::Application, Scheme, EngineVariant, StateSyncMailbox<E>>;
 type StatefulAppMailbox<E> = StatefulMailbox<E, crate::Application>;
 type LimitedStatefulAppMailbox<E> = VerifyLimiter<StatefulAppMailbox<E>>;
-type InlineApp<E> = Inline<E, Scheme, LimitedStatefulAppMailbox<E>, Block, FixedEpocher>;
-type Marshaled<E> = BoxedAutomaton<InlineApp<E>>;
+type MarshaledApp<E, S> = BoxedAutomaton<
+    Marshaled<
+        E,
+        LimitedStatefulAppMailbox<E>,
+        Block,
+        ReedSolomon<Sha256>,
+        Sha256,
+        SchemeProvider,
+        S,
+        FixedEpocher,
+    >,
+>;
 type SchemeProvider = Provider<Scheme, ed25519::PrivateKey>;
 type FinalizationsArchive<E> = immutable::Archive<E, Digest, Finalization>;
-type BlocksArchive<E> = immutable::Archive<E, Digest, Block>;
+type BlocksArchive<E> = immutable::Archive<
+    E,
+    Digest,
+    EngineStoredBlock<NoopTransaction, BridgeExtension>,
+>;
 type Marshal<E, S> = MarshalActor<
     E,
-    Standard<Block>,
+    EngineVariant,
     SchemeProvider,
     FinalizationsArchive<E>,
     BlocksArchive<E>,
     FixedEpocher,
     S,
 >;
-type Orchestrator<E, B, S> = orchestrator::Actor<E, B, Marshaled<E>, Scheme, Random, S, Block>;
+type Orchestrator<E, B, S> = orchestrator::Actor<
+    E,
+    B,
+    MarshaledApp<E, S>,
+    Scheme,
+    Random,
+    S,
+    EngineVariant,
+    orchestrator::NoopReporter<SimplexActivity<Scheme, BlockCommitment>>,
+>;
+type ShardsEngine<E, B, P, S> = shards::Engine<
+    E,
+    SchemeProvider,
+    B,
+    P,
+    ReedSolomon<Sha256>,
+    Sha256,
+    Block,
+    PublicKey,
+    S,
+>;
+type ShardMailbox = shards::Mailbox<Block, ReedSolomon<Sha256>, Sha256, PublicKey>;
 
 /// The engine that drives a bridge-chain validator.
 #[allow(clippy::type_complexity)]
@@ -144,8 +185,8 @@ where
     config: Config<B, P, S>,
     dkg: DkgActor<E, P>,
     dkg_mailbox: DkgMailbox,
-    buffer: buffered::Engine<E, PublicKey, Block, P>,
-    buffered_mailbox: buffered::Mailbox<PublicKey, Block>,
+    shards: ShardsEngine<E, B, P, S>,
+    shard_mailbox: ShardMailbox,
     marshal: Marshal<E, S>,
     probe_handle: Handle<()>,
     state_sync_handle: Handle<()>,
@@ -188,7 +229,7 @@ where
             impl Receiver<PublicKey = PublicKey>,
         ),
     ) -> Result<(Self, NodeHandle<E>), StartupError> {
-        let prune_config = validate_state_prune_config(config.prune_config)?;
+        let prune_config = validate_state_prune_config(config.prune_config, config.max_pending_acks)?;
         validate_state_sync(config.state_sync)?;
         let (mempool, submitter) = Mempool::<NoopTransaction>::new(config.pool_config.clone());
         let mempool = mempool.start(context.child("mempool"));
@@ -213,18 +254,6 @@ where
                 namespace: config.namespace.clone(),
                 storage_protector: dkg::StorageProtector::new(config.dkg_storage_key),
                 epoch_length: BLOCKS_PER_EPOCH,
-            },
-        );
-
-        let (buffer, buffered_mailbox) = buffered::Engine::new(
-            context.child("buffer"),
-            buffered::Config {
-                public_key: config.signer.public_key(),
-                mailbox_size: MAILBOX_SIZE,
-                deque_size: DEQUE_SIZE,
-                priority: true,
-                codec_config: block_codec_config,
-                peer_provider: config.manager.clone(),
             },
         );
 
@@ -262,7 +291,7 @@ where
                 ),
                 ordinal_write_buffer: WRITE_BUFFER,
                 items_per_section: IMMUTABLE_ITEMS_PER_SECTION,
-                codec_config: Scheme::certificate_codec_config_unbounded(),
+                codec_config: (),
                 replay_buffer: REPLAY_BUFFER,
             },
         )
@@ -333,6 +362,30 @@ where
             config.signer.clone(),
             certificate_verifier,
         );
+        let n_coding_participants = u16::try_from(config.output.players().len())
+            .expect("participant count must fit in u16");
+        assert!(
+            n_coding_participants >= 4,
+            "erasure-coded marshal requires at least 4 participants, got {n_coding_participants}"
+        );
+        let coding_config = coding_config_for_participants(n_coding_participants);
+        let genesis_parent = nunchi_chain::genesis_parent(n_coding_participants);
+        let (shards, shard_mailbox) = shards::Engine::new(
+            context.child("shards"),
+            shards::Config {
+                scheme_provider: provider.clone(),
+                blocker: config.blocker.clone(),
+                shard_codec_cfg: CodecConfig {
+                    maximum_shard_size: MAX_SHARD_SIZE,
+                },
+                block_codec_cfg: block_codec_config,
+                strategy: config.strategy.clone(),
+                mailbox_size: MAILBOX_SIZE,
+                peer_buffer_size: SHARD_PEER_BUFFER_SIZE,
+                background_channel_capacity: SHARD_BACKGROUND_CHANNEL_CAPACITY,
+                peer_provider: config.manager.clone(),
+            },
+        );
         let floor_sizing_scheme =
             provider.scheme_for_epoch(&orchestrator::EpochTransition {
                 epoch: Epoch::zero(),
@@ -367,13 +420,15 @@ where
             bridge,
             applied_height.clone(),
             empty_state,
-            commonware_cryptography::Sha256::hash(&config.namespace),
+            Sha256::hash(&[config.namespace.as_slice()]),
             config.min_block_interval_ms,
-        );
+        )
+        .with_genesis_parent(genesis_parent);
         let genesis = app.genesis_block();
-        let genesis_digest = genesis.digest();
+        let coded_genesis = CodedBlock::new(genesis.clone(), coding_config, &config.strategy);
+        let genesis_commitment = coded_genesis.commitment();
         let mut plan =
-            SyncPlan::<_, Scheme, Standard<Block>>::init(&context, config.partition_prefix.clone())
+            SyncPlan::<_, Scheme, EngineVariant>::init(&context, config.partition_prefix.clone())
                 .await;
         let (state_sync, state_sync_mailbox) = StateSyncActor::new(
             context.child("state_sync_resolver"),
@@ -384,7 +439,6 @@ where
                 operation_codec_config: nunchi_common::qmdb_operation_codec_config(),
                 mailbox_size: MAILBOX_SIZE,
                 me: Some(config.signer.public_key()),
-                initial: STATE_SYNC_RESOLVER_INITIAL,
                 timeout: STATE_SYNC_RESOLVER_TIMEOUT,
                 fetch_retry_timeout: STATE_SYNC_RESOLVER_RETRY,
                 max_serve_ops: STATE_SYNC_FETCH_BATCH_SIZE,
@@ -412,8 +466,8 @@ where
         }
         let marshal_start = recovered_floor
             .clone()
-            .map_or_else(|| plan.marshal_start(genesis), marshal::Start::Floor);
-        let (marshal, marshal_mailbox, _processed_height) = MarshalActor::init(
+            .map_or_else(|| plan.marshal_start(coded_genesis), marshal::Start::Floor);
+        let (marshal, marshal_mailbox, marshal_floor) = MarshalActor::init(
             context.child("marshal"),
             finalizations_by_height,
             finalized_blocks,
@@ -423,7 +477,7 @@ where
                 start: marshal_start,
                 partition_prefix: format!("{}_marshal", config.partition_prefix),
                 mailbox_size: MAILBOX_SIZE,
-                view_retention_timeout: ViewDelta::new(
+                view_retention: ViewDelta::new(
                     ACTIVITY_TIMEOUT
                         .get()
                         .saturating_mul(SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER),
@@ -435,7 +489,7 @@ where
                 value_write_buffer: WRITE_BUFFER,
                 block_codec_config,
                 max_repair: MAX_REPAIR,
-                max_pending_acks: prune_config.max_pending_acks,
+                max_pending_acks: config.max_pending_acks,
                 strategy: config.strategy.clone(),
             },
         )
@@ -447,8 +501,8 @@ where
             StatefulConfig {
                 application: app,
                 db_config,
-                input_provider: submitter,
-                marshal: marshal_mailbox.clone(),
+                provider: submitter,
+                marshal: (marshal_mailbox.clone(), marshal_floor),
                 mailbox_size: MAILBOX_SIZE,
                 plan,
                 resolvers: state_sync_mailbox,
@@ -464,15 +518,20 @@ where
         );
 
         let verify_limiter_context = context.child("application_verify");
-        let application = BoxedAutomaton::new(Inline::new(
+        let application = BoxedAutomaton::new(Marshaled::new(
             context.child("application"),
-            VerifyLimiter::new(
-                &verify_limiter_context,
-                stateful_mailbox.clone(),
-                APPLICATION_VERIFY_CONCURRENCY,
-            ),
-            marshal_mailbox.clone(),
-            FixedEpocher::new(BLOCKS_PER_EPOCH),
+            MarshaledConfig {
+                application: VerifyLimiter::new(
+                    &verify_limiter_context,
+                    stateful_mailbox.clone(),
+                    APPLICATION_VERIFY_CONCURRENCY,
+                ),
+                marshal: marshal_mailbox.clone(),
+                shards: shard_mailbox.clone(),
+                scheme_provider: provider.clone(),
+                strategy: config.strategy.clone(),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+            },
         ));
 
         let (orchestrator, orchestrator_mailbox) = orchestrator::Actor::new(
@@ -483,6 +542,7 @@ where
                 provider,
                 marshal: marshal_mailbox,
                 reporter: orchestrator::NoopReporter::default(),
+                elector: Random::new(RandomVersion::V1),
                 strategy: config.strategy.clone(),
                 leader_timeout: config.leader_timeout,
                 certification_timeout: config.certification_timeout,
@@ -490,11 +550,10 @@ where
                 mailbox_size: MAILBOX_SIZE,
                 partition_prefix: format!("{}_consensus", config.partition_prefix),
                 epoch_length: BLOCKS_PER_EPOCH,
-                genesis_digest,
+                genesis_digest: genesis_commitment,
                 recovered_floor,
                 startup_finalization: None,
                 startup_floor: None,
-                _phantom: PhantomData,
             },
         );
 
@@ -503,8 +562,8 @@ where
             config,
             dkg,
             dkg_mailbox,
-            buffer,
-            buffered_mailbox,
+            shards,
+            shard_mailbox,
             marshal,
             probe_handle,
             state_sync_handle,
@@ -532,7 +591,7 @@ where
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
-        broadcast: (
+        marshal_shards: (
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
@@ -541,8 +600,8 @@ where
             impl Receiver<PublicKey = PublicKey>,
         ),
         marshal: (
-            resolver::handler::Receiver<Digest>,
-            resolver::p2p::Mailbox<Digest, PublicKey>,
+            resolver::handler::Receiver<BlockCommitment>,
+            resolver::p2p::Mailbox<BlockCommitment, PublicKey>,
         ),
         callback: Box<dyn UpdateCallBack<MinSig, PublicKey>>,
     ) -> Handle<()> {
@@ -552,7 +611,7 @@ where
                 votes,
                 certificates,
                 resolver,
-                broadcast,
+                marshal_shards,
                 dkg,
                 marshal,
                 callback
@@ -575,7 +634,7 @@ where
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
-        broadcast: (
+        marshal_shards: (
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
@@ -584,8 +643,8 @@ where
             impl Receiver<PublicKey = PublicKey>,
         ),
         marshal: (
-            resolver::handler::Receiver<Digest>,
-            resolver::p2p::Mailbox<Digest, PublicKey>,
+            resolver::handler::Receiver<BlockCommitment>,
+            resolver::p2p::Mailbox<BlockCommitment, PublicKey>,
         ),
         callback: Box<dyn UpdateCallBack<MinSig, PublicKey>>,
     ) {
@@ -596,11 +655,11 @@ where
             dkg,
             callback,
         );
-        let buffer_handle = self.buffer.start(broadcast);
+        let shards_handle = self.shards.start(marshal_shards);
         let reporters = nunchi_chain::dkg_reporters(self.stateful_mailbox, self.dkg_mailbox);
         let marshal_handle = self
             .marshal
-            .start(reporters, self.buffered_mailbox, marshal);
+            .start(reporters, self.shard_mailbox, marshal);
         let probe_handle = self.probe_handle;
         let state_sync_handle = self.state_sync_handle;
         let stateful_handle = self.stateful.start();
@@ -608,7 +667,7 @@ where
 
         match try_join_all(vec![
             dkg_handle,
-            buffer_handle,
+            shards_handle,
             marshal_handle,
             probe_handle,
             state_sync_handle,

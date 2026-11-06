@@ -98,13 +98,35 @@ where
     S: StateStore + Send + Sync,
     Events: EventSink + Send,
 {
-    // Fee ante: charge the authorizing account before module dispatch. The fee is staged in the
-    // same overlay as the operation, so a failed transaction reverts its fee.
+    // Fee and module writes share one overlay. A failed transaction drops both, including the
+    // bridge arm's inner overlay. Events stay buffered until that commit.
+    let mut overlay = Overlay::new(&mut *state);
+    let mut staged_events = VecEventSink::new();
+    let result = dispatch(&mut overlay, context, transaction, &mut staged_events).await;
+    if result.is_ok() {
+        overlay.commit();
+        for event in staged_events.into_events() {
+            events.emit(event);
+        }
+    }
+    result
+}
+
+async fn dispatch<S, Events>(
+    state: &mut S,
+    context: RuntimeContext,
+    transaction: &Transaction,
+    events: &mut Events,
+) -> Result<(), RuntimeError>
+where
+    S: StateStore + Send + Sync,
+    Events: EventSink + Send,
+{
     let mut fees = Ledger::new(&mut *state);
     fees.charge_fee(
         transaction.account_id(),
         transaction.encode_size(),
-        &mut events,
+        &mut *events,
     )
     .await?;
 

@@ -1,55 +1,54 @@
 //! Config-aware P2P resolver for Nunchi's variable-value QMDB.
 //!
-//! Commonware's QMDB sync engine supports variable operations, but the 2026.7.0 glue P2P
+//! Commonware's QMDB sync engine supports variable operations, but the 2026.9.0 glue P2P
 //! resolver decodes only operations whose codec configuration is exactly `()`. Nunchi values
 //! are `Vec<u8>`, so their operation codec requires a length bound. This module keeps the
 //! Commonware request/response wire layout and resolver engine while supplying that bound when
 //! decoding peer responses.
 
-use bytes::{Buf, BufMut, Bytes};
+use bytes::Bytes;
 use commonware_actor::mailbox::{
     self as actor_mailbox, Overflow, Policy, Sender as ActorSender,
 };
-use commonware_codec::{
-    Decode, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, ReadRangeExt, Write,
-};
+use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{sha256::Digest, PublicKey};
 use commonware_glue::stateful::db::{AttachableResolver, Shared};
-use commonware_macros::{select, select_loop};
+use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Provider, Receiver, Sender};
 use commonware_resolver::{p2p, Delivery, Resolver as _};
 use commonware_runtime::{
     spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_storage::{
-    merkle::{Proof, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT},
-    mmr::{self, Location},
-    qmdb::sync::resolver::{FetchResult, Resolver as SyncResolver},
+    mmr,
+    qmdb::sync::{FeedbackTx, Request, Response, Source},
     Context as StorageContext,
 };
-use commonware_utils::{
-    channel::{fallible::OneshotExt, oneshot},
-    Span,
-};
-use futures::{future, FutureExt as _};
+use commonware_utils::channel::{fallible::OneshotExt, oneshot};
+use futures::future;
 use nunchi_common::{
     QmdbBackend, QmdbDatabaseSet, QmdbOperation, QmdbOperationCfg,
 };
 use rand::Rng;
 use std::{
-    cmp::Ordering,
     collections::{BTreeMap, VecDeque},
-    fmt,
     future::Future,
-    hash::{Hash, Hasher},
     num::{NonZeroU64, NonZeroUsize},
     time::Duration,
 };
-use tracing::{debug, info};
+use tracing::info;
 
-type ResolverResult =
-    Result<FetchResult<mmr::Family, QmdbOperation, Digest>, ResponseDropped>;
-type PendingSubscriber = oneshot::Sender<ResolverResult>;
+type SyncRequest = Request<mmr::Family>;
+type SyncResponse = Response<mmr::Family, QmdbOperation, Digest>;
+type PendingSubscriber = oneshot::Sender<(SyncResponse, FeedbackTx)>;
+
+fn response_matches_request(request: &SyncRequest, response: &SyncResponse) -> bool {
+    matches!(
+        (request, response),
+        (Request::Operations { .. }, Response::Operations { .. })
+            | (Request::Boundary { .. }, Response::Boundary { .. })
+    )
+}
 
 /// Probe-only certificate provider for nodes that have not started their DKG actor yet.
 ///
@@ -114,8 +113,6 @@ where
     pub mailbox_size: NonZeroUsize,
     /// Local node identity if available.
     pub me: Option<P>,
-    /// Initial expected performance for new peers.
-    pub initial: Duration,
     /// Request timeout.
     pub timeout: Duration,
     /// Retry cadence for pending fetches.
@@ -128,142 +125,14 @@ where
     pub priority_responses: bool,
 }
 
-#[derive(Clone, Debug)]
-struct Request {
-    op_count: Location,
-    start_loc: Location,
-    max_ops: NonZeroU64,
-    include_pinned_nodes: bool,
-}
-
-impl PartialEq for Request {
-    fn eq(&self, other: &Self) -> bool {
-        self.op_count == other.op_count
-            && self.start_loc == other.start_loc
-            && self.max_ops == other.max_ops
-            && self.include_pinned_nodes == other.include_pinned_nodes
-    }
-}
-
-impl Eq for Request {}
-
-impl PartialOrd for Request {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for Request {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.op_count
-            .cmp(&other.op_count)
-            .then_with(|| self.start_loc.cmp(&other.start_loc))
-            .then_with(|| self.max_ops.cmp(&other.max_ops))
-            .then_with(|| self.include_pinned_nodes.cmp(&other.include_pinned_nodes))
-    }
-}
-
-impl Hash for Request {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.op_count.hash(state);
-        self.start_loc.hash(state);
-        self.max_ops.hash(state);
-        self.include_pinned_nodes.hash(state);
-    }
-}
-
-impl fmt::Display for Request {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Request(count={}, start={}, max={}, pinned={})",
-            self.op_count, self.start_loc, self.max_ops, self.include_pinned_nodes,
-        )
-    }
-}
-
-impl Write for Request {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.op_count.write(buf);
-        self.start_loc.write(buf);
-        self.max_ops.write(buf);
-        self.include_pinned_nodes.write(buf);
-    }
-}
-
-impl EncodeSize for Request {
-    fn encode_size(&self) -> usize {
-        self.op_count.encode_size()
-            + self.start_loc.encode_size()
-            + self.max_ops.encode_size()
-            + self.include_pinned_nodes.encode_size()
-    }
-}
-
-impl Read for Request {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Ok(Self {
-            op_count: Location::read(buf)?,
-            start_loc: Location::read(buf)?,
-            max_ops: NonZeroU64::read(buf)?,
-            include_pinned_nodes: bool::read(buf)?,
-        })
-    }
-}
-
-impl Span for Request {}
-
-struct Response {
-    proof: Proof<mmr::Family, Digest>,
-    operations: Vec<QmdbOperation>,
-    pinned_nodes: Option<Vec<Digest>>,
-}
-
-impl Write for Response {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.proof.write(buf);
-        self.operations.write(buf);
-        self.pinned_nodes.write(buf);
-    }
-}
-
-impl EncodeSize for Response {
-    fn encode_size(&self) -> usize {
-        self.proof.encode_size() + self.operations.encode_size() + self.pinned_nodes.encode_size()
-    }
-}
-
-impl Read for Response {
-    /// `(max_operations, operation_codec_config)`.
-    type Cfg = (usize, QmdbOperationCfg);
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        let (max_ops, operation_cfg) = cfg;
-        let max_proof_digests = max_ops.saturating_mul(MAX_PROOF_DIGESTS_PER_ELEMENT);
-        let proof = Proof::<mmr::Family, Digest>::read_cfg(buf, &max_proof_digests)?;
-        let operations = Vec::<QmdbOperation>::read_cfg(
-            buf,
-            &(RangeCfg::from(..=*max_ops), *operation_cfg),
-        )?;
-        let pinned_nodes = Option::<Vec<Digest>>::read_range(buf, ..=MAX_PINNED_NODES)?;
-        Ok(Self {
-            proof,
-            operations,
-            pinned_nodes,
-        })
-    }
-}
-
 enum EngineMessage {
     Deliver {
-        key: Request,
+        key: SyncRequest,
         value: Bytes,
         response: oneshot::Sender<bool>,
     },
     Produce {
-        key: Request,
+        key: SyncRequest,
         response: oneshot::Sender<Bytes>,
     },
 }
@@ -323,9 +192,10 @@ impl Handler {
 }
 
 impl commonware_resolver::Consumer for Handler {
-    type Key = Request;
+    type Key = SyncRequest;
     type Value = Bytes;
     type Subscriber = ();
+    type Outcome = bool;
 
     fn deliver(
         &mut self,
@@ -343,7 +213,7 @@ impl commonware_resolver::Consumer for Handler {
 }
 
 impl p2p::Producer for Handler {
-    type Key = Request;
+    type Key = SyncRequest;
 
     fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
         let (response, receiver) = oneshot::channel();
@@ -362,11 +232,11 @@ pub struct ResponseDropped;
 enum Message<E: StorageContext> {
     AttachDatabase(QmdbDatabaseSet<E>),
     GetOperations {
-        request: Request,
-        response: oneshot::Sender<ResolverResult>,
+        request: SyncRequest,
+        response: PendingSubscriber,
     },
     CancelOperations {
-        request: Request,
+        request: SyncRequest,
     },
 }
 
@@ -459,44 +329,55 @@ impl<E: StorageContext> Mailbox<E> {
     }
 }
 
-impl<E: StorageContext> SyncResolver for Mailbox<E> {
+struct CancelGuard<E: StorageContext> {
+    sender: ActorSender<Message<E>>,
+    cancel: Option<Message<E>>,
+}
+
+impl<E: StorageContext> CancelGuard<E> {
+    const fn new(sender: ActorSender<Message<E>>, cancel: Message<E>) -> Self {
+        Self {
+            sender,
+            cancel: Some(cancel),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.cancel = None;
+    }
+}
+
+impl<E: StorageContext> Drop for CancelGuard<E> {
+    fn drop(&mut self) {
+        let Some(cancel) = self.cancel.take() else {
+            return;
+        };
+        let _ = self.sender.enqueue(cancel);
+    }
+}
+
+impl<E: StorageContext> Source for Mailbox<E> {
     type Family = mmr::Family;
     type Digest = Digest;
     type Op = QmdbOperation;
     type Error = ResponseDropped;
 
-    async fn get_operations(
+    async fn serve(
         &self,
-        op_count: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-        include_pinned_nodes: bool,
-        cancel_rx: oneshot::Receiver<()>,
-    ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-        let request = Request {
-            op_count,
-            start_loc,
-            max_ops,
-            include_pinned_nodes,
-        };
-        futures::pin_mut!(cancel_rx);
+        request: SyncRequest,
+    ) -> Result<(SyncResponse, FeedbackTx), Self::Error> {
         let (response_tx, response_rx) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetOperations {
-            request: request.clone(),
+            request,
             response: response_tx,
         });
-        futures::pin_mut!(response_rx);
-
-        select! {
-            response = response_rx.as_mut() => response.map_err(|_| ResponseDropped)?,
-            _ = cancel_rx.as_mut() => {
-                if let Some(response) = response_rx.as_mut().now_or_never() {
-                    return response.map_err(|_| ResponseDropped)?;
-                }
-                let _ = self.sender.enqueue(Message::CancelOperations { request });
-                Err(ResponseDropped)
-            },
-        }
+        let mut guard = CancelGuard::new(
+            self.sender.clone(),
+            Message::CancelOperations { request },
+        );
+        let result = response_rx.await;
+        guard.disarm();
+        result.map_err(|_| ResponseDropped)
     }
 }
 
@@ -514,8 +395,8 @@ enum State<E: StorageContext> {
 
 enum MailboxAction {
     None,
-    Fetch(Request),
-    Cancel(Request),
+    Fetch(SyncRequest),
+    Cancel(SyncRequest),
 }
 
 /// P2P QMDB resolver that decodes variable-value operations with explicit bounds.
@@ -530,7 +411,7 @@ where
     config: Config<E, P, D, B>,
     mailbox_rx: actor_mailbox::Receiver<Message<E>>,
     state: State<E>,
-    pending: BTreeMap<Request, Vec<PendingSubscriber>>,
+    pending: BTreeMap<SyncRequest, Vec<PendingSubscriber>>,
 }
 
 impl<E, P, D, B> Actor<E, P, D, B>
@@ -582,7 +463,6 @@ where
                 producer: handler,
                 mailbox_size: self.config.mailbox_size,
                 me: self.config.me.clone(),
-                initial: self.config.initial,
                 timeout: self.config.timeout,
                 fetch_retry_timeout: self.config.fetch_retry_timeout,
                 priority_requests: self.config.priority_requests,
@@ -645,7 +525,7 @@ where
                         return MailboxAction::None;
                     }
                 }
-                self.pending.insert(request.clone(), vec![response]);
+                self.pending.insert(request, vec![response]);
                 MailboxAction::Fetch(request)
             }
             Message::CancelOperations { request } => {
@@ -658,7 +538,7 @@ where
         }
     }
 
-    fn should_cancel_request(&mut self, request: &Request) -> bool {
+    fn should_cancel_request(&mut self, request: &SyncRequest) -> bool {
         let Some(subscribers) = self.pending.get_mut(request) else {
             return false;
         };
@@ -672,24 +552,23 @@ where
 
     async fn handle_deliver(
         &mut self,
-        key: Request,
+        key: SyncRequest,
         value: Bytes,
-        response: oneshot::Sender<bool>,
+        feedback_tx: oneshot::Sender<bool>,
     ) {
         let Some(subscribers) = self.pending.remove(&key) else {
-            response.send_lossy(true);
+            feedback_tx.send_lossy(true);
             return;
         };
         let decode_cfg = (
-            key.max_ops.get() as usize,
+            key.max_ops().get() as usize,
             self.config.operation_codec_config,
         );
-        let decoded = match Response::decode_cfg(value, &decode_cfg) {
-            Ok(decoded) => decoded,
-            Err(error) => {
-                debug!(?key, ?error, "invalid state-sync response");
+        let decoded = match SyncResponse::decode_cfg(value, &decode_cfg) {
+            Ok(decoded) if response_matches_request(&key, &decoded) => decoded,
+            Ok(_) | Err(_) => {
                 self.pending.insert(key, subscribers);
-                response.send_lossy(false);
+                feedback_tx.send_lossy(false);
                 return;
             }
         };
@@ -697,20 +576,12 @@ where
         let mut approvals = Vec::new();
         for subscriber in subscribers {
             let (success_tx, success_rx) = oneshot::channel();
-            if subscriber
-                .send(Ok(FetchResult::with_callback(
-                    decoded.proof.clone(),
-                    decoded.operations.clone(),
-                    decoded.pinned_nodes.clone(),
-                    success_tx,
-                )))
-                .is_ok()
-            {
+            if subscriber.send((decoded.clone(), Some(success_tx))).is_ok() {
                 approvals.push(success_rx);
             }
         }
         if approvals.is_empty() {
-            response.send_lossy(true);
+            feedback_tx.send_lossy(true);
             return;
         }
         let mut peer_valid = true;
@@ -719,37 +590,22 @@ where
                 peer_valid &= approved;
             }
         }
-        response.send_lossy(peer_valid);
+        feedback_tx.send_lossy(peer_valid);
     }
 
-    async fn handle_produce(&mut self, key: Request, response: oneshot::Sender<Bytes>) {
+    async fn handle_produce(&mut self, key: SyncRequest, response: oneshot::Sender<Bytes>) {
         let State::HasDb(database) = &self.state else {
             return;
         };
-        if key.max_ops > self.config.max_serve_ops {
-            return;
+        if let Request::Operations { max_ops, .. } = key {
+            if max_ops > self.config.max_serve_ops {
+                return;
+            }
         }
-        let (_cancel_tx, cancel_rx) = oneshot::channel();
-        let result = database
-            .get_operations(
-                key.op_count,
-                key.start_loc,
-                key.max_ops,
-                key.include_pinned_nodes,
-                cancel_rx,
-            )
-            .await;
-        let Ok(fetch) = result else {
+        let Ok((payload, _feedback_tx)) = database.serve(key).await else {
             return;
         };
-        response.send_lossy(
-            Response {
-                proof: fetch.proof,
-                operations: fetch.operations,
-                pinned_nodes: fetch.pinned_nodes,
-            }
-            .encode(),
-        );
+        response.send_lossy(payload.encode());
     }
 }
 
@@ -757,15 +613,18 @@ where
 mod tests {
     use super::*;
     use commonware_actor::Feedback;
-    use commonware_codec::DecodeExt;
+    use commonware_codec::{DecodeExt, Error as CodecError, RangeCfg};
     use commonware_cryptography::ed25519;
     use commonware_p2p::{Provider, TrackedPeers};
     use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
+    use commonware_storage::merkle::Proof;
+    use commonware_storage::mmr::Location;
     use commonware_utils::{channel::oneshot, vec::NonEmptyVec, NZUsize};
     use nunchi_common::{
         qmdb_operation_codec_config, shared_database, QmdbBackend, QmdbState,
     };
     use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
     use std::time::Duration;
 
     #[derive(Clone, Debug)]
@@ -793,12 +652,23 @@ mod tests {
         fn block(&mut self, _peer: Self::PublicKey) -> Feedback {
             Feedback::Ok
         }
+
+        fn blocked(&mut self) -> commonware_p2p::BlockedSubscription<Self::PublicKey> {
+            let (_, receiver) = commonware_utils::channel::ring::channel(NZUsize!(1));
+            receiver
+        }
+    }
+
+    #[test]
+    fn dummy_blocker_exposes_blocked_subscription() {
+        let mut blocker = DummyBlocker;
+        let _ = commonware_p2p::Blocker::blocked(&mut blocker);
     }
 
     type TestActor =
         Actor<deterministic::Context, ed25519::PublicKey, DummyProvider, DummyBlocker>;
     type TestPending = PendingSubscriber;
-    type TestPendingResult = oneshot::Receiver<ResolverResult>;
+    type TestPendingResult = oneshot::Receiver<(SyncResponse, FeedbackTx)>;
 
     fn test_config(
         database: Option<QmdbDatabaseSet<deterministic::Context>>,
@@ -810,7 +680,6 @@ mod tests {
             operation_codec_config: qmdb_operation_codec_config(),
             mailbox_size: NZUsize!(16),
             me: None,
-            initial: Duration::from_millis(10),
             timeout: Duration::from_millis(10),
             fetch_retry_timeout: Duration::from_millis(10),
             max_serve_ops: NonZeroU64::new(16).unwrap(),
@@ -819,12 +688,11 @@ mod tests {
         }
     }
 
-    fn test_request_at(op_count: Location) -> Request {
-        Request {
-            op_count,
-            start_loc: Location::new(0),
+    fn test_request_at(size: Location) -> SyncRequest {
+        Request::Operations {
+            size,
+            start: Location::new(0),
             max_ops: NonZeroU64::new(1).unwrap(),
-            include_pinned_nodes: false,
         }
     }
 
@@ -843,79 +711,139 @@ mod tests {
         shared_database(db)
     }
 
-    fn response(value: Vec<u8>) -> Response {
-        Response {
-            proof: Proof {
-                leaves: Location::new(0),
-                inactive_peaks: 0,
-                digests: Vec::new(),
-            },
+    fn empty_proof() -> Proof<mmr::Family, Digest> {
+        Proof {
+            leaves: Location::new(0),
+            inactive_peaks: 0,
+            digests: Vec::new(),
+        }
+    }
+
+    fn response(value: Vec<u8>) -> SyncResponse {
+        Response::Operations {
+            proof: empty_proof(),
             operations: vec![QmdbOperation::CommitFloor(
                 Some(value),
                 Location::new(0),
             )],
-            pinned_nodes: None,
         }
     }
 
     fn encoded_fetch_payload() -> Bytes {
-        Response {
-            proof: Proof {
-                leaves: Location::new(0),
-                inactive_peaks: 0,
-                digests: Vec::new(),
-            },
-            operations: Vec::new(),
-            pinned_nodes: None,
+        Response::Operations {
+            proof: empty_proof(),
+            operations: Vec::<QmdbOperation>::new(),
         }
         .encode()
+    }
+
+    fn encoded_boundary_payload() -> Bytes {
+        Response::Boundary {
+            proof: Proof {
+                leaves: Location::new(10),
+                inactive_peaks: 0,
+                digests: vec![Digest::from([7; 32])],
+            },
+            op: QmdbOperation::CommitFloor(None, Location::new(0)),
+            pinned_nodes: vec![Digest::from([9; 32])],
+        }
+        .encode()
+    }
+
+    fn operations_len(response: &SyncResponse) -> usize {
+        match response {
+            Response::Operations { operations, .. } => operations.len(),
+            Response::Boundary { .. } => 1,
+        }
+    }
+
+    #[test]
+    fn response_matches_request_accepts_same_variant_only() {
+        let operations_request = test_request_at(Location::new(1));
+        let boundary_request = Request::Boundary {
+            size: Location::new(10),
+            start: Location::new(10),
+        };
+        let operations_response = Response::Operations {
+            proof: empty_proof(),
+            operations: Vec::<QmdbOperation>::new(),
+        };
+        let boundary_response = Response::Boundary {
+            proof: Proof {
+                leaves: Location::new(10),
+                inactive_peaks: 0,
+                digests: vec![Digest::from([7; 32])],
+            },
+            op: QmdbOperation::CommitFloor(None, Location::new(0)),
+            pinned_nodes: vec![Digest::from([9; 32])],
+        };
+        assert!(response_matches_request(
+            &operations_request,
+            &operations_response
+        ));
+        assert!(response_matches_request(
+            &boundary_request,
+            &boundary_response
+        ));
+        assert!(!response_matches_request(
+            &operations_request,
+            &boundary_response
+        ));
+        assert!(!response_matches_request(
+            &boundary_request,
+            &operations_response
+        ));
     }
 
     #[test]
     fn response_codec_uses_explicit_value_bound() {
         let encoded = response(vec![9; 32]).encode();
         let cfg = (1, ((), (RangeCfg::from(..=32), ())));
-        let decoded = Response::decode_cfg(encoded, &cfg).unwrap();
-        assert_eq!(decoded.operations.len(), 1);
+        let decoded = SyncResponse::decode_cfg(encoded, &cfg).unwrap();
+        assert_eq!(operations_len(&decoded), 1);
     }
 
     #[test]
     fn response_codec_rejects_oversized_value() {
         let encoded = response(vec![9; 33]).encode();
         let cfg = (1, ((), (RangeCfg::from(..=32), ())));
-        assert!(Response::decode_cfg(encoded, &cfg).is_err());
+        assert!(SyncResponse::decode_cfg(encoded, &cfg).is_err());
     }
 
     #[test]
     fn response_codec_roundtrips_with_pinned_nodes() {
-        let response = Response {
+        let response = Response::Boundary {
             proof: Proof {
                 leaves: Location::new(10),
                 inactive_peaks: 0,
                 digests: vec![Digest::from([7; 32])],
             },
-            operations: vec![QmdbOperation::CommitFloor(None, Location::new(0))],
-            pinned_nodes: Some(vec![Digest::from([9; 32])]),
+            op: QmdbOperation::CommitFloor(None, Location::new(0)),
+            pinned_nodes: vec![Digest::from([9; 32])],
         };
         let encoded = response.encode();
-        let decoded = Response::decode_cfg(encoded, &(1, qmdb_operation_codec_config())).unwrap();
-        assert_eq!(decoded.operations.len(), 1);
-        assert_eq!(decoded.pinned_nodes.as_ref().unwrap().len(), 1);
-        assert_eq!(decoded.proof.leaves, Location::new(10));
+        let decoded = SyncResponse::decode_cfg(encoded, &(1, qmdb_operation_codec_config())).unwrap();
+        assert_eq!(operations_len(&decoded), 1);
+        assert!(matches!(
+            decoded,
+            Response::Boundary {
+                pinned_nodes,
+                proof,
+                ..
+            } if pinned_nodes.len() == 1 && proof.leaves == Location::new(10)
+        ));
     }
 
     #[test]
     fn request_codec_round_trips() {
-        let request = Request {
-            op_count: Location::new(128),
-            start_loc: Location::new(64),
+        let request = Request::Operations {
+            size: Location::new(128),
+            start: Location::new(64),
             max_ops: NonZeroU64::new(16).unwrap(),
-            include_pinned_nodes: true,
         };
-        let decoded = Request::decode(request.encode()).unwrap();
+        let decoded = Request::<mmr::Family>::decode(request.encode()).unwrap();
         assert_eq!(request, decoded);
         assert!(request < test_request_at(Location::new(200)));
-        assert!(format!("{request}").contains("pinned=true"));
         assert!(format!("{request}").contains("max=16"));
 
         let mut hasher = DefaultHasher::new();
@@ -926,21 +854,18 @@ mod tests {
     }
 
     #[test]
-    fn request_decode_rejects_invalid_pinned_flag() {
-        let mut encoded = Request {
-            op_count: Location::new(128),
-            start_loc: Location::new(64),
+    fn request_decode_rejects_invalid_variant() {
+        let mut encoded = Request::Operations {
+            size: Location::new(128),
+            start: Location::new(64),
             max_ops: NonZeroU64::new(16).unwrap(),
-            include_pinned_nodes: true,
         }
         .encode()
         .to_vec();
-        *encoded
-            .last_mut()
-            .expect("request encoding must include pinned_nodes flag") = 2;
+        encoded[0] = 2;
         assert!(matches!(
-            Request::decode(Bytes::from(encoded)),
-            Err(CodecError::InvalidBool)
+            Request::<mmr::Family>::decode(Bytes::from(encoded)),
+            Err(CodecError::InvalidEnum(2))
         ));
     }
 
@@ -949,28 +874,19 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (sender, mut receiver) = actor_mailbox::new(context, NZUsize!(4));
             let mailbox = Mailbox::<deterministic::Context>::new(sender);
-            let (cancel_tx, cancel_rx) = oneshot::channel();
-            let get = mailbox.get_operations(
-                Location::new(10),
-                Location::new(3),
-                NonZeroU64::MIN,
-                false,
-                cancel_rx,
-            );
-            let observe = async move {
-                let response = match receiver.recv().await.unwrap() {
-                    Message::GetOperations { response, .. } => response,
-                    _ => panic!("expected get operations"),
-                };
-                drop(cancel_tx);
-                assert!(matches!(
-                    receiver.recv().await.unwrap(),
-                    Message::CancelOperations { .. }
-                ));
-                drop(response);
-            };
-            let (result, _) = futures::join!(get, observe);
-            assert!(matches!(result, Err(ResponseDropped)));
+            {
+                let get = mailbox.serve(test_request_at(Location::new(10)));
+                futures::pin_mut!(get);
+                assert!(futures::poll!(get.as_mut()).is_pending());
+            }
+            assert!(matches!(
+                receiver.recv().await.expect("request should be queued"),
+                Message::GetOperations { .. }
+            ));
+            assert!(matches!(
+                receiver.recv().await.expect("cancel should be queued"),
+                Message::CancelOperations { .. }
+            ));
         });
     }
 
@@ -979,14 +895,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (sender, mut receiver) = actor_mailbox::new(context, NZUsize!(4));
             let mailbox = Mailbox::<deterministic::Context>::new(sender);
-            let (cancel_tx, cancel_rx) = oneshot::channel();
-            let get = mailbox.get_operations(
-                Location::new(1),
-                Location::new(0),
-                NonZeroU64::MIN,
-                false,
-                cancel_rx,
-            );
+            let get = mailbox.serve(test_request_at(Location::new(1)));
             let observe = async move {
                 let Message::GetOperations { response, .. } =
                     receiver.recv().await.expect("request queued")
@@ -994,17 +903,14 @@ mod tests {
                     panic!("expected get operations");
                 };
                 response
-                    .send(Ok(FetchResult::new(
-                        Proof {
-                            leaves: Location::new(0),
-                            inactive_peaks: 0,
-                            digests: Vec::new(),
+                    .send((
+                        Response::Operations {
+                            proof: empty_proof(),
+                            operations: Vec::<QmdbOperation>::new(),
                         },
-                        Vec::new(),
                         None,
-                    )))
+                    ))
                     .unwrap();
-                drop(cancel_tx);
             };
             let (result, _) = futures::join!(get, observe);
             assert!(result.is_ok());
@@ -1072,7 +978,7 @@ mod tests {
             let deliver_rx = commonware_resolver::Consumer::deliver(
                 &mut handler,
                 Delivery {
-                    key: request.clone(),
+                    key: request,
                     subscribers: NonEmptyVec::new(((), tracing::Span::none())),
                 },
                 Bytes::from_static(b"payload"),
@@ -1087,7 +993,7 @@ mod tests {
             response.send_lossy(true);
             assert!(deliver_rx.await.unwrap());
 
-            let produce_rx = p2p::Producer::produce(&mut handler, request.clone());
+            let produce_rx = p2p::Producer::produce(&mut handler, request);
             let EngineMessage::Produce { key, response } =
                 receiver.recv().await.expect("produce queued")
             else {
@@ -1140,11 +1046,10 @@ mod tests {
             let (mut actor, _mailbox) =
                 TestActor::new(context.child("actor"), test_config(Some(db)));
 
-            let request = Request {
-                op_count,
-                start_loc: Location::new(0),
+            let request = Request::Operations {
+                size: op_count.max(Location::new(1)),
+                start: Location::new(0),
                 max_ops: NonZeroU64::new(1_000).unwrap(),
-                include_pinned_nodes: false,
             };
             let (response_tx, response_rx) = oneshot::channel();
             actor.handle_produce(request, response_tx).await;
@@ -1160,11 +1065,32 @@ mod tests {
 
             let (subscriber_tx, subscriber_rx) = test_subscriber();
             drop(subscriber_rx);
-            actor.pending.insert(request.clone(), vec![subscriber_tx]);
+            actor.pending.insert(request, vec![subscriber_tx]);
 
             let (ack_tx, ack_rx) = oneshot::channel();
             actor
                 .handle_deliver(request, encoded_fetch_payload(), ack_tx)
+                .await;
+            assert!(ack_rx.await.unwrap());
+        });
+    }
+
+    #[test]
+    fn deliver_accepts_matching_boundary_payload() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
+            let request = Request::Boundary {
+                size: Location::new(10),
+                start: Location::new(10),
+            };
+
+            let (subscriber_tx, subscriber_rx) = test_subscriber();
+            drop(subscriber_rx);
+            actor.pending.insert(request, vec![subscriber_tx]);
+
+            let (ack_tx, ack_rx) = oneshot::channel();
+            actor
+                .handle_deliver(request, encoded_boundary_payload(), ack_tx)
                 .await;
             assert!(ack_rx.await.unwrap());
         });
@@ -1177,11 +1103,11 @@ mod tests {
             let request = test_request_at(Location::new(1));
 
             let (subscriber_tx, _subscriber_rx) = test_subscriber();
-            actor.pending.insert(request.clone(), vec![subscriber_tx]);
+            actor.pending.insert(request, vec![subscriber_tx]);
 
             let (ack_tx, ack_rx) = oneshot::channel();
             actor
-                .handle_deliver(request.clone(), Bytes::from_static(b"not-a-response"), ack_tx)
+                .handle_deliver(request, Bytes::from_static(b"not-a-response"), ack_tx)
                 .await;
             assert!(!ack_rx.await.unwrap());
             assert!(actor.pending.contains_key(&request));
@@ -1198,23 +1124,21 @@ mod tests {
             let (sub2_tx, sub2_rx) = test_subscriber();
             actor
                 .pending
-                .insert(request.clone(), vec![sub1_tx, sub2_tx]);
+                .insert(request, vec![sub1_tx, sub2_tx]);
 
             let (ack_tx, ack_rx) = oneshot::channel();
             futures::join!(
                 actor.handle_deliver(request, encoded_fetch_payload(), ack_tx),
                 async {
-                    let fetch = sub1_rx.await.unwrap().unwrap();
-                    fetch
-                        .callback
+                    let (_response, feedback_tx) = sub1_rx.await.unwrap();
+                    feedback_tx
                         .expect("deliveries should include feedback")
                         .send(true)
                         .unwrap();
                 },
                 async {
-                    let fetch = sub2_rx.await.unwrap().unwrap();
-                    fetch
-                        .callback
+                    let (_response, feedback_tx) = sub2_rx.await.unwrap();
+                    feedback_tx
                         .expect("deliveries should include feedback")
                         .send(false)
                         .unwrap();
@@ -1235,19 +1159,18 @@ mod tests {
             let (sub2_tx, sub2_rx) = test_subscriber();
             actor
                 .pending
-                .insert(request.clone(), vec![sub1_tx, sub2_tx]);
+                .insert(request, vec![sub1_tx, sub2_tx]);
 
             let (ack_tx, ack_rx) = oneshot::channel();
             futures::join!(
                 actor.handle_deliver(request, encoded_fetch_payload(), ack_tx),
                 async {
-                    let fetch = sub1_rx.await.unwrap().unwrap();
+                    let fetch = sub1_rx.await.unwrap();
                     drop(fetch);
                 },
                 async {
-                    let fetch = sub2_rx.await.unwrap().unwrap();
-                    fetch
-                        .callback
+                    let (_response, feedback_tx) = sub2_rx.await.unwrap();
+                    feedback_tx
                         .expect("deliveries should include feedback")
                         .send(true)
                         .unwrap();
@@ -1282,14 +1205,14 @@ mod tests {
 
             let (first_tx, _first_rx) = test_subscriber();
             let action = actor.handle_mailbox_message(Message::GetOperations {
-                request: request.clone(),
+                request,
                 response: first_tx,
             });
             assert!(matches!(action, MailboxAction::Fetch(ref key) if key == &request));
 
             let (second_tx, _second_rx) = test_subscriber();
             let action = actor.handle_mailbox_message(Message::GetOperations {
-                request: request.clone(),
+                request,
                 response: second_tx,
             });
             assert!(matches!(action, MailboxAction::None));
@@ -1305,11 +1228,11 @@ mod tests {
 
             let (stale_tx, stale_rx) = test_subscriber();
             drop(stale_rx);
-            actor.pending.insert(request.clone(), vec![stale_tx]);
+            actor.pending.insert(request, vec![stale_tx]);
 
             let (fresh_tx, _fresh_rx) = test_subscriber();
             let action = actor.handle_mailbox_message(Message::GetOperations {
-                request: request.clone(),
+                request,
                 response: fresh_tx,
             });
 
@@ -1328,16 +1251,16 @@ mod tests {
 
             let (stale_tx, stale_rx) = test_subscriber();
             drop(stale_rx);
-            actor.pending.insert(request.clone(), vec![stale_tx]);
+            actor.pending.insert(request, vec![stale_tx]);
 
             let action = actor.handle_mailbox_message(Message::CancelOperations {
-                request: request.clone(),
+                request,
             });
             assert!(matches!(action, MailboxAction::Cancel(ref key) if key == &request));
             assert!(!actor.pending.contains_key(&request));
 
             let (live_tx, _live_rx) = test_subscriber();
-            actor.pending.insert(request.clone(), vec![live_tx]);
+            actor.pending.insert(request, vec![live_tx]);
             let action = actor.handle_mailbox_message(Message::CancelOperations { request });
             assert!(matches!(action, MailboxAction::None));
         });

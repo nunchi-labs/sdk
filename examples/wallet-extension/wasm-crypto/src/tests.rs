@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::{sign_transfer_internal, Address};
+    use crate::{register_account_policy_transaction, sign_transfer_internal, Address};
     use commonware_codec::Encode;
     use commonware_cryptography::{sha256::Digest, Hasher};
     use nunchi_coins::{CoinId, CoinOperation, Transaction};
@@ -47,7 +47,7 @@ mod tests {
         );
         
         let official_bytes = official_tx.encode();
-        let official_digest = commonware_cryptography::Sha256::hash(&official_bytes);
+        let official_digest = commonware_cryptography::Sha256::hash(&[official_bytes.as_ref()]);
         
         let from_wasm_addr = Address::external(&nunchi_key.public_key());
         let to_wasm_addr = Address::external(&to_key.public_key());
@@ -92,7 +92,7 @@ mod tests {
         );
         
         let official_bytes = official_tx.encode();
-        let official_digest = commonware_cryptography::Sha256::hash(&official_bytes);
+        let official_digest = commonware_cryptography::Sha256::hash(&[official_bytes.as_ref()]);
         
         let from_wasm_addr = Address::external(&nunchi_key.public_key());
         let to_wasm_addr = Address::external(&to_key.public_key());
@@ -156,5 +156,21 @@ mod tests {
         let wrong_hrp_str = valid_bech32.replacen("nch", "eth", 1);
         let wrong_hrp = Address::from_bech32(&wrong_hrp_str);
         assert!(wrong_hrp.is_err(), "Wrong HRP should be rejected");
+    }
+
+    #[test]
+    fn register_account_policy_rejects_threshold_above_one() {
+        let key = NunchiPrivateKey::ed25519_from_seed(1);
+        let other = NunchiPrivateKey::ed25519_from_seed(2);
+        let signers = format!(
+            "{},{}",
+            hex::encode(key.public_key().encode()),
+            hex::encode(other.public_key().encode())
+        );
+        let rejected = register_account_policy_transaction(&key, 0, 2, &signers);
+        assert!(rejected.is_err(), "threshold 2 cannot be signed by one key");
+
+        let accepted = register_account_policy_transaction(&key, 0, 1, &signers).unwrap();
+        assert_eq!(accepted.verify(), Ok(()));
     }
 }

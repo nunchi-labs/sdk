@@ -9,9 +9,13 @@ use nunchi_coins::{
     TokenCreated, TokenFactory, TokenGenesis, TokenName, TokenSymbol, FEE_CHARGED_EVENT,
     TOKEN_CREATED_EVENT, TRANSFERRED_EVENT,
 };
-use nunchi_common::{state_db::StateError, Address, QmdbState, Runtime, RuntimeContext, VecEventSink};
+use nunchi_common::{
+    state_db::StateError, Address, MultisigPolicy, QmdbState, Runtime, RuntimeContext, VecEventSink,
+};
 use nunchi_crypto::PrivateKey;
-use nunchi_oracle::OracleError;
+use nunchi_oracle::{
+    IntervalKey, NamespaceId, OracleDB, OracleError, OracleLedger, OracleOperation,
+};
 
 use crate::runtime::*;
 use crate::Transaction;
@@ -179,6 +183,84 @@ fn runtime_charges_fee_before_dispatch() {
 }
 
 #[test]
+fn runtime_reverts_fee_when_transaction_fails() {
+    deterministic::Runner::default().start(|context| async move {
+        let alice_key = PrivateKey::ed25519_from_seed(1);
+        let alice = Address::external(&alice_key.public_key());
+        let bob = Address::external(&PrivateKey::ed25519_from_seed(2).public_key());
+        let collector = Address::external(&PrivateKey::ed25519_from_seed(9).public_key());
+        let genesis = fee_genesis(alice.clone(), collector.clone(), 7, 3);
+        let mut state = fee_state(context, "coins-runtime-fee-revert", &genesis).await;
+        let coin = TokenFactory::derive_coin_id(&alice, 0, &genesis.tokens[0].spec);
+
+        let tx = Transaction::from(nunchi_coins::Transaction::sign(
+            &alice_key,
+            1,
+            CoinOperation::Transfer {
+                coin,
+                from: alice.clone(),
+                to: bob.clone(),
+                amount: 100,
+            },
+        ));
+        let mut events = VecEventSink::new();
+        let error = CoinsRuntime::apply(&mut state, RuntimeContext::default(), &tx, &mut events)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            RuntimeError::Coins(LedgerError::NonceMismatch { .. })
+        ));
+        assert!(events.is_empty());
+        assert_eq!(state.balance(&alice, &coin).await.unwrap(), 1_000);
+        assert_eq!(state.balance(&bob, &coin).await.unwrap(), 0);
+        assert_eq!(state.balance(&collector, &coin).await.unwrap(), 0);
+    });
+}
+
+#[test]
+fn failed_dispatch_reverts_the_fee() {
+    deterministic::Runner::default().start(|context| async move {
+        let alice_key = PrivateKey::ed25519_from_seed(1);
+        let alice = Address::external(&alice_key.public_key());
+        let bob = Address::external(&PrivateKey::ed25519_from_seed(2).public_key());
+        let collector = Address::external(&PrivateKey::ed25519_from_seed(9).public_key());
+        let genesis = fee_genesis(alice.clone(), collector.clone(), 7, 3);
+        let mut state = fee_state(context, "coins-runtime-fee-revert-balance", &genesis).await;
+        let spec = &genesis.tokens[0].spec;
+        let coin = TokenFactory::derive_coin_id(&alice, 0, spec);
+
+        let tx = Transaction::from(nunchi_coins::Transaction::sign(
+            &alice_key,
+            0,
+            CoinOperation::Transfer {
+                coin,
+                from: alice.clone(),
+                to: bob,
+                amount: 1_000,
+            },
+        ));
+        let mut events = VecEventSink::new();
+        let err = CoinsRuntime::apply(&mut state, RuntimeContext::default(), &tx, &mut events)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            RuntimeError::Coins(LedgerError::InsufficientBalance { .. })
+        ));
+        assert!(
+            events.is_empty(),
+            "a reverted transaction must not emit the fee it charged"
+        );
+
+        let ledger = Ledger::new(&mut state);
+        assert_eq!(ledger.balance(&alice, &coin).await.unwrap(), 1_000);
+        assert_eq!(ledger.balance(&collector, &coin).await.unwrap(), 0);
+        assert_eq!(ledger.nonce(&alice).await.unwrap(), 0);
+    });
+}
+
+#[test]
 fn bridge_lock_escrows_funds_and_records_transfer() {
     deterministic::Runner::default().start(|context| async move {
         let mut state = QmdbState::init(context, "bridge-lock-escrow").await.unwrap();
@@ -209,9 +291,9 @@ fn bridge_lock_escrows_funds_and_records_transfer() {
             .id;
 
         // Pin the bridge chain id, then lock 400 to a destination chain.
-        let local_chain = ChainId(Sha256::hash(b"local-chain"));
+        let local_chain = ChainId(Sha256::hash(&[b"local-chain"]));
         BridgeGenesis::new(local_chain).apply(&mut state);
-        let dest = ChainId(Sha256::hash(b"dest-chain"));
+        let dest = ChainId(Sha256::hash(&[b"dest-chain"]));
         let recipient = Address::external(&PrivateKey::ed25519_from_seed(2).public_key());
         let lock = Transaction::from(BridgeTransaction::sign(
             &alice,
@@ -292,9 +374,9 @@ fn bridge_lock_reverts_escrow_when_bridge_rejects() {
             .token
             .id;
 
-        let local_chain = ChainId(Sha256::hash(b"local-chain"));
+        let local_chain = ChainId(Sha256::hash(&[b"local-chain"]));
         BridgeGenesis::new(local_chain).apply(&mut state);
-        let dest = ChainId(Sha256::hash(b"dest-chain"));
+        let dest = ChainId(Sha256::hash(&[b"dest-chain"]));
         let recipient = Address::external(&PrivateKey::ed25519_from_seed(2).public_key());
 
         // Sufficient balance, but a wrong bridge nonce (expected 0, given 5).
@@ -378,6 +460,117 @@ fn runtime_rejects_transaction_that_cannot_pay_fee() {
 }
 
 #[test]
+fn runtime_reverts_fee_when_dispatch_rejects() {
+    deterministic::Runner::default().start(|context| async move {
+        let alice_key = PrivateKey::ed25519_from_seed(1);
+        let alice = Address::external(&alice_key.public_key());
+        let bob = Address::external(&PrivateKey::ed25519_from_seed(2).public_key());
+        let collector = Address::external(&PrivateKey::ed25519_from_seed(9).public_key());
+
+        let genesis = fee_genesis(alice.clone(), collector.clone(), 7, 3);
+        let mut state = fee_state(context, "coins-runtime-fee-revert-next", &genesis).await;
+        let coin = TokenFactory::derive_coin_id(&alice, 0, &genesis.tokens[0].spec);
+
+        // The fee ante succeeds, then the nonce check rejects the transfer.
+        let bad = Transaction::from(nunchi_coins::Transaction::sign(
+            &alice_key,
+            5,
+            CoinOperation::Transfer {
+                coin,
+                from: alice.clone(),
+                to: bob.clone(),
+                amount: 100,
+            },
+        ));
+        let err = CoinsRuntime::apply(
+            &mut state,
+            RuntimeContext::default(),
+            &bad,
+            &mut VecEventSink::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            RuntimeError::Coins(LedgerError::NonceMismatch { .. })
+        ));
+        assert_eq!(state.balance(&alice, &coin).await.unwrap(), 1_000);
+        assert_eq!(state.balance(&collector, &coin).await.unwrap(), 0);
+        assert_eq!(state.balance(&bob, &coin).await.unwrap(), 0);
+
+        // A later successful transaction must not commit the reverted fee as well.
+        let good = Transaction::from(nunchi_coins::Transaction::sign(
+            &alice_key,
+            0,
+            CoinOperation::Transfer {
+                coin,
+                from: alice.clone(),
+                to: bob.clone(),
+                amount: 100,
+            },
+        ));
+        let fee = 7 + 3 * good.encode_size() as u128;
+        CoinsRuntime::apply(
+            &mut state,
+            RuntimeContext::default(),
+            &good,
+            &mut VecEventSink::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.balance(&alice, &coin).await.unwrap(), 900 - fee);
+        assert_eq!(state.balance(&bob, &coin).await.unwrap(), 100);
+        assert_eq!(state.balance(&collector, &coin).await.unwrap(), fee);
+    });
+}
+
+#[test]
+fn runtime_rejects_forged_multisig_oracle_without_charging_a_fee() {
+    deterministic::Runner::default().start(|context| async move {
+        let alice_key = PrivateKey::ed25519_from_seed(1);
+        let alice = Address::external(&alice_key.public_key());
+        let attacker = PrivateKey::ed25519_from_seed(4);
+        let collector = Address::external(&PrivateKey::ed25519_from_seed(9).public_key());
+
+        let genesis = fee_genesis(alice.clone(), collector.clone(), 7, 3);
+        let mut state = fee_state(context, "coins-runtime-forged-oracle", &genesis).await;
+        let coin = TokenFactory::derive_coin_id(&alice, 0, &genesis.tokens[0].spec);
+        let policy = MultisigPolicy::new(1, vec![attacker.public_key()]).unwrap();
+        let namespace = NamespaceId(Sha256::hash(&[b"prices"]));
+        let forged = Transaction::from(nunchi_oracle::Transaction::sign_multisig(
+            alice.clone(),
+            policy,
+            &[&attacker],
+            0,
+            OracleOperation::AppendRecord {
+                namespace,
+                interval: IntervalKey::new(1),
+                payload: b"forged-price".to_vec(),
+                proof: None,
+            },
+        ));
+        assert!(!forged.verify());
+
+        let err = CoinsRuntime::apply(
+            &mut state,
+            RuntimeContext::default(),
+            &forged,
+            &mut VecEventSink::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            RuntimeError::Oracle(OracleError::UnsupportedAuthorization)
+        ));
+        assert_eq!(state.balance(&alice, &coin).await.unwrap(), 1_000);
+        assert_eq!(state.balance(&collector, &coin).await.unwrap(), 0);
+        let oracle = OracleLedger::new(&mut state);
+        assert_eq!(OracleDB::nonce(oracle.db(), &alice).await.unwrap(), 0);
+    });
+}
+
+#[test]
 fn bridge_lock_rejects_insufficient_balance_without_side_effects() {
     deterministic::Runner::default().start(|context| async move {
         let mut state = QmdbState::init(context, "bridge-lock-insufficient")
@@ -408,9 +601,9 @@ fn bridge_lock_rejects_insufficient_balance_without_side_effects() {
             .token
             .id;
 
-        let local_chain = ChainId(Sha256::hash(b"local-chain"));
+        let local_chain = ChainId(Sha256::hash(&[b"local-chain"]));
         BridgeGenesis::new(local_chain).apply(&mut state);
-        let dest = ChainId(Sha256::hash(b"dest-chain"));
+        let dest = ChainId(Sha256::hash(&[b"dest-chain"]));
         let recipient = Address::external(&PrivateKey::ed25519_from_seed(2).public_key());
 
         // Lock more than alice holds: the escrow debit fails before any write.

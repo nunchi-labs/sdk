@@ -2,6 +2,7 @@
 name = "nunchi-wallet-crypto"
 version = "0.1.0"
 edition = "2021"
+publish = false
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -9,8 +10,8 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 nunchi-crypto = { path = "../../../crypto" }
 nunchi-coins = { path = "../../../coins", default-features = false }
-commonware-codec = "2026.7.0"
-commonware-cryptography = "2026.7.0"
+commonware-codec = "2026.9.0"
+commonware-cryptography = "2026.9.0"
 wasm-bindgen = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 serde-wasm-bindgen = "0.6"

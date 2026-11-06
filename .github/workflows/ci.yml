@@ -23,10 +23,12 @@ jobs:
       rust: ${{ steps.filter.outputs.rust }}
       wallet: ${{ steps.filter.outputs.wallet }}
       wallet-live: ${{ steps.filter.outputs.wallet-live }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      mcp: ${{ steps.filter.outputs.mcp }}
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Detect Rust Changes
         id: filter
@@ -39,11 +41,17 @@ jobs:
               - 'Cargo.toml'
               - '**/Cargo.toml'
               - 'Cargo.lock'
+              - '**/Cargo.lock'
               - 'rust-toolchain'
               - 'rust-toolchain.toml'
               - 'rustfmt.toml'
               - 'clippy.toml'
               - '.cargo/**'
+              - '.github/workflows/**'
+              - 'Justfile'
+              - '**/Dockerfile'
+            frontend:
+              - 'examples/coins/frontend/**'
             wallet:
               - 'examples/wallet-extension/**'
             wallet-live:
@@ -55,6 +63,8 @@ jobs:
               - 'rpc/**'
               - 'chain/**'
               - 'xtask/**'
+            mcp:
+              - 'mcp/**'
 
   fmt:
     needs: changes
@@ -63,10 +73,10 @@ jobs:
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           components: rustfmt
 
@@ -80,34 +90,41 @@ jobs:
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install mold
         run: command -v mold || (sudo apt-get update && sudo apt-get install -y mold)
 
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           cache: false
           components: llvm-tools-preview
 
       - name: Install llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2.87.13
+        with:
+          tool: cargo-llvm-cov
 
       - name: Install nextest
-        uses: taiki-e/install-action@nextest
-
-      - name: Expose Runtime
-        uses: crazy-max/ghaction-github-runtime@v4
+        uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2.87.13
+        with:
+          tool: nextest
 
       - name: Run Tests and Collect Coverage
         run: |
-          cargo llvm-cov --locked --no-report nextest --workspace
+          cargo llvm-cov --locked --all-features --no-report nextest --workspace --all-targets
           cargo llvm-cov report --locked --codecov --output-path codecov.info
+
+      - name: Run doctests
+        run: cargo test --locked --workspace --all-features --doc
+
+      - name: Test wallet wasm-crypto
+        run: cargo test --locked --manifest-path examples/wallet-extension/wasm-crypto/Cargo.toml
 
       - name: Upload Coverage Data
         if: github.actor != 'dependabot[bot]'
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           fail_ci_if_error: false
           files: codecov.info
@@ -121,19 +138,21 @@ jobs:
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install mold
         run: command -v mold || (sudo apt-get update && sudo apt-get install -y mold)
 
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           cache: false
           toolchain: nightly
 
       - name: Install udeps
-        uses: taiki-e/install-action@cargo-udeps
+        uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2.87.13
+        with:
+          tool: cargo-udeps
 
       - name: Check Unused Dependencies
         run: cargo +nightly udeps --locked --all-features --all-targets
@@ -145,7 +164,7 @@ jobs:
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install Dependencies
         run: |
@@ -153,13 +172,13 @@ jobs:
             (sudo apt-get update && sudo apt-get install -y fontconfig libfontconfig1-dev mold)
 
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           cache: false
           components: clippy
 
       - name: Run Clippy
-        run: cargo clippy --locked --all --all-targets -- -D warnings
+        run: cargo clippy --locked --all --all-features --all-targets -- -D warnings
 
   wallet-test:
     needs: changes
@@ -168,10 +187,10 @@ jobs:
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           cache: npm
@@ -189,22 +208,24 @@ jobs:
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install mold
         run: command -v mold || (sudo apt-get update && sudo apt-get install -y mold)
 
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           target: wasm32-unknown-unknown
           rustflags: ""
 
       - name: Install wasm-pack
-        uses: taiki-e/install-action@wasm-pack
+        uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2.87.13
+        with:
+          tool: wasm-pack
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           cache: npm
@@ -223,3 +244,47 @@ jobs:
 
       - name: Broadcast a wallet transfer on a local testnet
         run: ./examples/wallet-extension/scripts/run-live-tests.sh
+
+  frontend:
+    needs: changes
+    if: ${{ always() && !cancelled() && (needs.changes.result == 'failure' || needs.changes.outputs.frontend == 'true') }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: examples/coins/frontend/package-lock.json
+
+      - name: Typecheck coins frontend
+        working-directory: examples/coins/frontend
+        run: npm ci && npx tsc --noEmit
+
+  mcp:
+    needs: changes
+    if: ${{ always() && !cancelled() && (needs.changes.result == 'failure' || needs.changes.outputs.mcp == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: mcp/package-lock.json
+
+      - name: Install, lint, build, and test
+        working-directory: mcp
+        run: npm ci && npm run ci
+
+      - name: Check package-lock.json unchanged
+        run: git diff --exit-code -- mcp/package-lock.json

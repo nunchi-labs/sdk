@@ -465,5 +465,5 @@ fn check_epoch_window(
 pub fn proposal_id(change: &RegistryChange, proposed_epoch: EpochNumber) -> ProposalId {
     let mut bytes = change.encode().as_ref().to_vec();
     bytes.extend_from_slice(proposed_epoch.encode().as_ref());
-    Sha256::hash(&bytes)
+    Sha256::hash(&[bytes.as_slice()])
 }

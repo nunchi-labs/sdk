@@ -5,20 +5,22 @@ use super::{
 use crate::{Activity, Block, Finalized, Notarized, Scheme, Seed, Seedable};
 use commonware_actor::Feedback;
 use commonware_consensus::{
-    marshal::{core::DigestFallback, core::Mailbox as MarshalMailbox, standard::Standard},
+    marshal::{core::DigestFallback, core::Mailbox as MarshalMailbox},
     types::{Round, View},
     Reporter, Viewable,
 };
 use commonware_cryptography::sha256::Digest;
 use commonware_runtime::{Clock, Metrics, Spawner};
-use std::{future::Future, sync::Arc};
+use std::{future::Future, sync::Arc, time::Duration};
 use tracing::{debug, warn};
+
+const UPLOAD_ATTEMPTS: u32 = 8;
 
 /// Uploads live seeds and certificate-bearing objects to the indexer.
 pub(crate) struct Pusher<E: Spawner + Metrics + Clock, C: Client> {
     context: Arc<E>,
     client: C,
-    marshal: MarshalMailbox<Scheme, Standard<Block>>,
+    marshal: MarshalMailbox<Scheme, crate::EngineVariant>,
     uploads: SharedState,
     metrics: IndexerMetrics,
 }
@@ -39,7 +41,7 @@ impl<E: Spawner + Metrics + Clock, C: Client> Pusher<E, C> {
     pub(crate) fn new(
         context: E,
         client: C,
-        marshal: MarshalMailbox<Scheme, Standard<Block>>,
+        marshal: MarshalMailbox<Scheme, crate::EngineVariant>,
         uploads: SharedState,
         metrics: IndexerMetrics,
     ) -> Self {
@@ -96,12 +98,25 @@ impl<E: Spawner + Metrics + Clock, C: Client> Pusher<E, C> {
             let metrics = self.metrics.clone();
             move |context| async move {
                 let mut upload = metrics.start_live_upload(context, artifact);
-                if let Err(e) = client.seed_upload(seed).await {
-                    warn!(?e, "failed to upload seed");
-                    return;
+                let mut delay = Duration::from_millis(100);
+                for attempt in 1..=UPLOAD_ATTEMPTS {
+                    match client.seed_upload(seed.clone()).await {
+                        Ok(()) => {
+                            upload.succeed();
+                            debug!(%view, "seed uploaded to indexer");
+                            return;
+                        }
+                        Err(e) if attempt < UPLOAD_ATTEMPTS && C::is_retryable(&e) => {
+                            warn!(?e, attempt, "failed to upload seed; retrying");
+                            upload.sleep(delay).await;
+                            delay = delay.saturating_mul(2).min(Duration::from_secs(2));
+                        }
+                        Err(e) => {
+                            warn!(?e, "failed to upload seed");
+                            return;
+                        }
+                    }
                 }
-                upload.succeed();
-                debug!(%view, "seed uploaded to indexer");
             }
         });
     }
@@ -129,10 +144,10 @@ impl<E: Spawner + Metrics + Clock, C: Client> Pusher<E, C> {
                 let mut guard = CertificateUploadGuard::new(uploads, digest);
 
                 let mut wait = upload.start_marshal_wait();
-                let block = marshal
+                let coded = marshal
                     .subscribe_by_digest(digest, DigestFallback::FetchByRound { round })
                     .await;
-                let Ok(block) = block else {
+                let Ok(coded) = coded else {
                     drop(wait);
                     upload.marshal_cancelled();
                     warn!(%view, "subscription for block cancelled");
@@ -141,12 +156,41 @@ impl<E: Spawner + Metrics + Clock, C: Client> Pusher<E, C> {
                 wait.found();
                 drop(wait);
 
-                let block = block.as_ref().clone();
+                let block = coded.inner().clone();
                 let height = block.header.height.get();
                 metrics.observe_block(BlockMetricSource::LiveCertificate, &block);
                 guard.cache_block(block.clone());
-                if let Err(e) = upload_fn(client, block).await {
-                    warn!(?e, %view, label = artifact.as_str(), "failed to upload certificate");
+                let mut delay = Duration::from_millis(100);
+                let mut uploaded = false;
+                for attempt in 1..=UPLOAD_ATTEMPTS {
+                    match upload_fn(client.clone(), block.clone()).await {
+                        Ok(()) => {
+                            uploaded = true;
+                            break;
+                        }
+                        Err(e) if attempt < UPLOAD_ATTEMPTS && C::is_retryable(&e) => {
+                            warn!(
+                                ?e,
+                                %view,
+                                attempt,
+                                label = artifact.as_str(),
+                                "failed to upload certificate; retrying"
+                            );
+                            upload.sleep(delay).await;
+                            delay = delay.saturating_mul(2).min(Duration::from_secs(2));
+                        }
+                        Err(e) => {
+                            warn!(
+                                ?e,
+                                %view,
+                                label = artifact.as_str(),
+                                "failed to upload certificate"
+                            );
+                            break;
+                        }
+                    }
+                }
+                if !uploaded {
                     return;
                 }
 
@@ -176,7 +220,7 @@ impl<E: Spawner + Metrics + Clock, C: Client> Reporter for Pusher<E, C> {
                     LiveUploadArtifact::NotarizedBlock,
                     view,
                     notarization.round(),
-                    notarization.proposal.payload,
+                    notarization.proposal.payload.block(),
                     false,
                     move |indexer, block| {
                         let notarization = notarization.clone();
@@ -199,7 +243,7 @@ impl<E: Spawner + Metrics + Clock, C: Client> Reporter for Pusher<E, C> {
                     LiveUploadArtifact::FinalizedBlock,
                     view,
                     finalization.round(),
-                    finalization.proposal.payload,
+                    finalization.proposal.payload.block(),
                     true,
                     move |indexer, block| {
                         let finalization = finalization.clone();

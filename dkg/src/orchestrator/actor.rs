@@ -6,16 +6,16 @@ use crate::{
 };
 use commonware_actor::mailbox;
 use commonware_consensus::{
-    marshal::{core::Mailbox as MarshalMailbox, standard::Standard},
+    marshal::core::{Mailbox as MarshalMailbox, Variant},
     simplex::{
         self, elector::Config as Elector, scheme, types::Activity, types::Context,
-        types::Finalization, Floor, Plan,
+        types::Finalization, Floor, Plan, SkipPolicy, ForwardPolicy,
     },
     types::{Epoch, Epocher, FixedEpocher, Height, ViewDelta},
     CertifiableAutomaton, Epochable, Relay, Reporter, Reporters,
 };
 use commonware_cryptography::{
-    bls12381::primitives::variant::MinSig, certificate::Scheme, ed25519, sha256::Digest, Digestible,
+    bls12381::primitives::variant::MinSig, certificate::Scheme, ed25519, Digest,
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{
@@ -24,7 +24,7 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    buffer::paged::CacheRef,
+    buffer::paged::{page_size, CacheRef},
     spawn_cell,
     telemetry::metrics::{
         histogram::Buckets, CounterFamily, EncodeLabelSet, Gauge, GaugeExt, Histogram,
@@ -34,7 +34,7 @@ use commonware_runtime::{
 };
 use commonware_storage::metadata::{self, Metadata};
 use commonware_utils::sequence::U64;
-use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16};
+use commonware_utils::{vec::NonEmptyVec, NZUsize};
 use rand::CryptoRng;
 use std::{
     collections::BTreeMap,
@@ -81,26 +81,29 @@ impl<A: Send + 'static> Reporter for NoopReporter<A> {
 }
 
 /// Configuration for the orchestrator.
-pub struct Config<B, A, S, L, T, Blk, R = NoopReporter<Activity<S, Digest>>>
+pub struct Config<B, A, S, L, T, V, R>
 where
     B: Blocker<PublicKey = ed25519::PublicKey>,
-    A: CertifiableAutomaton<Context = Context<Digest, ed25519::PublicKey>, Digest = Digest>
-        + Relay<Digest = Digest, PublicKey = ed25519::PublicKey, Plan = Plan<ed25519::PublicKey>>,
+    V: Variant,
+    A: CertifiableAutomaton<
+            Context = Context<V::Commitment, ed25519::PublicKey>,
+            Digest = V::Commitment,
+        > + Relay<
+            Digest = V::Commitment,
+            PublicKey = ed25519::PublicKey,
+            Plan = Plan<ed25519::PublicKey>,
+        >,
     S: Scheme,
     L: Elector<S>,
     T: Strategy,
-    Blk: commonware_consensus::Block
-        + commonware_consensus::Heightable
-        + commonware_consensus::CertifiableBlock<Context = Context<Digest, ed25519::PublicKey>>
-        + Digestible<Digest = Digest>
-        + Clone,
-    R: Reporter<Activity = Activity<S, Digest>> + Clone,
+    R: Reporter<Activity = Activity<S, V::Commitment>> + Clone,
 {
     pub oracle: B,
     pub application: A,
     pub provider: Provider<S, ed25519::PrivateKey>,
-    pub marshal: MarshalMailbox<S, Standard<Blk>>,
+    pub marshal: MarshalMailbox<S, V>,
     pub reporter: R,
+    pub elector: L,
     pub strategy: T,
     pub leader_timeout: Duration,
     pub certification_timeout: Duration,
@@ -111,25 +114,23 @@ where
     // Partition prefix used for orchestrator metadata persistence
     pub partition_prefix: String,
     pub epoch_length: NonZeroU64,
-    pub genesis_digest: Digest,
-    pub recovered_floor: Option<Finalization<S, Digest>>,
+    pub genesis_digest: V::Commitment,
+    pub recovered_floor: Option<Finalization<S, V::Commitment>>,
     /// A certificate-verified state-sync anchor for an in-progress epoch.
-    pub startup_finalization: Option<Finalization<S, Digest>>,
-    pub startup_floor: Option<StartupFloor>,
-
-    pub _phantom: PhantomData<L>,
+    pub startup_finalization: Option<Finalization<S, V::Commitment>>,
+    pub startup_floor: Option<StartupFloor<V::Commitment>>,
 }
 
 /// A certified startup boundary that can anchor the first entered epoch when
 /// local finalized block history is absent.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StartupFloor {
+pub struct StartupFloor<D: Digest> {
     pub height: Height,
-    pub digest: Digest,
+    pub digest: D,
 }
 
-impl StartupFloor {
-    fn digest_for_epoch(&self, epocher: &FixedEpocher, epoch: Epoch) -> Option<Digest> {
+impl<D: Digest> StartupFloor<D> {
+    fn digest_for_epoch(&self, epocher: &FixedEpocher, epoch: Epoch) -> Option<D> {
         Self::floor_boundary(epocher, epoch)
             .filter(|boundary| *boundary == self.height)
             .map(|_| self.digest)
@@ -147,24 +148,23 @@ impl StartupFloor {
     }
 }
 
-pub struct Actor<E, B, A, S, L, T, Blk, R = NoopReporter<Activity<S, Digest>>>
+pub struct Actor<E, B, A, S, L, T, V, R>
 where
     E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Storage + Network,
     B: Blocker<PublicKey = ed25519::PublicKey>,
-    A: CertifiableAutomaton<Context = Context<Digest, ed25519::PublicKey>, Digest = Digest>
-        + Relay<Digest = Digest, PublicKey = ed25519::PublicKey, Plan = Plan<ed25519::PublicKey>>,
+    V: Variant,
+    A: CertifiableAutomaton<
+            Context = Context<V::Commitment, ed25519::PublicKey>,
+            Digest = V::Commitment,
+        > + Relay<
+            Digest = V::Commitment,
+            PublicKey = ed25519::PublicKey,
+            Plan = Plan<ed25519::PublicKey>,
+        >,
     S: Scheme,
     L: Elector<S>,
     T: Strategy,
-    Blk: commonware_consensus::Block
-        + commonware_consensus::Heightable
-        + commonware_consensus::CertifiableBlock<Context = Context<Digest, ed25519::PublicKey>>
-        + Digestible<Digest = Digest>
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-    R: Reporter<Activity = Activity<S, Digest>> + Clone,
+    R: Reporter<Activity = Activity<S, V::Commitment>> + Clone,
     Provider<S, ed25519::PrivateKey>:
         EpochProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
 {
@@ -173,9 +173,10 @@ where
     application: A,
 
     oracle: B,
-    marshal: MarshalMailbox<S, Standard<Blk>>,
+    marshal: MarshalMailbox<S, V>,
     reporter: R,
     provider: Provider<S, ed25519::PrivateKey>,
+    elector: L,
     strategy: T,
     leader_timeout: Duration,
     certification_timeout: Duration,
@@ -183,10 +184,10 @@ where
     muxer_size: usize,
     partition_prefix: String,
     epoch_length: NonZeroU64,
-    genesis_digest: Digest,
-    recovered_floor: Option<Finalization<S, Digest>>,
-    startup_finalization: Option<Finalization<S, Digest>>,
-    startup_floor: Option<StartupFloor>,
+    genesis_digest: V::Commitment,
+    recovered_floor: Option<Finalization<S, V::Commitment>>,
+    startup_finalization: Option<Finalization<S, V::Commitment>>,
+    startup_floor: Option<StartupFloor<V::Commitment>>,
     page_cache_ref: CacheRef,
 
     latest_epoch: Gauge,
@@ -194,37 +195,34 @@ where
     partition_cleanup_watermark: Gauge,
     partitions_active: Gauge,
     partition_cleanup_duration: Histogram,
-
-    _phantom: PhantomData<L>,
 }
 
-impl<E, B, A, S, L, T, Blk, R> Actor<E, B, A, S, L, T, Blk, R>
+impl<E, B, A, S, L, T, V, R> Actor<E, B, A, S, L, T, V, R>
 where
     E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Storage + Network,
     B: Blocker<PublicKey = ed25519::PublicKey>,
-    A: CertifiableAutomaton<Context = Context<Digest, ed25519::PublicKey>, Digest = Digest>
-        + Relay<Digest = Digest, PublicKey = ed25519::PublicKey, Plan = Plan<ed25519::PublicKey>>,
-    S: scheme::Scheme<Digest, PublicKey = ed25519::PublicKey>,
+    V: Variant,
+    A: CertifiableAutomaton<
+            Context = Context<V::Commitment, ed25519::PublicKey>,
+            Digest = V::Commitment,
+        > + Relay<
+            Digest = V::Commitment,
+            PublicKey = ed25519::PublicKey,
+            Plan = Plan<ed25519::PublicKey>,
+        >,
+    S: scheme::Scheme<V::Commitment, PublicKey = ed25519::PublicKey>,
     L: Elector<S>,
     T: Strategy,
-    Blk: commonware_consensus::Block
-        + commonware_consensus::Heightable
-        + commonware_consensus::CertifiableBlock<Context = Context<Digest, ed25519::PublicKey>>
-        + Digestible<Digest = Digest>
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-    R: Reporter<Activity = Activity<S, Digest>> + Clone,
+    R: Reporter<Activity = Activity<S, V::Commitment>> + Clone,
     Provider<S, ed25519::PrivateKey>:
         EpochProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
 {
     pub fn new(
         context: E,
-        config: Config<B, A, S, L, T, Blk, R>,
+        config: Config<B, A, S, L, T, V, R>,
     ) -> (Self, Mailbox<MinSig, ed25519::PublicKey>) {
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
-        let page_cache_ref = CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000));
+        let page_cache_ref = CacheRef::from_pooler(&context, page_size(16_384), NZUsize!(10_000));
 
         // Register latest_epoch gauge for Grafana integration
         let latest_epoch = context.gauge("latest_epoch", "current epoch");
@@ -255,6 +253,7 @@ where
                 marshal: config.marshal,
                 reporter: config.reporter,
                 provider: config.provider,
+                elector: config.elector,
                 strategy: config.strategy,
                 leader_timeout: config.leader_timeout,
                 certification_timeout: config.certification_timeout,
@@ -271,19 +270,18 @@ where
                 partition_cleanup_watermark,
                 partitions_active,
                 partition_cleanup_duration,
-                _phantom: PhantomData,
             },
             Mailbox::new(sender),
         )
     }
 
-    pub fn set_startup_floor(&mut self, startup_floor: StartupFloor) {
+    pub fn set_startup_floor(&mut self, startup_floor: StartupFloor<V::Commitment>) {
         self.startup_floor = Some(startup_floor);
     }
 
     /// Installs the certificate-verified state-sync anchor used to resume an
     /// in-progress epoch when the local marshal archive is empty.
-    pub fn set_startup_finalization(&mut self, startup_finalization: Finalization<S, Digest>) {
+    pub fn set_startup_finalization(&mut self, startup_finalization: Finalization<S, V::Commitment>) {
         self.startup_finalization = Some(startup_finalization);
     }
 
@@ -428,8 +426,8 @@ where
                                 !engines.keys().any(|epoch| *epoch <= previous),
                                 "refusing to clean a consensus partition with an active engine"
                             );
-                            self.cleanup_through(
-                                &mut cleanup_metadata,
+                            cleanup_metadata = self.cleanup_through(
+                                cleanup_metadata,
                                 &mut next_epoch_to_clean,
                                 previous,
                             )
@@ -489,8 +487,8 @@ where
                             !engines.keys().any(|active| *active <= epoch),
                             "refusing to clean a consensus partition with an active engine"
                         );
-                        self.cleanup_through(
-                            &mut cleanup_metadata,
+                        cleanup_metadata = self.cleanup_through(
+                            cleanup_metadata,
                             &mut next_epoch_to_clean,
                             epoch,
                         )
@@ -505,10 +503,10 @@ where
 
     async fn cleanup_through(
         &mut self,
-        metadata: &mut Metadata<E, U64, U64>,
+        mut metadata: Metadata<E, U64, U64>,
         next_epoch_to_clean: &mut U64,
         through: Epoch,
-    ) {
+    ) -> Metadata<E, U64, U64> {
         while u64::from(&*next_epoch_to_clean) <= through.get() {
             let epoch = Epoch::new(u64::from(&*next_epoch_to_clean));
             let partition = format!("{}_consensus_{}", self.partition_prefix, epoch);
@@ -542,7 +540,7 @@ where
                 .get()
                 .checked_add(1)
                 .expect("consensus cleanup watermark overflow");
-            metadata
+            metadata = metadata
                 .put_sync(CLEANUP_WATERMARK_KEY, U64::new(next))
                 .await
                 .unwrap_or_else(|error| {
@@ -553,13 +551,14 @@ where
             *next_epoch_to_clean = U64::new(next);
             let _ = self.partition_cleanup_watermark.try_set(next);
         }
+        metadata
     }
 
     async fn resolve_floor(
         &mut self,
         epocher: &FixedEpocher,
         epoch: Epoch,
-    ) -> Option<Floor<S, Digest>> {
+    ) -> Option<Floor<S, V::Commitment>> {
         if self
             .recovered_floor
             .as_ref()
@@ -584,12 +583,12 @@ where
             ));
         }
 
-        let Some(boundary_height) = StartupFloor::floor_boundary(epocher, epoch) else {
+        let Some(boundary_height) = StartupFloor::<V::Commitment>::floor_boundary(epocher, epoch) else {
             return Some(Floor::Genesis(self.genesis_digest));
         };
 
         if let Some(block) = self.marshal.get_block(boundary_height).await {
-            return Some(Floor::Genesis(block.digest()));
+            return Some(Floor::Genesis(V::commitment(&block)));
         }
 
         if let Some(digest) = self
@@ -611,7 +610,7 @@ where
     async fn enter_epoch(
         &mut self,
         epoch: Epoch,
-        floor: Floor<S, Digest>,
+        floor: Floor<S, V::Commitment>,
         scheme: S,
         vote_mux: &mut MuxHandle<
             impl Sender<PublicKey = ed25519::PublicKey>,
@@ -627,7 +626,6 @@ where
         >,
     ) -> Handle<()> {
         // Start the new engine
-        let elector = L::default();
         let context = self
             .context
             .child("consensus_engine")
@@ -636,7 +634,7 @@ where
             context,
             simplex::Config {
                 scheme,
-                elector,
+                elector: self.elector.clone(),
                 blocker: self.oracle.clone(),
                 automaton: self.application.clone(),
                 relay: self.application.clone(),
@@ -647,16 +645,19 @@ where
                 floor,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
+                track_historical_votes: false,
                 leader_timeout: self.leader_timeout,
                 certification_timeout: self.certification_timeout,
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
-                activity_timeout: ViewDelta::new(256),
-                skip_timeout: ViewDelta::new(10),
-                fetch_concurrent: NZUsize!(32),
+                view_retention: ViewDelta::new(256),
+                skip: SkipPolicy::Enabled {
+                    timeout: Duration::from_secs(20),
+                    budget: Default::default(),
+                },
                 page_cache: self.page_cache_ref.clone(),
                 strategy: self.strategy.clone(),
-                forwarding: simplex::ForwardingPolicy::Disabled,
+                forward: ForwardPolicy::Disabled,
             },
         );
 
@@ -676,7 +677,7 @@ mod tests {
     #[test]
     fn startup_floor_only_matches_previous_epoch_boundary() {
         let epocher = FixedEpocher::new(NZU64!(10));
-        let digest = Digest([9; 32]);
+        let digest = commonware_cryptography::sha256::Digest([9; 32]);
         let floor = StartupFloor {
             height: Height::new(19),
             digest,
@@ -695,7 +696,7 @@ mod tests {
         let epocher = FixedEpocher::new(NZU64!(10));
         let floor = StartupFloor {
             height: Height::new(12),
-            digest: Digest([7; 32]),
+            digest: commonware_cryptography::sha256::Digest([7; 32]),
         };
 
         assert_eq!(floor.digest_for_epoch(&epocher, Epoch::new(2)), None);

@@ -2,16 +2,17 @@ use std::collections::BTreeMap;
 
 use crate::{
     ClobError, ClobOperation, Fill, FillId, Market, MarketId, Order, OrderId, OrderStatus, Side,
-    TimeInForce, Transaction, CLOB_NAMESPACE,
+    TimeInForce,     Transaction, CLOB_NAMESPACE, MAX_MATCH_BATCH_FILLS,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{Hasher, Sha256};
 use nunchi_common::RuntimeContext;
 
 /// Deterministic in-memory matcher used by proposers and validator replay.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MatchEngine {
     books: BTreeMap<MarketId, Book>,
+    max_fills: usize,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -28,9 +29,18 @@ pub struct ReplayResult {
     pub sequences: BTreeMap<MarketId, u64>,
 }
 
+impl Default for MatchEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MatchEngine {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            books: BTreeMap::new(),
+            max_fills: MAX_MATCH_BATCH_FILLS,
+        }
     }
 
     /// Replay signed `PlaceOrder` intents in order, starting each market at the supplied sequence.
@@ -51,7 +61,31 @@ impl MatchEngine {
         sequences: BTreeMap<MarketId, u64>,
         context: RuntimeContext,
     ) -> Result<ReplayResult, ClobError> {
+        Self::replay_limited(
+            resting_orders,
+            orders,
+            markets,
+            sequences,
+            context,
+            MAX_MATCH_BATCH_FILLS,
+        )
+    }
+
+    /// Replay like [`Self::replay_with_resting`], stopping after `max_fills` fills.
+    ///
+    /// A taker that still crosses after that budget is rejected. Resting the leftover
+    /// quantity, or expiring it, would leave executable size unmatched: later batches only
+    /// apply new intents and do not rematch resting orders.
+    pub(crate) fn replay_limited(
+        resting_orders: &[Order],
+        orders: &[Transaction],
+        markets: &BTreeMap<MarketId, Market>,
+        sequences: BTreeMap<MarketId, u64>,
+        context: RuntimeContext,
+        max_fills: usize,
+    ) -> Result<ReplayResult, ClobError> {
         let mut engine = Self::new();
+        engine.max_fills = max_fills;
         let mut sequences = sequences;
         let mut fills = Vec::new();
         let mut order_updates = BTreeMap::new();
@@ -161,6 +195,15 @@ impl MatchEngine {
                 append_open_orders(&mut remaining_makers, &makers[idx..]);
                 break;
             }
+            if fills.len() >= self.max_fills {
+                // Resting or expiring here would leave a crossed book. Later batches do not
+                // rematch resting orders, so reject the sweep instead of committing it.
+                if resting_crosses(&taker, &makers[idx..]) {
+                    return Err(ClobError::FillBudgetExceeded);
+                }
+                append_open_orders(&mut remaining_makers, &makers[idx..]);
+                break;
+            }
             let mut maker = makers[idx].clone();
             if !maker.status.is_open() || maker.remaining_base == 0 {
                 continue;
@@ -231,6 +274,53 @@ impl MatchEngine {
     }
 }
 
+/// Proposer replay positioned after the resting book and any orders already applied.
+///
+/// A trial clones this cursor and applies one new order.
+#[derive(Clone)]
+pub(crate) struct MatchCursor {
+    engine: MatchEngine,
+    sequences: BTreeMap<MarketId, u64>,
+    fills: Vec<Fill>,
+    markets: BTreeMap<MarketId, Market>,
+    context: RuntimeContext,
+}
+
+impl MatchCursor {
+    pub(crate) fn from_resting(
+        resting_orders: &[Order],
+        markets: &BTreeMap<MarketId, Market>,
+        sequences: BTreeMap<MarketId, u64>,
+        context: RuntimeContext,
+    ) -> Result<Self, ClobError> {
+        let mut engine = MatchEngine::new();
+        engine.seed_resting_orders(resting_orders, markets)?;
+        Ok(Self {
+            engine,
+            sequences,
+            fills: Vec::new(),
+            markets: markets.clone(),
+            context,
+        })
+    }
+
+    pub(crate) fn fill_len(&self) -> usize {
+        self.fills.len()
+    }
+
+    pub(crate) fn push(&mut self, tx: &Transaction) -> Result<(), ClobError> {
+        let mut order_updates = BTreeMap::new();
+        self.engine.apply_order_tx(
+            tx,
+            &self.markets,
+            self.context,
+            &mut self.sequences,
+            &mut self.fills,
+            &mut order_updates,
+        )
+    }
+}
+
 impl Book {
     fn side_mut(&mut self, side: Side) -> &mut Vec<Order> {
         match side {
@@ -246,6 +336,14 @@ fn append_open_orders(book: &mut Vec<Order>, orders: &[Order]) {
             book.push(order.clone());
         }
     }
+}
+
+fn resting_crosses(taker: &Order, makers: &[Order]) -> bool {
+    makers.iter().any(|maker| {
+        maker.status.is_open()
+            && maker.remaining_base > 0
+            && taker.side.crosses(taker.price, maker.price)
+    })
 }
 
 fn insert_resting(book: &mut Vec<Order>, order: Order) {
@@ -284,7 +382,7 @@ pub(crate) fn fill_id(taker: &OrderId, maker: &OrderId, sequence: u64) -> FillId
     bytes.extend_from_slice(taker.encode().as_ref());
     bytes.extend_from_slice(maker.encode().as_ref());
     bytes.extend_from_slice(sequence.encode().as_ref());
-    FillId(Sha256::hash(&bytes))
+    FillId(Sha256::hash(&[bytes.as_slice()]))
 }
 
 pub(crate) fn validate_order(

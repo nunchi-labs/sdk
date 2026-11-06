@@ -13,7 +13,7 @@ use commonware_actor::{
     Feedback,
 };
 use commonware_consensus::{
-    marshal::{core::Mailbox as MarshalMailbox, standard::Standard, Update},
+    marshal::{core::Mailbox as MarshalMailbox, Update},
     types::Height,
     Reporter,
 };
@@ -130,7 +130,7 @@ struct Actor<E: BufferPooler + Clock + Storage + Metrics> {
     context: ContextCell<E>,
     uploads: SharedState,
     metrics: IndexerMetrics,
-    marshal: MarshalMailbox<Scheme, Standard<Block>>,
+    marshal: MarshalMailbox<Scheme, crate::EngineVariant>,
     admission: AdmissionSender,
     receiver: mailbox::Receiver<Message>,
     retry: Duration,
@@ -179,7 +179,7 @@ impl<E: BufferPooler + Clock + Storage + Metrics + Spawner> Actor<E> {
         context: E,
         uploads: SharedState,
         metrics: IndexerMetrics,
-        marshal: MarshalMailbox<Scheme, Standard<Block>>,
+        marshal: MarshalMailbox<Scheme, crate::EngineVariant>,
         admission: AdmissionSender,
         config: Config,
     ) -> (Self, Producer) {
@@ -278,7 +278,7 @@ impl<E: BufferPooler + Clock + Storage + Metrics + Spawner> Actor<E> {
                 self.context.sleep(self.retry).await;
                 continue;
             };
-            if proof.proposal.payload != candidate.digest
+            if proof.proposal.payload.block() != candidate.digest
                 || proof.proposal.round.epoch() != block.header.context.round.epoch()
             {
                 let elapsed = self
@@ -341,7 +341,7 @@ pub fn init<E>(
     context: E,
     uploads: SharedState,
     metrics: IndexerMetrics,
-    marshal: MarshalMailbox<Scheme, Standard<Block>>,
+    marshal: MarshalMailbox<Scheme, crate::EngineVariant>,
     admission: AdmissionSender,
     config: Config,
 ) -> (Producer, Handle<()>)
@@ -375,7 +375,7 @@ mod tests {
 
     fn state(height: u64) -> StateCommitment {
         StateCommitment {
-            root: Sha256::hash(&height.to_be_bytes()),
+            root: Sha256::hash(&[height.to_be_bytes().as_slice()]),
             range: NonEmptyRange::new(Location::new(height)..Location::new(height + 1))
                 .expect("non-empty range"),
         }
@@ -388,10 +388,10 @@ mod tests {
                 leader: ed25519::PrivateKey::from_seed(view).public_key(),
                 parent: (
                     View::new(view.saturating_sub(1)),
-                    Sha256::hash(format!("parent-{view}").as_bytes()),
+                    nunchi_chain::dummy_genesis_parent(),
                 ),
             },
-            Sha256::hash(label),
+            Sha256::hash(&[label]),
             Height::new(height),
             height,
             Vec::<Transaction>::new(),

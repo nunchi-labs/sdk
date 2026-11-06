@@ -21,15 +21,15 @@ fn addr(key: &PrivateKey) -> Address {
 }
 
 fn local_chain() -> ChainId {
-    ChainId(Sha256::hash(b"local-chain"))
+    ChainId(Sha256::hash(&[b"local-chain"]))
 }
 
 fn dest_chain() -> ChainId {
-    ChainId(Sha256::hash(b"dest-chain"))
+    ChainId(Sha256::hash(&[b"dest-chain"]))
 }
 
 fn coin() -> sha256::Digest {
-    Sha256::hash(b"coin")
+    Sha256::hash(&[b"coin"])
 }
 
 fn lock_tx(
@@ -269,10 +269,9 @@ fn lock_rejects_bad_signature() {
 
 #[test]
 fn lock_rejects_multisig_authorization() {
-    // Multisig authorization is rejected outright: `tx.verify()` does not bind `account_id` to the
-    // policy, so accepting a transaction-supplied policy would be a fund-drain vector. The
-    // transaction below is a valid 2-of-2 multisig (signatures verify), so the rejection comes from
-    // the authorization-kind check, not a bad signature.
+    // The transaction below is a valid 2-of-2 multisig (signatures verify against the account
+    // derived from that policy). Bridge locks still reject every multisig because this module
+    // only spends external accounts.
     deterministic::Runner::default().start(|context| async move {
         let mut state = QmdbState::init(context, "bridge-lock-multisig-test")
             .await

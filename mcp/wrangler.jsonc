@@ -1,0 +1,40 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "nunchi-sdk-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-04-01",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  // Durable Objects keep MCP sessions.
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "MCP",
+        "class_name": "NunchiMCP"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "NunchiMCP"
+      ]
+    }
+  ],
+  // D1 database for the full-text search index of this repository.
+  "d1_databases": [
+    {
+      "binding": "SEARCH_DB",
+      "database_name": "nunchi-mcp-search",
+      "database_id": "00000000-0000-4000-8000-000000000001"
+    }
+  ],
+  // Indexing is posted by `just mcp-index`. The cron binding is unused locally.
+  "triggers": {
+    "crons": [
+      "*/10 * * * *"
+    ]
+  }
+}
