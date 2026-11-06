@@ -59,7 +59,10 @@ impl BlockExtension for TestConsensusExtension {
 }
 
 impl ConsensusExtension for TestConsensusExtension {
-    fn propose(&mut self) -> impl std::future::Future<Output = Self::Payload> + Send {
+    fn propose(
+        &mut self,
+        _context: RuntimeContext,
+    ) -> impl std::future::Future<Output = Self::Payload> + Send {
         std::future::ready(TestPayload(self.0))
     }
 
@@ -214,7 +217,7 @@ fn composite_consensus_extension_proposes_both_payloads() {
     let mut extension = Composite::new(TestConsensusExtension(1), TestConsensusExtension(2));
 
     assert_eq!(
-        futures::executor::block_on(extension.propose()),
+        futures::executor::block_on(extension.propose(RuntimeContext::default())),
         (TestPayload(1), TestPayload(2))
     );
 }

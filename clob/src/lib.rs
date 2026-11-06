@@ -23,7 +23,7 @@ mod tests;
 mod transaction;
 mod types;
 
-pub use actor::{ClobActor, ClobConfig, ClobMailbox};
+pub use actor::{BookSnapshot, ClobActor, ClobConfig, ClobMailbox};
 pub use db::ClobDB;
 pub(crate) use engine::fills_equivalent;
 pub use engine::{MatchEngine, ReplayResult};
