@@ -5,9 +5,10 @@ use nunchi_common::{state_db::Namespace, Address, CommitState, QmdbState, StateE
 use nunchi_crypto::PrivateKey;
 
 use crate::record::{
-    attestor, bridge_nonce, consumed_record_key, foreign_root, foreign_root_key, is_consumed,
-    latest_foreign_view, local_chain_id, mark_consumed, nonce_key, put_foreign_root,
-    put_transfer_record, set_attestor, set_bridge_nonce, set_latest_foreign_view, set_local_chain_id,
+    bridge_nonce, consumed_record_key, foreign_chain_id, foreign_root, foreign_root_key,
+    is_consumed, latest_foreign_view, local_chain_id, mark_consumed, nonce_key, put_foreign_root,
+    put_transfer_record, set_bridge_nonce, set_foreign_chain_id, set_latest_foreign_view,
+    set_local_chain_id,
     transfer_record, transfer_record_key, AssetId, BridgeTransferRecord, ChainId, ForeignRoot,
     TransferRecordId, BRIDGE_NAMESPACE,
 };
@@ -204,15 +205,14 @@ fn foreign_root_and_config_accessors_roundtrip() {
         // Absent until anchored/configured.
         assert_eq!(foreign_root(&state, &source, 5).await.expect("read"), None);
         assert_eq!(latest_foreign_view(&state, &source).await.expect("read"), None);
-        assert_eq!(attestor(&state).await.expect("read"), None);
+        assert_eq!(foreign_chain_id(&state).await.expect("read"), None);
 
         let root = ForeignRoot {
             state_root: Sha256::hash(&[b"root-5"]),
         };
         put_foreign_root(&mut state, &source, 5, &root);
         set_latest_foreign_view(&mut state, &source, 5);
-        let signer = addr(1);
-        set_attestor(&mut state, &signer);
+        set_foreign_chain_id(&mut state, &source);
         state.commit().await.expect("commit");
 
         // Everything reads back, scoped by (source chain, view).
@@ -227,7 +227,10 @@ fn foreign_root_and_config_accessors_roundtrip() {
             Some(5)
         );
         assert_eq!(latest_foreign_view(&state, &other).await.expect("read"), None);
-        assert_eq!(attestor(&state).await.expect("read"), Some(signer));
+        assert_eq!(
+            foreign_chain_id(&state).await.expect("read"),
+            Some(source)
+        );
     });
 }
 
@@ -270,8 +273,8 @@ fn corrupt_state_values_surface_as_backend_errors() {
         set_local_chain_id(&mut state, &source);
         assert_eq!(local_chain_id(&state).await.expect("chain"), Some(source));
 
-        state.set(ns.key(3u8, b"attestor"), garbage.clone());
-        assert!(attestor(&state).await.is_err());
+        state.set(ns.key(3u8, b"foreign_chain_id"), garbage.clone());
+        assert!(foreign_chain_id(&state).await.is_err());
 
         // Latest-view table discriminant 5 matches `Table::ForeignLatestView`.
         state.set(ns.key(5u8, source.encode().as_ref()), garbage);
@@ -309,6 +312,6 @@ fn destination_accessors_propagate_storage_errors() {
         let store = FailStore;
         assert!(foreign_root(&store, &source, 1).await.is_err());
         assert!(latest_foreign_view(&store, &source).await.is_err());
-        assert!(attestor(&store).await.is_err());
+        assert!(foreign_chain_id(&store).await.is_err());
     });
 }

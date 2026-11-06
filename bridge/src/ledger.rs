@@ -1,19 +1,17 @@
-//! Deterministic bridge state machine for lock, anchor, and claim operations.
+//! Deterministic bridge state machine for lock and claim operations.
 //!
 //! The ledger stays decoupled from any asset module. A **lock** records an authenticated
-//! [`BridgeTransferRecord`]; an **anchor** pins an attested foreign state root; a **claim** proves a
-//! record against an anchored root and marks it consumed exactly once. The actual asset movement
-//! (escrow on lock, mint on claim) is performed by the chain's integration layer alongside these
-//! calls, in the same overlay, keyed off the returned [`BridgeReceipt`].
+//! [`BridgeTransferRecord`]. A **claim** proves that record against a foreign state root certified
+//! by a verified finalization certificate and marks it consumed exactly once. The certificate is
+//! not a transaction: the destination consensus extension verifies it and stores the root. The
+//! actual asset movement (escrow on lock, mint on claim) is performed by the chain's integration
+//! layer alongside these calls, in the same overlay, keyed off the returned [`BridgeReceipt`].
 
-use crate::events::{
-    foreign_root_anchored_event, transfer_claimed_event, transfer_locked_event, ForeignRootAnchored,
-    TransferClaimed, TransferLocked,
-};
+use crate::events::{transfer_claimed_event, transfer_locked_event, TransferClaimed, TransferLocked};
 use crate::record::{
-    attestor, bridge_nonce, foreign_root, is_consumed, latest_foreign_view, local_chain_id,
-    mark_consumed, put_foreign_root, put_transfer_record, set_bridge_nonce, set_latest_foreign_view,
-    transfer_record_key, AssetId, BridgeTransferRecord, ChainId, ForeignRoot, TransferRecordId,
+    bridge_nonce, foreign_chain_id, foreign_root, is_consumed, local_chain_id, mark_consumed,
+    put_transfer_record, set_bridge_nonce, transfer_record_key, AssetId, BridgeTransferRecord,
+    TransferRecordId,
 };
 use crate::transaction::{BridgeOperation, Transaction};
 use commonware_codec::Encode;
@@ -41,17 +39,15 @@ pub enum BridgeError {
     SelfBridge,
     #[error("bridge chain id is not configured")]
     ChainNotConfigured,
-    #[error("anchor attestor is not configured")]
-    AttestorNotConfigured,
-    #[error("only the configured attestor may anchor foreign roots")]
-    NotAttestor,
-    #[error("stale anchor: latest view is {latest}, got {submitted}")]
-    StaleAnchor { latest: u64, submitted: u64 },
+    #[error("foreign chain is not configured")]
+    ForeignChainNotConfigured,
+    #[error("claim source chain is not the configured foreign chain")]
+    UnexpectedForeignChain,
     #[error("claim record does not belong to the claimed source chain")]
     ClaimSourceMismatch,
     #[error("claim record is not destined for this chain")]
     WrongDestination,
-    #[error("no anchored foreign root for the claimed (source chain, view)")]
+    #[error("no certified foreign root for the claimed view")]
     MissingAnchor,
     #[error("claim proof does not authenticate the record under the anchored root")]
     InvalidProof,
@@ -74,8 +70,6 @@ impl From<StateError> for BridgeError {
 pub enum BridgeReceipt {
     /// A source-chain lock recorded `record_id`.
     Locked(TransferRecordId),
-    /// An attested foreign root was anchored for `source_chain_id` at `view`.
-    Anchored { source_chain_id: ChainId, view: u64 },
     /// A transfer was claimed and marked consumed; the recipient must be credited `amount` of the
     /// coin mapped from `source_asset`.
     Claimed {
@@ -176,42 +170,6 @@ impl<S: StateStore> BridgeLedger<S> {
                 BridgeReceipt::Locked(record_id)
             }
 
-            BridgeOperation::AnchorForeignRoot {
-                source_chain_id,
-                view,
-                state_root,
-            } => {
-                let attestor = attestor(&self.store)
-                    .await?
-                    .ok_or(BridgeError::AttestorNotConfigured)?;
-                if tx.account_id != attestor {
-                    return Err(BridgeError::NotAttestor);
-                }
-                // Monotonic per source chain so distinct source chains never block one another.
-                if let Some(latest) = latest_foreign_view(&self.store, source_chain_id).await? {
-                    if *view <= latest {
-                        return Err(BridgeError::StaleAnchor {
-                            latest,
-                            submitted: *view,
-                        });
-                    }
-                }
-                let root = ForeignRoot {
-                    state_root: *state_root,
-                };
-                put_foreign_root(&mut self.store, source_chain_id, *view, &root);
-                set_latest_foreign_view(&mut self.store, source_chain_id, *view);
-                events.emit(foreign_root_anchored_event(ForeignRootAnchored {
-                    source_chain_id: *source_chain_id,
-                    view: *view,
-                    state_root: *state_root,
-                }));
-                BridgeReceipt::Anchored {
-                    source_chain_id: *source_chain_id,
-                    view: *view,
-                }
-            }
-
             BridgeOperation::Claim {
                 source_chain_id,
                 source_view,
@@ -228,7 +186,14 @@ impl<S: StateStore> BridgeLedger<S> {
                 if record.destination_chain_id != local {
                     return Err(BridgeError::WrongDestination);
                 }
-                // The foreign root for (source_chain_id, source_view) must be anchored.
+                // The MVP accepts certificates from exactly one foreign chain.
+                let foreign = foreign_chain_id(&self.store)
+                    .await?
+                    .ok_or(BridgeError::ForeignChainNotConfigured)?;
+                if *source_chain_id != foreign {
+                    return Err(BridgeError::UnexpectedForeignChain);
+                }
+                // The root for this view was stored from a verified foreign finalization.
                 let anchored = foreign_root(&self.store, source_chain_id, *source_view)
                     .await?
                     .ok_or(BridgeError::MissingAnchor)?;
