@@ -106,6 +106,20 @@ export function parseUnits(value: string, decimals: number): string | null {
   return base || "0";
 }
 
+/**
+ * Full-precision inverse of a base-unit balance, for the Max button.
+ * `formatUnits` caps visible fraction digits, so using it as the typed amount
+ * drops everything past that cap (1 wei of an 18-decimal coin becomes 0).
+ */
+export function formatUnitsExact(baseUnits: string, decimals: number): string {
+  if (!/^\d+$/.test(baseUnits)) return baseUnits;
+  if (decimals <= 0) return baseUnits.replace(/^0+/, "") || "0";
+  const padded = baseUnits.padStart(decimals + 1, "0");
+  const whole = (padded.slice(0, padded.length - decimals) || "0").replace(/^0+/, "") || "0";
+  const fraction = padded.slice(padded.length - decimals).replace(/0+$/, "");
+  return fraction ? `${whole}.${fraction}` : whole;
+}
+
 /** Groups the integer part of a partially-typed amount, leaving the decimal alone. */
 export function groupTypedAmount(raw: string): string {
   const [whole, fraction] = raw.split(".");

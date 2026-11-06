@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
+    db::MAX_NONCE_ACCOUNTS,
     engine::{validate_order, MatchCursor},
     ClobActorSnapshot, ClobError, ClobOperation, MatchBatch, MatchEngine, Market, MarketId, Order,
     OrderId, Transaction, MAX_MATCH_BATCH_FILLS, MAX_MATCH_BATCH_ORDERS,
@@ -14,6 +15,19 @@ use futures::{
     FutureExt, SinkExt, StreamExt,
 };
 use nunchi_common::{Address, RuntimeContext};
+
+/// Committed book the matcher must replay against.
+///
+/// Loaded from the ledger before each proposal so a restarted validator does
+/// not match against an empty cache.
+#[derive(Clone, Debug, Default)]
+pub struct BookSnapshot {
+    pub markets: Vec<(Market, u64)>,
+    pub orders: Vec<Order>,
+    pub nonces: Vec<(Address, u64)>,
+    /// Accounts stored in the ledger nonce index, including zero-nonce placeholders.
+    pub nonce_accounts: Vec<Address>,
+}
 use tracing::{debug, warn};
 
 /// Runtime settings for the validator-local CLOB actor.
@@ -51,7 +65,20 @@ enum Message {
         responder: oneshot::Sender<Result<(), ClobError>>,
     },
     Propose {
+        context: RuntimeContext,
+        book: Option<BookSnapshot>,
         responder: oneshot::Sender<MatchBatch>,
+    },
+    Hydrate {
+        snapshot: BookSnapshot,
+        responder: oneshot::Sender<Result<(), ClobError>>,
+    },
+    KnownAccounts {
+        responder: oneshot::Sender<Vec<Address>>,
+    },
+    SyncNonceIndex {
+        accounts: Vec<Address>,
+        responder: oneshot::Sender<Result<(), ClobError>>,
     },
 }
 
@@ -134,14 +161,92 @@ impl ClobMailbox {
         receiver.await.unwrap_or(Err(ClobError::ActorStopped))
     }
 
-    /// Drain currently matchable signed orders into one proposed batch.
-    pub async fn propose(&self) -> MatchBatch {
+    /// Replace the local nonce index after a committed block.
+    pub async fn sync_nonce_index(&self, accounts: Vec<Address>) -> Result<(), ClobError> {
         let (responder, receiver) = oneshot::channel();
         let mut sender = self.sender.clone();
-        if sender.send(Message::Propose { responder }).await.is_err() {
+        if sender
+            .send(Message::SyncNonceIndex {
+                accounts,
+                responder,
+            })
+            .await
+            .is_err()
+        {
+            return Err(ClobError::ActorStopped);
+        }
+        receiver.await.unwrap_or(Err(ClobError::ActorStopped))
+    }
+
+    /// Drain currently matchable signed orders into one proposed batch.
+    ///
+    /// Fill timestamps use [`RuntimeContext::default`]. Prefer
+    /// [`Self::propose_with_context`] when the block height and time are known.
+    pub async fn propose(&self) -> MatchBatch {
+        self.propose_with_context(RuntimeContext::default()).await
+    }
+
+    /// Drain currently matchable signed orders, stamping fills with `context`.
+    pub async fn propose_with_context(&self, context: RuntimeContext) -> MatchBatch {
+        self.propose_with_book(context, None).await
+    }
+
+    /// Propose against `book` when it is set, then restore the committed actor state.
+    ///
+    /// `book` is the post-transaction preview. Ingress keeps the committed book.
+    pub(crate) async fn propose_with_book(
+        &self,
+        context: RuntimeContext,
+        book: Option<BookSnapshot>,
+    ) -> MatchBatch {
+        let (responder, receiver) = oneshot::channel();
+        let mut sender = self.sender.clone();
+        if sender
+            .send(Message::Propose {
+                context,
+                book,
+                responder,
+            })
+            .await
+            .is_err()
+        {
             return MatchBatch::default();
         }
         receiver.await.unwrap_or_default()
+    }
+
+    /// Accounts the matcher already has a nonce for, or a pending order from.
+    ///
+    /// Hydration uses this so a snapshot that cannot see an account (pruned
+    /// fills, missing index) does not forget a nonce this process already learned.
+    pub async fn known_accounts(&self) -> Vec<Address> {
+        let (responder, receiver) = oneshot::channel();
+        let mut sender = self.sender.clone();
+        if sender
+            .send(Message::KnownAccounts { responder })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        receiver.await.unwrap_or_default()
+    }
+
+    /// Replace the committed book, sequences, and nonces.
+    ///
+    /// Pending orders that have not been committed are kept, then dropped when
+    /// their nonce is already below the committed nonce.
+    pub async fn hydrate(&self, snapshot: BookSnapshot) -> Result<(), ClobError> {
+        let (responder, receiver) = oneshot::channel();
+        let mut sender = self.sender.clone();
+        if sender
+            .send(Message::Hydrate { snapshot, responder })
+            .await
+            .is_err()
+        {
+            return Err(ClobError::ActorStopped);
+        }
+        receiver.await.unwrap_or(Err(ClobError::ActorStopped))
     }
 }
 
@@ -153,6 +258,8 @@ pub struct ClobActor {
     markets: BTreeMap<MarketId, Market>,
     sequences: BTreeMap<MarketId, u64>,
     nonces: BTreeMap<Address, u64>,
+    /// Ledger nonce index, including accounts whose nonce is still zero.
+    nonce_index: BTreeSet<Address>,
 }
 
 impl ClobActor {
@@ -166,6 +273,7 @@ impl ClobActor {
                 markets: BTreeMap::new(),
                 sequences: BTreeMap::new(),
                 nonces: BTreeMap::new(),
+                nonce_index: BTreeSet::new(),
             },
             ClobMailbox { sender },
         )
@@ -183,6 +291,7 @@ impl ClobActor {
             }
         }
         for (account, nonce) in snapshot.nonces {
+            self.nonce_index.insert(account.clone());
             self.nonces.insert(account, nonce);
         }
     }
@@ -282,8 +391,26 @@ impl ClobActor {
                 self.sync_nonce_state(account, nonce);
                 let _ = responder.send(Ok(()));
             }
-            Message::Propose { responder } => {
-                let _ = responder.send(self.propose_batch());
+            Message::Propose {
+                context,
+                book,
+                responder,
+            } => {
+                let _ = responder.send(self.propose_batch(context, book));
+            }
+            Message::Hydrate { snapshot, responder } => {
+                self.hydrate_snapshot(snapshot);
+                let _ = responder.send(Ok(()));
+            }
+            Message::KnownAccounts { responder } => {
+                let _ = responder.send(self.known_account_ids());
+            }
+            Message::SyncNonceIndex {
+                accounts,
+                responder,
+            } => {
+                self.nonce_index = accounts.into_iter().collect();
+                let _ = responder.send(Ok(()));
             }
         }
     }
@@ -321,11 +448,94 @@ impl ClobActor {
         }
     }
 
-    fn propose_batch(&mut self) -> MatchBatch {
+    fn known_account_ids(&self) -> Vec<Address> {
+        let mut accounts = BTreeSet::new();
+        accounts.extend(self.nonces.keys().cloned());
+        accounts.extend(self.pending_orders.iter().map(|tx| tx.account_id.clone()));
+        accounts.into_iter().collect()
+    }
+
+    fn hydrate_snapshot(&mut self, mut snapshot: BookSnapshot) {
+        // The snapshot is authoritative for accounts it lists. Accounts it
+        // cannot see keep the nonce this process already has, so a missing
+        // index does not wipe `sync_accepted`.
+        let listed = snapshot
+            .nonces
+            .iter()
+            .map(|(account, _)| account.clone())
+            .collect::<BTreeSet<_>>();
+        for (account, nonce) in &self.nonces {
+            if !listed.contains(account) {
+                snapshot.nonces.push((account.clone(), *nonce));
+            }
+        }
+        let _ = self.install_book(snapshot);
+        self.drop_stale_pending_orders();
+    }
+
+    /// Replace the committed book and return the book that was installed before.
+    fn install_book(&mut self, snapshot: BookSnapshot) -> BookSnapshot {
+        let previous = BookSnapshot {
+            markets: self
+                .markets
+                .values()
+                .map(|market| {
+                    (
+                        market.clone(),
+                        self.sequences.get(&market.id).copied().unwrap_or(0),
+                    )
+                })
+                .collect(),
+            orders: self.active_orders.values().cloned().collect(),
+            nonces: self
+                .nonces
+                .iter()
+                .map(|(account, nonce)| (account.clone(), *nonce))
+                .collect(),
+            nonce_accounts: self.nonce_index.iter().cloned().collect(),
+        };
+        self.markets.clear();
+        self.sequences.clear();
+        self.active_orders.clear();
+        for (market, sequence) in snapshot.markets {
+            self.sequences.insert(market.id, sequence);
+            self.markets.insert(market.id, market);
+        }
+        for order in snapshot.orders {
+            if order.status.is_open() && order.remaining_base > 0 {
+                self.active_orders.insert(order.id, order);
+            }
+        }
+        self.nonces.clear();
+        for (account, nonce) in snapshot.nonces {
+            self.nonces.insert(account, nonce);
+        }
+        self.nonce_index = snapshot.nonce_accounts.into_iter().collect();
+        previous
+    }
+
+    fn propose_batch(&mut self, context: RuntimeContext, book: Option<BookSnapshot>) -> MatchBatch {
+        // Matching may use the post-transaction preview. Pending-order drops still
+        // follow the committed nonces, and the preview is uninstalled before return
+        // so `submit_order` never observes it.
+        let committed_nonces = self.nonces.clone();
+        let previous = book.map(|book| self.install_book(book));
+        let batch = self.propose_installed(context, &committed_nonces);
+        if let Some(previous) = previous {
+            let _preview = self.install_book(previous);
+        }
+        batch
+    }
+
+    fn propose_installed(
+        &mut self,
+        context: RuntimeContext,
+        committed_nonces: &BTreeMap<Address, u64>,
+    ) -> MatchBatch {
         if self.pending_orders.is_empty() {
             return MatchBatch::default();
         }
-        let orders = self.proposal_orders();
+        let orders = self.proposal_orders(committed_nonces);
         if orders.is_empty() {
             return MatchBatch::default();
         }
@@ -336,7 +546,7 @@ impl ClobActor {
             &resting_snapshots,
             &markets,
             sequences.clone(),
-            RuntimeContext::default(),
+            context,
         ) {
             Ok(replay) => replay,
             Err(error) => {
@@ -357,7 +567,7 @@ impl ClobActor {
                     &orders,
                     &self.markets,
                     self.sequences.clone(),
-                    RuntimeContext::default(),
+                    context,
                 ) {
                     self.drop_closed_pending_orders(&result.orders);
                 }
@@ -369,7 +579,7 @@ impl ClobActor {
             &selected,
             &self.markets,
             self.sequences.clone(),
-            RuntimeContext::default(),
+            context,
         ) {
             Ok(result) if !result.fills.is_empty() => MatchBatch {
                 orders: selected,
@@ -464,22 +674,75 @@ impl ClobActor {
         {
             return Err(ClobError::InvalidOrder("duplicate pending order id"));
         }
+        if !self.nonce_account_admitted(&tx.account_id) {
+            return Err(ClobError::NonceIndexFull);
+        }
         self.pending_orders.push(tx);
         Ok(())
     }
 
-    fn proposal_orders(&mut self) -> Vec<Transaction> {
+    /// `account` is already in the nonce index, or the index still has room for it.
+    fn nonce_account_admitted(&self, account: &Address) -> bool {
+        if self.nonce_index.contains(account) || self.nonces.contains_key(account) {
+            return true;
+        }
+        let mut reserved = 0usize;
+        let mut seen = BTreeSet::new();
+        for tx in &self.pending_orders {
+            if self.nonce_index.contains(&tx.account_id) || self.nonces.contains_key(&tx.account_id)
+            {
+                continue;
+            }
+            if &tx.account_id == account {
+                return true;
+            }
+            if seen.insert(&tx.account_id) {
+                reserved += 1;
+            }
+        }
+        self.nonce_index_occupied().saturating_add(reserved) < MAX_NONCE_ACCOUNTS
+    }
+
+    fn nonce_index_occupied(&self) -> usize {
+        self.nonce_index.len().max(self.nonces.len())
+    }
+
+    fn proposal_orders(&mut self, committed_nonces: &BTreeMap<Address, u64>) -> Vec<Transaction> {
+        let bases = self.nonces.clone();
         let mut expected_nonces = self.nonces.clone();
+        let mut new_accounts = 0usize;
+        let mut introduced = BTreeSet::new();
+        let capacity = MAX_NONCE_ACCOUNTS.saturating_sub(self.nonce_index_occupied());
         let mut stale = BTreeSet::new();
         let mut orders = Vec::new();
         for tx in &self.pending_orders {
             let order_id = OrderId(tx.digest());
+            let base = bases.get(&tx.account_id).copied().unwrap_or(0);
+            let committed_base = committed_nonces.get(&tx.account_id).copied().unwrap_or(0);
             let expected = expected_nonces.entry(tx.account_id.clone()).or_default();
             match tx.payload.nonce.cmp(expected) {
+                // A preview can move the nonce ahead of the committed book. Keep an
+                // intent that is still valid there; drop it once this scan or the
+                // committed nonce has moved past it.
                 std::cmp::Ordering::Less => {
-                    stale.insert(order_id);
+                    if *expected > base || tx.payload.nonce < committed_base {
+                        stale.insert(order_id);
+                    }
                 }
                 std::cmp::Ordering::Equal if self.can_locally_replay(tx) => {
+                    let known = if self.nonce_index.is_empty() {
+                        bases.contains_key(&tx.account_id) || introduced.contains(&tx.account_id)
+                    } else {
+                        self.nonce_index.contains(&tx.account_id)
+                            || introduced.contains(&tx.account_id)
+                    };
+                    if !known && new_accounts >= capacity {
+                        continue;
+                    }
+                    if !known {
+                        new_accounts += 1;
+                        introduced.insert(tx.account_id.clone());
+                    }
                     orders.push(tx.clone());
                     if let Some(next) = expected.checked_add(1) {
                         *expected = next;

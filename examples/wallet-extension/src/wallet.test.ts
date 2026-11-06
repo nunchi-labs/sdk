@@ -3,6 +3,7 @@ import type { Message, MessageType, Response } from "./types";
 import {
   AUTO_LOCK_MS,
   LOCKOUT_DURATION,
+  NONCE_CURSOR_STORAGE,
   MAX_UNLOCK_ATTEMPTS,
   MIN_PASSWORD_LENGTH,
   PRIVILEGED_TYPES,
@@ -17,6 +18,8 @@ const PAGE_ORIGIN = "https://dapp.example";
 const PASSWORD = "correct-password";
 const GENERATED_KEY = "aa".repeat(32);
 const IMPORTED_KEY = "cc".repeat(32);
+const COIN = "aa".repeat(32);
+const NCH_ZERO = "nch1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqf5f4ay";
 
 const popup = { origin: EXTENSION_ORIGIN };
 const page = { origin: PAGE_ORIGIN, tab: { url: `${PAGE_ORIGIN}/` } };
@@ -63,7 +66,7 @@ class FakeClock {
 function keyPair(privateKeyHex: string, curve = "ed25519") {
   return {
     private_key_hex: privateKeyHex,
-    public_key_hex: `pub-${privateKeyHex.slice(0, 8)}`,
+    public_key_hex: `11${privateKeyHex}`.slice(0, 66),
     address: `addr-${privateKeyHex.slice(0, 16)}`,
     curve,
   };
@@ -121,8 +124,7 @@ function createHarness(options?: { storage?: MemoryStorage; clock?: FakeClock })
   const approvalPaths: string[] = [];
   let nextWindowId = 100;
   let lastWindowId = 0;
-  let nonce = 7;
-  let factoryNonce = 1;
+  let nonce: number | string = 7;
   const rpcCalls: Array<{ method: string; params: unknown }> = [];
 
   const host: WalletHost = {
@@ -144,7 +146,7 @@ function createHarness(options?: { storage?: MemoryStorage; clock?: FakeClock })
         return { result: { nonce } };
       }
       if (request.method === "coins.factory_nonce") {
-        return { result: { nonce: factoryNonce } };
+        return { result: { nonce: 1 } };
       }
       if (request.method === "coins.balance") {
         return { result: { amount: "42" } };
@@ -165,11 +167,8 @@ function createHarness(options?: { storage?: MemoryStorage; clock?: FakeClock })
     wasm,
     approvalPaths,
     rpcCalls,
-    setNonce: (value: number) => {
+    setNonce: (value: number | string) => {
       nonce = value;
-    },
-    setFactoryNonce: (value: number) => {
-      factoryNonce = value;
     },
     restart(): Wallet {
       return new Wallet(host);
@@ -230,9 +229,26 @@ describe("wallet message table", () => {
     const chain = await send(wallet, "GET_CHAIN_ID", page);
     expect(chain).toEqual({ success: true, data: { chainId: "nunchi-local" } });
 
+    const accounts = await send(wallet, "GET_ACCOUNTS", page);
+    expect(accounts).toEqual({ success: true, data: { accounts: [] } });
+
     const connection = await send(wallet, "REQUEST_CONNECTION", page);
     expect(connection.success).toBe(false);
     expect(connection.error).toBe("Wallet is locked");
+  });
+
+  it("rejects GET_ACCOUNTS from the popup so the account switcher stays hidden", async () => {
+    const { wallet } = createHarness();
+    const response = await send(wallet, "GET_ACCOUNTS", popup);
+    expect(response.success).toBe(false);
+    expect(response.error).toBe("Unknown message type: GET_ACCOUNTS");
+  });
+
+  it("rejects an unsupported curve", async () => {
+    const { wallet } = createHarness();
+    const created = await send(wallet, "CREATE_WALLET", popup, { curve: "secp256k1", password: PASSWORD });
+    expect(created.success).toBe(false);
+    expect(created.error).toBe("Unsupported curve");
   });
 
   it("rejects dApp requests with an empty sender origin", async () => {
@@ -287,6 +303,21 @@ describe("create, backup, and delete", () => {
     const afterDelete = await send(wallet, "GET_STATE", popup);
     expect(afterDelete.data).toMatchObject({ hasWallet: false, isUnlocked: false });
   });
+
+  it("keeps backup revealed across a worker restart", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    expect((await send(harness.wallet, "REVEAL_BACKUP", popup, {})).success).toBe(true);
+    expect((await harness.storage.get(["backupRevealed"])).backupRevealed).toBe(true);
+
+    harness.wallet.shutdown();
+    const restarted = harness.restart();
+    const confirmed = await send(restarted, "CONFIRM_BACKUP", popup);
+    expect(confirmed.success).toBe(true);
+    expect((await harness.storage.get(["backupRevealed"])).backupRevealed).toBe(false);
+    const state = await send(restarted, "GET_STATE", popup);
+    expect(state.data).toMatchObject({ needsBackup: false });
+  });
 });
 
 describe("coin operations", () => {
@@ -309,14 +340,14 @@ describe("coin operations", () => {
     });
 
     const minted = await send(harness.wallet, "MINT", popup, {
-      coin: "aa".repeat(32),
-      to: "nch1to",
+      coin: COIN,
+      to: NCH_ZERO,
       amount: "10",
     });
     expect(minted.success, minted.error).toBe(true);
     expect(minted.data).toMatchObject({ hash: "0xabc" });
 
-    const burned = await send(harness.wallet, "BURN", popup, { coin: "aa".repeat(32), amount: "3" });
+    const burned = await send(harness.wallet, "BURN", popup, { coin: COIN, amount: "3" });
     expect(burned.success, burned.error).toBe(true);
 
     const registered = await send(harness.wallet, "REGISTER_ACCOUNT_POLICY", popup, {});
@@ -327,11 +358,8 @@ describe("coin operations", () => {
       "coins.factory_nonce",
       "coins.submit_transaction",
       "coins.nonce",
-      "coins.transaction_status",
       "coins.submit_transaction",
       "coins.nonce",
-      "coins.transaction_status",
-      "coins.transaction_status",
       "coins.submit_transaction",
       "coins.nonce",
       "coins.submit_transaction",
@@ -348,7 +376,7 @@ describe("sign versus submit", () => {
     harness.setNonce(3);
     const seen = harness.approvalPaths.length;
     const signPending = harness.wallet.handleMessage(
-      { type: "REQUEST_SIGN", payload: { coin: "nunchi", to: "addr-to", amount: "1" } },
+      { type: "REQUEST_SIGN", payload: { coin: COIN, to: NCH_ZERO, amount: "1" } },
       page
     );
     const signId = await waitForApproval(harness.approvalPaths, seen);
@@ -372,7 +400,7 @@ describe("sign versus submit", () => {
 
     const seen = harness.approvalPaths.length;
     const sendPending = harness.wallet.handleMessage(
-      { type: "REQUEST_TRANSACTION", payload: { coin: "nunchi", to: "addr-to", amount: "2" } },
+      { type: "REQUEST_TRANSACTION", payload: { coin: COIN, to: NCH_ZERO, amount: "2" } },
       page
     );
     const requestId = await waitForApproval(harness.approvalPaths, seen);
@@ -384,6 +412,27 @@ describe("sign versus submit", () => {
     expect(approved.data).toMatchObject({ hash: "0xabc" });
     expect((await sendPending).data).toMatchObject({ hash: "0xabc" });
     expect(harness.rpcCalls.map((call) => call.method)).toContain("coins.submit_transaction");
+  });
+
+  it("does not consume the next nonce when the signature is not submitted", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    await connectSite(harness);
+    harness.setNonce(7);
+
+    const seen = harness.approvalPaths.length;
+    const signPending = harness.wallet.handleMessage(
+      { type: "REQUEST_SIGN", payload: { coin: COIN, to: NCH_ZERO, amount: "1" } },
+      page
+    );
+    const signId = await waitForApproval(harness.approvalPaths, seen);
+    const approved = await send(harness.wallet, "APPROVE_TRANSACTION", popup, { requestId: signId });
+    expect(approved.success, approved.error).toBe(true);
+    expect((await signPending).success).toBe(true);
+
+    const sent = await send(harness.wallet, "SEND_TRANSACTION", popup, transfer("2"));
+    expect(sent.success, sent.error).toBe(true);
+    expect(harness.wasm.signed.map((entry) => entry.nonce)).toEqual([7n, 7n]);
   });
 });
 
@@ -451,7 +500,7 @@ describe("persisted sites and pending requests", () => {
 
     const seen = harness.approvalPaths.length;
     void harness.wallet.handleMessage(
-      { type: "REQUEST_TRANSACTION", payload: { coin: "nunchi", to: "addr-to", amount: "3" } },
+      { type: "REQUEST_TRANSACTION", payload: { coin: COIN, to: NCH_ZERO, amount: "3" } },
       page
     );
     const requestId = await waitForApproval(harness.approvalPaths, seen);
@@ -485,303 +534,92 @@ describe("persisted sites and pending requests", () => {
   });
 });
 
-describe("concurrent submissions", () => {
-  it("reserves the next nonce while an earlier submit is still in flight", async () => {
+describe("accounts, disconnect, and validation", () => {
+  it("returns connected accounts only while unlocked", async () => {
+    const events: Array<{ origin: string; event: string; params: unknown }> = [];
+    const harness = createHarness();
+    harness.host.broadcast = (origin, event, params) => {
+      events.push({ origin, event, params });
+    };
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+
+    const before = await send(harness.wallet, "GET_ACCOUNTS", page);
+    expect(before).toEqual({ success: true, data: { accounts: [] } });
+
+    await connectSite(harness);
+    const connected = await send(harness.wallet, "GET_ACCOUNTS", page);
+    expect(connected).toEqual({
+      success: true,
+      data: { accounts: [keyPair(GENERATED_KEY).address] },
+    });
+    const connectEvents = events.filter(
+      (event) => event.origin === PAGE_ORIGIN && event.event === "accountsChanged"
+    );
+    expect(connectEvents).toEqual([
+      { origin: PAGE_ORIGIN, event: "accountsChanged", params: [keyPair(GENERATED_KEY).address] },
+    ]);
+
+    expect((await send(harness.wallet, "LOCK_WALLET", popup)).success).toBe(true);
+    const locked = await send(harness.wallet, "GET_ACCOUNTS", page);
+    expect(locked).toEqual({ success: true, data: { accounts: [] } });
+    expect(events).toContainEqual({ origin: PAGE_ORIGIN, event: "accountsChanged", params: [] });
+
+    expect((await send(harness.wallet, "UNLOCK_WALLET", popup, { password: PASSWORD })).success).toBe(true);
+    expect((await send(harness.wallet, "GET_ACCOUNTS", page)).data).toEqual({
+      accounts: [keyPair(GENERATED_KEY).address],
+    });
+
+    events.length = 0;
+    expect((await send(harness.wallet, "DISCONNECT", page)).success).toBe(true);
+    expect((await send(harness.wallet, "GET_ACCOUNTS", page)).data).toEqual({ accounts: [] });
+    expect(events).toEqual([{ origin: PAGE_ORIGIN, event: "accountsChanged", params: [] }]);
+    const sites = await send(harness.wallet, "GET_CONNECTED_SITES", popup);
+    expect(sites.data).toEqual([]);
+  });
+
+  it("reports no accounts for a connected site after the worker restarts locked", async () => {
     const harness = createHarness();
     expect((await createWallet(harness.wallet)).success).toBe(true);
-    const address = keyPair(GENERATED_KEY).address;
-    let releaseNonce: () => void = () => undefined;
-    const nonceGate = new Promise<void>((resolve) => {
-      releaseNonce = resolve;
-    });
-    let nonceCalls = 0;
-    const originalRpc = harness.host.rpc;
-    harness.host.rpc = async (url, body) => {
-      const request = body as { method: string };
-      if (request.method === "coins.nonce") {
-        nonceCalls += 1;
-        if (nonceCalls === 1) {
-          await nonceGate;
-        }
-      }
-      return originalRpc(url, body);
-    };
-    harness.setNonce(7);
+    await connectSite(harness);
+    expect(await harness.wallet.connectedAccounts(PAGE_ORIGIN)).toEqual([keyPair(GENERATED_KEY).address]);
 
-    const first = send(harness.wallet, "SEND_TRANSACTION", popup, {
-      from: address,
-      to: "nch1to",
+    harness.wallet.shutdown();
+    const restarted = harness.restart();
+    expect(await restarted.connectedAccounts(PAGE_ORIGIN)).toEqual([]);
+    expect(await restarted.connectedAccounts("https://other.example")).toEqual([]);
+  });
+
+  it("rejects invalid transfer fields before opening approval", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    await connectSite(harness);
+
+    const invalid = await send(harness.wallet, "REQUEST_TRANSACTION", page, {
+      coin: "aa".repeat(16),
+      to: "not-an-address",
       amount: "1",
-      coin: "aa",
     });
-    for (let i = 0; i < 50 && nonceCalls === 0; i += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-    expect(nonceCalls).toBe(1);
-    const second = send(harness.wallet, "SEND_TRANSACTION", popup, {
-      from: address,
-      to: "nch1to",
-      amount: "2",
-      coin: "bb",
+    expect(invalid.success).toBe(false);
+    expect(invalid.error).toBe("Coin id must be 32 bytes hex");
+    expect(harness.approvalPaths).toHaveLength(1);
+
+    const badAmount = await send(harness.wallet, "SEND_TRANSACTION", popup, {
+      from: keyPair(GENERATED_KEY).address,
+      to: NCH_ZERO,
+      coin: COIN,
+      amount: "1.5",
     });
-    releaseNonce();
-
-    const [firstResult, secondResult] = await Promise.all([first, second]);
-    expect(firstResult.success, firstResult.error).toBe(true);
-    expect(secondResult.success, secondResult.error).toBe(true);
-    expect(harness.wasm.signed.map((item) => item.nonce)).toEqual([7n, 8n]);
-  });
-});
-
-function stubTxStatus(harness: ReturnType<typeof createHarness>, status: string): void {
-  const original = harness.host.rpc;
-  harness.host.rpc = async (url, body) => {
-    const request = body as { method: string; params: unknown };
-    if (request.method === "coins.transaction_status") {
-      harness.rpcCalls.push(request);
-      return { result: { hash: "0xstatus", status } };
-    }
-    return original(url, body);
-  };
-}
-
-async function approveSign(harness: ReturnType<typeof createHarness>, amount: string): Promise<Response> {
-  const seen = harness.approvalPaths.length;
-  const pending = harness.wallet.handleMessage(
-    { type: "REQUEST_SIGN", payload: { coin: "nunchi", to: "addr-to", amount } },
-    page
-  );
-  const requestId = await waitForApproval(harness.approvalPaths, seen);
-  const approved = await send(harness.wallet, "APPROVE_TRANSACTION", popup, { requestId });
-  await pending;
-  return approved;
-}
-
-async function sendTransfer(wallet: Wallet, amount: string, coin: string): Promise<Response> {
-  return send(wallet, "SEND_TRANSACTION", popup, {
-    from: keyPair(GENERATED_KEY).address,
-    to: "nch1to",
-    amount,
-    coin,
-  });
-}
-
-describe("nonce reservations follow the chain", () => {
-  it("drops a reserved nonce when the chain nonce moves backward", async () => {
-    const harness = createHarness();
-    expect((await createWallet(harness.wallet)).success).toBe(true);
-    stubTxStatus(harness, "pending");
-    harness.setNonce(4);
-
-    const first = await sendTransfer(harness.wallet, "1", "aa");
-    expect(first.success, first.error).toBe(true);
-    harness.setNonce(0);
-    const second = await sendTransfer(harness.wallet, "2", "bb");
-    expect(second.success, second.error).toBe(true);
-    expect(harness.wasm.signed.map((item) => item.nonce)).toEqual([4n, 0n]);
+    expect(badAmount.success).toBe(false);
+    expect(badAmount.error).toBe("Amount must be a whole number");
   });
 
-  it("reuses a nonce when the previous submit was dropped", async () => {
-    const harness = createHarness();
-    expect((await createWallet(harness.wallet)).success).toBe(true);
-    stubTxStatus(harness, "dropped");
-    harness.setNonce(0);
-    harness.setFactoryNonce(0);
-
-    const first = await send(harness.wallet, "CREATE_TOKEN", popup, {
-      symbol: "WLT",
-      name: "Wallet",
-      decimals: 6,
-      initial_supply: "1000",
-      max_supply: "5000",
+  it("normalizes display coin hex when saving settings", async () => {
+    const { wallet } = createHarness();
+    const updated = await send(wallet, "UPDATE_SETTINGS", popup, {
+      displayCoin: `0x${"AB".repeat(32)}`,
     });
-    expect(first.success, first.error).toBe(true);
-    expect(first.data).toMatchObject({ factoryNonce: 0 });
-
-    const second = await send(harness.wallet, "CREATE_TOKEN", popup, {
-      symbol: "WLT",
-      name: "Wallet",
-      decimals: 6,
-      initial_supply: "1000",
-      max_supply: "5000",
-    });
-    expect(second.success, second.error).toBe(true);
-    expect(second.data).toMatchObject({ factoryNonce: 0 });
-    const submitted = harness.rpcCalls.filter((call) => call.method === "coins.submit_transaction");
-    expect(submitted.map((call) => (call.params as { transaction: string }).transaction)).toEqual([
-      "create:0",
-      "create:0",
-    ]);
-  });
-
-  it("drops a reserved nonce when a restarted chain reports the same nonce", async () => {
-    const harness = createHarness();
-    expect((await createWallet(harness.wallet)).success).toBe(true);
-    stubTxStatus(harness, "unknown");
-    harness.setNonce(0);
-    harness.setFactoryNonce(0);
-
-    const first = await send(harness.wallet, "CREATE_TOKEN", popup, {
-      symbol: "WLT",
-      name: "Wallet",
-      decimals: 6,
-      initial_supply: "1000",
-      max_supply: "5000",
-    });
-    expect(first.success, first.error).toBe(true);
-    expect(first.data).toMatchObject({ factoryNonce: 0 });
-
-    const second = await send(harness.wallet, "CREATE_TOKEN", popup, {
-      symbol: "WLT",
-      name: "Wallet",
-      decimals: 6,
-      initial_supply: "1000",
-      max_supply: "5000",
-    });
-    expect(second.success, second.error).toBe(true);
-    expect(second.data).toMatchObject({ factoryNonce: 0 });
-    const submitted = harness.rpcCalls.filter((call) => call.method === "coins.submit_transaction");
-    expect(submitted.map((call) => (call.params as { transaction: string }).transaction)).toEqual([
-      "create:0",
-      "create:0",
-    ]);
-  });
-
-  it("does not reuse a nonce reserved for another RPC", async () => {
-    const harness = createHarness();
-    expect((await createWallet(harness.wallet)).success).toBe(true);
-    stubTxStatus(harness, "pending");
-    harness.setNonce(5);
-
-    const first = await sendTransfer(harness.wallet, "1", "aa");
-    expect(first.success, first.error).toBe(true);
-    const updated = await send(harness.wallet, "UPDATE_SETTINGS", popup, {
-      rpcUrl: "http://127.0.0.1:9545",
-    });
-    expect(updated.success, updated.error).toBe(true);
-    const second = await sendTransfer(harness.wallet, "2", "bb");
-    expect(second.success, second.error).toBe(true);
-    expect(harness.wasm.signed.map((item) => item.nonce)).toEqual([5n, 5n]);
-  });
-
-  it("keeps the next nonce while the previous submit is still pending", async () => {
-    const harness = createHarness();
-    expect((await createWallet(harness.wallet)).success).toBe(true);
-    stubTxStatus(harness, "pending");
-    harness.setNonce(7);
-
-    const first = await sendTransfer(harness.wallet, "1", "aa");
-    const second = await sendTransfer(harness.wallet, "2", "bb");
-    expect(first.success, first.error).toBe(true);
-    expect(second.success, second.error).toBe(true);
-    expect(harness.wasm.signed.map((item) => item.nonce)).toEqual([7n, 8n]);
-  });
-
-  it("keeps an earlier pending nonce when a later submit is dropped", async () => {
-    const harness = createHarness();
-    expect((await createWallet(harness.wallet)).success).toBe(true);
-    harness.setNonce(7);
-    const statuses = new Map<string, string>();
-    let submitted = 0;
-    const original = harness.host.rpc;
-    harness.host.rpc = async (url, body) => {
-      const request = body as { method: string; params: { hash?: string } };
-      if (request.method === "coins.submit_transaction") {
-        submitted += 1;
-        const hash = `0x${submitted}`;
-        statuses.set(hash, "pending");
-        harness.rpcCalls.push(request);
-        return { result: { hash } };
-      }
-      if (request.method === "coins.transaction_status") {
-        harness.rpcCalls.push(request);
-        const hash = request.params.hash ?? "";
-        return { result: { hash, status: statuses.get(hash) ?? "unknown" } };
-      }
-      return original(url, body);
-    };
-
-    const first = await sendTransfer(harness.wallet, "1", "aa");
-    const second = await sendTransfer(harness.wallet, "2", "bb");
-    expect(first.success, first.error).toBe(true);
-    expect(second.success, second.error).toBe(true);
-    statuses.set("0x2", "dropped");
-    const third = await sendTransfer(harness.wallet, "3", "cc");
-    expect(third.success, third.error).toBe(true);
-    expect(harness.wasm.signed.map((item) => item.nonce)).toEqual([7n, 8n, 8n]);
-  });
-
-  it("does not reuse a nonce that was signed for a dapp", async () => {
-    const harness = createHarness();
-    expect((await createWallet(harness.wallet)).success).toBe(true);
-    await connectSite(harness);
-    stubTxStatus(harness, "unknown");
-    harness.setNonce(4);
-
-    const signed = await approveSign(harness, "1");
-    expect(signed.success, signed.error).toBe(true);
-    const sent = await sendTransfer(harness.wallet, "2", "bb");
-    expect(sent.success, sent.error).toBe(true);
-    expect(harness.wasm.signed.map((item) => item.nonce)).toEqual([4n, 5n]);
-  });
-
-  it("reserves a fresh nonce after signing while a submit is still pending", async () => {
-    const harness = createHarness();
-    expect((await createWallet(harness.wallet)).success).toBe(true);
-    await connectSite(harness);
-    stubTxStatus(harness, "pending");
-    harness.setNonce(4);
-
-    const first = await sendTransfer(harness.wallet, "1", "aa");
-    expect(first.success, first.error).toBe(true);
-    const signed = await approveSign(harness, "2");
-    expect(signed.success, signed.error).toBe(true);
-    const second = await sendTransfer(harness.wallet, "3", "cc");
-    expect(second.success, second.error).toBe(true);
-    expect(harness.wasm.signed.map((item) => item.nonce)).toEqual([4n, 5n, 6n]);
-  });
-
-  it("reuses a dropped submit without taking back a dapp-signed nonce", async () => {
-    const harness = createHarness();
-    expect((await createWallet(harness.wallet)).success).toBe(true);
-    await connectSite(harness);
-    stubTxStatus(harness, "dropped");
-    harness.setNonce(4);
-
-    const signed = await approveSign(harness, "1");
-    expect(signed.success, signed.error).toBe(true);
-    const first = await sendTransfer(harness.wallet, "2", "bb");
-    const second = await sendTransfer(harness.wallet, "3", "cc");
-    expect(first.success, first.error).toBe(true);
-    expect(second.success, second.error).toBe(true);
-    expect(harness.wasm.signed.map((item) => item.nonce)).toEqual([4n, 5n, 5n]);
-  });
-
-  it("keeps a pending nonce when settings do not change the chain", async () => {
-    const harness = createHarness();
-    expect((await createWallet(harness.wallet)).success).toBe(true);
-    stubTxStatus(harness, "pending");
-    harness.setNonce(7);
-
-    const first = await sendTransfer(harness.wallet, "1", "aa");
-    expect(first.success, first.error).toBe(true);
-    const updated = await send(harness.wallet, "UPDATE_SETTINGS", popup, { displayCoin: "nunchi" });
-    expect(updated.success, updated.error).toBe(true);
-    const second = await sendTransfer(harness.wallet, "2", "bb");
-    expect(second.success, second.error).toBe(true);
-    expect(harness.wasm.signed.map((item) => item.nonce)).toEqual([7n, 8n]);
-  });
-});
-
-describe("delete wallet", () => {
-  it("rejects an in-flight connection instead of leaving it pending", async () => {
-    const harness = createHarness();
-    expect((await createWallet(harness.wallet)).success).toBe(true);
-    const pending = harness.wallet.handleMessage({ type: "REQUEST_CONNECTION" }, page);
-    await waitForApproval(harness.approvalPaths);
-    const deleted = await send(harness.wallet, "DELETE_WALLET", popup, { password: PASSWORD });
-    expect(deleted.success).toBe(true);
-    await expect(pending).resolves.toMatchObject({ success: false, error: "Wallet deleted" });
+    expect(updated.success).toBe(true);
+    expect(updated.data).toMatchObject({ displayCoin: "ab".repeat(32) });
   });
 });
 
@@ -796,5 +634,430 @@ describe("import", () => {
       success: true,
       data: { address: keyPair(IMPORTED_KEY).address, curve: "ed25519", needsBackup: false },
     });
+  });
+});
+
+describe("security hardening", () => {
+  it("does not let a page confirm backup, export, or send", async () => {
+    const { wallet } = createHarness();
+    expect((await createWallet(wallet)).success).toBe(true);
+    for (const type of ["CONFIRM_BACKUP", "EXPORT_PRIVATE_KEY", "SEND_TRANSACTION", "GET_BALANCE"] as MessageType[]) {
+      const response = await send(wallet, type, page, { password: PASSWORD });
+      expect(response.error, type).toBe("Unauthorized: privileged operation");
+    }
+  });
+
+  it("rejects opaque and file origins for page messages", async () => {
+    const { wallet } = createHarness();
+    for (const origin of ["null", "file://", ""]) {
+      const response = await send(wallet, "GET_CHAIN_ID", { origin });
+      expect(response.success, origin).toBe(false);
+      expect(response.error, origin).toBe("Missing sender origin");
+    }
+  });
+
+  it("rejects a second create and parallel creates", async () => {
+    const { wallet } = createHarness();
+    const first = wallet.handleMessage(
+      { type: "CREATE_WALLET", payload: { curve: "Ed25519", password: PASSWORD } },
+      popup
+    );
+    const second = wallet.handleMessage(
+      { type: "CREATE_WALLET", payload: { curve: "Ed25519", password: PASSWORD } },
+      popup
+    );
+    const results = await Promise.all([
+      first.then((response) => ({ ok: true, response })).catch((error) => ({
+        ok: false,
+        response: { success: false, error: error instanceof Error ? error.message : String(error) },
+      })),
+      second.then((response) => ({ ok: true, response })).catch((error) => ({
+        ok: false,
+        response: { success: false, error: error instanceof Error ? error.message : String(error) },
+      })),
+    ]);
+    const errors = results.filter((result) => !result.response.success).map((result) => result.response.error);
+    const successes = results.filter((result) => result.response.success);
+    expect(successes).toHaveLength(1);
+    expect(errors.some((error) => error === "Wallet is busy" || error?.includes("already exists"))).toBe(true);
+
+    const again = await send(wallet, "CREATE_WALLET", popup, { curve: "Ed25519", password: PASSWORD });
+    expect(again.success).toBe(false);
+    expect(again.error).toMatch(/already exists/);
+  });
+
+  it("does not confirm a backup that was never revealed", async () => {
+    const { wallet } = createHarness();
+    expect((await createWallet(wallet)).success).toBe(true);
+    const confirmed = await send(wallet, "CONFIRM_BACKUP", popup);
+    expect(confirmed.success).toBe(false);
+    expect(confirmed.error).toBe("Backup has not been revealed");
+  });
+
+  it("shares lockout across unlock and export", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    expect((await send(harness.wallet, "LOCK_WALLET", popup)).success).toBe(true);
+    for (let i = 0; i < MAX_UNLOCK_ATTEMPTS; i++) {
+      const failed = await send(harness.wallet, "UNLOCK_WALLET", popup, { password: "wrong-password" });
+      expect(failed.error).toBe("Invalid password");
+    }
+    const exported = await send(harness.wallet, "EXPORT_PRIVATE_KEY", popup, { password: PASSWORD });
+    expect(exported.success).toBe(false);
+    expect(exported.error).toMatch(/Too many failed attempts/);
+  });
+
+  it("rejects a transfer from address that is not the unlocked wallet", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    await connectSite(harness);
+    const mismatch = await send(harness.wallet, "REQUEST_TRANSACTION", page, {
+      coin: COIN,
+      from: NCH_ZERO,
+      to: NCH_ZERO,
+      amount: "1",
+    });
+    expect(mismatch.success).toBe(false);
+    expect(mismatch.error).toBe("from address must match unlocked wallet");
+    expect(harness.approvalPaths).toHaveLength(1);
+  });
+
+  it("rejects page transfers before the site is connected", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    const response = await send(harness.wallet, "REQUEST_TRANSACTION", page, {
+      coin: COIN,
+      to: NCH_ZERO,
+      amount: "1",
+    });
+    expect(response.success).toBe(false);
+    expect(response.error).toMatch(/not connected/);
+    expect(harness.approvalPaths).toHaveLength(0);
+  });
+
+  it("ignores unknown settings fields", async () => {
+    const { wallet } = createHarness();
+    const updated = await send(wallet, "UPDATE_SETTINGS", popup, {
+      displayCoin: COIN,
+      encrypted: "steal-the-keystore",
+    });
+    expect(updated.success).toBe(true);
+    expect(updated.data).not.toHaveProperty("encrypted");
+    expect(updated.data).toMatchObject({ displayCoin: COIN, rpcUrl: "http://localhost:8545" });
+  });
+
+  it("rejects whitespace passwords at the wallet boundary", async () => {
+    const { wallet } = createHarness();
+    const created = await send(wallet, "CREATE_WALLET", popup, { curve: "Ed25519", password: "        " });
+    expect(created.success).toBe(false);
+    expect(created.error).toBe("Password contains invalid characters");
+  });
+
+  it("rejects empty token metadata before touching RPC", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    const created = await send(harness.wallet, "CREATE_TOKEN", popup, {
+      symbol: "",
+      name: "Wallet",
+      decimals: 6,
+      initial_supply: "1000",
+    });
+    expect(created.success).toBe(false);
+    expect(created.error).toBe("Token symbol is required");
+    expect(harness.rpcCalls).toEqual([]);
+  });
+
+  it("rejects a policy threshold of zero", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    const registered = await send(harness.wallet, "REGISTER_ACCOUNT_POLICY", popup, { threshold: 0 });
+    expect(registered.success).toBe(false);
+    expect(registered.error).toBe("Threshold must be a positive integer");
+  });
+
+  it("broadcasts accountsChanged when auto-lock fires", async () => {
+    const events: Array<{ origin: string; event: string; params: unknown }> = [];
+    const harness = createHarness();
+    harness.host.broadcast = (origin, event, params) => {
+      events.push({ origin, event, params });
+    };
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    await connectSite(harness);
+    harness.clock.advance(AUTO_LOCK_MS + 1);
+    const chain = await send(harness.wallet, "GET_CHAIN_ID", page);
+    expect(chain.success).toBe(true);
+    expect(events).toContainEqual({ origin: PAGE_ORIGIN, event: "accountsChanged", params: [] });
+    const accounts = await send(harness.wallet, "GET_ACCOUNTS", page);
+    expect(accounts.data).toEqual({ accounts: [] });
+  });
+
+  it("does not extend auto-lock when a page reads chain id", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    harness.clock.advance(AUTO_LOCK_MS - 1);
+    expect((await send(harness.wallet, "GET_CHAIN_ID", page)).success).toBe(true);
+    harness.clock.advance(2);
+    const state = await send(harness.wallet, "GET_STATE", popup);
+    expect(state.data).toMatchObject({ isUnlocked: false });
+  });
+
+  it("retries hydration after a storage read fails", async () => {
+    const harness = createHarness();
+    let fail = true;
+    const original = harness.host.storageGet.bind(harness.host);
+    harness.host.storageGet = async (keys) => {
+      const list = Array.isArray(keys) ? keys : [keys];
+      if (fail && list.includes("connectedSites")) {
+        fail = false;
+        throw new Error("storage unavailable");
+      }
+      return original(keys);
+    };
+    const first = await send(harness.wallet, "GET_STATE", popup);
+    expect(first.success).toBe(false);
+    const second = await send(harness.wallet, "GET_STATE", popup);
+    expect(second.success).toBe(true);
+    expect(second.data).toMatchObject({ hasWallet: false });
+  });
+
+  it("rejects an open approval when the wallet is deleted", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    const pending = harness.wallet.handleMessage({ type: "REQUEST_CONNECTION" }, page);
+    await waitForApproval(harness.approvalPaths);
+    const deleted = await send(harness.wallet, "DELETE_WALLET", popup, { password: PASSWORD });
+    expect(deleted.success).toBe(true);
+    await expect(pending).resolves.toEqual({ success: false, error: "Wallet deleted" });
+  });
+});
+
+function transfer(amount: string) {
+  return {
+    from: keyPair(GENERATED_KEY).address,
+    to: NCH_ZERO,
+    coin: COIN,
+    amount,
+  };
+}
+
+describe("nonce reservation", () => {
+  it("uses the next nonce while an earlier transfer is still unconfirmed", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    harness.setNonce(7);
+    const first = await send(harness.wallet, "SEND_TRANSACTION", popup, transfer("1"));
+    expect(first.success, first.error).toBe(true);
+    const second = await send(harness.wallet, "SEND_TRANSACTION", popup, transfer("2"));
+    expect(second.success, second.error).toBe(true);
+    expect(harness.wasm.signed.map((entry) => entry.nonce)).toEqual([7n, 8n]);
+  });
+
+  it("keeps the reserved nonce across a worker restart", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    harness.setNonce(7);
+    expect((await send(harness.wallet, "SEND_TRANSACTION", popup, transfer("1"))).success).toBe(true);
+    harness.wallet.shutdown();
+    const restarted = harness.restart();
+    expect((await send(restarted, "UNLOCK_WALLET", popup, { password: PASSWORD })).success).toBe(true);
+    const second = await send(restarted, "SEND_TRANSACTION", popup, transfer("2"));
+    expect(second.success, second.error).toBe(true);
+    expect(harness.wasm.signed.map((entry) => entry.nonce)).toEqual([7n, 8n]);
+  });
+
+  it("does not skip a nonce when submission fails", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    harness.setNonce(7);
+    const original = harness.host.rpc.bind(harness.host);
+    harness.host.rpc = async (url, body) => {
+      const request = body as { method: string };
+      if (request.method === "coins.submit_transaction") {
+        return { error: { message: "rejected" } };
+      }
+      return original(url, body);
+    };
+    const failed = await send(harness.wallet, "SEND_TRANSACTION", popup, transfer("1"));
+    expect(failed.success).toBe(false);
+    expect(failed.error).toBe("rejected");
+    harness.host.rpc = original;
+    const retried = await send(harness.wallet, "SEND_TRANSACTION", popup, transfer("1"));
+    expect(retried.success, retried.error).toBe(true);
+    expect(harness.wasm.signed.map((entry) => entry.nonce)).toEqual([7n, 7n]);
+  });
+
+  it("serializes overlapping sends onto distinct nonces", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    harness.setNonce(4);
+    let held = false;
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = harness.host.rpc.bind(harness.host);
+    harness.host.rpc = async (url, body) => {
+      const request = body as { method: string };
+      if (request.method === "coins.submit_transaction" && !held) {
+        held = true;
+        await gate;
+      }
+      return original(url, body);
+    };
+    const first = send(harness.wallet, "SEND_TRANSACTION", popup, transfer("1"));
+    for (let i = 0; i < 50 && !held; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(held).toBe(true);
+    const second = send(harness.wallet, "SEND_TRANSACTION", popup, transfer("2"));
+    release();
+    const results = await Promise.all([first, second]);
+    expect(results.every((result) => result.success)).toBe(true);
+    expect(harness.wasm.signed.map((entry) => entry.nonce)).toEqual([4n, 5n]);
+  });
+
+  it("refuses a rounded nonce and accepts a decimal-string nonce", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    harness.setNonce(Number.MAX_SAFE_INTEGER + 2);
+    const unsafe = await send(harness.wallet, "SEND_TRANSACTION", popup, transfer("1"));
+    expect(unsafe.success).toBe(false);
+    expect(unsafe.error).toMatch(/safe integer/);
+    expect(harness.wasm.signed).toHaveLength(0);
+
+    harness.setNonce("9007199254740993");
+    const large = await send(harness.wallet, "SEND_TRANSACTION", popup, transfer("1"));
+    expect(large.success, large.error).toBe(true);
+    expect(harness.wasm.signed[0]?.nonce).toBe(9007199254740993n);
+  });
+
+  it("forgets reserved nonces after the RPC URL changes", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    harness.setNonce(7);
+    expect((await send(harness.wallet, "SEND_TRANSACTION", popup, transfer("1"))).success).toBe(true);
+    const created = await send(harness.wallet, "CREATE_TOKEN", popup, {
+      symbol: "WLT",
+      name: "Wallet",
+      decimals: 6,
+      initial_supply: "1",
+    });
+    expect(created.success, created.error).toBe(true);
+    expect(created.data).toMatchObject({ factoryNonce: 1 });
+
+    const updated = await send(harness.wallet, "UPDATE_SETTINGS", popup, {
+      rpcUrl: "http://127.0.0.1:9545",
+    });
+    expect(updated.success, updated.error).toBe(true);
+
+    harness.wallet.shutdown();
+    const restarted = harness.restart();
+    expect((await send(restarted, "UNLOCK_WALLET", popup, { password: PASSWORD })).success).toBe(true);
+    harness.setNonce(0);
+    const sent = await send(restarted, "SEND_TRANSACTION", popup, transfer("2"));
+    expect(sent.success, sent.error).toBe(true);
+    const createdAgain = await send(restarted, "CREATE_TOKEN", popup, {
+      symbol: "WLT",
+      name: "Wallet",
+      decimals: 6,
+      initial_supply: "1",
+    });
+    expect(createdAgain.success, createdAgain.error).toBe(true);
+    expect(createdAgain.data).toMatchObject({ factoryNonce: 1 });
+    expect(harness.wasm.signed.map((entry) => entry.nonce)).toEqual([7n, 0n]);
+  });
+
+  it("predicts the next factory nonce for a second create", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    const payload = { symbol: "WLT", name: "Wallet", decimals: 6, initial_supply: "1", max_supply: "5" };
+    const first = await send(harness.wallet, "CREATE_TOKEN", popup, payload);
+    const second = await send(harness.wallet, "CREATE_TOKEN", popup, payload);
+    expect(first.success, first.error).toBe(true);
+    expect(second.success, second.error).toBe(true);
+    expect(first.data).toMatchObject({ factoryNonce: 1 });
+    expect(second.data).toMatchObject({ factoryNonce: 2 });
+  });
+
+  it("does not let an in-flight send rewrite cursors after delete", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    harness.setNonce(7);
+    let held = false;
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = harness.host.rpc.bind(harness.host);
+    harness.host.rpc = async (url, body) => {
+      const request = body as { method: string };
+      if (request.method === "coins.submit_transaction" && !held) {
+        held = true;
+        await gate;
+      }
+      return original(url, body);
+    };
+
+    const inflight = send(harness.wallet, "SEND_TRANSACTION", popup, transfer("1"));
+    for (let i = 0; i < 50 && !held; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(held).toBe(true);
+
+    const deleted = send(harness.wallet, "DELETE_WALLET", popup, { password: PASSWORD });
+    // Password derivation is synchronous PBKDF2. Give delete time to finish it
+    // and reach the submit lock before the in-flight send commits its cursor.
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    release();
+
+    const [sent, removed] = await Promise.all([inflight, deleted]);
+    expect(sent.success, sent.error).toBe(true);
+    expect(removed.success, removed.error).toBe(true);
+    const stored = await harness.storage.get(["wallet", NONCE_CURSOR_STORAGE, "activity"]);
+    expect(stored.wallet).toBeUndefined();
+    expect(stored[NONCE_CURSOR_STORAGE]).toBeUndefined();
+    expect(stored.activity).toBeUndefined();
+  });
+});
+
+describe("amount and policy validation", () => {
+  it("rejects a zero transfer and an initial supply above the max", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    const zero = await send(harness.wallet, "SEND_TRANSACTION", popup, transfer("0"));
+    expect(zero.success).toBe(false);
+    expect(zero.error).toBe("Amount must be greater than zero");
+
+    const created = await send(harness.wallet, "CREATE_TOKEN", popup, {
+      symbol: "WLT",
+      name: "Wallet",
+      decimals: 6,
+      initial_supply: "5000",
+      max_supply: "1000",
+    });
+    expect(created.success).toBe(false);
+    expect(created.error).toBe("Initial supply exceeds max supply");
+    expect(harness.rpcCalls).toEqual([]);
+  });
+
+  it("rejects a policy this key cannot satisfy", async () => {
+    const harness = createHarness();
+    expect((await createWallet(harness.wallet)).success).toBe(true);
+    const own = keyPair(GENERATED_KEY).public_key_hex;
+    const other = "22".repeat(33);
+    const missing = await send(harness.wallet, "REGISTER_ACCOUNT_POLICY", popup, {
+      threshold: 1,
+      signer_pub_keys: other,
+    });
+    expect(missing.success).toBe(false);
+    expect(missing.error).toBe("Policy must include the unlocked wallet public key");
+
+    const tooHigh = await send(harness.wallet, "REGISTER_ACCOUNT_POLICY", popup, {
+      threshold: 2,
+      signer_pub_keys: `${own},${other}`,
+    });
+    expect(tooHigh.success).toBe(false);
+    expect(tooHigh.error).toBe("This wallet can only authorize a one-signature policy");
+    expect(harness.rpcCalls).toEqual([]);
   });
 });

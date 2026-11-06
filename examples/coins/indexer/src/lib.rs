@@ -6,7 +6,7 @@
 
 use axum::{
     body::Bytes,
-    extract::{ws::WebSocketUpgrade, Path, State as AxumState},
+    extract::{ws::WebSocketUpgrade, DefaultBodyLimit, Path, State as AxumState},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -50,6 +50,11 @@ use tower_http::{
 use tracing::warn;
 
 pub const LATEST: &str = "latest";
+/// Largest consensus upload accepted by the indexer HTTP routes.
+///
+/// This matches the coins-chain spool `max_payload_bytes`. Axum's default
+/// `Bytes` limit is 2 MiB, which rejects artifacts the node is allowed to send.
+pub const MAX_UPLOAD_BODY_BYTES: usize = 16 * 1024 * 1024;
 const DKG_OUTPUT_STATE_FILE: &str = "dkg-output.latest";
 const UPLOAD_PENDING: &str = "upload pending";
 const CONFLICT_SEED: &str = "conflicting seed";
@@ -541,6 +546,7 @@ impl Api {
             .route("/consensus/ws", get(consensus_ws))
             .route("/consensus/summary/latest", get(consensus_summary_latest))
             .route("/consensus/summary/ws", get(consensus_summary_ws))
+            .layer(DefaultBodyLimit::max(MAX_UPLOAD_BODY_BYTES))
             .layer(CorsLayer::permissive())
             .with_state(self.indexer)
     }
@@ -692,7 +698,7 @@ async fn handle_consensus_ws(socket: axum::extract::ws::WebSocket, indexer: Arc<
     loop {
         tokio::select! {
             incoming = receiver.next() => {
-                if !ws_still_open(incoming) {
+                if !forward_socket_control(&mut sender, incoming).await {
                     break;
                 }
             }
@@ -707,8 +713,14 @@ async fn handle_consensus_ws(socket: axum::extract::ws::WebSocket, indexer: Arc<
                             break;
                         }
                     }
+                    // A lagged broadcast skipped artifacts. Close so the client
+                    // reconnects instead of treating the stream as gapless.
                     Err(RecvError::Lagged(skipped)) => {
                         warn!(skipped, "consensus websocket lagged");
+                        let _ = sender
+                            .send(axum::extract::ws::Message::Close(None))
+                            .await;
+                        break;
                     }
                     Err(RecvError::Closed) => break,
                 }
@@ -724,7 +736,7 @@ async fn handle_consensus_summary_ws(socket: axum::extract::ws::WebSocket, index
     loop {
         tokio::select! {
             incoming = receiver.next() => {
-                if !ws_still_open(incoming) {
+                if !forward_socket_control(&mut sender, incoming).await {
                     break;
                 }
             }
@@ -744,6 +756,10 @@ async fn handle_consensus_summary_ws(socket: axum::extract::ws::WebSocket, index
                     }
                     Err(RecvError::Lagged(skipped)) => {
                         warn!(skipped, "consensus summary websocket lagged");
+                        let _ = sender
+                            .send(axum::extract::ws::Message::Close(None))
+                            .await;
+                        break;
                     }
                     Err(RecvError::Closed) => break,
                 }
@@ -752,8 +768,18 @@ async fn handle_consensus_summary_ws(socket: axum::extract::ws::WebSocket, index
     }
 }
 
-fn ws_still_open(incoming: Option<Result<axum::extract::ws::Message, axum::Error>>) -> bool {
+async fn forward_socket_control<S>(
+    sender: &mut S,
+    incoming: Option<Result<axum::extract::ws::Message, axum::Error>>,
+) -> bool
+where
+    S: futures::Sink<axum::extract::ws::Message, Error = axum::Error> + Unpin,
+{
     match incoming {
+        Some(Ok(axum::extract::ws::Message::Ping(payload))) => sender
+            .send(axum::extract::ws::Message::Pong(payload))
+            .await
+            .is_ok(),
         Some(Ok(axum::extract::ws::Message::Close(_))) | None | Some(Err(_)) => false,
         Some(Ok(_)) => true,
     }
