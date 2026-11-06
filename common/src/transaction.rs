@@ -147,6 +147,12 @@ impl Authorization {
                 )
             }
             Self::Multisig { policy, signatures } => {
+                // Multisig account ids are the hash of the policy, and each signature
+                // commits to the account id. A policy that does not derive this account
+                // would let any key authorize any account.
+                if Address::multisig(policy) != *account_id {
+                    return Err(SignatureError::IncompatibleKey);
+                }
                 let mut seen = BTreeSet::new();
                 let mut previous_signer_key: Option<Vec<u8>> = None;
                 for signature in signatures {
@@ -263,6 +269,10 @@ impl<Operation: self::Operation> Transaction<Operation> {
         }
     }
 
+    /// Sign `operation` with `signers` under `policy`.
+    ///
+    /// `account_id` must be [`Address::multisig`] of `policy`. Verification rejects any other
+    /// pairing, because the signatures commit to the account id rather than a replaceable policy.
     pub fn sign_multisig(
         account_id: Address,
         policy: MultisigPolicy,
