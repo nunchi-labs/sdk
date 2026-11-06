@@ -86,14 +86,14 @@ where
     Events: EventSink + Send,
 {
     // Fee and module writes share one overlay. A failed transaction drops both, including the
-    // bridge arm's inner overlay.
+    // bridge arm's inner overlay. Events stay buffered until that commit.
     let mut overlay = Overlay::new(&mut *state);
     let mut staged_events = VecEventSink::new();
     let result = dispatch(&mut overlay, context, transaction, &mut staged_events).await;
     if result.is_ok() {
         overlay.commit();
-        for event in staged_events.events() {
-            events.emit(event.clone());
+        for event in staged_events.into_events() {
+            events.emit(event);
         }
     }
     result

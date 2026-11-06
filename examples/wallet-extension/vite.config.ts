@@ -3,12 +3,16 @@ import react from "@vitejs/plugin-react";
 import { resolve } from "path";
 
 export default defineConfig({
+  base: "./",
   plugins: [react()],
   test: {
     exclude: ["**/node_modules/**", "**/dist/**", "**/*.live.test.ts"],
   },
   build: {
     outDir: "dist",
+    sourcemap: false,
+    assetsInlineLimit: 0,
+    modulePreload: false,
     rollupOptions: {
       input: {
         popup: resolve(__dirname, "popup.html"),

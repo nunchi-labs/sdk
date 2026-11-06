@@ -13,7 +13,6 @@ use thiserror::Error;
 pub enum OracleError {
     #[error("bad oracle transaction signature: {0}")]
     BadSignature(#[from] SignatureError),
-    /// Multisig authorization is not bound to the account by signature verification.
     #[error("unsupported oracle authorization")]
     UnsupportedAuthorization,
     #[error("nonce mismatch for {account:?}: expected {expected}, got {actual}")]
@@ -70,14 +69,17 @@ impl<D: OracleDB> OracleLedger<D> {
     /// transactions that already passed stateless verification
     /// ([`Transaction::verify`]), which the chain guarantees at mempool
     /// admission and block verification.
+    ///
+    /// This method does not verify signatures. Chain execution verifies first, and
+    /// that check binds a multisig account to its policy. The same binding is
+    /// enforced here so a direct caller cannot attribute a record to an account
+    /// the supplied policy does not derive.
     pub async fn apply_transaction(
         &mut self,
         tx: &Transaction,
         context: RuntimeContext,
     ) -> Result<(), OracleError> {
-        // `Transaction::verify` does not bind a multisig policy to `account_id`. Accepting the
-        // embedded policy would let any signer write records as an arbitrary account.
-        if !matches!(tx.authorization, Authorization::Single { .. }) {
+        if !authorization_is_bound(tx) {
             return Err(OracleError::UnsupportedAuthorization);
         }
 
@@ -229,6 +231,13 @@ impl<D: OracleDB> OracleLedger<D> {
             records.push(record);
         }
         Ok(())
+    }
+}
+
+fn authorization_is_bound(tx: &Transaction) -> bool {
+    match &tx.authorization {
+        Authorization::Single { .. } => true,
+        Authorization::Multisig { policy, .. } => Address::multisig(policy) == tx.account_id,
     }
 }
 
