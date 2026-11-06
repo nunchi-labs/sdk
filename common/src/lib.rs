@@ -20,7 +20,8 @@ pub use events::{Event, EventSink, NoopEventSink, VecEventSink};
 pub use runtime::{Runtime, RuntimeContext};
 #[cfg(feature = "state")]
 pub use state_db::{
-    qmdb_operation_codec_config, shared_database, CommitState, Namespace, Overlay, QmdbBackend,
+    max_qmdb_operation_bytes, qmdb_operation_codec_config, shared_database, CommitState,
+    Namespace, Overlay, QmdbBackend,
     QmdbBatch, QmdbConfig, QmdbDatabaseSet, QmdbMerkleized, QmdbOperation, QmdbOperationCfg,
     QmdbReader, QmdbState, QmdbUnmerkleized, QmdbUpdate, StateDb, StateError, StateStore,
     MAX_STATE_VALUE_SIZE,

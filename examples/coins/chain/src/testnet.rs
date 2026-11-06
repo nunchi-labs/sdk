@@ -36,7 +36,6 @@ use nunchi_dkg::{
     ContinueOnUpdate, PeerConfig, Storage as DkgStorage, StorageKey, StorageProtector,
     UpdateCallBack, MAX_SUPPORTED_MODE,
 };
-use nunchi_mempool::PoolConfig;
 use nunchi_chain::engine::{
     default_state_prune_config, validate_state_prune_config, DEFAULT_MAX_PENDING_ACKS,
     PruneConfigError,
@@ -1030,6 +1029,28 @@ async fn start_node(
             .max(2),
     )
     .expect("max_peers_per_set");
+    let pool_config = crate::transaction::pool_config();
+    let required_message_size = nunchi_chain::discovery_max_message_size::<
+        crate::transaction::Transaction,
+        nunchi_clob::ClobExtension,
+    >(
+        max_participants,
+        &(max_participants, ()),
+        nunchi_chain::engine::STATE_SYNC_FETCH_BATCH_SIZE,
+        nunchi_common::max_qmdb_operation_bytes(),
+        pool_config.max_tx_bytes,
+    );
+    let max_message_size = config
+        .networking
+        .max_message_size
+        .max(required_message_size);
+    if max_message_size > config.networking.max_message_size {
+        info!(
+            configured = config.networking.max_message_size,
+            required = required_message_size,
+            "raising discovery max_message_size to the component payload bound"
+        );
+    }
     let p2p_config = discovery::Config::local(
         local_handshake(private_key.clone()),
         NAMESPACE,
@@ -1037,7 +1058,7 @@ async fn start_node(
         config.dialable_address.clone(),
         bootstrappers,
         max_peers_per_set,
-        config.networking.max_message_size,
+        max_message_size,
         NZUsize!(1_000),
     );
     let (mut network, mut oracle) = Network::new(context.child("network"), p2p_config);
@@ -1102,7 +1123,7 @@ async fn start_node(
         max_pending_acks: config.max_pending_acks,
         prune_config,
         max_block_transactions: config.max_block_transactions,
-        pool_config: PoolConfig::default(),
+        pool_config,
         genesis,
         indexer: indexer_client.map(|(client, _metrics)| client),
         indexer_spool_limits: indexer::SpoolLimits {

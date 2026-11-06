@@ -767,6 +767,28 @@ async fn start_node(
 
     let max_peers_per_set = NonZeroUsize::new(config.peer_config.participants.len().max(2))
         .expect("max_peers_per_set");
+    let pool_config = PoolConfig::default();
+    let required_message_size = nunchi_chain::discovery_max_message_size::<
+        crate::NoopTransaction,
+        nunchi_bridge::BridgeExtension,
+    >(
+        max_participants,
+        &(max_participants, ()),
+        nunchi_chain::engine::STATE_SYNC_FETCH_BATCH_SIZE,
+        nunchi_common::max_qmdb_operation_bytes(),
+        pool_config.max_tx_bytes,
+    );
+    let max_message_size = config
+        .networking
+        .max_message_size
+        .max(required_message_size);
+    if max_message_size > config.networking.max_message_size {
+        info!(
+            configured = config.networking.max_message_size,
+            required = required_message_size,
+            "raising discovery max_message_size to the component payload bound"
+        );
+    }
     let p2p_config = discovery::Config::local(
         local_handshake(private_key.clone()),
         config.namespace.as_bytes(),
@@ -774,7 +796,7 @@ async fn start_node(
         config.dialable_address.clone(),
         bootstrappers,
         max_peers_per_set,
-        config.networking.max_message_size,
+        max_message_size,
         commonware_utils::NZUsize!(1_000),
     );
     let (mut network, mut oracle) = Network::new(context.child("network"), p2p_config);
@@ -812,7 +834,7 @@ async fn start_node(
         state_sync: config.state_sync,
         max_pending_acks: config.max_pending_acks,
         prune_config,
-        pool_config: PoolConfig::default(),
+        pool_config,
         bridge: bridge_mailbox,
         bridge_handle,
     };

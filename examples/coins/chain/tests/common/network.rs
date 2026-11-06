@@ -35,7 +35,7 @@ use nunchi_coins_chain::{
 };
 use nunchi_common::QmdbReader;
 use nunchi_dkg::{ContinueOnUpdate, PeerConfig};
-use nunchi_mempool::{MempoolHandle, PoolConfig};
+use nunchi_mempool::MempoolHandle;
 use nunchi_oracle::OracleLedger;
 use std::num::NonZeroUsize;
 use std::{
@@ -206,7 +206,16 @@ impl TestNetworkBuilder {
         let (network, mut oracle) = Network::new(
             context.child("network"),
             simulated::Config {
-                max_size: 1024 * 1024,
+                max_size: nunchi_chain::discovery_max_message_size::<
+                    Transaction,
+                    nunchi_clob::ClobExtension,
+                >(
+                    NZU32!(4),
+                    &(NZU32!(4), ()),
+                    nunchi_chain::engine::STATE_SYNC_FETCH_BATCH_SIZE,
+                    nunchi_common::max_qmdb_operation_bytes(),
+                    nunchi_coins_chain::transaction::pool_config().max_tx_bytes,
+                ),
                 max_peers_per_set: NonZeroUsize::new(
                     (self.validators + self.secondaries).max(2) as usize
                 )
@@ -732,7 +741,7 @@ async fn start_validator(
         max_pending_acks: NZUsize!(16),
         prune_config: cfg.prune_config,
         max_block_transactions: MAX_BLOCK_TRANSACTIONS,
-        pool_config: PoolConfig::default(),
+        pool_config: nunchi_coins_chain::transaction::pool_config(),
         genesis: None,
         indexer: None,
         indexer_spool_limits: Default::default(),
