@@ -243,12 +243,20 @@ impl BridgeActor {
 #[derive(Clone, Debug)]
 pub struct BridgeExtension {
     mailbox: BridgeMailbox,
+    /// Newest certified view loaded by [`ConsensusExtension::preview`].
+    ///
+    /// `None` means preview has not seen a stored root. Propose then includes the cached
+    /// certificate. A certificate at or behind this view is left out of the next block.
+    committed_view: Option<u64>,
 }
 
 impl BridgeExtension {
     /// Create a bridge extension from an existing mailbox.
     pub const fn new(mailbox: BridgeMailbox) -> Self {
-        Self { mailbox }
+        Self {
+            mailbox,
+            committed_view: None,
+        }
     }
 
     /// Return the mailbox used to submit and inspect foreign finalization certificates.
@@ -267,20 +275,37 @@ impl BlockExtension for BridgeExtension {
 }
 
 impl ConsensusExtension for BridgeExtension {
+    async fn preview<S>(&mut self, state: &mut S)
+    where
+        S: StateStore + Send + Sync,
+    {
+        self.committed_view = match foreign_chain_id(state).await {
+            Ok(Some(chain)) => record::latest_foreign_view(state, &chain).await.ok().flatten(),
+            _ => None,
+        };
+    }
+
     async fn propose(&mut self, _context: RuntimeContext) -> Self::Payload {
-        self.mailbox.latest().await
+        let latest = self.mailbox.latest().await;
+        match (&latest, self.committed_view) {
+            // A certificate that is not newer than the committed root must not be required
+            // for the next block. An empty payload is a valid extension.
+            (Some(certificate), Some(committed)) if certificate.view().get() <= committed => None,
+            _ => latest,
+        }
     }
 
     fn verify_payload(&mut self, payload: &Self::Payload) -> impl Future<Output = bool> + Send {
         self.mailbox.verify_payload(payload.clone())
     }
 
-    /// Store the verified certificate's proposal payload as the foreign chain's claim root.
+    /// Record the certificate payload as the foreign chain's claim root.
     ///
-    /// `verify_payload` has already checked the certificate against the configured scheme when a
-    /// block is validated. This checks again so a payload is recorded only when that verification
-    /// still holds. An empty payload leaves the stored root unchanged. The same view and root may
-    /// be included again. An older view, or the same view with a different payload, is rejected.
+    /// Verification stays in [`ConsensusExtension::verify_payload`]. Applying a certified block
+    /// must not wait on the bridge actor: a stopped mailbox cannot reject history that already
+    /// passed validation. An empty payload, a repeat of the stored root, and an older view leave
+    /// the stored root unchanged and still succeed. The same view with a different payload conflicts
+    /// and is rejected.
     async fn apply_payload<S>(
         &mut self,
         state: &mut S,
@@ -293,22 +318,16 @@ impl ConsensusExtension for BridgeExtension {
         let Some(finalization) = payload else {
             return true;
         };
-        if !self
-            .mailbox
-            .verify_payload(Some(finalization.clone()))
-            .await
-        {
-            return false;
-        }
         match store_certified_root(state, finalization.view().get(), finalization.proposal.payload)
             .await
         {
             Ok(
                 CertifiedRootStatus::Stored
                 | CertifiedRootStatus::Unchanged
-                | CertifiedRootStatus::Unconfigured,
+                | CertifiedRootStatus::Unconfigured
+                | CertifiedRootStatus::Stale,
             ) => true,
-            Ok(CertifiedRootStatus::Stale | CertifiedRootStatus::Conflict) => false,
+            Ok(CertifiedRootStatus::Conflict) => false,
             Err(_) => false,
         }
     }

@@ -255,23 +255,39 @@ fn verified_finalization_stores_certified_root_for_claims() {
             root
         );
 
+        // An older verified certificate does not move the root and does not fail the block.
         let older = finalization_over(&foreign, 3, Sha256::hash(&[b"older-root"]));
         assert!(
-            !extension
+            extension
                 .apply_payload(&mut dest_state, runtime, &Some(older))
                 .await
         );
-        let wrong_schemes = schemes(8);
-        let wrong = finalization_over(&wrong_schemes, 9, Sha256::hash(&[b"wrong-root"]));
+        assert_eq!(
+            foreign_root(&dest_state, &source, 7)
+                .await
+                .expect("read")
+                .expect("stored")
+                .state_root,
+            root
+        );
+        // The same view with a different payload conflicts.
+        let conflict = finalization_over(&foreign, 7, Sha256::hash(&[b"other-root"]));
         assert!(
             !extension
-                .apply_payload(&mut dest_state, runtime, &Some(wrong))
+                .apply_payload(&mut dest_state, runtime, &Some(conflict))
                 .await
         );
+        // A certificate from another scheme fails verification and is not a claim root.
+        let wrong_schemes = schemes(8);
+        let wrong = finalization_over(&wrong_schemes, 9, Sha256::hash(&[b"wrong-root"]));
+        assert!(!extension.verify_payload(&Some(wrong)).await);
         assert!(foreign_root(&dest_state, &source, 9)
             .await
             .expect("read")
             .is_none());
+        // Once the root is committed, the next proposal leaves the stale certificate out.
+        extension.preview(&mut dest_state).await;
+        assert_eq!(extension.propose(runtime).await, None);
 
         let mut dest_ledger = BridgeLedger::new(dest_state);
         let claimed = dest_ledger
@@ -304,6 +320,40 @@ fn verified_finalization_stores_certified_root_for_claims() {
             extension
                 .apply_payload(&mut bare, runtime, &payload)
                 .await
+        );
+    });
+}
+
+#[test]
+fn apply_payload_does_not_require_the_bridge_actor() {
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let source = ChainId(Sha256::hash(&[b"source-chain"]));
+        let foreign = schemes(9);
+        let (_actor, mailbox) = BridgeActor::new(foreign[0].clone(), 1);
+        let mut extension = BridgeExtension::new(mailbox);
+        let root = Sha256::hash(&[b"offline-root"]);
+        let certificate = finalization_over(&foreign, 4, root);
+
+        let mut state = QmdbState::init(context.child("dst"), "offline-apply")
+            .await
+            .expect("init");
+        BridgeGenesis::new(ChainId(Sha256::hash(&[b"dest-chain"])))
+            .with_foreign_chain(source)
+            .apply(&mut state);
+
+        assert!(
+            extension
+                .apply_payload(&mut state, RuntimeContext::default(), &Some(certificate))
+                .await
+        );
+        assert_eq!(
+            foreign_root(&state, &source, 4)
+                .await
+                .expect("read")
+                .expect("stored")
+                .state_root,
+            root
         );
     });
 }
