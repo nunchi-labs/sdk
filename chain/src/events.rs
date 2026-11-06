@@ -191,21 +191,19 @@ impl EventConsumer for InMemoryEventConsumer {
     type Sink = TransactionEventSink;
 
     fn begin_block(&self, context: RuntimeContext) -> impl Future<Output = ()> + Send {
-        let pending = self.pending.clone();
-        async move {
-            let block_digest = context
-                .block_digest
-                .expect("event consumer received context without block digest");
-            pending.lock().expect("event consumer poisoned").insert(
+        let block_digest = context
+            .block_digest
+            .expect("event consumer received context without block digest");
+        self.pending.lock().expect("event consumer poisoned").insert(
+            block_digest,
+            FinalizedEvents {
+                height: Height::new(context.height),
                 block_digest,
-                FinalizedEvents {
-                    height: Height::new(context.height),
-                    block_digest,
-                    block_timestamp: context.timestamp_ms,
-                    transactions: Vec::new(),
-                },
-            );
-        }
+                block_timestamp: context.timestamp_ms,
+                transactions: Vec::new(),
+            },
+        );
+        std::future::ready(())
     }
 
     fn transaction_sink(
@@ -217,71 +215,63 @@ impl EventConsumer for InMemoryEventConsumer {
     }
 
     fn transaction_applied(&self, sink: Self::Sink) -> impl Future<Output = ()> + Send {
-        let pending = self.pending.clone();
-        async move {
-            let events = sink
-                .events
-                .into_iter()
-                .enumerate()
-                .map(|(event_index, event)| IndexedEvent {
-                    event_index: u32::try_from(event_index)
-                        .expect("transaction emitted more than u32::MAX events"),
-                    event,
-                })
-                .collect();
+        let events = sink
+            .events
+            .into_iter()
+            .enumerate()
+            .map(|(event_index, event)| IndexedEvent {
+                event_index: u32::try_from(event_index)
+                    .expect("transaction emitted more than u32::MAX events"),
+                event,
+            })
+            .collect();
 
-            let block_digest = sink
-                .context
-                .block_digest
-                .expect("event consumer received context without block digest");
-            let mut pending = pending.lock().expect("event consumer poisoned");
-            let events_for_block = pending
-                .entry(block_digest)
-                .or_insert_with(|| FinalizedEvents {
-                    height: Height::new(sink.context.height),
-                    block_digest,
-                    block_timestamp: sink.context.timestamp_ms,
-                    transactions: Vec::new(),
-                });
-            events_for_block.transactions.push(TransactionEvents {
-                tx_index: sink.transaction.tx_index,
-                tx_digest: sink.transaction.tx_digest,
-                events,
-            });
-        }
+        let block_digest = sink
+            .context
+            .block_digest
+            .expect("event consumer received context without block digest");
+        let mut pending = self.pending.lock().expect("event consumer poisoned");
+        let events_for_block = pending.entry(block_digest).or_insert_with(|| FinalizedEvents {
+            height: Height::new(sink.context.height),
+            block_digest,
+            block_timestamp: sink.context.timestamp_ms,
+            transactions: Vec::new(),
+        });
+        events_for_block.transactions.push(TransactionEvents {
+            tx_index: sink.transaction.tx_index,
+            tx_digest: sink.transaction.tx_digest,
+            events,
+        });
+        std::future::ready(())
     }
 
     fn discard_block(&self, block_digest: Digest) -> impl Future<Output = ()> + Send {
-        let pending = self.pending.clone();
-        async move {
-            pending
-                .lock()
-                .expect("event consumer poisoned")
-                .remove(&block_digest);
-        }
+        self.pending
+            .lock()
+            .expect("event consumer poisoned")
+            .remove(&block_digest);
+        std::future::ready(())
     }
 
     fn finalized(&self, context: RuntimeContext) -> impl Future<Output = ()> + Send {
-        let pending = self.pending.clone();
-        let reports = self.reports.clone();
-        async move {
-            let block_digest = context
-                .block_digest
-                .expect("event consumer received context without block digest");
-            let events = pending
-                .lock()
-                .expect("event consumer poisoned")
-                .remove(&block_digest)
-                .unwrap_or_else(|| FinalizedEvents {
-                    height: Height::new(context.height),
-                    block_digest,
-                    block_timestamp: context.timestamp_ms,
-                    transactions: Vec::new(),
-                });
-            reports
-                .lock()
-                .expect("event consumer poisoned")
-                .push(events);
-        }
+        let block_digest = context
+            .block_digest
+            .expect("event consumer received context without block digest");
+        let events = self
+            .pending
+            .lock()
+            .expect("event consumer poisoned")
+            .remove(&block_digest)
+            .unwrap_or_else(|| FinalizedEvents {
+                height: Height::new(context.height),
+                block_digest,
+                block_timestamp: context.timestamp_ms,
+                transactions: Vec::new(),
+            });
+        self.reports
+            .lock()
+            .expect("event consumer poisoned")
+            .push(events);
+        std::future::ready(())
     }
 }

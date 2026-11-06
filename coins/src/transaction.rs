@@ -40,7 +40,7 @@ impl Write for CoinOperationId {
 impl Read for CoinOperationId {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         let value = u8::read(buf)?;
         Self::try_from(value).map_err(|_| Error::Invalid("CoinOperationId", "invalid operation id"))
     }
@@ -117,7 +117,7 @@ impl Write for CoinOperation {
 impl Read for CoinOperation {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         match CoinOperationId::read(buf)? {
             CoinOperationId::RegisterAccountPolicy => Ok(Self::RegisterAccountPolicy {
                 account_id: Address::read(buf)?,

@@ -20,7 +20,7 @@ impl Write for ValueSet {
 impl Read for ValueSet {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
             account_id: Address::read(buf)?,
             value: u64::read(buf)?,
@@ -48,7 +48,7 @@ impl Write for ValueCleared {
 impl Read for ValueCleared {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
             account_id: Address::read(buf)?,
         })

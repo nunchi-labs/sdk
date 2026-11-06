@@ -53,7 +53,7 @@ impl Write for MatchBatch {
 impl Read for MatchBatch {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
             orders: Vec::read_cfg(buf, &(RangeCfg::new(0..=MAX_MATCH_BATCH_ORDERS), ()))?,
             fills: Vec::read_cfg(buf, &(RangeCfg::new(0..=MAX_MATCH_BATCH_FILLS), ()))?,
@@ -136,7 +136,7 @@ impl Write for ClobOperation {
 impl Read for ClobOperation {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         match OperationTag::try_from(u8::read(buf)?)? {
             OperationTag::CreateMarket => Ok(Self::CreateMarket {
                 base_asset: AssetId::read(buf)?,

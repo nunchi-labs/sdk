@@ -1,10 +1,11 @@
 //! Authenticated public DKG state stored in the chain QMDB.
 
+use bytes::Buf as _;
 use commonware_codec::{Encode, Read};
 use commonware_consensus::types::{Epocher, FixedEpocher, Height};
 use commonware_cryptography::{
     bls12381::primitives::variant::MinSig,
-    ed25519::{self, Batch},
+    ed25519,
 };
 use commonware_parallel::Sequential;
 use nunchi_common::{
@@ -159,7 +160,7 @@ impl DkgState {
                 logs.push(decode_log(&raw, self.max_participants)?);
             }
         }
-        let next = public_transition::<MinSig, ed25519::PublicKey, ed25519::PrivateKey, Batch>(
+        let next = public_transition::<MinSig, ed25519::PublicKey>(
             &self.config,
             &checkpoint,
             logs,
@@ -257,12 +258,12 @@ fn decode_checkpoint(
     raw: &[u8],
     max_participants: std::num::NonZeroU32,
 ) -> Result<PublicCheckpoint, Error> {
-    let mut buf = raw;
+    let mut buf = commonware_codec::Copying(raw);
     let checkpoint = PublicCheckpoint::read_cfg(
         &mut buf,
         &(max_participants, nunchi_dkg::MAX_SUPPORTED_MODE),
     )?;
-    if !buf.is_empty() {
+    if buf.has_remaining() {
         return Err(Error::TrailingBytes);
     }
     Ok(checkpoint)
@@ -272,9 +273,9 @@ fn decode_log(
     raw: &[u8],
     max_participants: std::num::NonZeroU32,
 ) -> Result<nunchi_dkg::DealerLog, Error> {
-    let mut buf = raw;
+    let mut buf = commonware_codec::Copying(raw);
     let log = nunchi_dkg::DealerLog::read_cfg(&mut buf, &max_participants)?;
-    if !buf.is_empty() {
+    if buf.has_remaining() {
         return Err(Error::TrailingBytes);
     }
     Ok(log)

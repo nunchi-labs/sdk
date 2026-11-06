@@ -12,7 +12,7 @@ use crate::indexer::{
 use commonware_cryptography::sha256::Digest;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell, telemetry::metrics::status, BufferPooler, Clock, ContextCell, Handle, Metrics,
+    spawn_cell, telemetry::metrics::status, Clock, ContextCell, Handle, Metrics,
     Spawner, Storage,
 };
 use commonware_storage::queue;
@@ -52,13 +52,13 @@ pub(crate) struct Config {
     pub(crate) spool_limits: SpoolLimits,
 }
 
-pub struct Consumer<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> {
+pub struct Consumer<E: Spawner + Clock + Storage + Metrics, C: Client> {
     context: ContextCell<E>,
     client: C,
     metrics: IndexerMetrics,
     upload_results: status::Counter,
     uploads: SharedState,
-    writer: queue::Writer<E, Entry>,
+    writer: Option<queue::Queue<E, Entry>>,
     reader: queue::Reader<E, Entry>,
     admission: AdmissionReceiver,
     active: Pool<'static, Completion>,
@@ -67,13 +67,13 @@ pub struct Consumer<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Cl
     spool_limits: SpoolLimits,
 }
 
-impl<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
+impl<E: Spawner + Clock + Storage + Metrics, C: Client> Consumer<E, C> {
     pub fn new(
         context: E,
         client: C,
         metrics: IndexerMetrics,
         uploads: SharedState,
-        backfiller: (queue::Writer<E, Entry>, queue::Reader<E, Entry>),
+        backfiller: (queue::Queue<E, Entry>, queue::Reader<E, Entry>),
         admission: AdmissionReceiver,
         config: Config,
     ) -> Self {
@@ -90,12 +90,12 @@ impl<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> Consumer<
         metrics.backfill_configured(max_active.get());
         let (writer, reader) = backfiller;
         Self {
+            writer: Some(writer),
             context: ContextCell::new(context),
             client,
             metrics,
             upload_results,
             uploads,
-            writer,
             reader,
             admission,
             active: Pool::default(),
@@ -191,17 +191,17 @@ impl<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> Consumer<
             self.active.cancel_all();
             self.reader
                 .ack_up_to(position.saturating_add(1))
-                .await
                 .unwrap_or_else(|error| panic!("failed to expire indexer spool floor: {error:?}"));
             let sync_started = Instant::now();
-            self.writer.sync().await.unwrap_or_else(|error| {
-                panic!("failed to durably sync expired indexer spool floor: {error:?}")
-            });
+            let writer = self.writer.take().expect("indexer spool writer");
+            self.writer = Some(
+                writer.sync().await.unwrap_or_else(|error| {
+                    panic!("failed to durably sync expired indexer spool floor: {error:?}")
+                }),
+            );
             self.metrics
                 .queue_synced(QueueStatus::Success, sync_started.elapsed());
-            self.reader.reset().await.unwrap_or_else(|error| {
-                panic!("failed to reset indexer spool reader: {error:?}")
-            });
+            self.reader.reset();
             let expired = self.uploads.lock().expire_through(position);
             for (_, _, _) in &expired {
                 self.metrics.producer_recorded(status, Duration::ZERO);
@@ -218,10 +218,12 @@ impl<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> Consumer<
         }
 
         self.metrics.queue_entry(entry.height());
-        let position = self.writer.enqueue(entry.clone()).await.unwrap_or_else(|error| {
+        let writer = self.writer.take().expect("indexer spool writer");
+        let (writer, position) = writer.enqueue(&entry).await.unwrap_or_else(|error| {
             self.metrics.queue_enqueued(QueueStatus::Failure);
             panic!("failed to enqueue finalized indexer payload: {error:?}")
         });
+        self.writer = Some(writer);
         self.uploads.lock().mark_queued(position, &entry);
         self.metrics.queue_enqueued(QueueStatus::Success);
         response
@@ -471,20 +473,23 @@ impl<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> Consumer<
         };
         self.uploads.lock().finish_queued(&digest);
 
-        let floor = self.reader.ack_floor().await.expect("ack floor");
-        match self.reader.ack(position).await {
+        let floor = self.reader.ack_floor();
+        match self.reader.ack(position) {
             Ok(()) => self.metrics.queue_acked(QueueStatus::Success),
             Err(err) => {
                 self.metrics.queue_acked(QueueStatus::Failure);
                 panic!("failed to ack: {err:?}");
             }
         }
-        let floor_advanced = self.reader.ack_floor().await.expect("ack floor") > floor;
+        let floor_advanced = self.reader.ack_floor() > floor;
         let sync_started = Instant::now();
-        match self.writer.sync().await {
-            Ok(()) => self
-                .metrics
-                .queue_synced(QueueStatus::Success, sync_started.elapsed()),
+        let writer = self.writer.take().expect("indexer spool writer");
+        match writer.sync().await {
+            Ok(writer) => {
+                self.writer = Some(writer);
+                self.metrics
+                    .queue_synced(QueueStatus::Success, sync_started.elapsed());
+            }
             Err(err) => {
                 self.metrics
                     .queue_synced(QueueStatus::Failure, sync_started.elapsed());

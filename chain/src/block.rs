@@ -1,6 +1,7 @@
 use std::num::NonZeroU32;
 
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
+use commonware_codec::Buf;
 use commonware_codec::{varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_coding::ReedSolomon;
 use commonware_consensus::{
@@ -486,6 +487,18 @@ where
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         Block::read_cfg(reader, cfg).map(Self)
+    }
+}
+
+impl<Tx, Ext> commonware_consensus::BoundedBlock for CodingBlock<Tx, Ext>
+where
+    Tx: Clone + EncodeSize + Read<Cfg = ()> + Send + Sync + Write + 'static,
+    Ext: BlockExtension + Clone + Send + Sync,
+{
+    fn max_encode_size(_cfg: &Self::Cfg) -> usize {
+        // The decoder admits at most MAX_TRANSACTIONS self-describing transactions.
+        // 8 KiB per transaction covers current module payloads with room for the header.
+        8 * 1024 + (MAX_TRANSACTIONS as usize) * 8 * 1024
     }
 }
 

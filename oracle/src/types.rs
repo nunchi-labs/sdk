@@ -44,7 +44,10 @@ macro_rules! digest_id_codec {
         impl Read for $ty {
             type Cfg = ();
 
-            fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+            fn read_cfg(
+                buf: &mut impl commonware_codec::Buf,
+                _: &Self::Cfg,
+            ) -> Result<Self, Error> {
                 Ok(Self(Digest::read(buf)?))
             }
         }
@@ -67,7 +70,7 @@ impl Write for IntervalKey {
 impl Read for IntervalKey {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
             bucket: u64::read(buf)?,
         })
@@ -115,7 +118,7 @@ impl Write for OracleRecord {
 impl Read for OracleRecord {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
             id: RecordId::read(buf)?,
             writer: Address::read(buf)?,

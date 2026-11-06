@@ -351,9 +351,7 @@ fn recovers_unclean_shutdown() {
                     ) => {
                         true
                     },
-                    _ = network.context().sleep(wait) => {
-                        false
-                    }
+                    _ = network.context().sleep(wait) => false
                 }
             };
 

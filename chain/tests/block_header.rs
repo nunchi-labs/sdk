@@ -84,11 +84,11 @@ fn schemes() -> Vec<Scheme> {
 fn notarization_for(
     block: &CodingBlock<u8>,
 ) -> nunchi_dkg::Notarization<nunchi_chain::BlockCommitment<u8>> {
-    let commitment = CodedBlock::new(
-        block.clone(),
+    let commitment = futures::executor::block_on(CodedBlock::encode(
+        commonware_cryptography::Digested::precomputed(block.clone(), block.digest()),
         coding_config_for_participants(4),
         &Sequential,
-    )
+    ))
     .commitment();
     let proposal = Proposal::new(block.header.context.round, View::zero(), commitment);
     let schemes = schemes();
@@ -107,11 +107,11 @@ fn notarization_for(
 fn finalization_for(
     block: &CodingBlock<u8>,
 ) -> nunchi_dkg::Finalization<nunchi_chain::BlockCommitment<u8>> {
-    let commitment = CodedBlock::new(
-        block.clone(),
+    let commitment = futures::executor::block_on(CodedBlock::encode(
+        commonware_cryptography::Digested::precomputed(block.clone(), block.digest()),
         coding_config_for_participants(4),
         &Sequential,
-    )
+    ))
     .commitment();
     let proposal = Proposal::new(block.header.context.round, View::zero(), commitment);
     let schemes = schemes();
@@ -192,8 +192,7 @@ fn header_codec_round_trips() {
     let header = block.header.clone();
 
     let decoded =
-        BlockHeader::<NoConsensusExtension>::decode_cfg(header.encode().as_ref(), &header_cfg())
-            .unwrap();
+        BlockHeader::<NoConsensusExtension>::decode_cfg(header.encode(), &header_cfg()).unwrap();
 
     assert_eq!(decoded, header);
     assert_eq!(decoded.digest(), block.digest());
@@ -209,7 +208,7 @@ fn decode_rejects_mismatched_transaction_root() {
     let first_transaction = block.header.encode_size() + 1;
     bytes[first_transaction] = 9;
 
-    let result = Block::<u8>::decode_cfg(bytes.as_slice(), &header_cfg());
+    let result = Block::<u8>::decode_cfg(bytes, &header_cfg());
     assert!(matches!(
         result,
         Err(Error::Invalid(
@@ -243,8 +242,10 @@ fn coding_block_traits_and_deref_mut_reach_inner_header() {
 
 #[test]
 fn header_and_block_decode_reject_truncated_buffers() {
-    assert!(BlockHeader::<NoConsensusExtension>::decode_cfg(&[] as &[u8], &header_cfg()).is_err());
-    assert!(Block::<u8>::decode_cfg(&[] as &[u8], &header_cfg()).is_err());
+    assert!(
+        BlockHeader::<NoConsensusExtension>::decode_cfg(Vec::<u8>::new(), &header_cfg()).is_err()
+    );
+    assert!(Block::<u8>::decode_cfg(Vec::<u8>::new(), &header_cfg()).is_err());
 }
 
 #[test]
@@ -254,29 +255,29 @@ fn notarized_and_finalized_round_trip_and_reject_digest_mismatch() {
     let notarized = Notarized::new(notarization_for(&block), block.clone());
     let finalized = Finalized::new(finalization_for(&block), block.clone());
 
-    let decoded_notarized = Notarized::<u8>::decode_cfg(notarized.encode().as_ref(), &header_cfg())
+    let decoded_notarized = Notarized::<u8>::decode_cfg(notarized.encode(), &header_cfg())
         .expect("notarized round-trip");
     assert_eq!(decoded_notarized.block.digest(), block.digest());
 
-    let decoded_finalized = Finalized::<u8>::decode_cfg(finalized.encode().as_ref(), &header_cfg())
+    let decoded_finalized = Finalized::<u8>::decode_cfg(finalized.encode(), &header_cfg())
         .expect("finalized round-trip");
     assert_eq!(decoded_finalized.block.digest(), block.digest());
 
-    assert!(Notarized::<u8>::decode_cfg(&[] as &[u8], &header_cfg()).is_err());
-    assert!(Finalized::<u8>::decode_cfg(&[] as &[u8], &header_cfg()).is_err());
+    assert!(Notarized::<u8>::decode_cfg(Vec::<u8>::new(), &header_cfg()).is_err());
+    assert!(Finalized::<u8>::decode_cfg(Vec::<u8>::new(), &header_cfg()).is_err());
     let mut truncated_notarized = notarized.encode().to_vec();
     truncated_notarized.truncate(truncated_notarized.len() / 2);
-    assert!(Notarized::<u8>::decode_cfg(truncated_notarized.as_slice(), &header_cfg()).is_err());
+    assert!(Notarized::<u8>::decode_cfg(truncated_notarized, &header_cfg()).is_err());
     let mut truncated_finalized = finalized.encode().to_vec();
     truncated_finalized.truncate(truncated_finalized.len() / 2);
-    assert!(Finalized::<u8>::decode_cfg(truncated_finalized.as_slice(), &header_cfg()).is_err());
+    assert!(Finalized::<u8>::decode_cfg(truncated_finalized, &header_cfg()).is_err());
 
     let mut mismatched_notarized = notarized.encode().to_vec();
     let proof_len = notarized.proof.encode_size();
     mismatched_notarized.truncate(proof_len);
     mismatched_notarized.extend_from_slice(other.encode().as_ref());
     assert!(matches!(
-        Notarized::<u8>::decode_cfg(mismatched_notarized.as_slice(), &header_cfg()),
+        Notarized::<u8>::decode_cfg(mismatched_notarized, &header_cfg()),
         Err(Error::Invalid(
             _,
             "proof payload does not match block digest"
@@ -288,7 +289,7 @@ fn notarized_and_finalized_round_trip_and_reject_digest_mismatch() {
     mismatched_finalized.truncate(proof_len);
     mismatched_finalized.extend_from_slice(other.encode().as_ref());
     assert!(matches!(
-        Finalized::<u8>::decode_cfg(mismatched_finalized.as_slice(), &header_cfg()),
+        Finalized::<u8>::decode_cfg(mismatched_finalized, &header_cfg()),
         Err(Error::Invalid(
             _,
             "proof payload does not match block digest"
@@ -312,7 +313,7 @@ fn empty_coding_block_has_stable_transaction_root() {
 fn coding_block_empty_transactions_encode_decode_round_trip() {
     let block = coding_block(vec![]);
     let encoded = block.encode();
-    let decoded = CodingBlock::<u8>::decode_cfg(encoded.as_ref(), &header_cfg())
+    let decoded = CodingBlock::<u8>::decode_cfg(encoded, &header_cfg())
         .expect("empty coding block should decode");
 
     assert_eq!(decoded.transactions.len(), 0);
@@ -330,7 +331,7 @@ fn coding_block_decode_rejects_exceeding_max_transactions() {
     encoded[count_position] = 0x88;
     encoded[count_position + 1] = 0x27;
 
-    let result = CodingBlock::<u8>::decode_cfg(encoded.as_slice(), &header_cfg());
+    let result = CodingBlock::<u8>::decode_cfg(encoded, &header_cfg());
     assert!(matches!(
         result,
         Err(Error::Invalid(_, "transaction count exceeds maximum"))
@@ -347,7 +348,7 @@ fn coding_block_with_tamperedtransaction_root_rejects() {
         bytes[first_transaction] = 99;
     }
 
-    let result = CodingBlock::<u8>::decode_cfg(bytes.as_slice(), &header_cfg());
+    let result = CodingBlock::<u8>::decode_cfg(bytes, &header_cfg());
     assert!(matches!(
         result,
         Err(Error::Invalid(

@@ -46,7 +46,7 @@ impl Write for FeeConfig {
 impl Read for FeeConfig {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             coin: CoinId::read(buf)?,
             collector: Address::read(buf)?,

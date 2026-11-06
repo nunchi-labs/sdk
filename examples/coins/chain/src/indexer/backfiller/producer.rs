@@ -18,7 +18,7 @@ use commonware_consensus::{
     Reporter,
 };
 use commonware_runtime::{
-    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_utils::{acknowledgement::Exact, Acknowledgement};
 use commonware_utils::channel::oneshot;
@@ -126,7 +126,7 @@ fn drain_to_latest(receiver: &mut mailbox::Receiver<Message>) -> Option<Message>
     latest
 }
 
-struct Actor<E: BufferPooler + Clock + Storage + Metrics> {
+struct Actor<E: Clock + Storage + Metrics> {
     context: ContextCell<E>,
     uploads: SharedState,
     metrics: IndexerMetrics,
@@ -155,7 +155,7 @@ impl Reporter for Producer {
             Update::Block(block, ack) => {
                 let feedback =
                     self.sender
-                        .enqueue(Message::new(block, ack, self.metrics.clone()));
+                        .enqueue(Message::new(Arc::from(block), ack, self.metrics.clone()));
                 let status = if feedback.accepted() {
                     ProducerStatus::Enqueued
                 } else {
@@ -174,7 +174,7 @@ impl Reporter for Producer {
     }
 }
 
-impl<E: BufferPooler + Clock + Storage + Metrics + Spawner> Actor<E> {
+impl<E: Clock + Storage + Metrics + Spawner> Actor<E> {
     fn new(
         context: E,
         uploads: SharedState,
@@ -346,7 +346,7 @@ pub fn init<E>(
     config: Config,
 ) -> (Producer, Handle<()>)
 where
-    E: BufferPooler + Clock + Storage + Metrics + Spawner,
+    E: Clock + Storage + Metrics + Spawner,
 {
     let (actor, producer) = Actor::new(
         context,

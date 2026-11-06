@@ -63,7 +63,7 @@ impl Address {
                 actual: bytes.len(),
             });
         }
-        Self::decode(bytes.as_ref()).map_err(Bech32Error::Codec)
+        Self::decode(bytes).map_err(Bech32Error::Codec)
     }
 
     fn derive(kind: u8, material: &[u8]) -> Self {
@@ -104,7 +104,7 @@ impl Write for Address {
 impl Read for Address {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self(Digest::read(buf)?))
     }
 }
@@ -189,7 +189,7 @@ impl Write for MultisigPolicy {
 impl Read for MultisigPolicy {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         let threshold = u16::read(buf)?;
         let signers =
             Vec::<PublicKey>::read_cfg(buf, &(RangeCfg::new(0..=MAX_MULTISIG_SIGNERS), ()))?;

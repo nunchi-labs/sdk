@@ -4,7 +4,8 @@ use crate::{
     orchestrator::Message, protector::StorageProtector, ContinueOnUpdate, PeerConfig, PostUpdate,
     Update, UpdateCallBack,
 };
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
+use commonware_codec::Buf;
 use commonware_actor::{mailbox, Feedback};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::marshal::Update as MarshalUpdate;
@@ -30,7 +31,7 @@ use commonware_utils::{
 };
 use core::marker::PhantomData;
 use futures::channel::oneshot;
-use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
+use std::{collections::BTreeMap, future::Future, pin::Pin};
 
 const TEST_STORAGE_KEY: [u8; 32] = [7u8; 32];
 
@@ -577,7 +578,13 @@ fn public_transition_continues_shareless_when_player_dealing_is_missing() {
             let (ack, waiter) = Exact::handle();
             assert!(mailbox
                 .report(MarshalUpdate::Block(
-                    Arc::new(test_block(height, log)),
+                    {
+                        let block = test_block(height, log);
+                        commonware_cryptography::Digested::precomputed(
+                            block.clone(),
+                            block.digest(),
+                        )
+                    },
                     ack,
                 ))
                 .accepted());

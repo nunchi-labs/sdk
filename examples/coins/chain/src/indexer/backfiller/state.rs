@@ -7,7 +7,8 @@ use crate::{
     },
     Block, Finalized,
 };
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
+use commonware_codec::Buf;
 use commonware_codec::{self, EncodeSize, FixedSize, Read, Write};
 use commonware_cryptography::{sha256::Digest, Digestible};
 use commonware_utils::{sync::Mutex, PrioritySet};

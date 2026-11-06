@@ -9,7 +9,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, certificate::ConstantProvider, ed25519, sha256,
-    Digest as _, Signer,
+    Digest as _, Digestible as _, Signer,
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
@@ -87,12 +87,14 @@ fn marshal_mailbox_local_finalizations_are_empty_before_start() {
         let scheme = vrf::fixture::<MinSig, _>(&mut rng, NAMESPACE, 4).schemes[0].clone();
         let provider = ConstantProvider::<Scheme, Epoch>::new(scheme);
         let page_cache =
-            CacheRef::from_pooler(&context, engine::PAGE_CACHE_PAGE_SIZE, NZUsize!(1_024));
-        let coded_genesis = CodedBlock::new(
-            genesis_block(),
+            CacheRef::new(engine::PAGE_CACHE_PAGE_SIZE, NZUsize!(1_024));
+        let genesis = genesis_block();
+        let coded_genesis = CodedBlock::encode(
+            commonware_cryptography::Digested::precomputed(genesis.clone(), genesis.digest()),
             coding_config_for_participants(4),
             &Sequential,
-        );
+        )
+        .await;
         let block_codec_config = (NZU32!(4), ());
         let replay_buffer = NZUsize!(1_024);
         let write_buffer = NZUsize!(1_024);
@@ -129,7 +131,7 @@ fn marshal_mailbox_local_finalizations_are_empty_before_start() {
             MarshalConfig {
                 provider,
                 epocher: FixedEpocher::new(NZU64!(200)),
-                start: Start::Genesis(coded_genesis),
+                start: Start::Genesis(std::sync::Arc::new(coded_genesis)),
                 partition_prefix: "bridge-rpc-marshal".to_string(),
                 mailbox_size: NZUsize!(16),
                 view_retention: ViewDelta::new(10),

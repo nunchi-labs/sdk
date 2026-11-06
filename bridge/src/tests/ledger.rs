@@ -129,7 +129,7 @@ fn lock_emits_transfer_locked_event() {
         assert_eq!(sink.len(), 1);
         let event = &sink.events()[0];
         assert_eq!(event.name.as_ref(), TRANSFER_LOCKED_EVENT);
-        let decoded = TransferLocked::decode(event.value.as_ref()).expect("decode event");
+        let decoded = TransferLocked::decode(commonware_codec::Viewing::new(&event.value)).expect("decode event");
         assert_eq!(decoded.record_id, record_id);
         assert_eq!(decoded.source_chain_id, local_chain());
         assert_eq!(decoded.destination_chain_id, dest_chain());
@@ -303,13 +303,13 @@ fn operation_and_transaction_codec_round_trip() {
         recipient: addr(&signer(3)),
     };
     assert_eq!(
-        BridgeOperation::decode(op.encode().as_ref()).expect("decode op"),
+        BridgeOperation::decode(op.encode()).expect("decode op"),
         op
     );
 
     let tx = lock_tx(&signer(1), 5, dest_chain(), coin(), 42, addr(&signer(3)));
     assert_eq!(
-        Transaction::decode(tx.encode().as_ref()).expect("decode tx"),
+        Transaction::decode(tx.encode()).expect("decode tx"),
         tx
     );
 }

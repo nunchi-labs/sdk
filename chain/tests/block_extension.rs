@@ -1,4 +1,5 @@
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
+use commonware_codec::Buf;
 use commonware_codec::{Decode, Encode, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_consensus::types::{Epoch, Height, Round, View};
 use commonware_cryptography::{ed25519, sha256, Digest as _, Digestible as _, Signer};
@@ -137,7 +138,7 @@ fn default_block_extension_is_empty_payload() {
 
     assert_eq!(block.header.extension, EmptyPayload);
     assert_eq!(
-        Block::<u8>::decode_cfg(block.encode().as_ref(), &block_cfg()).unwrap(),
+        Block::<u8>::decode_cfg(block.encode(), &block_cfg()).unwrap(),
         block
     );
 }
@@ -168,7 +169,7 @@ fn custom_extension_payload_is_encoded_and_committed() {
     assert_ne!(left.encode(), right.encode());
     assert_ne!(left.digest(), right.digest());
     assert_eq!(
-        Block::<u8, TestExtension>::decode_cfg(left.encode().as_ref(), &block_cfg()).unwrap(),
+        Block::<u8, TestExtension>::decode_cfg(left.encode(), &block_cfg()).unwrap(),
         left,
     );
 }
@@ -206,8 +207,7 @@ fn composite_extension_payloads_are_encoded_and_committed() {
     assert_ne!(left.encode(), right.encode());
     assert_ne!(left.digest(), right.digest());
     assert_eq!(
-        Block::<u8, TestComposite>::decode_cfg(left.encode().as_ref(), &composite_block_cfg())
-            .unwrap(),
+        Block::<u8, TestComposite>::decode_cfg(left.encode(), &composite_block_cfg()).unwrap(),
         left,
     );
 }

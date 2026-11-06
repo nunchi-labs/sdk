@@ -66,11 +66,11 @@ fn payload_codec_round_trips() {
     let payload = Some(finalization);
 
     let encoded = payload.encode();
-    let decoded = BridgePayload::decode(encoded.as_ref()).unwrap();
+    let decoded = BridgePayload::decode(encoded).unwrap();
 
     assert_eq!(payload, decoded);
     assert_eq!(
-        BridgePayload::decode(None::<Finalization>.encode().as_ref()).unwrap(),
+        BridgePayload::decode(None::<Finalization>.encode()).unwrap(),
         None
     );
 }

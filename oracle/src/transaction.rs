@@ -57,7 +57,7 @@ impl Write for OracleOperation {
 impl Read for OracleOperation {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         match OperationTag::try_from(u8::read(buf)?)? {
             OperationTag::AppendRecord => Ok(Self::AppendRecord {
                 namespace: NamespaceId::read(buf)?,

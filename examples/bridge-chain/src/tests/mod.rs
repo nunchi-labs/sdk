@@ -13,7 +13,9 @@ use commonware_cryptography::{
     Sha256, Signer,
 };
 use commonware_consensus::marshal::ancestry;
-use commonware_glue::stateful::{db::DatabaseSet, Application as StatefulApplication, Input};
+use commonware_glue::stateful::{
+    db::DatabaseSet, Application as StatefulApplication, Finality, Input,
+};
 use commonware_parallel::Sequential;
 use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
 use commonware_utils::{non_empty, TestRng, NZU64};
@@ -53,8 +55,8 @@ fn application_uses_configured_block_interval() {
 
         let db_context = context.child("state");
         let config =
-            QmdbState::<deterministic::Context>::config(&db_context, "bridge-production-interval");
-        let db: QmdbBackend<deterministic::Context> = QmdbBackend::init(db_context, config)
+            QmdbState::<deterministic::Context>::config( "bridge-production-interval");
+        let db: QmdbBackend<deterministic::Context> = QmdbBackend::init(db_context, config, None)
             .await
             .expect("init state db");
         let databases: QmdbDatabaseSet<deterministic::Context> = shared_database(db);
@@ -75,7 +77,7 @@ fn application_uses_configured_block_interval() {
         let proposed = <Application as StatefulApplication<deterministic::Context>>::propose(
             &mut app,
             (context.child("propose"), consensus_context(1)),
-            ancestry::from_iter([Arc::new(genesis.clone())]),
+            ancestry::from_iter([{ let block = genesis.clone(); let digest = block.digest(); commonware_cryptography::Digested::precomputed(block, digest) }]),
             databases.new_batches().await,
             Input {
                 upstream: (),
@@ -153,8 +155,8 @@ fn chain_application_proposes_and_verifies_bridge_payload() {
         let input = submitter.clone();
 
         let db_context = context.child("state");
-        let config = QmdbState::<deterministic::Context>::config(&db_context, "bridge-chain-e2e");
-        let db: QmdbBackend<deterministic::Context> = QmdbBackend::init(db_context, config)
+        let config = QmdbState::<deterministic::Context>::config( "bridge-chain-e2e");
+        let db: QmdbBackend<deterministic::Context> = QmdbBackend::init(db_context, config, None)
             .await
             .expect("init state db");
         let databases: QmdbDatabaseSet<deterministic::Context> = shared_database(db);
@@ -178,7 +180,7 @@ fn chain_application_proposes_and_verifies_bridge_payload() {
         let proposed = <Application as StatefulApplication<deterministic::Context>>::propose(
             &mut app,
             (context.child("propose"), consensus_context(1)),
-            ancestry::from_iter([Arc::new(genesis.clone())]),
+            ancestry::from_iter([{ let block = genesis.clone(); let digest = block.digest(); commonware_cryptography::Digested::precomputed(block, digest) }]),
             databases.new_batches().await,
             Input {
                 upstream: (),
@@ -192,11 +194,12 @@ fn chain_application_proposes_and_verifies_bridge_payload() {
         assert_eq!(bridge_payload, Some(foreign_finalization.clone()));
 
         let verified: Option<QmdbMerkleized<deterministic::Context>> =
-            <Application as StatefulApplication<deterministic::Context>>::verify(
+            <Application as StatefulApplication<deterministic::Context>>::process(
                 &mut app,
                 (context.child("verify"), proposed.block.header.context.clone()),
-                ancestry::from_iter([Arc::new(proposed.block.clone()), Arc::new(genesis.clone())]),
+                ancestry::from_iter([{ let block = proposed.block.clone(); let digest = block.digest(); commonware_cryptography::Digested::precomputed(block, digest) }, { let block = genesis.clone(); let digest = block.digest(); commonware_cryptography::Digested::precomputed(block, digest) }]),
                 databases.new_batches().await,
+                Finality::Candidate,
             )
             .await;
         assert!(verified.is_some());
@@ -233,11 +236,12 @@ fn chain_application_proposes_and_verifies_bridge_payload() {
             },
         );
         let verified: Option<QmdbMerkleized<deterministic::Context>> =
-            <Application as StatefulApplication<deterministic::Context>>::verify(
+            <Application as StatefulApplication<deterministic::Context>>::process(
                 &mut app,
                 (context.child("verify_reject"), rejected.header.context.clone()),
-                ancestry::from_iter([Arc::new(rejected), Arc::new(genesis)]),
+                ancestry::from_iter([{ let block = rejected; let digest = block.digest(); commonware_cryptography::Digested::precomputed(block, digest) }, { let block = genesis; let digest = block.digest(); commonware_cryptography::Digested::precomputed(block, digest) }]),
                 databases.new_batches().await,
+                Finality::Candidate,
             )
             .await;
         assert!(verified.is_none());
@@ -246,7 +250,7 @@ fn chain_application_proposes_and_verifies_bridge_payload() {
         let proposed = <Application as StatefulApplication<deterministic::Context>>::propose(
             &mut app,
             (context.child("propose_empty"), consensus_context(2)),
-            ancestry::from_iter([Arc::new(proposed.block)]),
+            ancestry::from_iter([{ let block = proposed.block; let digest = block.digest(); commonware_cryptography::Digested::precomputed(block, digest) }]),
             databases.new_batches().await,
             Input {
                 upstream: (),

@@ -60,7 +60,7 @@ impl Write for TestTx {
 impl Read for TestTx {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             account: u8::read(buf)?,
             nonce: u64::read(buf)?,

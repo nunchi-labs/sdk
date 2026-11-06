@@ -17,14 +17,14 @@ use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Provider, Receiver, Sender};
 use commonware_resolver::{p2p, Delivery, Resolver as _};
 use commonware_runtime::{
-    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
+    spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_storage::{
     mmr,
-    qmdb::sync::{FeedbackTx, Request, Response, Source},
+    qmdb::sync::{Feedback, Request, Response, Source},
     Context as StorageContext,
 };
-use commonware_utils::channel::{fallible::OneshotExt, oneshot};
+use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
 use futures::future;
 use nunchi_common::{
     QmdbBackend, QmdbDatabaseSet, QmdbOperation, QmdbOperationCfg,
@@ -40,7 +40,7 @@ use tracing::info;
 
 type SyncRequest = Request<mmr::Family>;
 type SyncResponse = Response<mmr::Family, QmdbOperation, Digest>;
-type PendingSubscriber = oneshot::Sender<(SyncResponse, FeedbackTx)>;
+type PendingSubscriber = oneshot::Sender<(SyncResponse, Option<Feedback<SyncResponse>>)>;
 
 fn response_matches_request(request: &SyncRequest, response: &SyncResponse) -> bool {
     matches!(
@@ -114,9 +114,9 @@ where
     /// Local node identity if available.
     pub me: Option<P>,
     /// Request timeout.
-    pub timeout: Duration,
-    /// Retry cadence for pending fetches.
-    pub fetch_retry_timeout: Duration,
+    pub fetch_timeout: commonware_utils::NonZeroDuration,
+    /// Delay after an unresolved attempt before retrying its fetch.
+    pub fetch_retry_delay: Duration,
     /// Maximum number of operations to serve in a single response.
     pub max_serve_ops: NonZeroU64,
     /// Send fetch requests with network priority.
@@ -365,7 +365,7 @@ impl<E: StorageContext> Source for Mailbox<E> {
     async fn serve(
         &self,
         request: SyncRequest,
-    ) -> Result<(SyncResponse, FeedbackTx), Self::Error> {
+    ) -> Result<(SyncResponse, Option<Feedback<SyncResponse>>), Self::Error> {
         let (response_tx, response_rx) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetOperations {
             request,
@@ -416,7 +416,7 @@ where
 
 impl<E, P, D, B> Actor<E, P, D, B>
 where
-    E: StorageContext + BufferPooler + Clock + Spawner + Rng + Metrics,
+    E: StorageContext + Clock + Spawner + Rng + Metrics,
     P: PublicKey,
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
@@ -463,8 +463,8 @@ where
                 producer: handler,
                 mailbox_size: self.config.mailbox_size,
                 me: self.config.me.clone(),
-                timeout: self.config.timeout,
-                fetch_retry_timeout: self.config.fetch_retry_timeout,
+                fetch_timeout: self.config.fetch_timeout,
+                fetch_retry_delay: self.config.fetch_retry_delay,
                 priority_requests: self.config.priority_requests,
                 priority_responses: self.config.priority_responses,
             },
@@ -576,7 +576,9 @@ where
         let mut approvals = Vec::new();
         for subscriber in subscribers {
             let (success_tx, success_rx) = oneshot::channel();
-            if subscriber.send((decoded.clone(), Some(success_tx))).is_ok() {
+            let (_retry_tx, retry_rx) = mpsc::channel(1);
+            let feedback = Feedback::new(success_tx, retry_rx);
+            if subscriber.send((decoded.clone(), Some(feedback))).is_ok() {
                 approvals.push(success_rx);
             }
         }
@@ -668,7 +670,10 @@ mod tests {
     type TestActor =
         Actor<deterministic::Context, ed25519::PublicKey, DummyProvider, DummyBlocker>;
     type TestPending = PendingSubscriber;
-    type TestPendingResult = oneshot::Receiver<(SyncResponse, FeedbackTx)>;
+    type TestPendingResult = oneshot::Receiver<(
+        SyncResponse,
+        Option<commonware_storage::qmdb::sync::Feedback<SyncResponse>>,
+    )>;
 
     fn test_config(
         database: Option<QmdbDatabaseSet<deterministic::Context>>,
@@ -680,8 +685,8 @@ mod tests {
             operation_codec_config: qmdb_operation_codec_config(),
             mailbox_size: NZUsize!(16),
             me: None,
-            timeout: Duration::from_millis(10),
-            fetch_retry_timeout: Duration::from_millis(10),
+            fetch_timeout: commonware_utils::NonZeroDuration::new_panic(Duration::from_millis(10)),
+            fetch_retry_delay: Duration::from_millis(10),
             max_serve_ops: NonZeroU64::new(16).unwrap(),
             priority_requests: false,
             priority_responses: false,
@@ -704,8 +709,8 @@ mod tests {
         context: deterministic::Context,
         partition: &str,
     ) -> QmdbDatabaseSet<deterministic::Context> {
-        let cfg = QmdbState::config(&context, partition);
-        let db = QmdbBackend::init(context, cfg)
+        let cfg = QmdbState::<deterministic::Context>::config(partition);
+        let db = QmdbBackend::init(context, cfg, None)
             .await
             .expect("db init should succeed");
         shared_database(db)
@@ -902,7 +907,7 @@ mod tests {
                 else {
                     panic!("expected get operations");
                 };
-                response
+                assert!(response
                     .send((
                         Response::Operations {
                             proof: empty_proof(),
@@ -910,7 +915,7 @@ mod tests {
                         },
                         None,
                     ))
-                    .unwrap();
+                    .is_ok());
             };
             let (result, _) = futures::join!(get, observe);
             assert!(result.is_ok());
@@ -1133,15 +1138,15 @@ mod tests {
                     let (_response, feedback_tx) = sub1_rx.await.unwrap();
                     feedback_tx
                         .expect("deliveries should include feedback")
-                        .send(true)
-                        .unwrap();
+                        .accept();
                 },
                 async {
                     let (_response, feedback_tx) = sub2_rx.await.unwrap();
-                    feedback_tx
+                    assert!(feedback_tx
                         .expect("deliveries should include feedback")
-                        .send(false)
-                        .unwrap();
+                        .reject()
+                        .await
+                        .is_none());
                 }
             );
 
@@ -1172,8 +1177,7 @@ mod tests {
                     let (_response, feedback_tx) = sub2_rx.await.unwrap();
                     feedback_tx
                         .expect("deliveries should include feedback")
-                        .send(true)
-                        .unwrap();
+                        .accept();
                 }
             );
 

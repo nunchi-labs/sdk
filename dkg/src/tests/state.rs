@@ -28,7 +28,7 @@ use commonware_macros::test_traced;
 use commonware_math::algebra::{Random, Ring};
 use commonware_runtime::{
     buffer::paged::{page_size, CacheRef},
-    deterministic, BufferPooler, Clock, Metrics, ReadOptions, Runner, Storage as RuntimeStorage,
+    deterministic, Clock, Metrics, ReadOptions, Runner, Storage as RuntimeStorage,
     Supervisor as _,
 };
 use commonware_storage::{
@@ -76,7 +76,7 @@ async fn init_storage<E>(
     public_key: ed25519::PublicKey,
 ) -> Storage<E, MinPk, ed25519::PublicKey>
 where
-    E: BufferPooler + Clock + RuntimeStorage + Metrics + CryptoRng,
+    E: Clock + RuntimeStorage + Metrics + CryptoRng,
 {
     Storage::<_, MinPk, ed25519::PublicKey>::init(
         context,
@@ -192,9 +192,9 @@ where
 
 async fn append_corrupt_journal_event<E>(context: E, partition: &str, epoch: Epoch)
 where
-    E: BufferPooler + Clock + RuntimeStorage + Metrics,
+    E: Clock + RuntimeStorage + Metrics,
 {
-    let page_cache = CacheRef::from_pooler(&context, page_size(1 << 12), NZUsize!(1 << 13));
+    let page_cache = CacheRef::new(page_size(1 << 12), NZUsize!(1 << 13));
     let msgs = SVJournal::init(
         context,
         SVConfig {
@@ -722,8 +722,8 @@ fn test_dealer_handle_returns_false_when_player_not_in_unsent() {
             let mut rng = TestRng::new(100);
             ed25519::PrivateKey::random(&mut rng).public_key()
         };
-        let fake_ack = PlayerAck::read(&mut signers[1].sign(b"ns", b"msg").encode().as_ref())
-            .expect("valid ack");
+        let mut encoded = signers[1].sign(b"ns", b"msg").encode();
+        let fake_ack = PlayerAck::read(&mut encoded).expect("valid ack");
 
         let result = dealer
             .handle(&mut storage, Epoch::zero(), unknown_player, fake_ack)
@@ -774,8 +774,9 @@ fn test_dealer_handle_returns_false_when_crypto_dealer_is_none() {
         let mut dealer = Dealer::<MinPk, ed25519::PrivateKey>::new(None, pub_msg, unsent);
 
         let sig = signers[1].sign(b"ns", b"msg");
+        let mut encoded = sig.encode();
         let fake_ack: PlayerAck<ed25519::PublicKey> =
-            PlayerAck::read(&mut sig.encode().as_ref()).expect("valid ack");
+            PlayerAck::read(&mut encoded).expect("valid ack");
 
         let result = dealer
             .handle(&mut storage, Epoch::zero(), player, fake_ack)
@@ -1014,8 +1015,8 @@ fn invalid_ack_does_not_change_the_recovered_dealer_log() {
             .find(|(player, _, _)| *player == player_pk)
             .map(|(_, pub_msg, priv_msg)| (pub_msg, priv_msg))
             .expect("player share");
-        let fake_ack = PlayerAck::read(&mut player_signer.sign(b"ns", b"msg").encode().as_ref())
-            .expect("ack bytes");
+        let mut encoded = player_signer.sign(b"ns", b"msg").encode();
+        let fake_ack = PlayerAck::read(&mut encoded).expect("ack bytes");
         assert!(
             !dealer
                 .handle(&mut storage, epoch, player_pk.clone(), fake_ack)

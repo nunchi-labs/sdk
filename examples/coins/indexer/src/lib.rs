@@ -431,7 +431,7 @@ impl Indexer {
 
         let raw = from_hex(query)?;
         if raw.len() == u64::SIZE {
-            let height = u64::decode(raw.as_slice()).ok()?;
+            let height = u64::decode(raw).ok()?;
             store.finalized_height_to_key.get(&height).and_then(|key| {
                 store
                     .finalizations
@@ -439,7 +439,7 @@ impl Indexer {
                     .map(|finalized| BlockResult::Finalized(finalized.clone()))
             })
         } else if raw.len() == Digest::SIZE {
-            let digest = Digest::decode(raw.as_slice()).ok()?;
+            let digest = Digest::decode(raw).ok()?;
             store
                 .blocks_by_digest
                 .get(&digest)
@@ -560,7 +560,7 @@ async fn seed_upload(
     AxumState(indexer): AxumState<Arc<Indexer>>,
     body: Bytes,
 ) -> impl IntoResponse {
-    match Seed::decode(body.as_ref()) {
+    match Seed::decode(body) {
         Ok(seed) => upload_status(indexer.submit_seed(seed)),
         Err(_) => StatusCode::BAD_REQUEST,
     }
@@ -580,7 +580,7 @@ async fn notarization_upload(
     AxumState(indexer): AxumState<Arc<Indexer>>,
     body: Bytes,
 ) -> impl IntoResponse {
-    match Notarized::decode_cfg(body.as_ref(), &indexer.block_cfg()) {
+    match Notarized::decode_cfg(body, &indexer.block_cfg()) {
         Ok(notarized) => upload_status(indexer.submit_notarization(notarized)),
         Err(_) => StatusCode::BAD_REQUEST,
     }
@@ -600,7 +600,7 @@ async fn finalization_upload(
     AxumState(indexer): AxumState<Arc<Indexer>>,
     body: Bytes,
 ) -> impl IntoResponse {
-    match Finalized::decode_cfg(body.as_ref(), &indexer.block_cfg()) {
+    match Finalized::decode_cfg(body, &indexer.block_cfg()) {
         Ok(finalized) => upload_status(indexer.submit_finalization(finalized)),
         Err(_) => StatusCode::BAD_REQUEST,
     }
@@ -636,7 +636,7 @@ async fn dkg_output_upload(
     Path(epoch): Path<u64>,
     body: Bytes,
 ) -> impl IntoResponse {
-    match DkgOutput::decode_cfg(body.as_ref(), &indexer.dkg_output_cfg()) {
+    match DkgOutput::decode_cfg(body, &indexer.dkg_output_cfg()) {
         Ok(output) => match indexer.submit_dkg_output(Epoch::new(epoch), output) {
             Ok(()) => StatusCode::OK,
             Err(_) => StatusCode::UNAUTHORIZED,
@@ -790,7 +790,7 @@ fn parse_index(query: &str) -> Option<u64> {
     if raw.len() != u64::SIZE {
         return None;
     }
-    u64::decode(raw.as_slice()).ok()
+    u64::decode(raw).ok()
 }
 
 fn block_epoch(block: &Block) -> Option<Epoch> {
@@ -816,8 +816,11 @@ pub fn load_dkg_output(
     }
     let mut epoch = [0u8; u64::SIZE];
     epoch.copy_from_slice(&bytes[..u64::SIZE]);
-    let output = DkgOutput::decode_cfg(&bytes[u64::SIZE..], &(participants, MAX_SUPPORTED_MODE))
-        .map_err(|_| "invalid DKG output state")?;
+    let output = DkgOutput::decode_cfg(
+        commonware_codec::Copying(&bytes[u64::SIZE..]),
+        &(participants, MAX_SUPPORTED_MODE),
+    )
+    .map_err(|_| "invalid DKG output state")?;
     Ok(Some((Epoch::new(u64::from_be_bytes(epoch)), output)))
 }
 
@@ -922,11 +925,11 @@ mod tests {
                 range: NonEmptyRange::new(Location::new(1)..Location::new(2)).unwrap(),
             },
         );
-        let commitment = CodedBlock::new(
-            block.clone(),
+        let commitment = futures::executor::block_on(CodedBlock::encode(
+            commonware_cryptography::Digested::precomputed(block.clone(), block.digest()),
             coding_config_for_participants(4),
             &Sequential,
-        )
+        ))
         .commitment();
         let proposal = Proposal::new(round, View::zero(), commitment);
         let finalizes = schemes

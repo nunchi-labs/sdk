@@ -63,7 +63,7 @@ impl Write for AuthorityOperation {
 impl Read for AuthorityOperation {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         match u8::read(buf)? {
             OP_CONFIGURE => {
                 let policy = crate::MultisigPolicy::read(buf)?;

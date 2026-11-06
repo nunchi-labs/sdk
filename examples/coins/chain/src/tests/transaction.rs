@@ -94,7 +94,7 @@ fn transaction_codec_uses_stable_tags() {
     assert_eq!(Transaction::decode(authority_encoded).unwrap(), authority);
     assert_eq!(Transaction::decode(oracle_encoded).unwrap(), oracle);
     assert_eq!(Transaction::decode(clob_encoded).unwrap(), clob);
-    assert!(Transaction::decode([99].as_slice()).is_err());
+    assert!(Transaction::decode(commonware_codec::Copying(&[99])).is_err());
 }
 
 #[test]

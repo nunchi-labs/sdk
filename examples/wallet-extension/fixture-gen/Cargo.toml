@@ -7,6 +7,6 @@ publish = false
 [dependencies]
 nunchi-crypto = { path = "../../../crypto" }
 nunchi-common = { path = "../../../common" }
-commonware-codec = "2026.9.0"
-commonware-cryptography = "2026.9.0"
+commonware-codec = "2026.10.0"
+commonware-cryptography = "2026.10.0"
 hex = "0.4"

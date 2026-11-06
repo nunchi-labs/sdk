@@ -36,7 +36,7 @@ impl Write for TransferLocked {
 impl Read for TransferLocked {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
             record_id: TransferRecordId::read(buf)?,
             source_chain_id: ChainId::read(buf)?,

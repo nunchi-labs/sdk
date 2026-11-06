@@ -13,9 +13,9 @@ fn ed25519_signatures_roundtrip_and_verify() {
 
     assert_eq!(public.curve(), Curve::Ed25519);
     assert_eq!(public.verify(NAMESPACE, MESSAGE, &signature), Ok(()));
-    assert_eq!(PublicKey::decode(public.encode().as_ref()).unwrap(), public);
+    assert_eq!(PublicKey::decode(public.encode()).unwrap(), public);
     assert_eq!(
-        Signature::decode(signature.encode().as_ref()).unwrap(),
+        Signature::decode(signature.encode()).unwrap(),
         signature
     );
 }
@@ -28,9 +28,9 @@ fn secp256r1_signatures_roundtrip_and_verify() {
 
     assert_eq!(public.curve(), Curve::Secp256r1);
     assert_eq!(public.verify(NAMESPACE, MESSAGE, &signature), Ok(()));
-    assert_eq!(PublicKey::decode(public.encode().as_ref()).unwrap(), public);
+    assert_eq!(PublicKey::decode(public.encode()).unwrap(), public);
     assert_eq!(
-        Signature::decode(signature.encode().as_ref()).unwrap(),
+        Signature::decode(signature.encode()).unwrap(),
         signature
     );
 }
@@ -83,7 +83,7 @@ fn unknown_curve_tag_is_rejected_at_parse() {
     encoded.extend_from_slice(&[0; 32]);
 
     assert!(matches!(
-        PublicKey::decode(encoded.as_ref()),
+        PublicKey::decode(encoded),
         Err(Error::InvalidEnum(0xff))
     ));
 }
@@ -91,7 +91,7 @@ fn unknown_curve_tag_is_rejected_at_parse() {
 #[test]
 fn private_keys_roundtrip_with_ed25519() {
     let private = PrivateKey::ed25519_from_seed(7);
-    let decoded = PrivateKey::decode(private.encode().as_ref()).unwrap();
+    let decoded = PrivateKey::decode(private.encode()).unwrap();
     let signature = private.sign(NAMESPACE, MESSAGE);
     let decoded_signature = decoded.sign(NAMESPACE, MESSAGE);
 
@@ -112,7 +112,7 @@ fn private_keys_roundtrip_with_ed25519() {
 #[test]
 fn private_keys_roundtrip_with_secp256r1() {
     let private = PrivateKey::secp256r1_from_seed(7);
-    let decoded = PrivateKey::decode(private.encode().as_ref()).unwrap();
+    let decoded = PrivateKey::decode(private.encode()).unwrap();
     let signature = private.sign(NAMESPACE, MESSAGE);
     let decoded_signature = decoded.sign(NAMESPACE, MESSAGE);
 

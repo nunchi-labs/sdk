@@ -95,7 +95,7 @@ impl Write for MultisigPolicy {
 impl Read for MultisigPolicy {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
             // Policies arrive on the wire inside Configure, so the owner list is bounded.
             owners: Vec::read_cfg(buf, &(RangeCfg::new(0..=MAX_MULTISIG_SIGNERS), ()))?,
@@ -128,7 +128,7 @@ impl Write for RegistryChange {
 impl Read for RegistryChange {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         match u8::read(buf)? {
             0 => Ok(Self::AddValidator {
                 validator: ValidatorId::read(buf)?,
@@ -164,7 +164,7 @@ impl Write for Proposal {
 impl Read for Proposal {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         let id = ProposalId::read(buf)?;
         let change = RegistryChange::read(buf)?;
         let proposed_epoch = EpochNumber::read(buf)?;
@@ -212,7 +212,7 @@ impl Write for ValidatorSchedule {
 impl Read for ValidatorSchedule {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         let validator = ValidatorId::read(buf)?;
         let player_from = EpochNumber::read(buf)?;
         let dealer_from = EpochNumber::read(buf)?;
@@ -251,7 +251,7 @@ impl Write for EpochRegistry {
 impl Read for EpochRegistry {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
             epoch: EpochNumber::read(buf)?,
             players: Vec::read_cfg(buf, &stored_vec_cfg())?,

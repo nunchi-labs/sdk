@@ -71,7 +71,7 @@ impl Write for Address {
 
 impl Read for Address {
     type Cfg = ();
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self(Digest::read(buf)?))
     }
 }
@@ -103,7 +103,7 @@ pub fn generate_ed25519_keypair() -> Result<JsValue, JsValue> {
     encoded.push(1);
     encoded.extend_from_slice(&entropy);
     
-    let private_key = PrivateKey::decode(encoded.as_ref())
+    let private_key = PrivateKey::decode(encoded)
         .map_err(|e| JsValue::from_str(&format!("failed to decode key: {}", e)))?;
     let public_key = private_key.public_key();
     let address = Address::external(&public_key);
@@ -127,7 +127,7 @@ pub fn generate_secp256r1_keypair() -> Result<JsValue, JsValue> {
     encoded.push(2);
     encoded.extend_from_slice(&entropy);
     
-    let private_key = PrivateKey::decode(encoded.as_ref())
+    let private_key = PrivateKey::decode(encoded)
         .map_err(|e| JsValue::from_str(&format!("failed to decode key: {}", e)))?;
     let public_key = private_key.public_key();
     let address = Address::external(&public_key);
@@ -146,7 +146,7 @@ pub fn generate_secp256r1_keypair() -> Result<JsValue, JsValue> {
 pub fn import_private_key(private_key_hex: &str) -> Result<JsValue, JsValue> {
     let bytes = hex::decode(private_key_hex)
         .map_err(|e| JsValue::from_str(&format!("invalid hex: {}", e)))?;
-    let private_key = PrivateKey::decode(bytes.as_ref())
+    let private_key = PrivateKey::decode(bytes)
         .map_err(|e| JsValue::from_str(&format!("invalid private key: {}", e)))?;
     let public_key = private_key.public_key();
     let address = Address::external(&public_key);
@@ -170,7 +170,7 @@ pub fn import_private_key(private_key_hex: &str) -> Result<JsValue, JsValue> {
 pub fn derive_address(public_key_hex: &str) -> Result<String, JsValue> {
     let bytes = hex::decode(public_key_hex)
         .map_err(|e| JsValue::from_str(&format!("invalid hex: {}", e)))?;
-    let public_key = PublicKey::decode(bytes.as_ref())
+    let public_key = PublicKey::decode(bytes)
         .map_err(|e| JsValue::from_str(&format!("invalid public key: {}", e)))?;
     let address = Address::external(&public_key);
     Ok(address.to_bech32())
@@ -199,7 +199,7 @@ fn encode_signed(transaction: Transaction) -> SignedTransaction {
 
 fn parse_private_key(private_key_hex: &str) -> Result<PrivateKey, String> {
     let private_bytes = hex::decode(private_key_hex).map_err(|e| format!("invalid private key hex: {e}"))?;
-    PrivateKey::decode(private_bytes.as_ref()).map_err(|e| format!("invalid private key: {e}"))
+    PrivateKey::decode(private_bytes).map_err(|e| format!("invalid private key: {e}"))
 }
 
 fn parse_address(value: &str, label: &str) -> Result<nunchi_coins::Address, String> {
@@ -249,7 +249,7 @@ fn parse_signers(signer_pub_keys: &str) -> Result<Vec<PublicKey>, String> {
     {
         let bytes = hex::decode(key).map_err(|e| format!("invalid signer public key hex: {e}"))?;
         keys.push(
-            PublicKey::decode(bytes.as_ref()).map_err(|e| format!("invalid signer public key: {e}"))?,
+            PublicKey::decode(bytes).map_err(|e| format!("invalid signer public key: {e}"))?,
         );
     }
     Ok(keys)

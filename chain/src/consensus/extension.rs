@@ -1,6 +1,7 @@
 use std::{fmt::Debug, future::Future};
 
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
+use commonware_codec::Buf;
 use commonware_codec::{EncodeSize, Error as CodecError, Read, Write};
 use nunchi_common::{RuntimeContext, StateStore};
 

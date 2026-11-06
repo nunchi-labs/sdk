@@ -51,7 +51,7 @@ impl FromStr for ScopeId {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let bytes = from_hex(value).ok_or(Error::Invalid("ScopeId", "invalid hex"))?;
-        Self::decode(bytes.as_ref())
+        Self::decode(bytes)
     }
 }
 
@@ -64,7 +64,7 @@ impl Write for ScopeId {
 impl Read for ScopeId {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self(Digest::read(buf)?))
     }
 }
@@ -95,7 +95,7 @@ impl Write for RoleId {
 impl Read for RoleId {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self(u16::read(buf)?))
     }
 }
@@ -126,7 +126,7 @@ impl Write for Scope {
 impl Read for Scope {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
             id: ScopeId::read(buf)?,
             owner: Address::read(buf)?,

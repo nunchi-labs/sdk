@@ -11,7 +11,7 @@ fn account_roundtrips_with_external_id() {
     let id = external_account_id(&PrivateKey::ed25519_from_seed(1).public_key());
     let account = Account::new(id, AccountType::External, 42);
 
-    assert_eq!(Account::decode(account.encode().as_ref()).unwrap(), account);
+    assert_eq!(Account::decode(account.encode()).unwrap(), account);
 }
 
 #[test]
@@ -21,7 +21,7 @@ fn account_roundtrips_with_multisig_kind() {
     let id = multisig_account_id(&policy);
     let account = Account::new(id, AccountType::Multisig, 42);
 
-    assert_eq!(Account::decode(account.encode().as_ref()).unwrap(), account);
+    assert_eq!(Account::decode(account.encode()).unwrap(), account);
 }
 
 #[test]
@@ -90,7 +90,7 @@ fn account_policy_roundtrips_with_mixed_curve_multisig() {
     .unwrap();
 
     assert_eq!(
-        AccountPolicy::decode(policy.encode().as_ref()).unwrap(),
+        AccountPolicy::decode(policy.encode()).unwrap(),
         policy
     );
 }

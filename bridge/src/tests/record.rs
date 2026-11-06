@@ -29,7 +29,7 @@ fn record() -> BridgeTransferRecord {
 #[test]
 fn transfer_record_codec_round_trips() {
     let record = record();
-    let decoded = BridgeTransferRecord::decode(record.encode().as_ref()).unwrap();
+    let decoded = BridgeTransferRecord::decode(record.encode()).unwrap();
     assert_eq!(record, decoded);
 }
 
@@ -39,11 +39,11 @@ fn digest_newtypes_round_trip_through_codec() {
     let asset = AssetId::derive(&chain, &Sha256::hash(&[b"coin"]));
     let record_id = TransferRecordId(Sha256::hash(&[b"record"]));
 
-    assert_eq!(ChainId::decode(chain.encode().as_ref()).unwrap(), chain);
-    let decoded_asset = AssetId::decode(asset.encode().as_ref()).unwrap();
+    assert_eq!(ChainId::decode(chain.encode()).unwrap(), chain);
+    let decoded_asset = AssetId::decode(asset.encode()).unwrap();
     assert_eq!(decoded_asset, asset);
     assert_eq!(
-        TransferRecordId::decode(record_id.encode().as_ref()).unwrap(),
+        TransferRecordId::decode(record_id.encode()).unwrap(),
         record_id
     );
 

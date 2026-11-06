@@ -275,7 +275,7 @@ fn parse_bootstrapper_public_key(
         return Err(BootstrapperConfigError::InvalidPublicKeyHex);
     }
     let bytes = from_hex(value).ok_or(BootstrapperConfigError::InvalidPublicKeyHex)?;
-    PublicKey::decode(bytes.as_slice()).map_err(BootstrapperConfigError::InvalidPublicKey)
+    PublicKey::decode(bytes).map_err(BootstrapperConfigError::InvalidPublicKey)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -613,6 +613,25 @@ fn write_chain(
     Ok(())
 }
 
+fn local_handshake(
+    signer: ed25519::PrivateKey,
+) -> commonware_stream::SakeCups<ed25519::PrivateKey, commonware_cryptography::ChaCha20Poly1305>
+{
+    use commonware_stream::{
+        cups::{self, Cups},
+        sake::{self, Sake},
+    };
+    Cups::<_, commonware_cryptography::ChaCha20Poly1305>::new(
+        Sake {
+            signer,
+            synchrony_bound: std::time::Duration::from_secs(5),
+            max_handshake_age: std::time::Duration::from_secs(10),
+            version: sake::Version::V1,
+        },
+        cups::Version::V1,
+    )
+}
+
 fn channel_quota(rate_per_second: u32) -> Quota {
     let rate = match rate_per_second {
         0 | u32::MAX => DEFAULT_CHANNEL_RATE_PER_SECOND,
@@ -749,13 +768,14 @@ async fn start_node(
     let max_peers_per_set = NonZeroUsize::new(config.peer_config.participants.len().max(2))
         .expect("max_peers_per_set");
     let p2p_config = discovery::Config::local(
-        private_key.clone(),
+        local_handshake(private_key.clone()),
         config.namespace.as_bytes(),
         config.listen_address,
         config.dialable_address.clone(),
         bootstrappers,
         max_peers_per_set,
         config.networking.max_message_size,
+        commonware_utils::NZUsize!(1_000),
     );
     let (mut network, mut oracle) = Network::new(context.child("network"), p2p_config);
     oracle.track(0, config.peer_config.participants.clone());
@@ -801,8 +821,8 @@ async fn start_node(
         peer_provider: oracle.clone(),
         blocker: oracle,
         mailbox_size: NZUsize!(1024),
-        timeout: Duration::from_secs(2),
-        fetch_retry_timeout: Duration::from_millis(100),
+        fetch_timeout: commonware_utils::NonZeroDuration::new_panic(Duration::from_secs(2)),
+        fetch_retry_delay: Duration::from_millis(100),
         priority_requests: false,
         priority_responses: false,
     };
@@ -841,7 +861,7 @@ fn decode_output(
     max_participants: NonZeroU32,
 ) -> Result<Output<MinSig, PublicKey>, Error> {
     let bytes = decode_hex(value, "output")?;
-    Output::decode_cfg(bytes.as_ref(), &(max_participants, MAX_SUPPORTED_MODE)).map_err(|source| {
+    Output::decode_cfg(bytes, &(max_participants, MAX_SUPPORTED_MODE)).map_err(|source| {
         Error::CodecDecode {
             field: "output",
             source,
@@ -854,7 +874,7 @@ where
     T: DecodeExt<()>,
 {
     let bytes = decode_hex(value, field)?;
-    T::decode(bytes.as_ref()).map_err(|source| Error::CodecDecode { field, source })
+    T::decode(bytes).map_err(|source| Error::CodecDecode { field, source })
 }
 
 fn decode_hex(value: &str, field: &'static str) -> Result<Vec<u8>, Error> {

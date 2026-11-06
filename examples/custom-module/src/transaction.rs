@@ -31,7 +31,7 @@ impl Write for CustomOperation {
 impl Read for CustomOperation {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         match u8::read(buf)? {
             OP_SET_VALUE => Ok(Self::SetValue {
                 value: u64::read(buf)?,

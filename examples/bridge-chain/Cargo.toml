@@ -28,6 +28,7 @@ commonware-p2p = { workspace = true }
 commonware-parallel = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-storage = { workspace = true }
+commonware-stream = { workspace = true }
 commonware-utils = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }

@@ -77,7 +77,7 @@ mod serde_hex_vec {
             .map(|value| {
                 let bytes = from_hex(&value)
                     .ok_or_else(|| D::Error::custom("expected hex-encoded codec bytes"))?;
-                T::decode(bytes.as_ref()).map_err(D::Error::custom)
+                T::decode(bytes).map_err(D::Error::custom)
             })
             .collect()
     }

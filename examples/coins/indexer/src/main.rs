@@ -42,19 +42,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => match optional_arg(cli.output) {
             Some(output) => {
                 let output_bytes = from_hex(&output).ok_or("invalid output hex")?;
-                let output = DkgOutput::decode_cfg(
-                    output_bytes.as_ref(),
-                    &(cli.participants, MAX_SUPPORTED_MODE),
-                )
-                .map_err(|_| "invalid output")?;
+                let output =
+                    DkgOutput::decode_cfg(output_bytes, &(cli.participants, MAX_SUPPORTED_MODE))
+                        .map_err(|_| "invalid output")?;
                 Indexer::new_from_output_at(Epoch::new(cli.output_epoch), output, cli.participants)
             }
             None => {
                 let identity =
                     optional_arg(cli.identity).ok_or("identity or output is required")?;
                 let identity_bytes = from_hex(&identity).ok_or("invalid identity hex")?;
-                let identity =
-                    Identity::decode(identity_bytes.as_ref()).map_err(|_| "invalid identity")?;
+                let identity = Identity::decode(identity_bytes).map_err(|_| "invalid identity")?;
                 Indexer::new(identity, cli.participants)
             }
         },

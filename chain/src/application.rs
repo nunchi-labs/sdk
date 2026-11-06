@@ -6,22 +6,23 @@ use commonware_consensus::{
 use commonware_cryptography::{ed25519, sha256, Digestible, Signer};
 use commonware_glue::stateful::{
     db::{DatabaseSet, Merkleized as _},
-    Application as StatefulApplication, Input, Proposed,
+    Application as StatefulApplication, Finality, Input, Proposed,
 };
 use commonware_parallel::{Rayon, Strategy as _};
 use commonware_runtime::{
     telemetry::metrics::{histogram::Buckets, Histogram, HistogramExt as _, MetricsExt as _},
-    BufferPooler, Clock, Metrics, Spawner, Storage,
+    Clock, Metrics, Spawner, Storage,
 };
 use commonware_storage::{mmr::Location, qmdb::sync::Target};
 use commonware_utils::{non_empty_range, range::NonEmptyRange, SystemTimeExt};
-use futures::{lock::Mutex as AsyncMutex, StreamExt};
+use futures::{lock::Mutex as AsyncMutex, FutureExt, StreamExt};
 use nunchi_common::{Overlay, QmdbBatch, QmdbDatabaseSet, QmdbMerkleized, Runtime, RuntimeContext};
 use nunchi_dkg::Scheme;
 use nunchi_mempool::{MempoolHandle, PoolTransaction};
 use rand::{CryptoRng, Rng};
 use std::{
     collections::HashMap,
+    future::Future,
     marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
@@ -240,7 +241,7 @@ where
 
     /// Execute txpool candidates in order, including the first `max_block_transactions` that
     /// apply cleanly against the parent state.
-    pub async fn build_valid_transactions<E: BufferPooler + Storage + Clock + Metrics + Spawner>(
+    pub async fn build_valid_transactions<E: Storage + Clock + Metrics + Spawner>(
         &self,
         batches: <QmdbDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
         context: RuntimeContext,
@@ -250,7 +251,7 @@ where
             .await
     }
 
-    async fn build_valid_transactions_inner<E: BufferPooler + Storage + Clock + Metrics + Spawner>(
+    async fn build_valid_transactions_inner<E: Storage + Clock + Metrics + Spawner>(
         &self,
         timing: Option<(&E, &ApplicationMetrics)>,
         batches: <QmdbDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
@@ -303,7 +304,7 @@ where
     }
 
     async fn build_proposal_state<
-        E: BufferPooler + Storage + Clock + Metrics + CryptoRng + Spawner,
+        E: Storage + Clock + Metrics + CryptoRng + Spawner,
     >(
         &mut self,
         timing: Option<&ApplicationMetrics>,
@@ -406,7 +407,7 @@ where
         commit_extension: bool,
     ) -> Option<QmdbMerkleized<E>>
     where
-        E: BufferPooler + Storage + Clock + Metrics + CryptoRng + Spawner,
+        E: Storage + Clock + Metrics + CryptoRng + Spawner,
         EventHandler: EventConsumer,
     {
         events.begin_block(context).await;
@@ -504,7 +505,7 @@ where
         }
     }
 
-    fn state_range<E: BufferPooler + Storage + Clock + Metrics + Spawner>(
+    fn state_range<E: Storage + Clock + Metrics + Spawner>(
         merkleized: &QmdbMerkleized<E>,
     ) -> NonEmptyRange<Location> {
         let bounds = merkleized.bounds();
@@ -529,6 +530,113 @@ where
             .expect("block timestamp exceeded maximum");
         runtime_context.sleep_until(deadline).await;
         true
+    }
+
+    pub(crate) async fn process_inner<E>(
+        &mut self,
+        (mut runtime_context, _): (E, CodingContext<R::Transaction, Ext>),
+        ancestry: impl Ancestry<CodingBlock<R::Transaction, Ext>>,
+        batches: <QmdbDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
+        finality: Finality,
+    ) -> Option<QmdbMerkleized<E>>
+    where
+        E: Rng + CryptoRng + Spawner + Metrics + Clock + Storage,
+    {
+        let metrics = self.metrics(&runtime_context);
+        let mut ancestry = Box::pin(ancestry);
+        let digested = match finality {
+            Finality::Candidate => ancestry.next().await?,
+            Finality::Finalized => ancestry
+                .next()
+                .await
+                .expect("finalized ancestry starts with the block"),
+        };
+        let block = digested.inner();
+
+        if finality == Finality::Candidate {
+            let parent = ancestry.next().await?;
+            if !self
+                .verify_timestamp(&runtime_context, block, parent.inner())
+                .await
+            {
+                return None;
+            }
+            if block.transactions.len() > self.max_block_transactions {
+                return None;
+            }
+
+            // Stateless signature verification is the adversarial gate for
+            // proposed blocks, and it dominates large-block latency when run
+            // serially; fan it out across the verification thread pool.
+            let strategy = self.strategy();
+            let all_valid = strategy.fold(
+                &block.transactions,
+                || true,
+                |valid, tx| valid && PoolTransaction::verify(tx).is_ok(),
+                |a, b| a && b,
+            );
+            if !all_valid {
+                return None;
+            }
+            if !self.consensus.verify_payload(&block.header.extension).await {
+                return None;
+            }
+        }
+
+        let execution_context = Self::block_runtime_context(block);
+        let merkleized = match finality {
+            Finality::Candidate => {
+                let merkleized = self
+                    .execute_block(
+                        &mut runtime_context,
+                        &metrics,
+                        batches,
+                        execution_context,
+                        &block.transactions,
+                        &block.header.extension,
+                        block.header.reshare_log.as_ref(),
+                        &NoopEventConsumer,
+                        false,
+                    )
+                    .await?;
+                let state_range = Self::state_range(&merkleized);
+                if merkleized.root() != block.header.state_root
+                    || state_range != block.header.state_range
+                {
+                    return None;
+                }
+                merkleized
+            }
+            Finality::Finalized => {
+                let events = self.events.clone();
+                let merkleized = self
+                    .execute_block(
+                        &mut runtime_context,
+                        &metrics,
+                        batches,
+                        execution_context,
+                        &block.transactions,
+                        &block.header.extension,
+                        block.header.reshare_log.as_ref(),
+                        &events,
+                        true,
+                    )
+                    .await
+                    .expect("certified block failed deterministic execution");
+                let state_range = Self::state_range(&merkleized);
+                assert_eq!(
+                    merkleized.root(),
+                    block.header.state_root,
+                    "certified block state root mismatch"
+                );
+                assert_eq!(
+                    state_range, block.header.state_range,
+                    "certified block state range mismatch"
+                );
+                merkleized
+            }
+        };
+        Some(merkleized)
     }
 }
 
@@ -716,7 +824,7 @@ where
 
 impl<E, R, Ext, Events> StatefulApplication<E> for Application<R, Ext, Events>
 where
-    E: Rng + CryptoRng + Spawner + Metrics + Clock + Storage + BufferPooler,
+    E: Rng + CryptoRng + Spawner + Metrics + Clock + Storage,
     R: Runtime + Clone + Send + Sync + 'static,
     R::Transaction: PoolTransaction + Sync,
     Ext: ConsensusExtension + Sync,
@@ -748,7 +856,8 @@ where
         let metrics = self.metrics(&runtime_context);
         let mut ancestry = Box::pin(ancestry);
         let parent = ancestry.next().await?;
-        let timestamp = self.timestamp(&runtime_context, &parent)?;
+        let parent_block = parent.inner();
+        let timestamp = self.timestamp(&runtime_context, parent_block)?;
         let selection_start = runtime_context.current();
         let candidates = input.provider.pending(self.max_block_transactions).await;
         metrics
@@ -756,7 +865,7 @@ where
             .observe_between(selection_start, runtime_context.current());
         let execution_context = Self::proposal_runtime_context(
             context.round.epoch().get(),
-            parent.header.height.next(),
+            parent_block.header.height.next(),
             timestamp,
         );
         // Obtain the optional dealer log before executing the speculative
@@ -779,7 +888,7 @@ where
         let block = CodingBlock::new(
             context,
             parent.digest(),
-            parent.header.height.next(),
+            parent_block.header.height.next(),
             timestamp,
             transactions,
             reshare_log,
@@ -792,102 +901,17 @@ where
         Some(Proposed { block, merkleized })
     }
 
-    async fn verify(
+    fn process(
         &mut self,
-        (mut runtime_context, _): (E, Self::Context),
+        context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        let metrics = self.metrics(&runtime_context);
-        let mut ancestry = Box::pin(ancestry);
-        let block = ancestry.next().await?;
-        let parent = ancestry.next().await?;
-
-        if !self
-            .verify_timestamp(&runtime_context, &block, &parent)
-            .await
-        {
-            return None;
-        }
-
-        if block.transactions.len() > self.max_block_transactions {
-            return None;
-        }
-
-        // Stateless signature verification is the adversarial gate for
-        // proposed blocks, and it dominates large-block latency when run
-        // serially; fan it out across the verification thread pool.
-        let strategy = self.strategy();
-        let all_valid = strategy.fold(
-            &block.transactions,
-            || true,
-            |valid, tx| valid && PoolTransaction::verify(tx).is_ok(),
-            |a, b| a && b,
-        );
-        if !all_valid {
-            return None;
-        }
-
-        if !self.consensus.verify_payload(&block.header.extension).await {
-            return None;
-        }
-
-        let execution_context = Self::block_runtime_context(&block);
-        let merkleized = self
-            .execute_block(
-                &mut runtime_context,
-                &metrics,
-                batches,
-                execution_context,
-                &block.transactions,
-                &block.header.extension,
-                block.header.reshare_log.as_ref(),
-                &NoopEventConsumer,
-                false,
-            )
-            .await?;
-        let state_range = Self::state_range(&merkleized);
-        if merkleized.root() != block.header.state_root || state_range != block.header.state_range {
-            return None;
-        }
-        Some(merkleized)
+        finality: Finality,
+    ) -> impl Future<Output = Option<<Self::Databases as DatabaseSet<E>>::Merkleized>> + Send {
+        self.process_inner(context, ancestry, batches, finality)
+            .boxed()
     }
 
-    async fn apply(
-        &mut self,
-        (mut runtime_context, _): (E, Self::Context),
-        block: &Self::Block,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        let metrics = self.metrics(&runtime_context);
-        let execution_context = Self::block_runtime_context(block);
-        let events = self.events.clone();
-        let merkleized = self
-            .execute_block(
-                &mut runtime_context,
-                &metrics,
-                batches,
-                execution_context,
-                &block.transactions,
-                &block.header.extension,
-                block.header.reshare_log.as_ref(),
-                &events,
-                true,
-            )
-            .await
-            .expect("certified block failed deterministic execution");
-        let state_range = Self::state_range(&merkleized);
-        assert_eq!(
-            merkleized.root(),
-            block.header.state_root,
-            "certified block state root mismatch"
-        );
-        assert_eq!(
-            state_range, block.header.state_range,
-            "certified block state range mismatch"
-        );
-        Some(merkleized)
-    }
 
     async fn capture(
         &mut self,

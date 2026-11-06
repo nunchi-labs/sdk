@@ -15,7 +15,7 @@ impl Write for TestOperation {
 impl Read for TestOperation {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self(u8::read(buf)?))
     }
 }
@@ -37,7 +37,7 @@ fn ed25519_transaction_signs_verifies_and_roundtrips() {
 
     assert_eq!(tx.account_id, Address::external(&signer.public_key()));
     assert_eq!(tx.verify(), Ok(()));
-    assert_eq!(Transaction::decode(tx.encode().as_ref()).unwrap(), tx);
+    assert_eq!(Transaction::decode(tx.encode()).unwrap(), tx);
 }
 
 #[test]
@@ -47,7 +47,7 @@ fn secp256r1_transaction_signs_verifies_and_roundtrips() {
 
     assert_eq!(tx.account_id, Address::external(&signer.public_key()));
     assert_eq!(tx.verify(), Ok(()));
-    assert_eq!(Transaction::decode(tx.encode().as_ref()).unwrap(), tx);
+    assert_eq!(Transaction::decode(tx.encode()).unwrap(), tx);
 }
 
 #[test]
@@ -88,7 +88,7 @@ fn transaction_decode_rejects_mismatched_signature_curve() {
         signature: other.sign(TestOperation::NAMESPACE, &tx.payload.encode()),
     };
 
-    assert!(Transaction::<TestOperation>::decode(tx.encode().as_ref()).is_err());
+    assert!(Transaction::<TestOperation>::decode(tx.encode()).is_err());
 }
 
 #[test]
@@ -100,7 +100,7 @@ fn multisig_transaction_signs_verifies_and_roundtrips() {
     let tx = Transaction::sign_multisig(account_id, policy, &[&alice, &bob], 0, TestOperation(42));
 
     assert_eq!(tx.verify(), Ok(()));
-    assert_eq!(Transaction::decode(tx.encode().as_ref()).unwrap(), tx);
+    assert_eq!(Transaction::decode(tx.encode()).unwrap(), tx);
 }
 
 #[test]

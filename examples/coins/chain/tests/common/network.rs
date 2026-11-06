@@ -44,7 +44,9 @@ use std::{
     time::Duration,
 };
 
-const TEST_QUOTA: Quota = Quota::per_second(NZU32!(u32::MAX));
+// The simulated receiver reports peers times this burst as its channel capacity, and the
+// marshal resolver mailbox allocates one slot per unit of that capacity.
+const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000)).allow_burst(NZU32!(1_024));
 const MAX_BLOCK_TRANSACTIONS: usize = 256;
 
 const PENDING_CHANNEL: u64 = nunchi_coins_chain::channels::PENDING;
@@ -567,7 +569,8 @@ impl TestNetwork<'_> {
                     .get_block(commonware_consensus::types::Height::new(height))
                     .await
                     .expect("finalized block missing")
-                    .into_inner(),
+                    .inner()
+                    .clone(),
             );
         }
         blocks
@@ -738,8 +741,8 @@ async fn start_validator(
         peer_provider: oracle.manager(),
         blocker: oracle.control(public_key.clone()),
         mailbox_size: NZUsize!(1024),
-        timeout: Duration::from_secs(2),
-        fetch_retry_timeout: Duration::from_millis(100),
+        fetch_timeout: commonware_utils::NonZeroDuration::new_panic(Duration::from_secs(2)),
+        fetch_retry_delay: Duration::from_millis(100),
         priority_requests: false,
         priority_responses: false,
     };

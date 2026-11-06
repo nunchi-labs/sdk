@@ -112,7 +112,7 @@ where
     T: Read<Cfg = ()>,
 {
     let bytes = from_hex(value).ok_or_else(|| invalid_params(format!("{type_name} is not hex")))?;
-    T::decode(bytes.as_ref()).map_err(|err| invalid_params(format!("invalid {type_name}: {err}")))
+    T::decode(bytes).map_err(|err| invalid_params(format!("invalid {type_name}: {err}")))
 }
 
 /// Convert invalid user input into a JSON-RPC invalid-params error.

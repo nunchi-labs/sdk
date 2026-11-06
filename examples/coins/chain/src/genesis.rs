@@ -139,7 +139,7 @@ pub async fn genesis_target<E>(
     empty: &StateCommitment,
 ) -> Result<StateCommitment, GenesisError>
 where
-    E: Context + commonware_runtime::BufferPooler + commonware_runtime::Spawner,
+    E: Context + commonware_runtime::Spawner,
 {
     let mut state = QmdbState::init_with_config(context, config).await?;
     genesis.apply_to_state(&mut state, empty).await?;
@@ -157,7 +157,7 @@ pub async fn authenticated_genesis_target<E>(
     empty: &StateCommitment,
 ) -> Result<StateCommitment, GenesisError>
 where
-    E: Context + commonware_runtime::BufferPooler + commonware_runtime::Spawner,
+    E: Context + commonware_runtime::Spawner,
 {
     let mut state = QmdbState::init_with_config(context, config).await?;
     dkg.seed(&mut state, empty.root, initial_output).await?;
@@ -183,7 +183,7 @@ where
     let Some(bytes) = state.get(&marker_key()).await? else {
         return Ok(None);
     };
-    Digest::decode(bytes.as_ref())
+    Digest::decode(bytes)
         .map(Some)
         .map_err(|err| GenesisError::State(StateError::Backend(err.to_string())))
 }

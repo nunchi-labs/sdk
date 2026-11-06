@@ -30,7 +30,7 @@ use commonware_runtime::{
         histogram::Buckets, CounterFamily, EncodeLabelSet, Gauge, GaugeExt, Histogram,
         MetricsExt as _,
     },
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
+    Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
 use commonware_storage::metadata::{self, Metadata};
 use commonware_utils::sequence::U64;
@@ -108,7 +108,6 @@ where
     pub leader_timeout: Duration,
     pub certification_timeout: Duration,
 
-    pub muxer_size: usize,
     pub mailbox_size: NonZeroUsize,
 
     // Partition prefix used for orchestrator metadata persistence
@@ -150,7 +149,7 @@ impl<D: Digest> StartupFloor<D> {
 
 pub struct Actor<E, B, A, S, L, T, V, R>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Storage + Network,
+    E: Spawner + Metrics + CryptoRng + Clock + Storage + Network,
     B: Blocker<PublicKey = ed25519::PublicKey>,
     V: Variant,
     A: CertifiableAutomaton<
@@ -181,7 +180,6 @@ where
     leader_timeout: Duration,
     certification_timeout: Duration,
 
-    muxer_size: usize,
     partition_prefix: String,
     epoch_length: NonZeroU64,
     genesis_digest: V::Commitment,
@@ -199,7 +197,7 @@ where
 
 impl<E, B, A, S, L, T, V, R> Actor<E, B, A, S, L, T, V, R>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Storage + Network,
+    E: Spawner + Metrics + CryptoRng + Clock + Storage + Network,
     B: Blocker<PublicKey = ed25519::PublicKey>,
     V: Variant,
     A: CertifiableAutomaton<
@@ -222,7 +220,7 @@ where
         config: Config<B, A, S, L, T, V, R>,
     ) -> (Self, Mailbox<MinSig, ed25519::PublicKey>) {
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
-        let page_cache_ref = CacheRef::from_pooler(&context, page_size(16_384), NZUsize!(10_000));
+        let page_cache_ref = CacheRef::new(page_size(16_384), NZUsize!(10_000));
 
         // Register latest_epoch gauge for Grafana integration
         let latest_epoch = context.gauge("latest_epoch", "current epoch");
@@ -257,7 +255,6 @@ where
                 strategy: config.strategy,
                 leader_timeout: config.leader_timeout,
                 certification_timeout: config.certification_timeout,
-                muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
                 epoch_length: config.epoch_length,
                 genesis_digest: config.genesis_digest,
@@ -323,7 +320,6 @@ where
             self.context.child("vote_mux"),
             vote_sender,
             vote_receiver,
-            self.muxer_size,
         )
         .with_backup()
         .build();
@@ -332,7 +328,6 @@ where
             self.context.child("certificate_mux"),
             certificate_sender,
             certificate_receiver,
-            self.muxer_size,
         )
         .build();
         mux.start();
@@ -340,7 +335,6 @@ where
             self.context.child("resolver_mux"),
             resolver_sender,
             resolver_receiver,
-            self.muxer_size,
         );
         mux.start();
 
@@ -612,18 +606,9 @@ where
         epoch: Epoch,
         floor: Floor<S, V::Commitment>,
         scheme: S,
-        vote_mux: &mut MuxHandle<
-            impl Sender<PublicKey = ed25519::PublicKey>,
-            impl commonware_p2p::Receiver<PublicKey = ed25519::PublicKey>,
-        >,
-        certificate_mux: &mut MuxHandle<
-            impl Sender<PublicKey = ed25519::PublicKey>,
-            impl commonware_p2p::Receiver<PublicKey = ed25519::PublicKey>,
-        >,
-        resolver_mux: &mut MuxHandle<
-            impl Sender<PublicKey = ed25519::PublicKey>,
-            impl commonware_p2p::Receiver<PublicKey = ed25519::PublicKey>,
-        >,
+        vote_mux: &mut MuxHandle<impl Sender<PublicKey = ed25519::PublicKey>>,
+        certificate_mux: &mut MuxHandle<impl Sender<PublicKey = ed25519::PublicKey>>,
+        resolver_mux: &mut MuxHandle<impl Sender<PublicKey = ed25519::PublicKey>>,
     ) -> Handle<()> {
         // Start the new engine
         let context = self
@@ -649,7 +634,8 @@ where
                 leader_timeout: self.leader_timeout,
                 certification_timeout: self.certification_timeout,
                 timeout_retry: Duration::from_secs(10),
-                fetch_timeout: Duration::from_secs(1),
+                fetch_timeout: commonware_utils::NonZeroDuration::new_panic(Duration::from_secs(1)),
+                fetch_retry_delay: Duration::from_millis(200),
                 view_retention: ViewDelta::new(256),
                 skip: SkipPolicy::Enabled {
                     timeout: Duration::from_secs(20),

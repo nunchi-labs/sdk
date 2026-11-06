@@ -65,7 +65,7 @@ fn runtime_apply_forwards_coin_events() {
         assert_eq!(events.len(), 1);
         let event = &events.events()[0];
         assert_eq!(event.name.as_ref(), TOKEN_CREATED_EVENT);
-        let payload = TokenCreated::decode(event.value.as_ref()).unwrap();
+        let payload = TokenCreated::decode(commonware_codec::Viewing::new(&event.value)).unwrap();
         assert_eq!(payload.token.total_supply, 1_000);
         assert_eq!(payload.token.max_supply, Some(2_000));
     });
@@ -168,7 +168,7 @@ fn runtime_charges_fee_before_dispatch() {
 
         assert_eq!(events.len(), 2);
         assert_eq!(events.events()[0].name.as_ref(), FEE_CHARGED_EVENT);
-        let charged = FeeCharged::decode(events.events()[0].value.as_ref()).unwrap();
+        let charged = FeeCharged::decode(commonware_codec::Viewing::new(&events.events()[0].value)).unwrap();
         assert_eq!(charged.payer, alice);
         assert_eq!(charged.collector, collector);
         assert_eq!(charged.amount, fee);
@@ -279,7 +279,7 @@ fn bridge_lock_escrows_funds_and_records_transfer() {
         CoinsRuntime::apply(&mut state, RuntimeContext::default(), &create, &mut events)
             .await
             .unwrap();
-        let coin = TokenCreated::decode(events.events()[0].value.as_ref())
+        let coin = TokenCreated::decode(commonware_codec::Viewing::new(&events.events()[0].value))
             .unwrap()
             .token
             .id;
@@ -363,7 +363,7 @@ fn bridge_lock_reverts_escrow_when_bridge_rejects() {
         CoinsRuntime::apply(&mut state, RuntimeContext::default(), &create, &mut events)
             .await
             .unwrap();
-        let coin = TokenCreated::decode(events.events()[0].value.as_ref())
+        let coin = TokenCreated::decode(commonware_codec::Viewing::new(&events.events()[0].value))
             .unwrap()
             .token
             .id;
@@ -590,7 +590,7 @@ fn bridge_lock_rejects_insufficient_balance_without_side_effects() {
         CoinsRuntime::apply(&mut state, RuntimeContext::default(), &create, &mut events)
             .await
             .unwrap();
-        let coin = TokenCreated::decode(events.events()[0].value.as_ref())
+        let coin = TokenCreated::decode(commonware_codec::Viewing::new(&events.events()[0].value))
             .unwrap()
             .token
             .id;

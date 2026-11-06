@@ -34,7 +34,7 @@ fn encoded<T: Encode>(value: &T) -> Vec<u8> {
 }
 
 fn decoded<T: Read<Cfg = ()>>(bytes: &[u8]) -> Result<T, AuthorityError> {
-    let mut buf = bytes;
+    let mut buf = commonware_codec::Copying(bytes);
     T::read(&mut buf).map_err(|err| AuthorityError::Storage(err.to_string()))
 }
 
@@ -132,7 +132,7 @@ impl<S: StateStore> AuthorityDB for S {
             .map_err(|err| AuthorityError::Storage(err.to_string()))?
         {
             Some(bytes) => {
-                let mut buf = bytes.as_slice();
+                let mut buf = commonware_codec::Copying(bytes.as_slice());
                 Vec::read_cfg(&mut buf, &stored_vec_cfg())
                     .map_err(|err| AuthorityError::Storage(err.to_string()))
             }
