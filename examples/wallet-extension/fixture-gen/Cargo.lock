@@ -417,9 +417,9 @@ dependencies = [
 
 [[package]]
 name = "commonware-codec"
-version = "2026.9.0"
+version = "2026.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d1e1bd11366f81e304c737c098eb0c075cef59e21daff44c3227952c2f75b49"
+checksum = "f547e38e69017302f6966acb4b7b9558bced6232ef977adceb05b5eb445f6086"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -432,9 +432,9 @@ dependencies = [
 
 [[package]]
 name = "commonware-codec-macros"
-version = "2026.9.0"
+version = "2026.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54ccca449c618a38da9b867c128ec1e7be55cfe0b69b8814c25daac229ac6cc9"
+checksum = "155fa68ec9e020b9fd233e5dec8158d7ffd827acab342001954e106094524490"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
