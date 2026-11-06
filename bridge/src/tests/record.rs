@@ -239,9 +239,9 @@ fn foreign_root_codec_round_trips_and_rejects_truncation() {
     let root = ForeignRoot {
         state_root: Sha256::hash(&[b"root"]),
     };
-    assert_eq!(ForeignRoot::decode(root.encode().as_ref()).unwrap(), root);
+    assert_eq!(ForeignRoot::decode(root.encode()).unwrap(), root);
     let encoded = root.encode();
-    assert!(ForeignRoot::decode(&encoded[..encoded.len() - 1]).is_err());
+    assert!(ForeignRoot::decode(commonware_codec::Copying(&encoded[..encoded.len() - 1])).is_err());
 }
 
 #[test]
@@ -301,7 +301,7 @@ fn foreign_root_rejects_every_truncated_prefix() {
     };
     let encoded = root.encode();
     for i in 0..encoded.len() {
-        assert!(ForeignRoot::decode(&encoded[..i]).is_err());
+        assert!(ForeignRoot::decode(commonware_codec::Copying(&encoded[..i])).is_err());
     }
 }
 

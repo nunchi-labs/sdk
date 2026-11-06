@@ -95,7 +95,7 @@ impl Write for ForeignRootAnchored {
 impl Read for ForeignRootAnchored {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
             source_chain_id: ChainId::read(buf)?,
             view: u64::read(buf)?,
@@ -143,7 +143,7 @@ impl Write for TransferClaimed {
 impl Read for TransferClaimed {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
             record_id: TransferRecordId::read(buf)?,
             source_chain_id: ChainId::read(buf)?,

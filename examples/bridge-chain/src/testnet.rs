@@ -807,6 +807,7 @@ async fn start_node(
         min_block_interval_ms: config.min_block_interval_ms,
         leader_timeout: Duration::from_millis(config.consensus.leader_timeout_ms),
         certification_timeout: Duration::from_millis(config.consensus.certification_timeout_ms),
+        timeout_retry: Duration::from_secs(10),
         strategy: Sequential,
         state_sync: config.state_sync,
         max_pending_acks: config.max_pending_acks,

@@ -103,6 +103,8 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
     pub min_block_interval_ms: NonZeroU64,
     pub leader_timeout: Duration,
     pub certification_timeout: Duration,
+    /// See [`nunchi_dkg::orchestrator::Config::timeout_retry`].
+    pub timeout_retry: Duration,
     pub strategy: S,
     /// Discover a finalized floor and perform peer QMDB state sync on a fresh database.
     pub state_sync: bool,
@@ -761,6 +763,7 @@ where
                 strategy: config.strategy.clone(),
                 leader_timeout: config.leader_timeout,
                 certification_timeout: config.certification_timeout,
+                timeout_retry: config.timeout_retry,
                 mailbox_size: MAILBOX_SIZE,
                 partition_prefix: format!("{}_consensus", config.partition_prefix),
                 epoch_length: config.epoch_length,
@@ -1106,15 +1109,33 @@ where
     )
     .await
     .expect("failed to initialize marshal progress metadata probe");
-    let processed_height = metadata.get(&MARSHAL_PROCESSED_KEY).copied()?;
+    let processed_height = metadata.get(&MARSHAL_PROCESSED_KEY).copied();
     drop(metadata);
 
     let Some(tip) = ArchiveStore::last_index(finalized_blocks) else {
-        panic!("marshal progress references height {processed_height}, but finalized block history is empty; rebuild or perform verified peer state sync");
+        if let Some(processed_height) = processed_height {
+            panic!(
+                "marshal progress references height {processed_height}, but finalized block history is empty; rebuild or perform verified peer state sync"
+            );
+        }
+        return None;
     };
-    let search_end =
-        reconciliation_search_end(processed_height.get(), tip, max_pending_acks);
-    for height in processed_height.get()..=search_end {
+    let search_start = finalized_blocks
+        .first_index()
+        .expect("finalized block history has a tip");
+    // An unclean shutdown can sync QMDB behind marshal's processed height.
+    // Search the retained history, not only the forward acknowledgement window.
+    let search_end = match processed_height {
+        Some(processed) => reconciliation_search_end(processed.get(), tip, max_pending_acks),
+        None => tip,
+    };
+    if search_start > search_end {
+        panic!(
+            "finalized history floor {search_start} is above the startup search end {search_end}"
+        );
+    }
+    let reported_processed = processed_height.unwrap_or_else(|| Height::new(search_end));
+    for height in search_start..=search_end {
         let Some(block) = ArchiveStore::get(
             finalized_blocks,
             ArchiveIdentifier::Index(height),
@@ -1140,7 +1161,7 @@ where
                 "startup candidate certificate payload must equal block commitment"
             );
             return Some((
-                processed_height,
+                reported_processed,
                 nunchi_chain::startup::StartupCandidate {
                     height: inner.header.height,
                     digest: inner.digest(),
@@ -1153,9 +1174,7 @@ where
     }
 
     panic!(
-        "QMDB committed target does not exactly match canonical finalized history from processed height {} through {}; rebuild or perform verified peer state sync",
-        processed_height,
-        search_end,
+        "QMDB committed target does not exactly match canonical finalized history from {search_start} through {search_end}; rebuild or perform verified peer state sync"
     );
 }
 

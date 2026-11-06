@@ -107,6 +107,11 @@ where
     pub strategy: T,
     pub leader_timeout: Duration,
     pub certification_timeout: Duration,
+    /// Delay before rebroadcasting a nullify for a view restored from the journal.
+    ///
+    /// 2026.10 schedules this delay on the first poll after replay, so a node
+    /// that crashed mid-nullify does not broadcast again until it elapses.
+    pub timeout_retry: Duration,
 
     pub mailbox_size: NonZeroUsize,
 
@@ -179,6 +184,7 @@ where
     strategy: T,
     leader_timeout: Duration,
     certification_timeout: Duration,
+    timeout_retry: Duration,
 
     partition_prefix: String,
     epoch_length: NonZeroU64,
@@ -255,6 +261,7 @@ where
                 strategy: config.strategy,
                 leader_timeout: config.leader_timeout,
                 certification_timeout: config.certification_timeout,
+                timeout_retry: config.timeout_retry,
                 partition_prefix: config.partition_prefix,
                 epoch_length: config.epoch_length,
                 genesis_digest: config.genesis_digest,
@@ -633,7 +640,7 @@ where
                 track_historical_votes: false,
                 leader_timeout: self.leader_timeout,
                 certification_timeout: self.certification_timeout,
-                timeout_retry: Duration::from_secs(10),
+                timeout_retry: self.timeout_retry,
                 fetch_timeout: commonware_utils::NonZeroDuration::new_panic(Duration::from_secs(1)),
                 fetch_retry_delay: Duration::from_millis(200),
                 view_retention: ViewDelta::new(256),

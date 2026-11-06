@@ -37,7 +37,7 @@ pub async fn asset_coin<S: StateStore>(
     asset: &AssetId,
 ) -> Result<Option<CoinId>, StateError> {
     match store.get(&asset_coin_key(asset)).await? {
-        Some(bytes) => CoinId::decode(bytes.as_ref())
+        Some(bytes) => CoinId::decode(bytes)
             .map(Some)
             .map_err(|err| StateError::Backend(err.to_string())),
         None => Ok(None),

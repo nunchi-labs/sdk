@@ -80,6 +80,8 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
     pub min_block_interval_ms: NonZeroU64,
     pub leader_timeout: Duration,
     pub certification_timeout: Duration,
+    /// See [`nunchi_dkg::orchestrator::Config::timeout_retry`].
+    pub timeout_retry: Duration,
     pub strategy: S,
     /// Discover a finalized floor and perform peer QMDB state sync on a fresh database.
     pub state_sync: bool,
@@ -555,6 +557,7 @@ where
                 strategy: config.strategy.clone(),
                 leader_timeout: config.leader_timeout,
                 certification_timeout: config.certification_timeout,
+                timeout_retry: config.timeout_retry,
                 mailbox_size: MAILBOX_SIZE,
                 partition_prefix: format!("{}_consensus", config.partition_prefix),
                 epoch_length: BLOCKS_PER_EPOCH,

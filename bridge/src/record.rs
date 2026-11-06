@@ -364,7 +364,7 @@ pub async fn foreign_root<S: StateStore>(
     view: u64,
 ) -> Result<Option<ForeignRoot>, StateError> {
     match store.get(&foreign_root_key(source_chain_id, view)).await? {
-        Some(bytes) => ForeignRoot::decode(bytes.as_ref())
+        Some(bytes) => ForeignRoot::decode(bytes)
             .map(Some)
             .map_err(|err| StateError::Backend(err.to_string())),
         None => Ok(None),
@@ -384,7 +384,7 @@ pub async fn latest_foreign_view<S: StateStore>(
 ) -> Result<Option<u64>, StateError> {
     match store.get(&latest_foreign_view_key(source_chain_id)).await? {
         Some(bytes) => {
-            u64::decode(bytes.as_ref()).map(Some).map_err(|err| StateError::Backend(err.to_string()))
+            u64::decode(bytes).map(Some).map_err(|err| StateError::Backend(err.to_string()))
         }
         None => Ok(None),
     }
@@ -410,7 +410,7 @@ fn foreign_chain_id_key() -> Digest {
 /// The one foreign chain whose finalization certificates this chain accepts, if configured.
 pub async fn foreign_chain_id<S: StateStore>(store: &S) -> Result<Option<ChainId>, StateError> {
     match store.get(&foreign_chain_id_key()).await? {
-        Some(bytes) => ChainId::decode(bytes.as_ref())
+        Some(bytes) => ChainId::decode(bytes)
             .map(Some)
             .map_err(|err| StateError::Backend(err.to_string())),
         None => Ok(None),

@@ -59,7 +59,7 @@ where
     let encoded = value.encode();
     for i in 0..encoded.len() {
         assert!(
-            T::decode(&encoded[..i]).is_err(),
+            T::decode(commonware_codec::Copying(&encoded[..i])).is_err(),
             "prefix {i}/{} must fail to decode",
             encoded.len()
         );
@@ -69,7 +69,7 @@ where
 #[test]
 fn transfer_locked_event_round_trips() {
     let value = locked();
-    let decoded = TransferLocked::decode(value.encode().as_ref()).expect("decode");
+    let decoded = TransferLocked::decode(value.encode()).expect("decode");
     assert_eq!(decoded, value);
     assert_every_prefix_fails(&value);
 
@@ -80,7 +80,7 @@ fn transfer_locked_event_round_trips() {
 #[test]
 fn foreign_root_anchored_event_round_trips() {
     let value = anchored();
-    let decoded = ForeignRootAnchored::decode(value.encode().as_ref()).expect("decode");
+    let decoded = ForeignRootAnchored::decode(value.encode()).expect("decode");
     assert_eq!(decoded, value);
     assert_every_prefix_fails(&value);
 
@@ -91,7 +91,7 @@ fn foreign_root_anchored_event_round_trips() {
 #[test]
 fn transfer_claimed_event_round_trips() {
     let value = claimed();
-    let decoded = TransferClaimed::decode(value.encode().as_ref()).expect("decode");
+    let decoded = TransferClaimed::decode(value.encode()).expect("decode");
     assert_eq!(decoded, value);
     assert_every_prefix_fails(&value);
 

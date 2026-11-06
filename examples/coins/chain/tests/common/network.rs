@@ -120,6 +120,7 @@ pub(crate) struct ValidatorConfig {
     pub(crate) min_block_interval_ms: NonZeroU64,
     pub(crate) leader_timeout: Duration,
     pub(crate) certification_timeout: Duration,
+    pub(crate) timeout_retry: Duration,
     pub(crate) prune_config: PruneConfig,
 }
 
@@ -130,6 +131,7 @@ impl Default for ValidatorConfig {
             min_block_interval_ms: NZU64!(1),
             leader_timeout: Duration::from_secs(1),
             certification_timeout: Duration::from_secs(2),
+            timeout_retry: Duration::from_secs(10),
             prune_config: default_state_prune_config(),
         }
     }
@@ -724,6 +726,7 @@ async fn start_validator(
         min_block_interval_ms: cfg.min_block_interval_ms,
         leader_timeout: cfg.leader_timeout,
         certification_timeout: cfg.certification_timeout,
+        timeout_retry: cfg.timeout_retry,
         strategy: Sequential,
         state_sync,
         max_pending_acks: NZUsize!(16),
