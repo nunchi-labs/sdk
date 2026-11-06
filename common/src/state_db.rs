@@ -15,7 +15,10 @@ use std::collections::BTreeMap;
 
 use bytes::BufMut;
 use commonware_codec::Buf;
-use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, Write};
+use commonware_codec::varint::UInt;
+use commonware_codec::{
+    EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, RangeCfg, Read, Write,
+};
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_glue::stateful::db::{
     any::{AnyMerkleized, AnyUnmerkleized},
@@ -53,6 +56,34 @@ use thiserror::Error;
 /// The largest current value is a CLOB fill-id index. This leaves headroom while
 /// keeping every untrusted state-sync allocation below the examples' 1 MiB network message cap.
 pub const MAX_STATE_VALUE_SIZE: usize = 512 * 1024;
+
+/// Upper bound on one unordered variable QMDB operation whose value is at most `value_len` bytes.
+///
+/// The tag is one byte. A delete carries a digest key, an update carries that key plus the value,
+/// and a commit carries an optional value plus its floor location. Length prefixes use their widest
+/// varint.
+pub const fn max_qmdb_operation_encode_size(value_len: usize) -> usize {
+    let value = crate::items_bound(value_len, u8::SIZE);
+    let update = Digest::SIZE + value;
+    let commit = bool::SIZE + value + Location::<Family>::MAX_ENCODE_SIZE;
+    let body = if update > commit { update } else { commit };
+    let body = if body > Digest::SIZE { body } else { Digest::SIZE };
+    1 + body
+}
+
+/// Upper bound on a [`StateProof`] with at most `digests` proof digests and `operations`
+/// operations whose values are at most `value_len` bytes.
+pub const fn max_state_proof_encode_size(
+    digests: usize,
+    operations: usize,
+    value_len: usize,
+) -> usize {
+    let proof = crate::items_bound(digests, Digest::SIZE)
+        + Location::<Family>::MAX_ENCODE_SIZE
+        + UInt::<u64>::MAX_ENCODE_SIZE;
+    let operations = crate::items_bound(operations, max_qmdb_operation_encode_size(value_len));
+    proof + Location::<Family>::MAX_ENCODE_SIZE + operations
+}
 
 /// Errors surfaced by the shared state backend.
 #[derive(Debug, Error)]

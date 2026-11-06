@@ -9,7 +9,7 @@ use std::{
 
 use bytes::{BufMut, Bytes};
 use commonware_codec::Buf;
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, Read, ReadExt, Write};
 use commonware_consensus::{
     marshal::ancestry,
     types::{Epoch, Height, Round, View},
@@ -76,6 +76,10 @@ impl EncodeSize for TestTx {
             + self.id.encode_size()
             + self.value.encode_size()
     }
+}
+
+impl MaxEncodeSize for TestTx {
+    const MAX_ENCODE_SIZE: usize = u8::SIZE + u64::SIZE + u64::SIZE + u8::SIZE;
 }
 
 #[derive(Debug, Error)]

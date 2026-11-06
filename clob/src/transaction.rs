@@ -2,7 +2,8 @@ use crate::{
     AssetId, Fill, MarketId, OrderId, Side, TimeInForce, MAX_MATCH_BATCH_FILLS,
     MAX_MATCH_BATCH_ORDERS, CLOB_NAMESPACE,
 };
-use commonware_codec::{EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error, FixedSize, MaxEncodeSize, RangeCfg, Read, ReadExt, Write};
+use nunchi_common::{items_bound, Address, Authorization};
 use nunchi_common::Operation as CommonOperation;
 
 #[repr(u8)]
@@ -26,6 +27,35 @@ impl TryFrom<u8> for OperationTag {
             tag => Err(Error::InvalidEnum(tag)),
         }
     }
+}
+
+/// Widest CLOB operation that can appear as a signed order inside a match batch.
+///
+/// `ApplyMatchBatch` is not included. A batch carries order intents, and nesting another batch
+/// would make the encoded size unbounded.
+const MAX_ORDER_OPERATION_ENCODE_SIZE: usize = {
+    let create = 1 + AssetId::SIZE + AssetId::SIZE + u128::SIZE + u128::SIZE;
+    let place = 1 + MarketId::SIZE + u8::SIZE + u128::SIZE + u128::SIZE + u8::SIZE;
+    let cancel = 1 + OrderId::SIZE;
+    let mut max = create;
+    if place > max {
+        max = place;
+    }
+    if cancel > max {
+        max = cancel;
+    }
+    max
+};
+
+/// Widest signed order a match batch will accept.
+pub(crate) const MAX_SIGNED_ORDER_ENCODE_SIZE: usize = Address::SIZE
+    + u64::SIZE
+    + MAX_ORDER_OPERATION_ENCODE_SIZE
+    + Authorization::MAX_ENCODE_SIZE;
+
+fn bounded_order(order: &Transaction) -> bool {
+    order.encode_size() <= MAX_SIGNED_ORDER_ENCODE_SIZE
+        && !matches!(order.payload.operation, ClobOperation::ApplyMatchBatch { .. })
 }
 
 /// Proposer-supplied CLOB match batch carried in a block extension.
@@ -54,11 +84,26 @@ impl Read for MatchBatch {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+        let orders = Vec::<Transaction>::read_cfg(
+            buf,
+            &(RangeCfg::new(0..=MAX_MATCH_BATCH_ORDERS), ()),
+        )?;
+        if orders.iter().any(|order| !bounded_order(order)) {
+            return Err(Error::Invalid(
+                "nunchi_clob::MatchBatch",
+                "order exceeds the signed-order encode bound",
+            ));
+        }
         Ok(Self {
-            orders: Vec::read_cfg(buf, &(RangeCfg::new(0..=MAX_MATCH_BATCH_ORDERS), ()))?,
+            orders,
             fills: Vec::read_cfg(buf, &(RangeCfg::new(0..=MAX_MATCH_BATCH_FILLS), ()))?,
         })
     }
+}
+
+impl MaxEncodeSize for MatchBatch {
+    const MAX_ENCODE_SIZE: usize = items_bound(MAX_MATCH_BATCH_ORDERS, MAX_SIGNED_ORDER_ENCODE_SIZE)
+        + items_bound(MAX_MATCH_BATCH_FILLS, Fill::MAX_ENCODE_SIZE);
 }
 
 impl EncodeSize for MatchBatch {
@@ -196,6 +241,17 @@ impl EncodeSize for ClobOperation {
 
 impl CommonOperation for ClobOperation {
     const NAMESPACE: &'static [u8] = CLOB_NAMESPACE;
+}
+
+impl MaxEncodeSize for ClobOperation {
+    const MAX_ENCODE_SIZE: usize = {
+        let batch = 1 + MatchBatch::MAX_ENCODE_SIZE;
+        if batch > MAX_ORDER_OPERATION_ENCODE_SIZE {
+            batch
+        } else {
+            MAX_ORDER_OPERATION_ENCODE_SIZE
+        }
+    };
 }
 
 /// Signed CLOB transaction payload.

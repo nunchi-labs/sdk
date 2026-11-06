@@ -1,7 +1,9 @@
 use std::{collections::BTreeMap, future::Future, time::Duration};
 
-use commonware_codec::{DecodeExt, Encode, EncodeSize};
-use commonware_cryptography::{ed25519, sha256::Digest, Hasher, Sha256, Signer as _};
+use commonware_codec::{DecodeExt, Encode, EncodeSize, MaxEncodeSize};
+use commonware_cryptography::{
+    ed25519, sha256::Digest, Digest as DigestTrait, Hasher, Sha256, Signer as _,
+};
 use commonware_formatting::hex;
 use commonware_p2p::simulated::{self, Link, Network};
 use commonware_runtime::{deterministic, Clock, Runner as _, Supervisor};
@@ -10,15 +12,15 @@ use governor::Quota;
 use nunchi_chain::ConsensusExtension;
 use nunchi_common::{
     Address, CommitState, MultisigPolicy, RuntimeContext, StateError, StateStore,
-    MAX_STATE_VALUE_SIZE,
+    MAX_MULTISIG_SIGNERS, MAX_STATE_VALUE_SIZE,
 };
 use nunchi_crypto::PrivateKey;
 
 use crate::{
-    market_id, AssetId, ClobActor, ClobConfig, ClobDB, ClobError, ClobExtension, ClobGenesis,
-    ClobLedger, ClobMailbox, ClobMarketGenesis, ClobOperation, FillId, Market, MatchBatch,
-    MatchEngine, Order, OrderId, OrderStatus, Side, TimeInForce, Transaction, MAX_BOOK_ORDERS,
-    MAX_FILLS_PER_MARKET, MAX_MATCH_BATCH_ORDERS,
+    market_id, transaction::MAX_SIGNED_ORDER_ENCODE_SIZE, AssetId, ClobActor, ClobConfig, ClobDB,
+    ClobError, ClobExtension, ClobGenesis, ClobLedger, ClobMailbox, ClobMarketGenesis, ClobOperation,
+    Fill, FillId, Market, MatchBatch, MatchEngine, Order, OrderId, OrderStatus, Side, TimeInForce,
+    Transaction, MAX_BOOK_ORDERS, MAX_FILLS_PER_MARKET, MAX_MATCH_BATCH_FILLS, MAX_MATCH_BATCH_ORDERS,
 };
 
 #[derive(Clone, Default)]
@@ -2807,4 +2809,73 @@ fn preview_matches_same_block_markets_without_mutating_ingress() {
         );
         mailbox.submit_order(off_tick).await.unwrap();
     });
+}
+
+#[test]
+fn match_batch_bound_covers_full_multisig_orders() {
+    let signers: Vec<PrivateKey> = (0..MAX_MULTISIG_SIGNERS)
+        .map(|seed| PrivateKey::secp256r1_from_seed(seed as u64))
+        .collect();
+    let signer_refs: Vec<&PrivateKey> = signers.iter().collect();
+    let policy = MultisigPolicy::new(
+        1,
+        signers.iter().map(PrivateKey::public_key).collect(),
+    )
+    .expect("multisig policy");
+    let account = Address::multisig(&policy);
+    let order = Transaction::sign_multisig(
+        account,
+        policy,
+        &signer_refs,
+        u64::MAX,
+        ClobOperation::PlaceOrder {
+            market: market(),
+            side: Side::Bid,
+            price: u128::MAX,
+            base_quantity: u128::MAX,
+            time_in_force: TimeInForce::GoodTilCancelled,
+        },
+    );
+    assert!(order.encode_size() <= MAX_SIGNED_ORDER_ENCODE_SIZE);
+
+    let fill = Fill {
+        id: FillId(<Digest as DigestTrait>::EMPTY),
+        market: market(),
+        maker_order: OrderId(<Digest as DigestTrait>::EMPTY),
+        taker_order: OrderId(<Digest as DigestTrait>::EMPTY),
+        maker: order.account_id.clone(),
+        taker: order.account_id.clone(),
+        taker_side: Side::Ask,
+        price: u128::MAX,
+        base_quantity: u128::MAX,
+        quote_quantity: u128::MAX,
+        sequence: u64::MAX,
+        written_at_height: u64::MAX,
+        written_at_ms: u64::MAX,
+    };
+    assert!(fill.encode_size() <= Fill::MAX_ENCODE_SIZE);
+
+    let batch = MatchBatch {
+        orders: vec![order],
+        fills: vec![fill],
+    };
+    assert!(batch.encode_size() <= MatchBatch::MAX_ENCODE_SIZE);
+    const {
+        assert!(MatchBatch::MAX_ENCODE_SIZE > 8 * 1024);
+        assert!(MAX_MATCH_BATCH_ORDERS == 4_096);
+        assert!(MAX_MATCH_BATCH_FILLS == 4_096);
+    }
+
+    let nested = Transaction::sign(
+        &PrivateKey::from_seed(1),
+        0,
+        ClobOperation::ApplyMatchBatch {
+            batch: MatchBatch::default(),
+        },
+    );
+    let nested_batch = MatchBatch {
+        orders: vec![nested],
+        fills: Vec::new(),
+    };
+    assert!(MatchBatch::decode(nested_batch.encode()).is_err());
 }

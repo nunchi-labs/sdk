@@ -158,5 +158,20 @@ macro_rules! transaction_wrapper {
                 }
             }
         }
+
+        impl ::commonware_codec::MaxEncodeSize for $name {
+            const MAX_ENCODE_SIZE: usize = {
+                let mut max = 0usize;
+                $(
+                    {
+                        let size = <$transaction as ::commonware_codec::MaxEncodeSize>::MAX_ENCODE_SIZE;
+                        if size > max {
+                            max = size;
+                        }
+                    }
+                )+
+                1 + max
+            };
+        }
     };
 }

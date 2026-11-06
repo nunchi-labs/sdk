@@ -1,3 +1,4 @@
+use commonware_codec::MaxEncodeSize;
 use commonware_consensus::{
     marshal::ancestry::Ancestry,
     types::{Epoch, Height, Round, View},
@@ -33,7 +34,7 @@ use tracing::{debug, error};
 use crate::{
     dummy_genesis_parent, BlockCommitment, CodingBlock, CodingContext, ConsensusExtension,
     DkgMailbox, DkgState, EventConsumer, NoConsensusExtension, NoopEventConsumer, StateCommitment,
-    TransactionEventContext,
+    TransactionEventContext, MAX_TRANSACTIONS,
 };
 
 /// The height of the last finalized block applied to a node's ledger.
@@ -65,7 +66,7 @@ where
 pub struct Application<R, Ext = NoConsensusExtension, Events = NoopEventConsumer>
 where
     R: Runtime,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction + MaxEncodeSize,
     Ext: ConsensusExtension + Sync,
     Events: EventConsumer,
 {
@@ -135,7 +136,7 @@ impl ApplicationMetrics {
 impl<R, Ext, Events> Application<R, Ext, Events>
 where
     R: Runtime,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction + MaxEncodeSize,
     Ext: ConsensusExtension + Sync,
     Events: EventConsumer,
 {
@@ -222,6 +223,15 @@ where
             .expect("application strategy initialized")
     }
 
+    fn transaction_limit(&self) -> usize {
+        self.max_block_transactions
+            .min(MAX_TRANSACTIONS as usize)
+    }
+
+    fn transaction_within_bound(transaction: &R::Transaction) -> bool {
+        transaction.encoded_size() <= R::Transaction::MAX_ENCODE_SIZE
+    }
+
     fn minimum_timestamp(&self, parent: &CodingBlock<R::Transaction, Ext>) -> Option<u64> {
         parent
             .header
@@ -260,11 +270,16 @@ where
     ) -> Option<(Vec<R::Transaction>, QmdbMerkleized<E>)> {
         let mut batch = QmdbBatch::new(batches);
         let mut included = Vec::new();
+        let transaction_limit = self.transaction_limit();
 
         let validate_start = timing.map(|(runtime_context, _)| runtime_context.current());
         for transaction in candidates {
-            if included.len() == self.max_block_transactions {
+            if included.len() == transaction_limit {
                 break;
+            }
+            if !Self::transaction_within_bound(&transaction) {
+                debug!("skipping transaction wider than the block encode bound");
+                continue;
             }
             let mut overlay = Overlay::new(&mut batch);
             match R::validate(&mut overlay, context, &transaction).await {
@@ -316,6 +331,7 @@ where
     ) -> Option<(Vec<R::Transaction>, Ext::Payload, QmdbMerkleized<E>)> {
         let mut batch = QmdbBatch::new(batches);
         let mut included = Vec::new();
+        let transaction_limit = self.transaction_limit();
 
         // Hydrate extension ingress from the parent block. Transactions below are
         // still speculative; `preview` hands that view to proposal matching only.
@@ -323,8 +339,12 @@ where
 
         let validate_start = timing.map(|_| rng.current());
         for transaction in candidates {
-            if included.len() == self.max_block_transactions {
+            if included.len() == transaction_limit {
                 break;
+            }
+            if !Self::transaction_within_bound(&transaction) {
+                debug!("skipping transaction wider than the block encode bound");
+                continue;
             }
             let mut overlay = Overlay::new(&mut batch);
             match R::validate(&mut overlay, context, &transaction).await {
@@ -643,7 +663,7 @@ where
 impl<R, Ext> Application<R, Ext, NoopEventConsumer>
 where
     R: Runtime,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction + MaxEncodeSize,
     Ext: ConsensusExtension + Sync,
 {
     #[allow(clippy::too_many_arguments)]
@@ -704,7 +724,7 @@ where
 impl<R> Application<R>
 where
     R: Runtime,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction + MaxEncodeSize,
 {
     pub fn new(
         submitter: MempoolHandle<R::Transaction>,
@@ -730,7 +750,7 @@ where
 impl<R, Events> Application<R, NoConsensusExtension, Events>
 where
     R: Runtime,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction + MaxEncodeSize,
     Events: EventConsumer,
 {
     pub fn new_with_events(
@@ -762,7 +782,7 @@ where
 impl<R> Application<R>
 where
     R: Runtime,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction + MaxEncodeSize,
     CodingBlock<R::Transaction>: nunchi_dkg::ReshareBlock,
 {
     pub fn with_dkg(
@@ -790,7 +810,7 @@ where
 impl<R, Events> Application<R, NoConsensusExtension, Events>
 where
     R: Runtime,
-    R::Transaction: PoolTransaction,
+    R::Transaction: PoolTransaction + MaxEncodeSize,
     CodingBlock<R::Transaction>: nunchi_dkg::ReshareBlock,
     Events: EventConsumer,
 {
@@ -826,7 +846,7 @@ impl<E, R, Ext, Events> StatefulApplication<E> for Application<R, Ext, Events>
 where
     E: Rng + CryptoRng + Spawner + Metrics + Clock + Storage,
     R: Runtime + Clone + Send + Sync + 'static,
-    R::Transaction: PoolTransaction + Sync,
+    R::Transaction: PoolTransaction + MaxEncodeSize + Sync,
     Ext: ConsensusExtension + Sync,
     Events: EventConsumer,
 {

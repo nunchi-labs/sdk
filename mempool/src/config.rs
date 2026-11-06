@@ -1,3 +1,10 @@
+/// Default encoded-size cap for one admitted transaction.
+///
+/// This is a pool resource bound. Block codecs derive their own maximum from
+/// the transaction types they decode, and that maximum must be at least this
+/// wide so a default pool cannot admit a transaction the block bound excludes.
+pub const DEFAULT_MAX_TX_BYTES: usize = 64 * 1024;
+
 /// Resource bounds and tuning knobs for a [`crate::Mempool`].
 #[derive(Clone, Debug)]
 pub struct PoolConfig {
@@ -23,7 +30,7 @@ impl Default for PoolConfig {
         Self {
             max_total_txs: 1_000_000,
             max_per_account_txs: 256,
-            max_tx_bytes: 64 * 1024,
+            max_tx_bytes: DEFAULT_MAX_TX_BYTES,
             ttl_blocks: 25_000,
             status_cache_capacity: 100_000,
             mailbox_size: 1_024,

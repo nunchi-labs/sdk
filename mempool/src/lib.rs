@@ -21,7 +21,7 @@ mod tests;
 mod tx;
 
 pub use actor::{Mempool, MempoolHandle};
-pub use config::PoolConfig;
+pub use config::{PoolConfig, DEFAULT_MAX_TX_BYTES};
 pub use error::{AdmissionError, DropReason};
 pub use status::TxStatus;
 pub use tx::{NonceKey, PoolTransaction};

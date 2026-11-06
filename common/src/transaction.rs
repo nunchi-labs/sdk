@@ -1,5 +1,7 @@
 use crate::{Address, MultisigPolicy, MAX_MULTISIG_SIGNERS};
-use commonware_codec::{Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{
+    Encode, EncodeSize, Error, FixedSize, MaxEncodeSize, RangeCfg, Read, ReadExt, Write,
+};
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use nunchi_crypto::{PrivateKey, PublicKey, Signature, SignatureError};
 use std::collections::BTreeSet;
@@ -114,6 +116,10 @@ impl EncodeSize for AccountSignature {
     fn encode_size(&self) -> usize {
         self.signer.encode_size() + self.signature.encode_size()
     }
+}
+
+impl MaxEncodeSize for AccountSignature {
+    const MAX_ENCODE_SIZE: usize = PublicKey::MAX_ENCODE_SIZE + Signature::MAX_ENCODE_SIZE;
 }
 
 /// Authorization attached to a Nunchi transaction.
@@ -242,6 +248,16 @@ impl EncodeSize for Authorization {
     }
 }
 
+impl MaxEncodeSize for Authorization {
+    const MAX_ENCODE_SIZE: usize = {
+        let single = 1 + PublicKey::MAX_ENCODE_SIZE + Signature::MAX_ENCODE_SIZE;
+        let multisig = 1
+            + MultisigPolicy::MAX_ENCODE_SIZE
+            + crate::items_bound(MAX_MULTISIG_SIGNERS, AccountSignature::MAX_ENCODE_SIZE);
+        if single > multisig { single } else { multisig }
+    };
+}
+
 /// A signed Nunchi transaction over a caller-defined operation enum.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Transaction<Operation> {
@@ -341,6 +357,13 @@ impl<Operation: EncodeSize> EncodeSize for Transaction<Operation> {
             + self.payload.encode_size()
             + self.authorization.encode_size()
     }
+}
+
+impl<Operation: MaxEncodeSize> MaxEncodeSize for Transaction<Operation> {
+    const MAX_ENCODE_SIZE: usize = Address::SIZE
+        + u64::SIZE
+        + Operation::MAX_ENCODE_SIZE
+        + Authorization::MAX_ENCODE_SIZE;
 }
 
 fn signing_bytes<Operation: EncodeSize + Write>(

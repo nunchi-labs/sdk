@@ -1,4 +1,6 @@
-use commonware_codec::Encode;
+use commonware_codec::{Encode, EncodeSize, MaxEncodeSize};
+use commonware_consensus::BoundedBlock;
+use commonware_utils::NZU32;
 use nunchi_authority::{AuthorityOperation, Transaction as AuthorityTransaction};
 use nunchi_clob::{AssetId, ClobOperation, Transaction as ClobTransaction};
 use nunchi_coins::{CoinOperation, Transaction as CoinTransaction};
@@ -9,7 +11,13 @@ use commonware_codec::DecodeExt;
 use commonware_cryptography::{ed25519, Hasher, Sha256, Signer as _};
 use nunchi_authority::MultisigPolicy;
 use nunchi_coins::{CoinSpec, PrivateKey, TokenName, TokenSymbol};
-use nunchi_oracle::{IntervalKey, NamespaceId, OracleOperation, Transaction as OracleTransaction};
+use nunchi_chain::{CodingBlock, MAX_TRANSACTIONS};
+use nunchi_clob::{ClobExtension, MatchBatch};
+use nunchi_mempool::DEFAULT_MAX_TX_BYTES;
+use nunchi_oracle::{
+    IntervalKey, NamespaceId, OracleOperation, Transaction as OracleTransaction, MAX_PAYLOAD_SIZE,
+    MAX_PROOF_SIZE,
+};
 
 use crate::transaction::*;
 
@@ -144,4 +152,34 @@ fn pool_transaction_nonce_key_uses_operation_namespace() {
         PoolTransaction::nonce_key(&coin),
         PoolTransaction::nonce_key(&clob)
     );
+}
+
+#[test]
+fn aggregate_transaction_bound_covers_mempool_oracle_and_clob() {
+    let signer = nunchi_crypto::PrivateKey::ed25519_from_seed(9);
+    let oracle = OracleTransaction::sign(
+        &signer,
+        u64::MAX,
+        OracleOperation::AppendRecord {
+            namespace: NamespaceId(Sha256::hash(&[b"bound"])),
+            interval: IntervalKey::new(u64::MAX),
+            payload: vec![7; MAX_PAYLOAD_SIZE],
+            proof: Some(vec![9; MAX_PROOF_SIZE]),
+        },
+    );
+    assert!(oracle.encode_size() > DEFAULT_MAX_TX_BYTES);
+    assert!(oracle.encode_size() <= OracleTransaction::MAX_ENCODE_SIZE);
+
+    let wrapped = Transaction::from(oracle);
+    assert!(wrapped.encode_size() <= Transaction::MAX_ENCODE_SIZE);
+    const {
+        assert!(Transaction::MAX_ENCODE_SIZE >= DEFAULT_MAX_TX_BYTES);
+        assert!(Transaction::MAX_ENCODE_SIZE >= OracleTransaction::MAX_ENCODE_SIZE);
+    }
+
+    let bound = CodingBlock::<Transaction, ClobExtension>::max_encode_size(&(NZU32!(4), ()));
+    let mempool_block = (MAX_TRANSACTIONS as usize) * DEFAULT_MAX_TX_BYTES;
+    assert!(bound >= mempool_block);
+    assert!(bound >= MatchBatch::MAX_ENCODE_SIZE);
+    assert!(bound >= mempool_block + MatchBatch::MAX_ENCODE_SIZE);
 }

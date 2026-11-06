@@ -2,7 +2,9 @@ use std::num::NonZeroU32;
 
 use bytes::BufMut;
 use commonware_codec::Buf;
-use commonware_codec::{varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{
+    varint::UInt, Encode, EncodeSize, Error, FixedSize, MaxEncodeSize, Read, ReadExt, Write,
+};
 use commonware_coding::ReedSolomon;
 use commonware_consensus::{
     marshal::coding::types::coding_config_for_participants,
@@ -326,11 +328,72 @@ where
     }
 }
 
+fn add_bound(left: usize, right: usize) -> usize {
+    left.checked_add(right)
+        .expect("block encode bound fits in usize")
+}
+
+/// Upper bound on the header `BlockHeader::read_cfg` admits under `cfg`.
+///
+/// Each scalar uses its widest codec width. The dealer log uses `cfg`'s participant cap.
+/// The extension uses the payload bound the extension codec reports for `cfg`.
+fn header_max_encode_size<Ext, D>(cfg: &(NonZeroU32, Ext::ReadCfg)) -> usize
+where
+    Ext: BlockExtension,
+    D: DigestTrait + MaxEncodeSize,
+{
+    add_bound(
+        add_bound(
+            add_bound(
+                Context::<D>::MAX_ENCODE_SIZE,
+                add_bound(Digest::SIZE, Height::MAX_ENCODE_SIZE),
+            ),
+            add_bound(
+                UInt::<u64>::MAX_ENCODE_SIZE,
+                add_bound(Digest::SIZE, bool::SIZE),
+            ),
+        ),
+        add_bound(
+            add_bound(
+                DealerLog::max_encode_size(cfg.0),
+                Ext::max_payload_encode_size(&cfg.1),
+            ),
+            add_bound(
+                Digest::SIZE,
+                NonEmptyRange::<Location>::MAX_ENCODE_SIZE,
+            ),
+        ),
+    )
+}
+
+/// Upper bound on the transaction list `Block::read_cfg` admits.
+///
+/// The count prefix uses the widest `u64` varint. Each transaction is at most
+/// [`MaxEncodeSize::MAX_ENCODE_SIZE`], and the list holds at most [`MAX_TRANSACTIONS`].
+fn transaction_section_max<Tx: MaxEncodeSize>() -> usize {
+    let body = (MAX_TRANSACTIONS as usize)
+        .checked_mul(Tx::MAX_ENCODE_SIZE)
+        .expect("transaction section bound fits in usize");
+    add_bound(UInt::<u64>::MAX_ENCODE_SIZE, body)
+}
+
+fn block_max_encode_size<Tx, Ext, D>(cfg: &(NonZeroU32, Ext::ReadCfg)) -> usize
+where
+    Tx: MaxEncodeSize,
+    Ext: BlockExtension,
+    D: DigestTrait + MaxEncodeSize,
+{
+    add_bound(
+        header_max_encode_size::<Ext, D>(cfg),
+        transaction_section_max::<Tx>(),
+    )
+}
+
 impl<Tx, Ext, D> Read for Block<Tx, Ext, D>
 where
-    Tx: EncodeSize + Read<Cfg = ()> + Write,
+    Tx: EncodeSize + MaxEncodeSize + Read<Cfg = ()> + Write,
     Ext: BlockExtension,
-    D: DigestTrait,
+    D: DigestTrait + MaxEncodeSize,
 {
     type Cfg = (NonZeroU32, Ext::ReadCfg);
 
@@ -345,7 +408,14 @@ where
         }
         let mut transactions = Vec::with_capacity(count as usize);
         for _ in 0..count {
-            transactions.push(Tx::read(reader)?);
+            let transaction = Tx::read(reader)?;
+            if transaction.encode_size() > Tx::MAX_ENCODE_SIZE {
+                return Err(Error::Invalid(
+                    "nunchi_chain::Block",
+                    "transaction exceeds maximum encoded size",
+                ));
+            }
+            transactions.push(transaction);
         }
         if transaction_root(&transactions) != header.transaction_root {
             return Err(Error::Invalid(
@@ -354,11 +424,18 @@ where
             ));
         }
         let digest = header.digest();
-        Ok(Self {
+        let block = Self {
             header,
             transactions,
             digest,
-        })
+        };
+        if block.encode_size() > block_max_encode_size::<Tx, Ext, D>(cfg) {
+            return Err(Error::Invalid(
+                "nunchi_chain::Block",
+                "block exceeds maximum encoded size",
+            ));
+        }
+        Ok(block)
     }
 }
 
@@ -480,7 +557,7 @@ where
 
 impl<Tx, Ext> Read for CodingBlock<Tx, Ext>
 where
-    Tx: Clone + EncodeSize + Read<Cfg = ()> + Send + Sync + Write + 'static,
+    Tx: Clone + EncodeSize + MaxEncodeSize + Read<Cfg = ()> + Send + Sync + Write + 'static,
     Ext: BlockExtension + Clone + Send + Sync,
 {
     type Cfg = (NonZeroU32, Ext::ReadCfg);
@@ -492,13 +569,17 @@ where
 
 impl<Tx, Ext> commonware_consensus::BoundedBlock for CodingBlock<Tx, Ext>
 where
-    Tx: Clone + EncodeSize + Read<Cfg = ()> + Send + Sync + Write + 'static,
+    Tx: Clone + EncodeSize + MaxEncodeSize + Read<Cfg = ()> + Send + Sync + Write + 'static,
     Ext: BlockExtension + Clone + Send + Sync,
 {
-    fn max_encode_size(_cfg: &Self::Cfg) -> usize {
-        // The decoder admits at most MAX_TRANSACTIONS self-describing transactions.
-        // 8 KiB per transaction covers current module payloads with room for the header.
-        8 * 1024 + (MAX_TRANSACTIONS as usize) * 8 * 1024
+    fn max_encode_size(cfg: &Self::Cfg) -> usize {
+        // `read_cfg` rejects a transaction wider than `Tx::MAX_ENCODE_SIZE` and a block wider
+        // than this sum. Header fields use their codec maxima, including the dealer log for
+        // `cfg`'s participant cap and the extension payload bound. The transaction section is
+        // `MAX_TRANSACTIONS` entries at that per-transaction maximum. Coins-chain's transaction
+        // maximum is the widest module codec (oracle payload and proof caps, a CLOB match batch,
+        // a bridge claim proof, and a full multisig) and is at least the mempool admission limit.
+        block_max_encode_size::<Tx, Ext, BlockCommitment<Tx, Ext>>(cfg)
     }
 }
 
@@ -660,7 +741,7 @@ where
 
 impl<Tx, Ext> Read for Notarized<Tx, Ext>
 where
-    Tx: Clone + EncodeSize + Read<Cfg = ()> + Send + Sync + Write + 'static,
+    Tx: Clone + EncodeSize + MaxEncodeSize + Read<Cfg = ()> + Send + Sync + Write + 'static,
     Ext: BlockExtension + Clone + Send + Sync,
 {
     type Cfg = (NonZeroU32, Ext::ReadCfg);
@@ -726,7 +807,7 @@ where
 
 impl<Tx, Ext> Read for Finalized<Tx, Ext>
 where
-    Tx: Clone + EncodeSize + Read<Cfg = ()> + Send + Sync + Write + 'static,
+    Tx: Clone + EncodeSize + MaxEncodeSize + Read<Cfg = ()> + Send + Sync + Write + 'static,
     Ext: BlockExtension + Clone + Send + Sync,
 {
     type Cfg = (NonZeroU32, Ext::ReadCfg);

@@ -1,5 +1,6 @@
 use commonware_codec::{
-    DecodeExt, Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
+    DecodeExt, Encode, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, RangeCfg, Read,
+    ReadExt, Write,
 };
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use nunchi_crypto::PublicKey;
@@ -201,6 +202,11 @@ impl EncodeSize for MultisigPolicy {
     fn encode_size(&self) -> usize {
         self.threshold.encode_size() + self.signers.encode_size()
     }
+}
+
+impl MaxEncodeSize for MultisigPolicy {
+    const MAX_ENCODE_SIZE: usize =
+        u16::SIZE + crate::items_bound(MAX_MULTISIG_SIGNERS, PublicKey::MAX_ENCODE_SIZE);
 }
 
 /// Invalid account policy configuration.

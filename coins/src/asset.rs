@@ -1,6 +1,6 @@
 use super::Address;
 use commonware_codec::{
-    EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
+    EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, RangeCfg, Read, ReadExt, Write,
 };
 use commonware_cryptography::sha256::Digest;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -289,6 +289,15 @@ impl EncodeSize for CoinSpec {
             + self.initial_supply.encode_size()
             + self.max_supply.encode_size()
     }
+}
+
+impl MaxEncodeSize for CoinSpec {
+    const MAX_ENCODE_SIZE: usize = nunchi_common::items_bound(MAX_SYMBOL_BYTES, u8::SIZE)
+        + nunchi_common::items_bound(MAX_NAME_BYTES, u8::SIZE)
+        + u8::SIZE
+        + u128::SIZE
+        + bool::SIZE
+        + u128::SIZE;
 }
 
 /// A token registered in the Nunchi coin ledger.

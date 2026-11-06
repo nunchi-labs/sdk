@@ -1,4 +1,4 @@
-use commonware_codec::{EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error, FixedSize, MaxEncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{ed25519, sha256::Digest};
 use nunchi_common::MAX_MULTISIG_SIGNERS;
 use nunchi_crypto::PublicKey;
@@ -108,6 +108,13 @@ impl EncodeSize for MultisigPolicy {
     fn encode_size(&self) -> usize {
         self.owners.encode_size() + self.threshold.encode_size()
     }
+}
+
+impl MaxEncodeSize for MultisigPolicy {
+    const MAX_ENCODE_SIZE: usize = nunchi_common::items_bound(
+        MAX_MULTISIG_SIGNERS,
+        PublicKey::MAX_ENCODE_SIZE,
+    ) + u16::SIZE;
 }
 
 impl Write for RegistryChange {

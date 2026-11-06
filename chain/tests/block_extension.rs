@@ -1,6 +1,6 @@
 use bytes::BufMut;
 use commonware_codec::Buf;
-use commonware_codec::{Decode, Encode, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{Decode, Encode, EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_consensus::types::{Epoch, Height, Round, View};
 use commonware_cryptography::{ed25519, sha256, Digest as _, Digestible as _, Signer};
 use commonware_storage::mmr::Location;
@@ -45,6 +45,10 @@ impl BlockExtension for TestExtension {
     fn genesis_payload() -> Self::Payload {
         TestPayload(0)
     }
+
+    fn max_payload_encode_size(_cfg: &Self::ReadCfg) -> usize {
+        u8::SIZE
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -56,6 +60,10 @@ impl BlockExtension for TestConsensusExtension {
 
     fn genesis_payload() -> Self::Payload {
         TestPayload(0)
+    }
+
+    fn max_payload_encode_size(_cfg: &Self::ReadCfg) -> usize {
+        u8::SIZE
     }
 }
 
