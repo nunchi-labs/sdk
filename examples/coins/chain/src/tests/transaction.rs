@@ -189,7 +189,12 @@ fn aggregate_transaction_bound_covers_mempool_oracle_and_clob() {
 
     let bound = CodingBlock::<Transaction, ClobExtension>::max_encode_size(&(NZU32!(4), ()));
     let mempool_block = (MAX_TRANSACTIONS as usize) * DEFAULT_MAX_TX_BYTES;
+    // Header carries one match batch. The transaction list is a mempool-sized block,
+    // not `MAX_TRANSACTIONS` copies of the widest module codec.
     assert!(bound >= mempool_block);
     assert!(bound >= MatchBatch::MAX_ENCODE_SIZE);
     assert!(bound >= mempool_block + MatchBatch::MAX_ENCODE_SIZE);
+    assert!(bound / (MAX_TRANSACTIONS as usize) < Transaction::MAX_ENCODE_SIZE);
+    let product = (MAX_TRANSACTIONS as usize).saturating_mul(Transaction::MAX_ENCODE_SIZE);
+    assert!(bound < product / 64);
 }

@@ -1,6 +1,6 @@
 use std::num::NonZeroU32;
 
-use bytes::BufMut;
+use bytes::{Buf as _, BufMut};
 use commonware_codec::Buf;
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error, FixedSize, MaxEncodeSize, Read, ReadExt, Write,
@@ -366,15 +366,54 @@ where
     )
 }
 
+/// Encoded-size cap for one transaction [`Block::read_cfg`] will materialize.
+///
+/// [`MaxEncodeSize::MAX_ENCODE_SIZE`] is the widest bytes the transaction codec can parse.
+/// On a coins chain that width is a bridge claim proof or a CLOB match batch, far above the
+/// 64 KiB mempool admission limit. Marshal disseminates every body under the block bound, so
+/// using the codec width for every [`MAX_TRANSACTIONS`] slot would admit bodies honest
+/// admission never produces. The block cap is the tighter of the two.
+pub(crate) fn tx_encode_limit<Tx: MaxEncodeSize>() -> usize {
+    Tx::MAX_ENCODE_SIZE.min(nunchi_mempool::DEFAULT_MAX_TX_BYTES)
+}
+
 /// Upper bound on the transaction list `Block::read_cfg` admits.
 ///
 /// The count prefix uses the widest `u64` varint. Each transaction is at most
-/// [`MaxEncodeSize::MAX_ENCODE_SIZE`], and the list holds at most [`MAX_TRANSACTIONS`].
+/// [`tx_encode_limit`], and the list holds at most [`MAX_TRANSACTIONS`].
 fn transaction_section_max<Tx: MaxEncodeSize>() -> usize {
     let body = (MAX_TRANSACTIONS as usize)
-        .checked_mul(Tx::MAX_ENCODE_SIZE)
+        .checked_mul(tx_encode_limit::<Tx>())
         .expect("transaction section bound fits in usize");
     add_bound(UInt::<u64>::MAX_ENCODE_SIZE, body)
+}
+
+/// Read one transaction, refusing to parse past [`tx_encode_limit`].
+///
+/// The limit is applied to the buffer before [`Read::read`]. A transaction wider than the
+/// cap fails while bytes remain in the block instead of after the value has been allocated.
+fn read_transaction<Tx>(reader: &mut impl Buf, limit: usize) -> Result<Tx, Error>
+where
+    Tx: EncodeSize + Read<Cfg = ()>,
+{
+    let available = reader.remaining();
+    let mut limited = reader.take(limit);
+    match Tx::read(&mut limited) {
+        Ok(transaction) => {
+            if transaction.encode_size() > limit {
+                return Err(Error::Invalid(
+                    "nunchi_chain::Block",
+                    "transaction exceeds maximum encoded size",
+                ));
+            }
+            Ok(transaction)
+        }
+        Err(Error::EndOfBuffer) if available > limit => Err(Error::Invalid(
+            "nunchi_chain::Block",
+            "transaction exceeds maximum encoded size",
+        )),
+        Err(error) => Err(error),
+    }
 }
 
 fn block_max_encode_size<Tx, Ext, D>(cfg: &(NonZeroU32, Ext::ReadCfg)) -> usize
@@ -407,15 +446,9 @@ where
             ));
         }
         let mut transactions = Vec::with_capacity(count as usize);
+        let limit = tx_encode_limit::<Tx>();
         for _ in 0..count {
-            let transaction = Tx::read(reader)?;
-            if transaction.encode_size() > Tx::MAX_ENCODE_SIZE {
-                return Err(Error::Invalid(
-                    "nunchi_chain::Block",
-                    "transaction exceeds maximum encoded size",
-                ));
-            }
-            transactions.push(transaction);
+            transactions.push(read_transaction(reader, limit)?);
         }
         if transaction_root(&transactions) != header.transaction_root {
             return Err(Error::Invalid(
@@ -573,12 +606,12 @@ where
     Ext: BlockExtension + Clone + Send + Sync,
 {
     fn max_encode_size(cfg: &Self::Cfg) -> usize {
-        // `read_cfg` rejects a transaction wider than `Tx::MAX_ENCODE_SIZE` and a block wider
-        // than this sum. Header fields use their codec maxima, including the dealer log for
-        // `cfg`'s participant cap and the extension payload bound. The transaction section is
-        // `MAX_TRANSACTIONS` entries at that per-transaction maximum. Coins-chain's transaction
-        // maximum is the widest module codec (oracle payload and proof caps, a CLOB match batch,
-        // a bridge claim proof, and a full multisig) and is at least the mempool admission limit.
+        // `read_cfg` rejects a transaction wider than `tx_encode_limit` and a block wider than
+        // this sum. Header fields use their codec maxima, including the dealer log for `cfg`'s
+        // participant cap and the extension payload bound. The transaction section is
+        // `MAX_TRANSACTIONS` entries at the mempool admission limit when the transaction codec
+        // is wider than that. A bridge claim proof or a CLOB match batch must not be multiplied
+        // into every slot: marshal holds and forwards every body under this bound.
         block_max_encode_size::<Tx, Ext, BlockCommitment<Tx, Ext>>(cfg)
     }
 }

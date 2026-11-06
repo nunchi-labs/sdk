@@ -32,9 +32,9 @@ use std::{
 use tracing::{debug, error};
 
 use crate::{
-    dummy_genesis_parent, BlockCommitment, CodingBlock, CodingContext, ConsensusExtension,
-    DkgMailbox, DkgState, EventConsumer, NoConsensusExtension, NoopEventConsumer, StateCommitment,
-    TransactionEventContext, MAX_TRANSACTIONS,
+    block::tx_encode_limit, dummy_genesis_parent, BlockCommitment, CodingBlock, CodingContext,
+    ConsensusExtension, DkgMailbox, DkgState, EventConsumer, NoConsensusExtension,
+    NoopEventConsumer, StateCommitment, TransactionEventContext, MAX_TRANSACTIONS,
 };
 
 /// The height of the last finalized block applied to a node's ledger.
@@ -229,7 +229,7 @@ where
     }
 
     fn transaction_within_bound(transaction: &R::Transaction) -> bool {
-        transaction.encoded_size() <= R::Transaction::MAX_ENCODE_SIZE
+        transaction.encoded_size() <= tx_encode_limit::<R::Transaction>()
     }
 
     fn minimum_timestamp(&self, parent: &CodingBlock<R::Transaction, Ext>) -> Option<u64> {
