@@ -188,11 +188,12 @@ impl<T: PoolTransaction> MempoolHandle<T> {
     }
 
     /// Report a finalized block: the digests it included and each touched
-    /// lane's new committed nonce. Fire-and-forget so the consensus
-    /// finalize hook never blocks on the pool; a dropped report self-heals on
-    /// the next one (re-proposed finalized transactions fail the ledger nonce
-    /// gate and are pruned then).
-    pub fn finalized(
+    /// lane's new committed nonce.
+    ///
+    /// Waits for mailbox capacity. Dropping the report leaves included
+    /// transactions pending, so later proposals replay them and
+    /// `transaction_status` stays `pending` until TTL.
+    pub async fn finalized(
         &self,
         digests: Vec<Digest>,
         lane_nonces: Vec<(T::NonceKey, u64)>,
@@ -200,16 +201,17 @@ impl<T: PoolTransaction> MempoolHandle<T> {
     ) {
         let mut sender = self.sender.clone();
         if sender
-            .try_send(Message::Finalized {
+            .send(Message::Finalized {
                 digests,
                 lane_nonces,
                 height,
             })
+            .await
             .is_err()
         {
             warn!(
                 height,
-                "mempool mailbox unavailable; dropping finalization report"
+                "mempool mailbox closed; finalization report was not applied"
             );
         }
     }

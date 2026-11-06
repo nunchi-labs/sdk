@@ -5,3 +5,7 @@ dist/
 src/wasm/
 wasm-crypto/target/
 wasm-crypto/pkg/
+store/*.zip
+store/icons/icon-source.png
+scripts/__pycache__/
+**/__pycache__/
