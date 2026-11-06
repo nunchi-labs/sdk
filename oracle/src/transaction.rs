@@ -1,5 +1,7 @@
 use crate::{IntervalKey, NamespaceId, MAX_PAYLOAD_SIZE, MAX_PROOF_SIZE, ORACLE_NAMESPACE};
-use commonware_codec::{EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{
+    EncodeSize, Error, FixedSize, MaxEncodeSize, RangeCfg, Read, ReadExt, Write,
+};
 use nunchi_common::Operation as CommonOperation;
 
 #[repr(u8)]
@@ -85,6 +87,15 @@ impl EncodeSize for OracleOperation {
             }
         }
     }
+}
+
+impl MaxEncodeSize for OracleOperation {
+    const MAX_ENCODE_SIZE: usize = 1
+        + NamespaceId::SIZE
+        + IntervalKey::SIZE
+        + nunchi_common::items_bound(MAX_PAYLOAD_SIZE, u8::SIZE)
+        + bool::SIZE
+        + nunchi_common::items_bound(MAX_PROOF_SIZE, u8::SIZE);
 }
 
 impl CommonOperation for OracleOperation {

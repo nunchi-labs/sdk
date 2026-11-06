@@ -1,7 +1,7 @@
 //! Signed bridge operations.
 
 use crate::record::{BridgeTransferRecord, ChainId, BRIDGE_NAMESPACE};
-use commonware_codec::{EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error, FixedSize, MaxEncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::sha256::Digest;
 use nunchi_common::{
     state_db::{StateProof, StateProofCfg},
@@ -52,11 +52,15 @@ impl Read for BridgeOperationId {
 /// A `BridgeOperation` must decode with `Cfg = ()` (the [`Operation`] contract), but a `StateProof`
 /// needs explicit allocation bounds. These bridge-internal bounds are applied when reading a claim's
 /// proof, so the operation stays self-contained while still capping attacker-controlled allocation.
+const CLAIM_MAX_PROOF_DIGESTS: usize = 4096;
+const CLAIM_MAX_OPERATIONS: usize = 4096;
+const CLAIM_MAX_VALUE_LEN: usize = 65_536;
+
 fn claim_proof_cfg() -> StateProofCfg {
     StateProofCfg {
-        max_proof_digests: 4096,
-        operations: RangeCfg::new(0..=4096usize),
-        value_len: RangeCfg::new(0..=65536usize),
+        max_proof_digests: CLAIM_MAX_PROOF_DIGESTS,
+        operations: RangeCfg::new(0..=CLAIM_MAX_OPERATIONS),
+        value_len: RangeCfg::new(0..=CLAIM_MAX_VALUE_LEN),
     }
 }
 
@@ -176,6 +180,22 @@ impl EncodeSize for BridgeOperation {
 
 impl Operation for BridgeOperation {
     const NAMESPACE: &'static [u8] = BRIDGE_NAMESPACE;
+}
+
+impl MaxEncodeSize for BridgeOperation {
+    const MAX_ENCODE_SIZE: usize = {
+        let lock = 1 + ChainId::SIZE + Digest::SIZE + u128::SIZE + Address::SIZE;
+        let claim = 1
+            + ChainId::SIZE
+            + u64::SIZE
+            + BridgeTransferRecord::SIZE
+            + nunchi_common::max_state_proof_encode_size(
+                CLAIM_MAX_PROOF_DIGESTS,
+                CLAIM_MAX_OPERATIONS,
+                CLAIM_MAX_VALUE_LEN,
+            );
+        if claim > lock { claim } else { lock }
+    };
 }
 
 /// A signed bridge transaction.

@@ -1,5 +1,5 @@
 commonware_macros::stability_scope!(ALPHA {
-use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error, FixedSize, MaxEncodeSize, Read, ReadExt, Write};
 use commonware_cryptography::{ed25519, secp256r1, Signer as _, Verifier as _};
 
 #[cfg(test)]
@@ -99,6 +99,15 @@ impl EncodeSize for PublicKey {
             Self::Secp256r1(key) => key.encode_size(),
         }
     }
+}
+
+impl MaxEncodeSize for PublicKey {
+    const MAX_ENCODE_SIZE: usize = 1
+        + if ed25519::PublicKey::SIZE > secp256r1::standard::PublicKey::SIZE {
+            ed25519::PublicKey::SIZE
+        } else {
+            secp256r1::standard::PublicKey::SIZE
+        };
 }
 
 /// A Nunchi private key tagged with its signature curve.
@@ -230,5 +239,14 @@ impl EncodeSize for Signature {
             Self::Secp256r1(signature) => signature.encode_size(),
         }
     }
+}
+
+impl MaxEncodeSize for Signature {
+    const MAX_ENCODE_SIZE: usize = 1
+        + if ed25519::Signature::SIZE > secp256r1::standard::Signature::SIZE {
+            ed25519::Signature::SIZE
+        } else {
+            secp256r1::standard::Signature::SIZE
+        };
 }
 });

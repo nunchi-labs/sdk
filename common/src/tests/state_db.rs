@@ -1,13 +1,26 @@
 use std::num::NonZeroU64;
 
 use commonware_codec::{Decode, Encode, RangeCfg};
+use commonware_cryptography::sha256;
+use commonware_storage::{merkle::Proof, mmr::Family};
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{deterministic, Runner as _};
 
 use crate::state_db::{
-    verify_state_proof, verify_state_update, CommitState, Namespace, QmdbState, StateProof,
-    StateError, StateProofCfg, StateStore, MAX_STATE_VALUE_SIZE,
+    max_state_proof_encode_size, verify_state_proof, verify_state_update, CommitState, Namespace,
+    QmdbState, StateError, StateProof, StateProofCfg, StateStore, MAX_STATE_VALUE_SIZE,
 };
+
+#[test]
+fn state_proof_bound_covers_merkle_proof_width() {
+    let digests = 4_096;
+    let proof = Proof::<Family, sha256::Digest>::max_encode_size(digests);
+    let operations = 4_096;
+    let value_len = 65_536;
+    let bound = max_state_proof_encode_size(digests, operations, value_len);
+    assert!(bound >= proof);
+    assert!(bound > proof + operations);
+}
 
 #[test]
 fn state_proof_roundtrips_and_rejects_wrong_root() {

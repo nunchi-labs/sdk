@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 
+use commonware_codec::MaxEncodeSize;
+
 use crate::{
     BookSnapshot, ClobDB, ClobLedger, ClobMailbox, ClobOperation, MatchBatch, MarketId, Order,
     OrderId,
@@ -37,6 +39,10 @@ impl BlockExtension for ClobExtension {
 
     fn genesis_payload() -> Self::Payload {
         MatchBatch::default()
+    }
+
+    fn max_payload_encode_size(_cfg: &Self::ReadCfg) -> usize {
+        MatchBatch::MAX_ENCODE_SIZE
     }
 }
 

@@ -2,7 +2,8 @@ use crate::{
     AssetId, Fill, MarketId, OrderId, Side, TimeInForce, MAX_MATCH_BATCH_FILLS,
     MAX_MATCH_BATCH_ORDERS, CLOB_NAMESPACE,
 };
-use commonware_codec::{EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error, FixedSize, MaxEncodeSize, RangeCfg, Read, ReadExt, Write};
+use nunchi_common::{items_bound, Address, Authorization};
 use nunchi_common::Operation as CommonOperation;
 
 #[repr(u8)]
@@ -26,6 +27,42 @@ impl TryFrom<u8> for OperationTag {
             tag => Err(Error::InvalidEnum(tag)),
         }
     }
+}
+
+/// Widest CLOB operation that can appear as a signed order inside a match batch.
+///
+/// `ApplyMatchBatch` is not included. A batch carries order intents, and nesting another batch
+/// would make the encoded size unbounded.
+const MAX_ORDER_OPERATION_ENCODE_SIZE: usize = {
+    let create = 1 + AssetId::SIZE + AssetId::SIZE + u128::SIZE + u128::SIZE;
+    let place = 1 + MarketId::SIZE + u8::SIZE + u128::SIZE + u128::SIZE + u8::SIZE;
+    let cancel = 1 + OrderId::SIZE;
+    let mut max = create;
+    if place > max {
+        max = place;
+    }
+    if cancel > max {
+        max = cancel;
+    }
+    max
+};
+
+/// Widest signed order a match batch will accept.
+pub(crate) const MAX_SIGNED_ORDER_ENCODE_SIZE: usize = Address::SIZE
+    + u64::SIZE
+    + MAX_ORDER_OPERATION_ENCODE_SIZE
+    + Authorization::MAX_ENCODE_SIZE;
+
+fn bounded_order(order: &Transaction) -> bool {
+    order.encode_size() <= MAX_SIGNED_ORDER_ENCODE_SIZE
+        && !matches!(order.payload.operation, ClobOperation::ApplyMatchBatch { .. })
+}
+
+fn order_encode_bound_error() -> Error {
+    Error::Invalid(
+        "nunchi_clob::MatchBatch",
+        "order exceeds the signed-order encode bound",
+    )
 }
 
 /// Proposer-supplied CLOB match batch carried in a block extension.
@@ -55,10 +92,55 @@ impl Read for MatchBatch {
 
     fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
-            orders: Vec::read_cfg(buf, &(RangeCfg::new(0..=MAX_MATCH_BATCH_ORDERS), ()))?,
+            orders: read_bounded_orders(buf)?,
             fills: Vec::read_cfg(buf, &(RangeCfg::new(0..=MAX_MATCH_BATCH_FILLS), ()))?,
         })
     }
+}
+
+// Orders inside a batch stay within `MAX_SIGNED_ORDER_ENCODE_SIZE`.
+// A nested `ApplyMatchBatch` is rejected from its tag, before the nested batch body is read.
+// Reading that body first would parse another full batch, so the encode bound would not hold
+// during decode.
+fn read_bounded_orders(buf: &mut impl commonware_codec::Buf) -> Result<Vec<Transaction>, Error> {
+    let len = usize::read_cfg(buf, &RangeCfg::new(0..=MAX_MATCH_BATCH_ORDERS))?;
+    let mut orders = Vec::with_capacity(len);
+    for _ in 0..len {
+        orders.push(read_bounded_order(buf)?);
+    }
+    Ok(orders)
+}
+
+fn read_bounded_order(buf: &mut impl commonware_codec::Buf) -> Result<Transaction, Error> {
+    let account_id = Address::read(buf)?;
+    let nonce = u64::read(buf)?;
+    let operation = match OperationTag::try_from(u8::read(buf)?)? {
+        OperationTag::ApplyMatchBatch => return Err(order_encode_bound_error()),
+        tag => read_operation(buf, tag)?,
+    };
+    let authorization = Authorization::read(buf)?;
+    if let Authorization::Single { signer, signature } = &authorization {
+        if signer.curve() != signature.curve() {
+            return Err(Error::Invalid(
+                "transaction",
+                "signature curve does not match signer curve",
+            ));
+        }
+    }
+    let order = Transaction {
+        account_id,
+        payload: TransactionPayload::new(nonce, operation),
+        authorization,
+    };
+    if !bounded_order(&order) {
+        return Err(order_encode_bound_error());
+    }
+    Ok(order)
+}
+
+impl MaxEncodeSize for MatchBatch {
+    const MAX_ENCODE_SIZE: usize = items_bound(MAX_MATCH_BATCH_ORDERS, MAX_SIGNED_ORDER_ENCODE_SIZE)
+        + items_bound(MAX_MATCH_BATCH_FILLS, Fill::MAX_ENCODE_SIZE);
 }
 
 impl EncodeSize for MatchBatch {
@@ -137,27 +219,35 @@ impl Read for ClobOperation {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
-        match OperationTag::try_from(u8::read(buf)?)? {
-            OperationTag::CreateMarket => Ok(Self::CreateMarket {
-                base_asset: AssetId::read(buf)?,
-                quote_asset: AssetId::read(buf)?,
-                tick_size: u128::read(buf)?,
-                lot_size: u128::read(buf)?,
-            }),
-            OperationTag::PlaceOrder => Ok(Self::PlaceOrder {
-                market: MarketId::read(buf)?,
-                side: Side::read(buf)?,
-                price: u128::read(buf)?,
-                base_quantity: u128::read(buf)?,
-                time_in_force: TimeInForce::read(buf)?,
-            }),
-            OperationTag::CancelOrder => Ok(Self::CancelOrder {
-                order: OrderId::read(buf)?,
-            }),
-            OperationTag::ApplyMatchBatch => Ok(Self::ApplyMatchBatch {
-                batch: MatchBatch::read(buf)?,
-            }),
-        }
+        let tag = OperationTag::try_from(u8::read(buf)?)?;
+        read_operation(buf, tag)
+    }
+}
+
+fn read_operation(
+    buf: &mut impl commonware_codec::Buf,
+    tag: OperationTag,
+) -> Result<ClobOperation, Error> {
+    match tag {
+        OperationTag::CreateMarket => Ok(ClobOperation::CreateMarket {
+            base_asset: AssetId::read(buf)?,
+            quote_asset: AssetId::read(buf)?,
+            tick_size: u128::read(buf)?,
+            lot_size: u128::read(buf)?,
+        }),
+        OperationTag::PlaceOrder => Ok(ClobOperation::PlaceOrder {
+            market: MarketId::read(buf)?,
+            side: Side::read(buf)?,
+            price: u128::read(buf)?,
+            base_quantity: u128::read(buf)?,
+            time_in_force: TimeInForce::read(buf)?,
+        }),
+        OperationTag::CancelOrder => Ok(ClobOperation::CancelOrder {
+            order: OrderId::read(buf)?,
+        }),
+        OperationTag::ApplyMatchBatch => Ok(ClobOperation::ApplyMatchBatch {
+            batch: MatchBatch::read(buf)?,
+        }),
     }
 }
 
@@ -196,6 +286,17 @@ impl EncodeSize for ClobOperation {
 
 impl CommonOperation for ClobOperation {
     const NAMESPACE: &'static [u8] = CLOB_NAMESPACE;
+}
+
+impl MaxEncodeSize for ClobOperation {
+    const MAX_ENCODE_SIZE: usize = {
+        let batch = 1 + MatchBatch::MAX_ENCODE_SIZE;
+        if batch > MAX_ORDER_OPERATION_ENCODE_SIZE {
+            batch
+        } else {
+            MAX_ORDER_OPERATION_ENCODE_SIZE
+        }
+    };
 }
 
 /// Signed CLOB transaction payload.

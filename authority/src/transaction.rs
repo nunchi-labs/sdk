@@ -1,5 +1,5 @@
 use crate::{types::RegistryChange, AUTHORITY_NAMESPACE, MAX_VALIDATORS};
-use commonware_codec::{EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error, FixedSize, MaxEncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::sha256::Digest;
 use nunchi_common::Operation as CommonOperation;
 
@@ -109,6 +109,25 @@ impl EncodeSize for AuthorityOperation {
 
 impl CommonOperation for AuthorityOperation {
     const NAMESPACE: &'static [u8] = AUTHORITY_NAMESPACE;
+}
+
+impl MaxEncodeSize for AuthorityOperation {
+    const MAX_ENCODE_SIZE: usize = {
+        let configure = 1
+            + crate::MultisigPolicy::MAX_ENCODE_SIZE
+            + nunchi_common::items_bound(MAX_VALIDATORS, crate::ValidatorId::SIZE)
+            + u64::SIZE;
+        let propose = 1 + 1 + crate::ValidatorId::SIZE + u64::SIZE;
+        let approve = 1 + Digest::SIZE;
+        let mut max = configure;
+        if propose > max {
+            max = propose;
+        }
+        if approve > max {
+            max = approve;
+        }
+        max
+    };
 }
 
 pub type TransactionPayload = nunchi_common::TransactionPayload<AuthorityOperation>;

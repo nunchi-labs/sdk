@@ -1,4 +1,4 @@
-use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error, FixedSize, MaxEncodeSize, Read, ReadExt, Write};
 use commonware_cryptography::sha256::Digest;
 use nunchi_common::Address;
 
@@ -400,4 +400,20 @@ impl EncodeSize for Fill {
             + self.written_at_height.encode_size()
             + self.written_at_ms.encode_size()
     }
+}
+
+impl MaxEncodeSize for Fill {
+    const MAX_ENCODE_SIZE: usize = FillId::SIZE
+        + MarketId::SIZE
+        + OrderId::SIZE
+        + OrderId::SIZE
+        + Address::SIZE
+        + Address::SIZE
+        + u8::SIZE
+        + u128::SIZE
+        + u128::SIZE
+        + u128::SIZE
+        + u64::SIZE
+        + u64::SIZE
+        + u64::SIZE;
 }

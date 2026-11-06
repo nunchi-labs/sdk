@@ -1,5 +1,5 @@
 use super::{Address, CoinId, CoinSpec, MultisigPolicy};
-use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error, FixedSize, MaxEncodeSize, Read, ReadExt, Write};
 use nunchi_common::Operation;
 
 #[repr(u8)]
@@ -171,6 +171,24 @@ impl EncodeSize for CoinOperation {
 
 impl Operation for CoinOperation {
     const NAMESPACE: &'static [u8] = super::COINS_NAMESPACE;
+}
+
+impl MaxEncodeSize for CoinOperation {
+    const MAX_ENCODE_SIZE: usize = {
+        let register =
+            1 + Address::SIZE + nunchi_common::MultisigPolicy::MAX_ENCODE_SIZE;
+        let create = 1 + CoinSpec::MAX_ENCODE_SIZE;
+        let mint = 1 + CoinId::SIZE + Address::SIZE + u128::SIZE;
+        let transfer = mint + Address::SIZE;
+        let mut max = register;
+        if create > max {
+            max = create;
+        }
+        if transfer > max {
+            max = transfer;
+        }
+        max
+    };
 }
 
 pub type Transaction = nunchi_common::Transaction<CoinOperation>;

@@ -38,6 +38,7 @@ pub use transaction::{
 
 use std::future::Future;
 
+use commonware_codec::FixedSize;
 use commonware_consensus::Viewable;
 use commonware_parallel::Sequential;
 use commonware_runtime::{Handle, Spawner};
@@ -271,6 +272,13 @@ impl BlockExtension for BridgeExtension {
 
     fn genesis_payload() -> Self::Payload {
         None
+    }
+
+    fn max_payload_encode_size(_cfg: &Self::ReadCfg) -> usize {
+        // Threshold certificates are fixed width, so the participant count does not change the
+        // finalization bound.
+        bool::SIZE
+            + Finalization::<commonware_cryptography::sha256::Digest>::max_encode_size(1)
     }
 }
 

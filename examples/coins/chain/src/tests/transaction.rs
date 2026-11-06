@@ -1,4 +1,6 @@
-use commonware_codec::Encode;
+use commonware_codec::{Encode, EncodeSize, MaxEncodeSize};
+use commonware_consensus::BoundedBlock;
+use commonware_utils::NZU32;
 use nunchi_authority::{AuthorityOperation, Transaction as AuthorityTransaction};
 use nunchi_clob::{AssetId, ClobOperation, Transaction as ClobTransaction};
 use nunchi_coins::{CoinOperation, Transaction as CoinTransaction};
@@ -9,7 +11,14 @@ use commonware_codec::DecodeExt;
 use commonware_cryptography::{ed25519, Hasher, Sha256, Signer as _};
 use nunchi_authority::MultisigPolicy;
 use nunchi_coins::{CoinSpec, PrivateKey, TokenName, TokenSymbol};
-use nunchi_oracle::{IntervalKey, NamespaceId, OracleOperation, Transaction as OracleTransaction};
+use nunchi_bridge::BridgeOperation;
+use nunchi_chain::{CodingBlock, MAX_BLOCK_TX_BYTES, MAX_TRANSACTIONS};
+use nunchi_clob::{ClobExtension, MatchBatch};
+use nunchi_mempool::DEFAULT_MAX_TX_BYTES;
+use nunchi_oracle::{
+    IntervalKey, NamespaceId, OracleOperation, Transaction as OracleTransaction, MAX_PAYLOAD_SIZE,
+    MAX_PROOF_SIZE,
+};
 
 use crate::transaction::*;
 
@@ -82,6 +91,7 @@ fn widest_oracle_transaction_fits_the_chain_pool() {
     let config = crate::transaction::pool_config();
     assert!(widest > PoolConfig::default().max_tx_bytes);
     assert!(config.max_tx_bytes >= widest);
+    assert!(widest <= MAX_BLOCK_TX_BYTES);
 }
 
 #[test]
@@ -154,4 +164,50 @@ fn pool_transaction_nonce_key_uses_operation_namespace() {
         PoolTransaction::nonce_key(&coin),
         PoolTransaction::nonce_key(&clob)
     );
+}
+
+#[test]
+fn aggregate_transaction_bound_covers_mempool_oracle_and_clob() {
+    let signer = nunchi_crypto::PrivateKey::ed25519_from_seed(9);
+    let oracle = OracleTransaction::sign(
+        &signer,
+        u64::MAX,
+        OracleOperation::AppendRecord {
+            namespace: NamespaceId(Sha256::hash(&[b"bound"])),
+            interval: IntervalKey::new(u64::MAX),
+            payload: vec![7; MAX_PAYLOAD_SIZE],
+            proof: Some(vec![9; MAX_PROOF_SIZE]),
+        },
+    );
+    assert!(oracle.encode_size() > DEFAULT_MAX_TX_BYTES);
+    assert!(oracle.encode_size() <= OracleTransaction::MAX_ENCODE_SIZE);
+
+    let wrapped = Transaction::from(oracle);
+    assert!(wrapped.encode_size() <= Transaction::MAX_ENCODE_SIZE);
+    assert!(wrapped.encode_size() <= MAX_BLOCK_TX_BYTES);
+    const {
+        assert!(Transaction::MAX_ENCODE_SIZE >= DEFAULT_MAX_TX_BYTES);
+        assert!(Transaction::MAX_ENCODE_SIZE >= OracleTransaction::MAX_ENCODE_SIZE);
+        // The aggregate tag is one byte, so each honest module maximum sits under the slot.
+        assert!(OracleTransaction::MAX_ENCODE_SIZE < MAX_BLOCK_TX_BYTES);
+        assert!(CoinTransaction::MAX_ENCODE_SIZE < MAX_BLOCK_TX_BYTES);
+        assert!(AuthorityTransaction::MAX_ENCODE_SIZE < MAX_BLOCK_TX_BYTES);
+        assert!(Transaction::MAX_ENCODE_SIZE > MAX_BLOCK_TX_BYTES);
+        assert!(BridgeOperation::MAX_ENCODE_SIZE > MAX_BLOCK_TX_BYTES);
+        assert!(MatchBatch::MAX_ENCODE_SIZE > MAX_BLOCK_TX_BYTES);
+    }
+
+    let bound = CodingBlock::<Transaction, ClobExtension>::max_encode_size(&(NZU32!(4), ()));
+    let mempool_block = (MAX_TRANSACTIONS as usize) * DEFAULT_MAX_TX_BYTES;
+    // Header carries one match batch. The transaction list is a mempool-sized block,
+    // not `MAX_TRANSACTIONS` copies of the widest module codec.
+    assert!(bound >= mempool_block);
+    assert!(bound >= MatchBatch::MAX_ENCODE_SIZE);
+    assert!(bound >= mempool_block + MatchBatch::MAX_ENCODE_SIZE);
+    assert!(bound / (MAX_TRANSACTIONS as usize) < Transaction::MAX_ENCODE_SIZE);
+    let product = (MAX_TRANSACTIONS as usize).saturating_mul(Transaction::MAX_ENCODE_SIZE);
+    assert!(bound < product / 64);
+    assert!(bound < u32::MAX as usize);
+    let slot_body = (MAX_TRANSACTIONS as usize) * MAX_BLOCK_TX_BYTES;
+    assert!(bound <= slot_body + MatchBatch::MAX_ENCODE_SIZE + 8 * 1024 * 1024);
 }

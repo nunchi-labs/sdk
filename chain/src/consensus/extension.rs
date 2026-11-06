@@ -22,6 +22,9 @@ pub trait BlockExtension: 'static {
 
     /// Payload to use for genesis blocks.
     fn genesis_payload() -> Self::Payload;
+
+    /// Upper bound on the encoded size of any payload [`Read::read_cfg`] admits under `cfg`.
+    fn max_payload_encode_size(cfg: &Self::ReadCfg) -> usize;
 }
 
 /// Proposal-side driver for a block extension.
@@ -116,6 +119,10 @@ where
     fn genesis_payload() -> Self::Payload {
         (A::genesis_payload(), B::genesis_payload())
     }
+
+    fn max_payload_encode_size(cfg: &Self::ReadCfg) -> usize {
+        A::max_payload_encode_size(&cfg.0) + B::max_payload_encode_size(&cfg.1)
+    }
 }
 
 impl<A, B> ConsensusExtension for Composite<A, B>
@@ -207,6 +214,10 @@ impl BlockExtension for NoConsensusExtension {
 
     fn genesis_payload() -> Self::Payload {
         EmptyPayload
+    }
+
+    fn max_payload_encode_size(_cfg: &Self::ReadCfg) -> usize {
+        0
     }
 }
 

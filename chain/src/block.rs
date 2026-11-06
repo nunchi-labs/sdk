@@ -1,8 +1,10 @@
 use std::num::NonZeroU32;
 
-use bytes::BufMut;
+use bytes::{Buf as _, BufMut};
 use commonware_codec::Buf;
-use commonware_codec::{varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{
+    varint::UInt, Encode, EncodeSize, Error, FixedSize, MaxEncodeSize, Read, ReadExt, Write,
+};
 use commonware_coding::ReedSolomon;
 use commonware_consensus::{
     marshal::coding::types::coding_config_for_participants,
@@ -24,6 +26,20 @@ use crate::{BlockExtension, NoConsensusExtension};
 ///
 /// Bounds the work a peer can force us to do when decoding an untrusted block.
 pub const MAX_TRANSACTIONS: u64 = 4_096;
+
+/// Largest encoded transaction the block body will read.
+///
+/// This is above [`nunchi_mempool::DEFAULT_MAX_TX_BYTES`]. A maximum oracle append
+/// (64 KiB payload and 16 KiB proof) with a full multisig authorization is wider
+/// than that default, and the coins-chain pool admits it. It is far below a bridge
+/// claim `StateProof` or a CLOB `ApplyMatchBatch`. [`MAX_TRANSACTIONS`] copies of
+/// either of those codecs is about 10^12 bytes, which marshal would hold and forward.
+pub const MAX_BLOCK_TX_BYTES: usize = 128 * 1024;
+
+const _: () = {
+    assert!(MAX_BLOCK_TX_BYTES > nunchi_mempool::DEFAULT_MAX_TX_BYTES);
+    assert!((MAX_TRANSACTIONS as usize).saturating_mul(MAX_BLOCK_TX_BYTES) <= u32::MAX as usize);
+};
 
 /// Consensus commitment over a [`CodingBlock`].
 pub type BlockCommitment<Tx, Ext = NoConsensusExtension> =
@@ -326,11 +342,110 @@ where
     }
 }
 
+fn add_bound(left: usize, right: usize) -> usize {
+    left.checked_add(right)
+        .expect("block encode bound fits in usize")
+}
+
+/// Upper bound on the header `BlockHeader::read_cfg` admits under `cfg`.
+///
+/// Each scalar uses its widest codec width. The dealer log uses `cfg`'s participant cap.
+/// The extension uses the payload bound the extension codec reports for `cfg`.
+fn header_max_encode_size<Ext, D>(cfg: &(NonZeroU32, Ext::ReadCfg)) -> usize
+where
+    Ext: BlockExtension,
+    D: DigestTrait + MaxEncodeSize,
+{
+    add_bound(
+        add_bound(
+            add_bound(
+                Context::<D>::MAX_ENCODE_SIZE,
+                add_bound(Digest::SIZE, Height::MAX_ENCODE_SIZE),
+            ),
+            add_bound(
+                UInt::<u64>::MAX_ENCODE_SIZE,
+                add_bound(Digest::SIZE, bool::SIZE),
+            ),
+        ),
+        add_bound(
+            add_bound(
+                DealerLog::max_encode_size(cfg.0),
+                Ext::max_payload_encode_size(&cfg.1),
+            ),
+            add_bound(
+                Digest::SIZE,
+                NonEmptyRange::<Location>::MAX_ENCODE_SIZE,
+            ),
+        ),
+    )
+}
+
+/// Encoded-size cap for one transaction [`Block::read_cfg`] will materialize.
+///
+/// [`MaxEncodeSize::MAX_ENCODE_SIZE`] is the widest bytes the transaction codec can parse.
+/// On a coins chain that width is a bridge claim proof or a CLOB match batch. Marshal
+/// disseminates every body under the block bound, so the slot is the tighter of that
+/// codec maximum and [`MAX_BLOCK_TX_BYTES`].
+pub(crate) fn tx_encode_limit<Tx: MaxEncodeSize>() -> usize {
+    Tx::MAX_ENCODE_SIZE.min(MAX_BLOCK_TX_BYTES)
+}
+
+/// Upper bound on the transaction list `Block::read_cfg` admits.
+///
+/// The count prefix uses the widest `u64` varint. Each transaction is at most
+/// [`tx_encode_limit`], and the list holds at most [`MAX_TRANSACTIONS`].
+fn transaction_section_max<Tx: MaxEncodeSize>() -> usize {
+    let body = (MAX_TRANSACTIONS as usize)
+        .checked_mul(tx_encode_limit::<Tx>())
+        .expect("transaction section bound fits in usize");
+    add_bound(UInt::<u64>::MAX_ENCODE_SIZE, body)
+}
+
+/// Read one transaction, refusing to parse past [`tx_encode_limit`].
+///
+/// The limit is applied to the buffer before [`Read::read`]. A transaction wider than the
+/// cap fails while bytes remain in the block instead of after the value has been allocated.
+fn read_transaction<Tx>(reader: &mut impl Buf, limit: usize) -> Result<Tx, Error>
+where
+    Tx: EncodeSize + Read<Cfg = ()>,
+{
+    let available = reader.remaining();
+    let mut limited = reader.take(limit);
+    match Tx::read(&mut limited) {
+        Ok(transaction) => {
+            if transaction.encode_size() > limit {
+                return Err(Error::Invalid(
+                    "nunchi_chain::Block",
+                    "transaction exceeds maximum encoded size",
+                ));
+            }
+            Ok(transaction)
+        }
+        Err(Error::EndOfBuffer) if available > limit => Err(Error::Invalid(
+            "nunchi_chain::Block",
+            "transaction exceeds maximum encoded size",
+        )),
+        Err(error) => Err(error),
+    }
+}
+
+fn block_max_encode_size<Tx, Ext, D>(cfg: &(NonZeroU32, Ext::ReadCfg)) -> usize
+where
+    Tx: MaxEncodeSize,
+    Ext: BlockExtension,
+    D: DigestTrait + MaxEncodeSize,
+{
+    add_bound(
+        header_max_encode_size::<Ext, D>(cfg),
+        transaction_section_max::<Tx>(),
+    )
+}
+
 impl<Tx, Ext, D> Read for Block<Tx, Ext, D>
 where
-    Tx: EncodeSize + Read<Cfg = ()> + Write,
+    Tx: EncodeSize + MaxEncodeSize + Read<Cfg = ()> + Write,
     Ext: BlockExtension,
-    D: DigestTrait,
+    D: DigestTrait + MaxEncodeSize,
 {
     type Cfg = (NonZeroU32, Ext::ReadCfg);
 
@@ -344,8 +459,9 @@ where
             ));
         }
         let mut transactions = Vec::with_capacity(count as usize);
+        let limit = tx_encode_limit::<Tx>();
         for _ in 0..count {
-            transactions.push(Tx::read(reader)?);
+            transactions.push(read_transaction(reader, limit)?);
         }
         if transaction_root(&transactions) != header.transaction_root {
             return Err(Error::Invalid(
@@ -354,11 +470,18 @@ where
             ));
         }
         let digest = header.digest();
-        Ok(Self {
+        let block = Self {
             header,
             transactions,
             digest,
-        })
+        };
+        if block.encode_size() > block_max_encode_size::<Tx, Ext, D>(cfg) {
+            return Err(Error::Invalid(
+                "nunchi_chain::Block",
+                "block exceeds maximum encoded size",
+            ));
+        }
+        Ok(block)
     }
 }
 
@@ -480,7 +603,7 @@ where
 
 impl<Tx, Ext> Read for CodingBlock<Tx, Ext>
 where
-    Tx: Clone + EncodeSize + Read<Cfg = ()> + Send + Sync + Write + 'static,
+    Tx: Clone + EncodeSize + MaxEncodeSize + Read<Cfg = ()> + Send + Sync + Write + 'static,
     Ext: BlockExtension + Clone + Send + Sync,
 {
     type Cfg = (NonZeroU32, Ext::ReadCfg);
@@ -492,13 +615,17 @@ where
 
 impl<Tx, Ext> commonware_consensus::BoundedBlock for CodingBlock<Tx, Ext>
 where
-    Tx: Clone + EncodeSize + Read<Cfg = ()> + Send + Sync + Write + 'static,
+    Tx: Clone + EncodeSize + MaxEncodeSize + Read<Cfg = ()> + Send + Sync + Write + 'static,
     Ext: BlockExtension + Clone + Send + Sync,
 {
-    fn max_encode_size(_cfg: &Self::Cfg) -> usize {
-        // The decoder admits at most MAX_TRANSACTIONS self-describing transactions.
-        // 8 KiB per transaction covers current module payloads with room for the header.
-        8 * 1024 + (MAX_TRANSACTIONS as usize) * 8 * 1024
+    fn max_encode_size(cfg: &Self::Cfg) -> usize {
+        // `read_cfg` rejects a transaction wider than `tx_encode_limit` and a block wider than
+        // this sum. Header fields use their codec maxima, including the dealer log for `cfg`'s
+        // participant cap and the extension payload bound. The transaction section is
+        // `MAX_TRANSACTIONS` entries at that per-transaction cap. A bridge claim proof or a
+        // CLOB match batch is not that cap: marshal holds and forwards every body under this
+        // bound.
+        block_max_encode_size::<Tx, Ext, BlockCommitment<Tx, Ext>>(cfg)
     }
 }
 
@@ -660,7 +787,7 @@ where
 
 impl<Tx, Ext> Read for Notarized<Tx, Ext>
 where
-    Tx: Clone + EncodeSize + Read<Cfg = ()> + Send + Sync + Write + 'static,
+    Tx: Clone + EncodeSize + MaxEncodeSize + Read<Cfg = ()> + Send + Sync + Write + 'static,
     Ext: BlockExtension + Clone + Send + Sync,
 {
     type Cfg = (NonZeroU32, Ext::ReadCfg);
@@ -726,7 +853,7 @@ where
 
 impl<Tx, Ext> Read for Finalized<Tx, Ext>
 where
-    Tx: Clone + EncodeSize + Read<Cfg = ()> + Send + Sync + Write + 'static,
+    Tx: Clone + EncodeSize + MaxEncodeSize + Read<Cfg = ()> + Send + Sync + Write + 'static,
     Ext: BlockExtension + Clone + Send + Sync,
 {
     type Cfg = (NonZeroU32, Ext::ReadCfg);

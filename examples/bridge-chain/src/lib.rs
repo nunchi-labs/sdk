@@ -9,7 +9,7 @@
 commonware_macros::stability_scope!(ALPHA {
 use bytes::BufMut;
 use commonware_codec::Buf;
-use commonware_codec::{Encode, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{Encode, EncodeSize, Error, FixedSize, MaxEncodeSize, Read, ReadExt, Write};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use nunchi_bridge::BridgeExtension;
@@ -126,6 +126,10 @@ impl EncodeSize for NoopTransaction {
     fn encode_size(&self) -> usize {
         self.account.encode_size() + self.nonce.encode_size()
     }
+}
+
+impl MaxEncodeSize for NoopTransaction {
+    const MAX_ENCODE_SIZE: usize = Address::SIZE + u64::SIZE;
 }
 
 impl PoolTransaction for NoopTransaction {

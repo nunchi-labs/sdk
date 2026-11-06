@@ -1,7 +1,7 @@
 //! Payload bounds for the authenticated discovery network.
 
 use crate::{consensus::BlockExtension, BlockCommitment, CodingBlock, EngineVariant};
-use commonware_codec::{EncodeSize, Read, Write};
+use commonware_codec::{EncodeSize, MaxEncodeSize, Read, Write};
 use commonware_consensus::marshal;
 use commonware_cryptography::{
     bls12381::primitives::variant::MinSig,
@@ -37,7 +37,7 @@ pub fn discovery_max_message_size<Tx, Ext>(
     max_tx_bytes: usize,
 ) -> u32
 where
-    Tx: Clone + EncodeSize + Read<Cfg = ()> + Send + Sync + Write + 'static,
+    Tx: Clone + EncodeSize + MaxEncodeSize + Read<Cfg = ()> + Send + Sync + Write + 'static,
     Ext: BlockExtension + Clone + Send + Sync,
 {
     let committee = participants.get();
@@ -56,7 +56,7 @@ mod tests {
     use super::*;
     use crate::{consensus::BlockExtension, EmptyPayload};
     use bytes::BufMut;
-    use commonware_codec::{EncodeSize, Error, Read, Write};
+    use commonware_codec::{EncodeSize, Error, MaxEncodeSize, Read, Write};
     use commonware_utils::{NZU32, NZU64};
 
     #[derive(Clone)]
@@ -80,6 +80,10 @@ mod tests {
         }
     }
 
+    impl MaxEncodeSize for EmptyTx {
+        const MAX_ENCODE_SIZE: usize = 0;
+    }
+
     #[derive(Clone)]
     struct TestExtension;
 
@@ -89,6 +93,10 @@ mod tests {
 
         fn genesis_payload() -> Self::Payload {
             EmptyPayload
+        }
+
+        fn max_payload_encode_size(_: &Self::ReadCfg) -> usize {
+            0
         }
     }
 
