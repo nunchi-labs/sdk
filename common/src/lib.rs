@@ -4,11 +4,6 @@ commonware_macros::stability_scope!(ALPHA {
 use commonware_codec::varint::UInt;
 use commonware_codec::MaxEncodeSize;
 
-/// Larger of two encoded-size bounds.
-pub const fn wider(left: usize, right: usize) -> usize {
-    if left > right { left } else { right }
-}
-
 /// Upper bound on a length-prefixed sequence of `len` items of `item_size` bytes.
 ///
 /// The length prefix contributes its widest `u32` varint, matching
