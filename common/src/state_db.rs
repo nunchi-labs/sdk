@@ -221,6 +221,19 @@ pub fn qmdb_operation_codec_config() -> QmdbOperationCfg {
     )
 }
 
+/// Largest encoded operation [`qmdb_operation_codec_config`] will decode.
+///
+/// State sync serves a batch of these operations, so the peer network has to
+/// admit a response of this width.
+pub fn max_qmdb_operation_bytes() -> usize {
+    let value = MAX_STATE_VALUE_SIZE.encode_size() + MAX_STATE_VALUE_SIZE;
+    // `Operation::Update`: tag, digest key, variable value.
+    let update = 1 + Digest::SIZE + value;
+    // `Operation::CommitFloor`: tag, `Option<Vec<u8>>`, inactivity floor.
+    let commit = 1 + (1 + value) + Location::<Family>::new(u64::MAX).encode_size();
+    update.max(commit)
+}
+
 fn validate_state_values<'a>(
     values: impl Iterator<Item = &'a Option<Vec<u8>>>,
 ) -> Result<(), StateError> {

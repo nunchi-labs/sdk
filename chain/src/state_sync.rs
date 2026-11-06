@@ -7,18 +7,14 @@
 //! decoding peer responses.
 
 use bytes::Bytes;
-use commonware_actor::mailbox::{
-    self as actor_mailbox, Overflow, Policy, Sender as ActorSender,
-};
+use commonware_actor::mailbox::{self as actor_mailbox, Overflow, Policy, Sender as ActorSender};
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{sha256::Digest, PublicKey};
 use commonware_glue::stateful::db::{AttachableResolver, Shared};
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Provider, Receiver, Sender};
 use commonware_resolver::{p2p, Delivery, Resolver as _};
-use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner,
-};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_storage::{
     mmr,
     qmdb::sync::{Feedback, Request, Response, Source},
@@ -26,9 +22,7 @@ use commonware_storage::{
 };
 use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
 use futures::future;
-use nunchi_common::{
-    QmdbBackend, QmdbDatabaseSet, QmdbOperation, QmdbOperationCfg,
-};
+use nunchi_common::{QmdbBackend, QmdbDatabaseSet, QmdbOperation, QmdbOperationCfg};
 use rand::Rng;
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -40,7 +34,9 @@ use tracing::info;
 
 type SyncRequest = Request<mmr::Family>;
 type SyncResponse = Response<mmr::Family, QmdbOperation, Digest>;
-type PendingSubscriber = oneshot::Sender<(SyncResponse, Option<Feedback<SyncResponse>>)>;
+/// Candidate responses for one fetch. The receiver stays with the sync engine so
+/// [`Feedback::reject`] can wait for the next peer instead of ending the fetch.
+type PendingSubscriber = mpsc::Sender<(SyncResponse, oneshot::Sender<bool>)>;
 
 fn response_matches_request(request: &SyncRequest, response: &SyncResponse) -> bool {
     matches!(
@@ -366,18 +362,18 @@ impl<E: StorageContext> Source for Mailbox<E> {
         &self,
         request: SyncRequest,
     ) -> Result<(SyncResponse, Option<Feedback<SyncResponse>>), Self::Error> {
-        let (response_tx, response_rx) = oneshot::channel();
+        let (response_tx, mut response_rx) = mpsc::channel(1);
         let _ = self.sender.enqueue(Message::GetOperations {
             request,
             response: response_tx,
         });
-        let mut guard = CancelGuard::new(
-            self.sender.clone(),
-            Message::CancelOperations { request },
-        );
-        let result = response_rx.await;
+        let mut guard =
+            CancelGuard::new(self.sender.clone(), Message::CancelOperations { request });
+        let (response, verdict) = response_rx.recv().await.ok_or(ResponseDropped)?;
         guard.disarm();
-        result.map_err(|_| ResponseDropped)
+        // `response_rx` stays open. A failed proof calls `Feedback::reject` and blocks on
+        // the next item. Closing the channel here makes the sync engine fail the fetch.
+        Ok((response, Some(Feedback::new(verdict, response_rx))))
     }
 }
 
@@ -556,10 +552,18 @@ where
         value: Bytes,
         feedback_tx: oneshot::Sender<bool>,
     ) {
-        let Some(subscribers) = self.pending.remove(&key) else {
-            feedback_tx.send_lossy(true);
+        // Nobody is waiting. Leave the response unjudged so the resolver does not
+        // cache bytes that no engine checked.
+        let Some(subscribers) = self.pending.get_mut(&key) else {
             return;
         };
+        subscribers.retain(|subscriber| !subscriber.is_closed());
+        let waiting = !subscribers.is_empty();
+        if !waiting {
+            self.pending.remove(&key);
+            return;
+        }
+
         let decode_cfg = (
             key.max_ops().get() as usize,
             self.config.operation_codec_config,
@@ -567,32 +571,45 @@ where
         let decoded = match SyncResponse::decode_cfg(value, &decode_cfg) {
             Ok(decoded) if response_matches_request(&key, &decoded) => decoded,
             Ok(_) | Err(_) => {
-                self.pending.insert(key, subscribers);
                 feedback_tx.send_lossy(false);
                 return;
             }
         };
 
-        let mut approvals = Vec::new();
-        for subscriber in subscribers {
-            let (success_tx, success_rx) = oneshot::channel();
-            let (_retry_tx, retry_rx) = mpsc::channel(1);
-            let feedback = Feedback::new(success_tx, retry_rx);
-            if subscriber.send((decoded.clone(), Some(feedback))).is_ok() {
-                approvals.push(success_rx);
+        // Hand each waiter this candidate and keep its channel. `Feedback::reject` waits
+        // on that channel for another peer. Dropping it makes the sync engine return
+        // `InvalidResponse` and abandon the target.
+        let senders = subscribers.to_vec();
+        let mut verdicts = Vec::new();
+        for sender in senders {
+            let (verdict_tx, verdict_rx) = oneshot::channel();
+            if sender.send((decoded.clone(), verdict_tx)).await.is_ok() {
+                verdicts.push(verdict_rx);
             }
         }
-        if approvals.is_empty() {
-            feedback_tx.send_lossy(true);
+        if verdicts.is_empty() {
+            self.pending.remove(&key);
             return;
         }
+
+        let mut judged = false;
         let mut peer_valid = true;
-        for approval in approvals {
-            if let Ok(approved) = approval.await {
+        for verdict in verdicts {
+            if let Ok(approved) = verdict.await {
+                judged = true;
                 peer_valid &= approved;
             }
         }
-        feedback_tx.send_lossy(peer_valid);
+
+        if let Some(subscribers) = self.pending.get_mut(&key) {
+            subscribers.retain(|subscriber| !subscriber.is_closed());
+            if subscribers.is_empty() {
+                self.pending.remove(&key);
+            }
+        }
+        if judged {
+            feedback_tx.send_lossy(peer_valid);
+        }
     }
 
     async fn handle_produce(&mut self, key: SyncRequest, response: oneshot::Sender<Bytes>) {
@@ -615,6 +632,7 @@ where
 mod tests {
     use super::*;
     use commonware_actor::Feedback;
+    use commonware_storage::qmdb::sync::Feedback as SyncFeedback;
     use commonware_codec::{DecodeExt, Error as CodecError, RangeCfg};
     use commonware_cryptography::ed25519;
     use commonware_p2p::{Provider, TrackedPeers};
@@ -622,9 +640,7 @@ mod tests {
     use commonware_storage::merkle::Proof;
     use commonware_storage::mmr::Location;
     use commonware_utils::{channel::oneshot, vec::NonEmptyVec, NZUsize};
-    use nunchi_common::{
-        qmdb_operation_codec_config, shared_database, QmdbBackend, QmdbState,
-    };
+    use nunchi_common::{qmdb_operation_codec_config, shared_database, QmdbBackend, QmdbState};
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     use std::time::Duration;
@@ -667,13 +683,9 @@ mod tests {
         let _ = commonware_p2p::Blocker::blocked(&mut blocker);
     }
 
-    type TestActor =
-        Actor<deterministic::Context, ed25519::PublicKey, DummyProvider, DummyBlocker>;
+    type TestActor = Actor<deterministic::Context, ed25519::PublicKey, DummyProvider, DummyBlocker>;
     type TestPending = PendingSubscriber;
-    type TestPendingResult = oneshot::Receiver<(
-        SyncResponse,
-        Option<commonware_storage::qmdb::sync::Feedback<SyncResponse>>,
-    )>;
+    type TestPendingResult = mpsc::Receiver<(SyncResponse, oneshot::Sender<bool>)>;
 
     fn test_config(
         database: Option<QmdbDatabaseSet<deterministic::Context>>,
@@ -702,7 +714,7 @@ mod tests {
     }
 
     fn test_subscriber() -> (TestPending, TestPendingResult) {
-        oneshot::channel()
+        mpsc::channel(1)
     }
 
     async fn init_db(
@@ -727,10 +739,7 @@ mod tests {
     fn response(value: Vec<u8>) -> SyncResponse {
         Response::Operations {
             proof: empty_proof(),
-            operations: vec![QmdbOperation::CommitFloor(
-                Some(value),
-                Location::new(0),
-            )],
+            operations: vec![QmdbOperation::CommitFloor(Some(value), Location::new(0))],
         }
     }
 
@@ -827,7 +836,8 @@ mod tests {
             pinned_nodes: vec![Digest::from([9; 32])],
         };
         let encoded = response.encode();
-        let decoded = SyncResponse::decode_cfg(encoded, &(1, qmdb_operation_codec_config())).unwrap();
+        let decoded =
+            SyncResponse::decode_cfg(encoded, &(1, qmdb_operation_codec_config())).unwrap();
         assert_eq!(operations_len(&decoded), 1);
         assert!(matches!(
             decoded,
@@ -907,14 +917,16 @@ mod tests {
                 else {
                     panic!("expected get operations");
                 };
+                let (verdict_tx, _verdict_rx) = oneshot::channel();
                 assert!(response
                     .send((
                         Response::Operations {
                             proof: empty_proof(),
                             operations: Vec::<QmdbOperation>::new(),
                         },
-                        None,
+                        verdict_tx,
                     ))
+                    .await
                     .is_ok());
             };
             let (result, _) = futures::join!(get, observe);
@@ -929,10 +941,7 @@ mod tests {
             let mut overflow = Pending::<deterministic::Context>::default();
             assert!(overflow.is_empty());
 
-            Policy::handle(
-                &mut overflow,
-                Message::AttachDatabase(db.clone()),
-            );
+            Policy::handle(&mut overflow, Message::AttachDatabase(db.clone()));
             assert!(!overflow.is_empty());
 
             let mut seen = false;
@@ -988,8 +997,11 @@ mod tests {
                 },
                 Bytes::from_static(b"payload"),
             );
-            let EngineMessage::Deliver { key, value, response } =
-                receiver.recv().await.expect("deliver queued")
+            let EngineMessage::Deliver {
+                key,
+                value,
+                response,
+            } = receiver.recv().await.expect("deliver queued")
             else {
                 panic!("expected deliver");
             };
@@ -1063,7 +1075,7 @@ mod tests {
     }
 
     #[test]
-    fn deliver_with_dropped_response_receiver_is_treated_as_valid() {
+    fn deliver_with_dropped_response_receiver_is_unjudged() {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
             let request = test_request_at(Location::new(1));
@@ -1076,7 +1088,7 @@ mod tests {
             actor
                 .handle_deliver(request, encoded_fetch_payload(), ack_tx)
                 .await;
-            assert!(ack_rx.await.unwrap());
+            assert!(ack_rx.await.is_err());
         });
     }
 
@@ -1089,15 +1101,23 @@ mod tests {
                 start: Location::new(10),
             };
 
-            let (subscriber_tx, subscriber_rx) = test_subscriber();
-            drop(subscriber_rx);
+            let (subscriber_tx, mut subscriber_rx) = test_subscriber();
             actor.pending.insert(request, vec![subscriber_tx]);
 
             let (ack_tx, ack_rx) = oneshot::channel();
-            actor
-                .handle_deliver(request, encoded_boundary_payload(), ack_tx)
-                .await;
-            assert!(ack_rx.await.unwrap());
+            futures::join!(
+                async {
+                    actor
+                        .handle_deliver(request, encoded_boundary_payload(), ack_tx)
+                        .await;
+                    assert!(ack_rx.await.unwrap());
+                },
+                async {
+                    let (response, verdict) = subscriber_rx.recv().await.expect("boundary");
+                    assert!(matches!(response, Response::Boundary { .. }));
+                    SyncFeedback::new(verdict, subscriber_rx).accept();
+                }
+            );
         });
     }
 
@@ -1125,32 +1145,65 @@ mod tests {
             let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
             let request = test_request_at(Location::new(1));
 
-            let (sub1_tx, sub1_rx) = test_subscriber();
-            let (sub2_tx, sub2_rx) = test_subscriber();
-            actor
-                .pending
-                .insert(request, vec![sub1_tx, sub2_tx]);
+            let (sub1_tx, mut sub1_rx) = test_subscriber();
+            let (sub2_tx, mut sub2_rx) = test_subscriber();
+            actor.pending.insert(request, vec![sub1_tx, sub2_tx]);
 
             let (ack_tx, ack_rx) = oneshot::channel();
             futures::join!(
-                actor.handle_deliver(request, encoded_fetch_payload(), ack_tx),
                 async {
-                    let (_response, feedback_tx) = sub1_rx.await.unwrap();
-                    feedback_tx
-                        .expect("deliveries should include feedback")
-                        .accept();
+                    actor
+                        .handle_deliver(request, encoded_fetch_payload(), ack_tx)
+                        .await;
+                    assert!(!ack_rx.await.unwrap());
+                    // The rejecting waiter is still attached, so a later candidate can arrive.
+                    assert_eq!(actor.pending.get(&request).map(Vec::len), Some(1));
+                    actor.pending.remove(&request);
                 },
                 async {
-                    let (_response, feedback_tx) = sub2_rx.await.unwrap();
-                    assert!(feedback_tx
-                        .expect("deliveries should include feedback")
-                        .reject()
-                        .await
-                        .is_none());
+                    let (_response, verdict) = sub1_rx.recv().await.unwrap();
+                    SyncFeedback::new(verdict, sub1_rx).accept();
+                },
+                async {
+                    let (_response, verdict) = sub2_rx.recv().await.unwrap();
+                    assert!(SyncFeedback::new(verdict, sub2_rx).reject().await.is_none());
                 }
             );
+        });
+    }
 
-            assert!(!ack_rx.await.unwrap());
+    #[test]
+    fn rejected_response_yields_the_next_candidate() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
+            let request = test_request_at(Location::new(1));
+            let (subscriber_tx, mut subscriber_rx) = test_subscriber();
+            actor.pending.insert(request, vec![subscriber_tx]);
+
+            let first = encoded_fetch_payload();
+            let second = response(vec![1, 2, 3]).encode();
+            let (first_ack_tx, first_ack_rx) = oneshot::channel();
+            let (second_ack_tx, second_ack_rx) = oneshot::channel();
+
+            futures::join!(
+                async {
+                    actor.handle_deliver(request, first, first_ack_tx).await;
+                    assert!(!first_ack_rx.await.unwrap());
+                    actor.handle_deliver(request, second, second_ack_tx).await;
+                    assert!(second_ack_rx.await.unwrap());
+                },
+                async {
+                    let (first_response, verdict) =
+                        subscriber_rx.recv().await.expect("first candidate");
+                    assert_eq!(operations_len(&first_response), 0);
+                    let (next_response, feedback) = SyncFeedback::new(verdict, subscriber_rx)
+                        .reject()
+                        .await
+                        .expect("rejected proof waits for the next candidate");
+                    assert_eq!(operations_len(&next_response), 1);
+                    feedback.accept();
+                }
+            );
         });
     }
 
@@ -1160,24 +1213,20 @@ mod tests {
             let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
             let request = test_request_at(Location::new(1));
 
-            let (sub1_tx, sub1_rx) = test_subscriber();
-            let (sub2_tx, sub2_rx) = test_subscriber();
-            actor
-                .pending
-                .insert(request, vec![sub1_tx, sub2_tx]);
+            let (sub1_tx, mut sub1_rx) = test_subscriber();
+            let (sub2_tx, mut sub2_rx) = test_subscriber();
+            actor.pending.insert(request, vec![sub1_tx, sub2_tx]);
 
             let (ack_tx, ack_rx) = oneshot::channel();
             futures::join!(
                 actor.handle_deliver(request, encoded_fetch_payload(), ack_tx),
                 async {
-                    let fetch = sub1_rx.await.unwrap();
+                    let fetch = sub1_rx.recv().await.unwrap();
                     drop(fetch);
                 },
                 async {
-                    let (_response, feedback_tx) = sub2_rx.await.unwrap();
-                    feedback_tx
-                        .expect("deliveries should include feedback")
-                        .accept();
+                    let (_response, verdict) = sub2_rx.recv().await.unwrap();
+                    SyncFeedback::new(verdict, sub2_rx).accept();
                 }
             );
 
@@ -1186,7 +1235,7 @@ mod tests {
     }
 
     #[test]
-    fn deliver_without_pending_subscribers_is_treated_as_valid() {
+    fn deliver_without_pending_subscribers_is_unjudged() {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
             let (ack_tx, ack_rx) = oneshot::channel();
@@ -1197,7 +1246,7 @@ mod tests {
                     ack_tx,
                 )
                 .await;
-            assert!(ack_rx.await.unwrap());
+            assert!(ack_rx.await.is_err());
         });
     }
 
@@ -1257,9 +1306,7 @@ mod tests {
             drop(stale_rx);
             actor.pending.insert(request, vec![stale_tx]);
 
-            let action = actor.handle_mailbox_message(Message::CancelOperations {
-                request,
-            });
+            let action = actor.handle_mailbox_message(Message::CancelOperations { request });
             assert!(matches!(action, MailboxAction::Cancel(ref key) if key == &request));
             assert!(!actor.pending.contains_key(&request));
 

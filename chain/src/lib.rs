@@ -9,6 +9,7 @@ pub mod block;
 pub mod consensus;
 pub mod engine;
 pub mod events;
+pub mod limits;
 pub mod execution;
 pub mod state_sync;
 pub mod startup;
@@ -33,5 +34,6 @@ pub use events::{
 pub use engine::{
     EngineBlock, EngineCodedBlock, EngineCommitment, EngineStoredBlock, EngineVariant,
 };
+pub use limits::discovery_max_message_size;
 pub use execution::{NodeHandle, StatefulQuery};
 });

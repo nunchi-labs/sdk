@@ -183,6 +183,23 @@ fn state_proof_codec_roundtrips() {
 }
 
 #[test]
+fn max_operation_bytes_matches_commit_floor_layout() {
+    use commonware_codec::EncodeSize;
+    use commonware_storage::{merkle::Location, mmr::Family};
+
+    use crate::state_db::{max_qmdb_operation_bytes, QmdbOperation};
+
+    let value = vec![7u8; 32];
+    let floor = Location::<Family>::new(u64::MAX);
+    let commit = QmdbOperation::CommitFloor(Some(value.clone()), floor);
+    assert_eq!(
+        commit.encode_size(),
+        1 + (1 + value.encode_size()) + floor.encode_size()
+    );
+    assert!(max_qmdb_operation_bytes() > MAX_STATE_VALUE_SIZE);
+}
+
+#[test]
 fn state_commit_rejects_oversized_values() {
     deterministic::Runner::default().start(|context| async move {
         let mut state = QmdbState::init(context, "state-value-bound-test")

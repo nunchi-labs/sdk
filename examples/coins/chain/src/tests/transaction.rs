@@ -83,6 +83,16 @@ fn clob_transaction(seed: u64, nonce: u64) -> ClobTransaction {
 }
 
 #[test]
+fn widest_oracle_transaction_fits_the_chain_pool() {
+    use nunchi_mempool::PoolConfig;
+
+    let widest = crate::transaction::widest_transaction_bytes();
+    let config = crate::transaction::pool_config();
+    assert!(widest > PoolConfig::default().max_tx_bytes);
+    assert!(config.max_tx_bytes >= widest);
+}
+
+#[test]
 fn transaction_codec_uses_stable_tags() {
     let coin = Transaction::from(coin_transaction(1, 3));
     let authority = Transaction::from(authority_transaction(2, 4));
