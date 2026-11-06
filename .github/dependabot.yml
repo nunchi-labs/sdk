@@ -28,6 +28,10 @@ updates:
     directory: "/examples/coins/frontend"
     schedule:
       interval: "weekly"
+  - package-ecosystem: "npm"
+    directory: "/mcp"
+    schedule:
+      interval: "weekly"
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

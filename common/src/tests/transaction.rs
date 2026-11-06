@@ -144,6 +144,7 @@ fn single_signature_cannot_be_repackaged_as_multisig_authorization() {
         panic!("expected single authorization");
     };
     let policy = MultisigPolicy::new(1, vec![(*signer).clone()]).unwrap();
+    tx.account_id = Address::multisig(&policy);
     tx.authorization = Authorization::Multisig {
         policy,
         signatures: vec![AccountSignature {
@@ -159,14 +160,49 @@ fn single_signature_cannot_be_repackaged_as_multisig_authorization() {
 }
 
 #[test]
-fn multisig_authorization_supports_policy_rotation_under_stable_address() {
+fn multisig_authorization_rejects_policy_that_does_not_derive_account() {
     let alice = PrivateKey::ed25519_from_seed(1);
     let bob = PrivateKey::secp256r1_from_seed(2);
-    let initial = MultisigPolicy::new(1, vec![alice.public_key()]).unwrap();
-    let rotated = MultisigPolicy::new(1, vec![bob.public_key()]).unwrap();
-    let account_id = Address::multisig(&initial);
+    let victim = Address::external(&alice.public_key());
+    let forged = MultisigPolicy::new(1, vec![bob.public_key()]).unwrap();
 
-    let tx = Transaction::sign_multisig(account_id, rotated, &[&bob], 0, TestOperation(42));
+    let tx = Transaction::sign_multisig(victim, forged, &[&bob], 0, TestOperation(42));
 
-    assert_eq!(tx.verify(), Ok(()));
+    assert_eq!(
+        tx.verify(),
+        Err(nunchi_crypto::SignatureError::IncompatibleKey)
+    );
+}
+
+#[test]
+fn multisig_authorization_rejects_rebound_weaker_policy() {
+    let alice = PrivateKey::ed25519_from_seed(1);
+    let bob = PrivateKey::secp256r1_from_seed(2);
+    let policy = MultisigPolicy::new(2, vec![alice.public_key(), bob.public_key()]).unwrap();
+    let account_id = Address::multisig(&policy);
+    let mut tx = Transaction::sign_multisig(
+        account_id,
+        policy,
+        &[&alice, &bob],
+        0,
+        TestOperation(42),
+    );
+
+    let Authorization::Multisig { signatures, .. } = tx.authorization else {
+        panic!("expected multisig authorization");
+    };
+    let alice_signature = signatures
+        .into_iter()
+        .find(|signature| signature.signer == alice.public_key())
+        .expect("alice signature");
+    let weaker = MultisigPolicy::new(1, vec![alice.public_key()]).unwrap();
+    tx.authorization = Authorization::Multisig {
+        policy: weaker,
+        signatures: vec![alice_signature],
+    };
+
+    assert_eq!(
+        tx.verify(),
+        Err(nunchi_crypto::SignatureError::IncompatibleKey)
+    );
 }
