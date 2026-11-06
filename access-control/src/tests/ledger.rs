@@ -179,3 +179,257 @@ fn nonce_overflow_precedes_mutation() {
         assert!(!ledger.has_role(&member, &scope, WRITER).await.unwrap());
     });
 }
+
+fn transfer(scope: ScopeId, new_owner: Address) -> AccessControlOperation {
+    AccessControlOperation::TransferScopeOwner { scope, new_owner }
+}
+
+#[test]
+fn owner_transfers_scope() {
+    deterministic::Runner::default().start(|context| async move {
+        let mut ledger = ledger(context).await;
+        let owner_key = PrivateKey::ed25519_from_seed(1);
+        let owner = address(&owner_key);
+        let new_owner = address(&PrivateKey::ed25519_from_seed(2));
+        let scope = ScopeId::module(b"example");
+        let other_scope = ScopeId::module(b"other");
+        ledger.register_scope(scope, owner.clone()).await.unwrap();
+        ledger
+            .register_scope(other_scope, owner.clone())
+            .await
+            .unwrap();
+
+        let tx = Transaction::sign(&owner_key, 0, transfer(scope, new_owner.clone()));
+        ledger.apply_transaction(&tx).await.unwrap();
+        assert_eq!(ledger.scope(&scope).await.unwrap().unwrap().owner, new_owner);
+        assert!(ledger.is_scope_owner(&new_owner, &scope).await.unwrap());
+        assert!(!ledger.is_scope_owner(&owner, &scope).await.unwrap());
+        assert!(ledger.is_scope_owner(&owner, &other_scope).await.unwrap());
+        assert_eq!(ledger.nonce(&owner).await.unwrap(), 1);
+        assert_eq!(ledger.nonce(&new_owner).await.unwrap(), 0);
+    });
+}
+
+#[test]
+fn old_owner_loses_management() {
+    deterministic::Runner::default().start(|context| async move {
+        let mut ledger = ledger(context).await;
+        let owner_key = PrivateKey::ed25519_from_seed(1);
+        let owner = address(&owner_key);
+        let new_owner_key = PrivateKey::ed25519_from_seed(2);
+        let new_owner = address(&new_owner_key);
+        let member = address(&PrivateKey::ed25519_from_seed(3));
+        let scope = ScopeId::module(b"example");
+        ledger.register_scope(scope, owner.clone()).await.unwrap();
+        ledger
+            .apply_transaction(&Transaction::sign(
+                &owner_key,
+                0,
+                transfer(scope, new_owner.clone()),
+            ))
+            .await
+            .unwrap();
+
+        let stale = Transaction::sign(&owner_key, 1, grant(scope, WRITER, member.clone()));
+        assert_eq!(
+            ledger.apply_transaction(&stale).await,
+            Err(AccessControlError::Unauthorized {
+                scope,
+                account: Box::new(owner.clone()),
+            })
+        );
+        assert_eq!(ledger.nonce(&owner).await.unwrap(), 1);
+        assert!(!ledger.has_role(&member, &scope, WRITER).await.unwrap());
+
+        let stale_transfer = Transaction::sign(&owner_key, 1, transfer(scope, owner.clone()));
+        assert_eq!(
+            ledger.apply_transaction(&stale_transfer).await,
+            Err(AccessControlError::Unauthorized {
+                scope,
+                account: Box::new(owner.clone()),
+            })
+        );
+        assert!(ledger.is_scope_owner(&new_owner, &scope).await.unwrap());
+
+        let tx = Transaction::sign(&new_owner_key, 0, grant(scope, WRITER, member.clone()));
+        ledger.apply_transaction(&tx).await.unwrap();
+        assert!(ledger.has_role(&member, &scope, WRITER).await.unwrap());
+        assert_eq!(ledger.nonce(&new_owner).await.unwrap(), 1);
+    });
+}
+
+#[test]
+fn non_owner_cannot_transfer() {
+    deterministic::Runner::default().start(|context| async move {
+        let mut ledger = ledger(context).await;
+        let owner = address(&PrivateKey::ed25519_from_seed(1));
+        let attacker_key = PrivateKey::ed25519_from_seed(2);
+        let attacker = address(&attacker_key);
+        let scope = ScopeId::module(b"example");
+        ledger.register_scope(scope, owner.clone()).await.unwrap();
+
+        let tx = Transaction::sign(&attacker_key, 0, transfer(scope, attacker.clone()));
+        assert_eq!(
+            ledger.apply_transaction(&tx).await,
+            Err(AccessControlError::Unauthorized {
+                scope,
+                account: Box::new(attacker.clone()),
+            })
+        );
+        assert_eq!(ledger.nonce(&attacker).await.unwrap(), 0);
+        assert!(ledger.is_scope_owner(&owner, &scope).await.unwrap());
+        assert!(!ledger.is_scope_owner(&attacker, &scope).await.unwrap());
+    });
+}
+
+#[test]
+fn transfer_of_unknown_scope_fails() {
+    deterministic::Runner::default().start(|context| async move {
+        let mut ledger = ledger(context).await;
+        let owner_key = PrivateKey::ed25519_from_seed(1);
+        let owner = address(&owner_key);
+        let new_owner = address(&PrivateKey::ed25519_from_seed(2));
+        let scope = ScopeId::module(b"example");
+
+        let tx = Transaction::sign(&owner_key, 0, transfer(scope, new_owner));
+        assert_eq!(
+            ledger.apply_transaction(&tx).await,
+            Err(AccessControlError::UnknownScope(scope))
+        );
+        assert_eq!(ledger.nonce(&owner).await.unwrap(), 0);
+        assert_eq!(ledger.scope(&scope).await.unwrap(), None);
+    });
+}
+
+#[test]
+fn transfer_to_same_owner_refused() {
+    deterministic::Runner::default().start(|context| async move {
+        let mut ledger = ledger(context).await;
+        let owner_key = PrivateKey::ed25519_from_seed(1);
+        let owner = address(&owner_key);
+        let scope = ScopeId::module(b"example");
+        ledger.register_scope(scope, owner.clone()).await.unwrap();
+
+        let tx = Transaction::sign(&owner_key, 0, transfer(scope, owner.clone()));
+        assert_eq!(
+            ledger.apply_transaction(&tx).await,
+            Err(AccessControlError::SameOwner {
+                scope,
+                owner: Box::new(owner.clone()),
+            })
+        );
+        assert_eq!(ledger.nonce(&owner).await.unwrap(), 0);
+        assert!(ledger.is_scope_owner(&owner, &scope).await.unwrap());
+    });
+}
+
+#[test]
+fn multisig_transfer_rejected() {
+    deterministic::Runner::default().start(|context| async move {
+        let mut ledger = ledger(context).await;
+        let alice = PrivateKey::ed25519_from_seed(1);
+        let bob = PrivateKey::ed25519_from_seed(2);
+        let policy =
+            nunchi_common::MultisigPolicy::new(2, vec![alice.public_key(), bob.public_key()])
+                .unwrap();
+        let owner = Address::multisig(&policy);
+        let new_owner = address(&PrivateKey::ed25519_from_seed(3));
+        let scope = ScopeId::module(b"example");
+        ledger.register_scope(scope, owner.clone()).await.unwrap();
+
+        let tx = Transaction::sign_multisig(
+            owner.clone(),
+            policy,
+            &[&alice, &bob],
+            0,
+            transfer(scope, new_owner.clone()),
+        );
+        assert!(tx.verify().is_ok());
+        assert_eq!(
+            ledger.apply_transaction(&tx).await,
+            Err(AccessControlError::UnsupportedAuthorization)
+        );
+        assert_eq!(ledger.nonce(&owner).await.unwrap(), 0);
+        assert!(ledger.is_scope_owner(&owner, &scope).await.unwrap());
+        assert!(!ledger.is_scope_owner(&new_owner, &scope).await.unwrap());
+    });
+}
+
+#[test]
+fn transfer_nonce_unchanged_on_failure() {
+    deterministic::Runner::default().start(|context| async move {
+        let mut ledger = ledger(context).await;
+        let owner_key = PrivateKey::ed25519_from_seed(1);
+        let owner = address(&owner_key);
+        let new_owner = address(&PrivateKey::ed25519_from_seed(2));
+        let scope = ScopeId::module(b"example");
+        ledger.register_scope(scope, owner.clone()).await.unwrap();
+
+        let wrong_nonce = Transaction::sign(&owner_key, 5, transfer(scope, new_owner.clone()));
+        assert_eq!(
+            ledger.apply_transaction(&wrong_nonce).await,
+            Err(AccessControlError::NonceMismatch {
+                account: Box::new(owner.clone()),
+                expected: 0,
+                actual: 5,
+            })
+        );
+        assert_eq!(ledger.nonce(&owner).await.unwrap(), 0);
+        assert!(ledger.is_scope_owner(&owner, &scope).await.unwrap());
+
+        ledger.db.set_nonce(&owner, u64::MAX);
+        let overflow =
+            Transaction::sign(&owner_key, u64::MAX, transfer(scope, new_owner.clone()));
+        assert_eq!(
+            ledger.apply_transaction(&overflow).await,
+            Err(AccessControlError::NonceOverflow)
+        );
+        assert_eq!(ledger.nonce(&owner).await.unwrap(), u64::MAX);
+        assert!(ledger.is_scope_owner(&owner, &scope).await.unwrap());
+        assert!(!ledger.is_scope_owner(&new_owner, &scope).await.unwrap());
+    });
+}
+
+#[test]
+fn existing_grants_survive_transfer() {
+    deterministic::Runner::default().start(|context| async move {
+        let mut ledger = ledger(context).await;
+        let owner_key = PrivateKey::ed25519_from_seed(1);
+        let owner = address(&owner_key);
+        let new_owner_key = PrivateKey::ed25519_from_seed(2);
+        let new_owner = address(&new_owner_key);
+        let member = address(&PrivateKey::ed25519_from_seed(3));
+        let scope = ScopeId::module(b"example");
+        ledger.register_scope(scope, owner.clone()).await.unwrap();
+        ledger
+            .apply_transaction(&Transaction::sign(
+                &owner_key,
+                0,
+                grant(scope, WRITER, member.clone()),
+            ))
+            .await
+            .unwrap();
+        ledger
+            .apply_transaction(&Transaction::sign(
+                &owner_key,
+                1,
+                transfer(scope, new_owner.clone()),
+            ))
+            .await
+            .unwrap();
+        assert!(ledger.has_role(&member, &scope, WRITER).await.unwrap());
+        assert!(!ledger.has_role(&new_owner, &scope, WRITER).await.unwrap());
+
+        let revoke = Transaction::sign(
+            &new_owner_key,
+            0,
+            AccessControlOperation::RevokeRole {
+                scope,
+                role: WRITER,
+                account: member.clone(),
+            },
+        );
+        ledger.apply_transaction(&revoke).await.unwrap();
+        assert!(!ledger.has_role(&member, &scope, WRITER).await.unwrap());
+    });
+}
