@@ -7,7 +7,7 @@ use nunchi_common::{Address, MultisigPolicy, RuntimeContext, StateError, StateSt
 use nunchi_crypto::PrivateKey;
 
 use crate::{
-    IntervalKey, NamespaceId, OracleError, OracleGenesis, OracleLedger, OracleOperation,
+    IntervalKey, NamespaceId, OracleDB, OracleError, OracleGenesis, OracleLedger, OracleOperation,
     Transaction, MAX_PAYLOAD_SIZE, MAX_PROOF_SIZE,
 };
 
@@ -250,6 +250,64 @@ fn transaction_codec_round_trips() {
     let encoded = tx.encode();
 
     assert_eq!(Transaction::decode(encoded).unwrap(), tx);
+}
+
+#[test]
+fn multisig_authorization_cannot_impersonate_another_account() {
+    run_test(|| async {
+        let attacker = PrivateKey::from_seed(2);
+        let victim = Address::external(&PrivateKey::from_seed(3).public_key());
+        let policy = MultisigPolicy::new(1, vec![attacker.public_key()]).unwrap();
+        let tx = Transaction::sign_multisig(
+            victim.clone(),
+            policy,
+            &[&attacker],
+            0,
+            OracleOperation::AppendRecord {
+                namespace: namespace(),
+                interval: IntervalKey::new(1),
+                payload: b"forged".to_vec(),
+                proof: None,
+            },
+        );
+        assert!(tx.verify().is_err());
+
+        let mut ledger = OracleLedger::new(MemoryStore::default());
+        assert_eq!(
+            ledger
+                .apply_transaction(&tx, context(1_000))
+                .await
+                .unwrap_err(),
+            OracleError::UnsupportedAuthorization
+        );
+        assert_eq!(ledger.db().nonce(&victim).await.unwrap(), 0);
+        assert!(ledger
+            .records_by_writer(&victim, IntervalKey::new(1), IntervalKey::new(1))
+            .await
+            .unwrap()
+            .is_empty());
+
+        let writer = PrivateKey::from_seed(4);
+        let policy = MultisigPolicy::new(1, vec![writer.public_key()]).unwrap();
+        let account = Address::multisig(&policy);
+        let bound = Transaction::sign_multisig(
+            account.clone(),
+            policy,
+            &[&writer],
+            0,
+            OracleOperation::AppendRecord {
+                namespace: namespace(),
+                interval: IntervalKey::new(1),
+                payload: b"bound".to_vec(),
+                proof: None,
+            },
+        );
+        ledger
+            .apply_transaction(&bound, context(1_000))
+            .await
+            .expect("policy-derived multisig");
+        assert_eq!(ledger.db().nonce(&account).await.unwrap(), 1);
+    });
 }
 
 #[test]
