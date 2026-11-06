@@ -114,10 +114,11 @@ impl StorageProtector {
         ad: &[u8],
         nonce: [u8; NONCE_SIZE],
     ) -> Result<SealedRecord, ProtectionError> {
+        let aead_nonce = Nonce::try_from(nonce.as_slice()).map_err(|_| ProtectionError::Seal)?;
         let ciphertext = self
             .cipher
             .encrypt(
-                Nonce::from_slice(&nonce),
+                &aead_nonce,
                 Payload {
                     msg: plaintext,
                     aad: ad,
@@ -144,10 +145,12 @@ impl StorageProtector {
             return Err(ProtectionError::UnsupportedVersion(record.version));
         }
 
+        let aead_nonce =
+            Nonce::try_from(record.nonce.as_slice()).map_err(|_| ProtectionError::Open)?;
         let plaintext = self
             .cipher
             .decrypt(
-                Nonce::from_slice(&record.nonce),
+                &aead_nonce,
                 Payload {
                     msg: &record.ciphertext,
                     aad: ad,

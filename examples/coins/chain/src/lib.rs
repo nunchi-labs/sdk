@@ -16,6 +16,7 @@ use commonware_consensus::types::Epoch;
 use std::num::NonZeroU64;
 
 pub mod application;
+pub mod bridge_assets;
 pub mod engine;
 pub mod execution;
 pub mod genesis;
