@@ -144,10 +144,11 @@ where
             ledger.apply_transaction(transaction, context).await?;
         }
         Transaction::Bridge(transaction) => {
-            // Lock, anchor, and claim all commit into one inner overlay so their bridge-state
-            // effects and the matching coins settlement are atomic: a failure at any step reverts
-            // everything, without relying on the caller to discard partial writes. The bridge crate
-            // stays decoupled from coins; escrow (on lock) and mint (on claim) happen here.
+            // Lock and claim commit into one inner overlay so their bridge-state effects and the
+            // matching coins settlement are atomic: a failure at any step reverts everything,
+            // including the fee charged in the outer overlay. The bridge crate stays decoupled
+            // from coins; escrow (on lock) and mint (on claim) happen here. The certified root
+            // the claim reads is written by the bridge consensus extension, not by a transaction.
             let mut overlay = Overlay::new(&mut *state);
 
             // Preconditions before any bridge-state change.
@@ -174,7 +175,6 @@ where
                         return Err(RuntimeError::UnmappedAsset);
                     }
                 }
-                BridgeOperation::AnchorForeignRoot { .. } => {}
             }
 
             // Apply the bridge operation (verify, replay guard, consume, ...). Buffer its events

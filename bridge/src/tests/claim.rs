@@ -9,14 +9,13 @@ use nunchi_common::{
 };
 use nunchi_crypto::PrivateKey;
 
-use crate::events::{
-    ForeignRootAnchored, TransferClaimed, FOREIGN_ROOT_ANCHORED_EVENT, TRANSFER_CLAIMED_EVENT,
-};
+use crate::events::{TransferClaimed, TRANSFER_CLAIMED_EVENT};
 use crate::genesis::BridgeGenesis;
 use crate::ledger::{BridgeError, BridgeLedger, BridgeReceipt};
 use crate::record::{
-    consumed_record_key, foreign_root_key, is_consumed, put_transfer_record, set_bridge_nonce,
-    transfer_record_key, AssetId, BridgeTransferRecord, ChainId, BRIDGE_NAMESPACE,
+    consumed_record_key, foreign_chain_id, foreign_root, foreign_root_key, is_consumed,
+    put_transfer_record, set_bridge_nonce, store_certified_root, transfer_record_key, AssetId,
+    BridgeTransferRecord, CertifiedRootStatus, ChainId, BRIDGE_NAMESPACE,
 };
 use crate::transaction::{BridgeOperation, BridgeOperationId, Transaction};
 
@@ -68,35 +67,30 @@ async fn source_root_and_proof(
     (root, proof)
 }
 
-async fn dest_ledger(
+async fn dest_state(
     context: &deterministic::Context,
-    attestor: &Address,
-) -> BridgeLedger<QmdbState<deterministic::Context>> {
-    let mut dest = QmdbState::init(context.child("dst"), "bridge-claim-dest")
+    partition: &str,
+) -> QmdbState<deterministic::Context> {
+    let mut dest = QmdbState::init(context.child("dst"), partition)
         .await
         .expect("init dest");
     BridgeGenesis::new(dest_chain())
-        .with_attestor(attestor.clone())
+        .with_foreign_chain(source_chain())
         .apply(&mut dest);
-    BridgeLedger::new(dest)
+    dest
 }
 
-fn anchor_tx(
-    attestor: &PrivateKey,
-    nonce: u64,
-    source: ChainId,
-    view: u64,
-    state_root: sha256::Digest,
-) -> Transaction {
-    Transaction::sign(
-        attestor,
-        nonce,
-        BridgeOperation::AnchorForeignRoot {
-            source_chain_id: source,
-            view,
-            state_root,
-        },
-    )
+async fn dest_ledger(
+    context: &deterministic::Context,
+) -> BridgeLedger<QmdbState<deterministic::Context>> {
+    BridgeLedger::new(dest_state(context, "bridge-claim-dest").await)
+}
+
+async fn certify(state: &mut QmdbState<deterministic::Context>, view: u64, root: sha256::Digest) {
+    assert_eq!(
+        store_certified_root(state, view, root).await.expect("store root"),
+        CertifiedRootStatus::Stored
+    );
 }
 
 fn claim_tx(
@@ -191,24 +185,11 @@ fn claim_succeeds_and_marks_consumed() {
         let (root, proof) = source_root_and_proof(&context, &record).await;
         let record_id = record.record_id();
 
-        let attestor = signer(1);
-        let mut ledger = dest_ledger(&context, &addr(&attestor)).await;
+        let mut state = dest_state(&context, "bridge-claim-dest").await;
+        certify(&mut state, 7, root).await;
+        let mut ledger = BridgeLedger::new(state);
 
-        // Anchor the source root at view 7.
-        let mut sink = VecEventSink::new();
-        let anchored = ledger
-            .apply_transaction(&anchor_tx(&attestor, 0, source_chain(), 7, root), &mut sink)
-            .await
-            .expect("anchor");
-        assert_eq!(
-            anchored,
-            BridgeReceipt::Anchored {
-                source_chain_id: source_chain(),
-                view: 7,
-            }
-        );
-
-        // Claim against the anchored root.
+        // Claim against the certified root.
         let claimer = signer(3);
         let mut claim_sink = VecEventSink::new();
         let receipt = ledger
@@ -251,12 +232,9 @@ fn claim_rejects_double_claim() {
         let record = sample_record(recipient);
         let (root, proof) = source_root_and_proof(&context, &record).await;
 
-        let attestor = signer(1);
-        let mut ledger = dest_ledger(&context, &addr(&attestor)).await;
-        ledger
-            .apply_transaction(&anchor_tx(&attestor, 0, source_chain(), 7, root), NoopEventSink)
-            .await
-            .expect("anchor");
+        let mut state = dest_state(&context, "double-claim").await;
+        certify(&mut state, 7, root).await;
+        let mut ledger = BridgeLedger::new(state);
 
         let claimer = signer(3);
         ledger
@@ -286,9 +264,8 @@ fn claim_rejects_missing_anchor() {
         let record = sample_record(recipient);
         let (_root, proof) = source_root_and_proof(&context, &record).await;
 
-        let attestor = signer(1);
-        let mut ledger = dest_ledger(&context, &addr(&attestor)).await;
-        // No anchor for (source_chain, 7).
+        let mut ledger = dest_ledger(&context).await;
+        // No certified root for view 7.
         let claimer = signer(3);
         let err = ledger
             .apply_transaction(
@@ -310,12 +287,9 @@ fn claim_rejects_wrong_destination() {
         record.destination_chain_id = ChainId(Sha256::hash(&[b"other-dest"]));
         let (root, proof) = source_root_and_proof(&context, &record).await;
 
-        let attestor = signer(1);
-        let mut ledger = dest_ledger(&context, &addr(&attestor)).await;
-        ledger
-            .apply_transaction(&anchor_tx(&attestor, 0, source_chain(), 7, root), NoopEventSink)
-            .await
-            .expect("anchor");
+        let mut state = dest_state(&context, "wrong-dest").await;
+        certify(&mut state, 7, root).await;
+        let mut ledger = BridgeLedger::new(state);
 
         let claimer = signer(3);
         let err = ledger
@@ -336,12 +310,9 @@ fn claim_rejects_tampered_record() {
         let record = sample_record(recipient);
         let (root, proof) = source_root_and_proof(&context, &record).await;
 
-        let attestor = signer(1);
-        let mut ledger = dest_ledger(&context, &addr(&attestor)).await;
-        ledger
-            .apply_transaction(&anchor_tx(&attestor, 0, source_chain(), 7, root), NoopEventSink)
-            .await
-            .expect("anchor");
+        let mut state = dest_state(&context, "tampered").await;
+        certify(&mut state, 7, root).await;
+        let mut ledger = BridgeLedger::new(state);
 
         // Tamper the amount: the proof was generated for the original record, so it no longer
         // authenticates the (content-addressed) tampered record.
@@ -359,110 +330,65 @@ fn claim_rejects_tampered_record() {
     });
 }
 
-#[test]
-fn anchor_rejects_non_attestor() {
-    deterministic::Runner::default().start(|context| async move {
-        let attestor = signer(1);
-        let mut ledger = dest_ledger(&context, &addr(&attestor)).await;
-
-        // A different signer tries to anchor.
-        let impostor = signer(4);
-        let err = ledger
-            .apply_transaction(
-                &anchor_tx(&impostor, 0, source_chain(), 7, Sha256::hash(&[b"root"])),
-                NoopEventSink,
-            )
-            .await
-            .expect_err("non-attestor");
-        assert_eq!(err, BridgeError::NotAttestor);
-    });
-}
 
 #[test]
-fn anchor_rejects_stale_view() {
+fn certified_root_advances_by_view_and_rejects_conflicts() {
     deterministic::Runner::default().start(|context| async move {
-        let attestor = signer(1);
-        let mut ledger = dest_ledger(&context, &addr(&attestor)).await;
-
-        ledger
-            .apply_transaction(
-                &anchor_tx(&attestor, 0, source_chain(), 7, Sha256::hash(&[b"root-7"])),
-                NoopEventSink,
-            )
-            .await
-            .expect("anchor view 7");
-
-        // Re-anchoring the same view is stale.
-        let err = ledger
-            .apply_transaction(
-                &anchor_tx(&attestor, 1, source_chain(), 7, Sha256::hash(&[b"root-7b"])),
-                NoopEventSink,
-            )
-            .await
-            .expect_err("stale view");
+        let mut state = dest_state(&context, "root-order").await;
+        let first = Sha256::hash(&[b"root-5"]);
+        let second = Sha256::hash(&[b"root-8"]);
+        certify(&mut state, 5, first).await;
         assert_eq!(
-            err,
-            BridgeError::StaleAnchor {
-                latest: 7,
-                submitted: 7
-            }
+            store_certified_root(&mut state, 5, first).await.expect("replay"),
+            CertifiedRootStatus::Unchanged
+        );
+        assert_eq!(
+            store_certified_root(&mut state, 5, second)
+                .await
+                .expect("conflict"),
+            CertifiedRootStatus::Conflict
+        );
+        assert_eq!(
+            store_certified_root(&mut state, 4, Sha256::hash(&[b"root-4"]))
+                .await
+                .expect("stale"),
+            CertifiedRootStatus::Stale
+        );
+        certify(&mut state, 8, second).await;
+        assert_eq!(
+            foreign_root(&state, &source_chain(), 8)
+                .await
+                .expect("read")
+                .expect("stored")
+                .state_root,
+            second
+        );
+        // The earlier view remains available to in-flight claims.
+        assert_eq!(
+            foreign_root(&state, &source_chain(), 5)
+                .await
+                .expect("read")
+                .expect("kept")
+                .state_root,
+            first
         );
     });
 }
 
 #[test]
-fn anchor_is_monotonic_per_source_chain() {
+fn certified_root_requires_one_configured_foreign_chain() {
     deterministic::Runner::default().start(|context| async move {
-        let attestor = signer(1);
-        let mut ledger = dest_ledger(&context, &addr(&attestor)).await;
-        let other_source = ChainId(Sha256::hash(&[b"other-source"]));
-
-        // Anchor chain A at a high view.
-        ledger
-            .apply_transaction(
-                &anchor_tx(&attestor, 0, source_chain(), 100, Sha256::hash(&[b"a-100"])),
-                NoopEventSink,
-            )
-            .await
-            .expect("anchor A@100");
-
-        // A different source chain is unaffected: it can anchor at a low view.
-        let anchored = ledger
-            .apply_transaction(
-                &anchor_tx(&attestor, 1, other_source, 1, Sha256::hash(&[b"b-1"])),
-                NoopEventSink,
-            )
-            .await
-            .expect("anchor B@1");
-        assert_eq!(
-            anchored,
-            BridgeReceipt::Anchored {
-                source_chain_id: other_source,
-                view: 1,
-            }
-        );
-    });
-}
-
-#[test]
-fn anchor_rejects_when_attestor_not_configured() {
-    deterministic::Runner::default().start(|context| async move {
-        // Destination has a chain id but no configured attestor.
-        let mut dest = QmdbState::init(context.child("dst"), "no-attestor")
+        let mut dest = QmdbState::init(context.child("dst"), "no-foreign")
             .await
             .expect("init dest");
         BridgeGenesis::new(dest_chain()).apply(&mut dest);
-        let mut ledger = BridgeLedger::new(dest);
-
-        let attestor = signer(1);
-        let err = ledger
-            .apply_transaction(
-                &anchor_tx(&attestor, 0, source_chain(), 7, Sha256::hash(&[b"root"])),
-                NoopEventSink,
-            )
-            .await
-            .expect_err("attestor not configured");
-        assert_eq!(err, BridgeError::AttestorNotConfigured);
+        assert_eq!(
+            store_certified_root(&mut dest, 7, Sha256::hash(&[b"root"]))
+                .await
+                .expect("unconfigured"),
+            CertifiedRootStatus::Unconfigured
+        );
+        assert_eq!(foreign_chain_id(&dest).await.expect("read"), None);
     });
 }
 
@@ -473,12 +399,9 @@ fn claim_rejects_source_chain_mismatch() {
         let record = sample_record(recipient);
         let (root, proof) = source_root_and_proof(&context, &record).await;
 
-        let attestor = signer(1);
-        let mut ledger = dest_ledger(&context, &addr(&attestor)).await;
-        ledger
-            .apply_transaction(&anchor_tx(&attestor, 0, source_chain(), 7, root), NoopEventSink)
-            .await
-            .expect("anchor");
+        let mut state = dest_state(&context, "source-mismatch").await;
+        certify(&mut state, 7, root).await;
+        let mut ledger = BridgeLedger::new(state);
 
         // The claim declares a different source chain than the record carries.
         let other_source = ChainId(Sha256::hash(&[b"other-source"]));
@@ -495,41 +418,28 @@ fn claim_rejects_source_chain_mismatch() {
 }
 
 #[test]
-fn anchor_emits_foreign_root_anchored_event() {
+fn claim_rejects_chain_other_than_the_configured_foreign_chain() {
     deterministic::Runner::default().start(|context| async move {
-        let attestor = signer(1);
-        let mut ledger = dest_ledger(&context, &addr(&attestor)).await;
+        let recipient = addr(&signer(2));
+        let other = ChainId(Sha256::hash(&[b"other-source"]));
+        let mut record = sample_record(recipient);
+        record.source_chain_id = other;
+        let (_root, proof) = source_root_and_proof(&context, &record).await;
 
-        let root = Sha256::hash(&[b"anchored-root"]);
-        let mut sink = VecEventSink::new();
-        ledger
-            .apply_transaction(&anchor_tx(&attestor, 0, source_chain(), 9, root), &mut sink)
+        let mut ledger = dest_ledger(&context).await;
+        let err = ledger
+            .apply_transaction(
+                &claim_tx(&signer(3), 0, other, 7, record, proof),
+                NoopEventSink,
+            )
             .await
-            .expect("anchor");
-
-        assert_eq!(sink.len(), 1);
-        let event = &sink.events()[0];
-        assert_eq!(event.name.as_ref(), FOREIGN_ROOT_ANCHORED_EVENT);
-        let decoded = ForeignRootAnchored::decode(event.value.as_ref()).expect("decode event");
-        assert_eq!(decoded.source_chain_id, source_chain());
-        assert_eq!(decoded.view, 9);
-        assert_eq!(decoded.state_root, root);
+            .expect_err("other foreign chain");
+        assert_eq!(err, BridgeError::UnexpectedForeignChain);
     });
 }
 
 #[test]
-fn anchor_and_claim_codec_round_trip() {
-    let anchor = BridgeOperation::AnchorForeignRoot {
-        source_chain_id: source_chain(),
-        view: 42,
-        state_root: Sha256::hash(&[b"root"]),
-    };
-    assert_eq!(
-        BridgeOperation::decode(anchor.encode().as_ref()).expect("decode anchor"),
-        anchor
-    );
-
-    // A claim carries an embedded proof; a signed transaction wrapping it must round-trip.
+fn claim_codec_round_trip() {
     deterministic::Runner::default().start(|context| async move {
         let record = sample_record(addr(&signer(2)));
         let (_root, proof) = source_root_and_proof(&context, &record).await;
@@ -551,30 +461,15 @@ fn operation_ids_round_trip_and_reject_unknown() {
         BridgeOperationId::Lock
     );
     assert_eq!(
-        BridgeOperationId::try_from(1).expect("anchor"),
-        BridgeOperationId::AnchorForeignRoot
-    );
-    assert_eq!(
         BridgeOperationId::try_from(2).expect("claim"),
         BridgeOperationId::Claim
     );
+    // Operation id 1 is unused. It must not decode as a claim.
+    assert!(BridgeOperationId::try_from(1).is_err());
+    assert!(BridgeOperation::decode(&[1u8][..]).is_err());
     assert!(BridgeOperationId::try_from(3).is_err());
     assert!(BridgeOperation::decode(&[3u8][..]).is_err());
     assert!(BridgeOperation::decode(&[][..]).is_err());
-
-    let anchor = BridgeOperation::AnchorForeignRoot {
-        source_chain_id: source_chain(),
-        view: 1,
-        state_root: Sha256::hash(&[b"root"]),
-    };
-    let encoded = anchor.encode();
-    assert_eq!(encoded.len(), anchor.encode_size());
-    for i in 0..encoded.len() {
-        assert!(
-            BridgeOperation::decode(&encoded[..i]).is_err(),
-            "anchor prefix {i} must fail"
-        );
-    }
 }
 
 #[test]
@@ -600,6 +495,29 @@ fn claim_rejects_when_chain_not_configured() {
 }
 
 #[test]
+fn claim_rejects_when_foreign_chain_not_configured() {
+    deterministic::Runner::default().start(|context| async move {
+        let recipient = addr(&signer(2));
+        let record = sample_record(recipient);
+        let (_root, proof) = source_root_and_proof(&context, &record).await;
+
+        let mut dest = QmdbState::init(context.child("dst"), "no-foreign-claim")
+            .await
+            .expect("init dest");
+        BridgeGenesis::new(dest_chain()).apply(&mut dest);
+        let mut ledger = BridgeLedger::new(dest);
+        let err = ledger
+            .apply_transaction(
+                &claim_tx(&signer(3), 0, source_chain(), 7, record, proof),
+                NoopEventSink,
+            )
+            .await
+            .expect_err("no foreign chain");
+        assert_eq!(err, BridgeError::ForeignChainNotConfigured);
+    });
+}
+
+#[test]
 fn storage_error_wraps_state_backend_failure() {
     let err = BridgeError::from(StateError::Backend("disk".into()));
     assert_eq!(err, BridgeError::Storage("state backend error: disk".into()));
@@ -607,85 +525,6 @@ fn storage_error_wraps_state_backend_failure() {
         BridgeError::from(StateError::ValueTooLarge { size: 8, max: 4 }),
         BridgeError::Storage("state value is too large: size 8, maximum 4".into())
     );
-}
-
-#[test]
-fn anchor_rejects_view_below_latest() {
-    deterministic::Runner::default().start(|context| async move {
-        let attestor = signer(1);
-        let mut ledger = dest_ledger(&context, &addr(&attestor)).await;
-        ledger
-            .apply_transaction(
-                &anchor_tx(&attestor, 0, source_chain(), 9, Sha256::hash(&[b"root-9"])),
-                NoopEventSink,
-            )
-            .await
-            .expect("anchor view 9");
-
-        let err = ledger
-            .apply_transaction(
-                &anchor_tx(&attestor, 1, source_chain(), 4, Sha256::hash(&[b"root-4"])),
-                NoopEventSink,
-            )
-            .await
-            .expect_err("older view");
-        assert_eq!(
-            err,
-            BridgeError::StaleAnchor {
-                latest: 9,
-                submitted: 4
-            }
-        );
-    });
-}
-
-struct FailGet<S> {
-    inner: S,
-    fail: sha256::Digest,
-}
-
-impl<S: StateStore + Send + Sync> StateStore for FailGet<S> {
-    async fn get(&self, key: &sha256::Digest) -> Result<Option<Vec<u8>>, StateError> {
-        if *key == self.fail {
-            Err(StateError::Backend("injected".into()))
-        } else {
-            self.inner.get(key).await
-        }
-    }
-
-    fn set(&mut self, key: sha256::Digest, value: Vec<u8>) {
-        self.inner.set(key, value);
-    }
-
-    fn remove(&mut self, key: sha256::Digest) {
-        self.inner.remove(key);
-    }
-}
-
-fn attestor_key() -> sha256::Digest {
-    Namespace::new(BRIDGE_NAMESPACE).key(3u8, b"attestor")
-}
-
-fn local_chain_id_key() -> sha256::Digest {
-    Namespace::new(BRIDGE_NAMESPACE).key(3u8, b"local_chain_id")
-}
-
-fn latest_view_key(source: &ChainId) -> sha256::Digest {
-    Namespace::new(BRIDGE_NAMESPACE).key(5u8, source.encode().as_ref())
-}
-
-async fn configured_dest(
-    context: &deterministic::Context,
-    attestor: &Address,
-    partition: &str,
-) -> QmdbState<deterministic::Context> {
-    let mut dest = QmdbState::init(context.child("dst"), partition)
-        .await
-        .expect("init dest");
-    BridgeGenesis::new(dest_chain())
-        .with_attestor(attestor.clone())
-        .apply(&mut dest);
-    dest
 }
 
 #[test]
@@ -715,45 +554,25 @@ fn claim_operation_rejects_every_truncated_prefix() {
 }
 
 #[test]
-fn anchor_accepts_strictly_higher_view() {
-    deterministic::Runner::default().start(|context| async move {
-        let attestor = signer(1);
-        let mut ledger = dest_ledger(&context, &addr(&attestor)).await;
-        ledger
-            .apply_transaction(
-                &anchor_tx(&attestor, 0, source_chain(), 5, Sha256::hash(&[b"root-5"])),
-                NoopEventSink,
-            )
-            .await
-            .expect("anchor view 5");
-        let receipt = ledger
-            .apply_transaction(
-                &anchor_tx(&attestor, 1, source_chain(), 8, Sha256::hash(&[b"root-8"])),
-                NoopEventSink,
-            )
-            .await
-            .expect("anchor view 8");
-        assert_eq!(
-            receipt,
-            BridgeReceipt::Anchored {
-                source_chain_id: source_chain(),
-                view: 8,
-            }
-        );
-    });
-}
-
-#[test]
 fn apply_rejects_nonce_overflow() {
     deterministic::Runner::default().start(|context| async move {
-        let attestor = signer(1);
-        let mut dest = configured_dest(&context, &addr(&attestor), "nonce-overflow").await;
-        set_bridge_nonce(&mut dest, &addr(&attestor), u64::MAX);
+        let sender = signer(1);
+        let mut dest = dest_state(&context, "nonce-overflow").await;
+        set_bridge_nonce(&mut dest, &addr(&sender), u64::MAX);
 
         let mut ledger = BridgeLedger::new(dest);
         let err = ledger
             .apply_transaction(
-                &anchor_tx(&attestor, u64::MAX, source_chain(), 1, Sha256::hash(&[b"root"])),
+                &Transaction::sign(
+                    &sender,
+                    u64::MAX,
+                    BridgeOperation::Lock {
+                        destination_chain_id: ChainId(Sha256::hash(&[b"other"])),
+                        local_asset: Sha256::hash(&[b"coin"]),
+                        amount: 1,
+                        recipient: addr(&signer(2)),
+                    },
+                ),
                 NoopEventSink,
             )
             .await
@@ -762,43 +581,50 @@ fn apply_rejects_nonce_overflow() {
     });
 }
 
+struct FailGet<S> {
+    inner: S,
+    fail: sha256::Digest,
+}
+
+impl<S: StateStore + Send + Sync> StateStore for FailGet<S> {
+    async fn get(&self, key: &sha256::Digest) -> Result<Option<Vec<u8>>, StateError> {
+        if *key == self.fail {
+            Err(StateError::Backend("injected".into()))
+        } else {
+            self.inner.get(key).await
+        }
+    }
+
+    fn set(&mut self, key: sha256::Digest, value: Vec<u8>) {
+        self.inner.set(key, value);
+    }
+
+    fn remove(&mut self, key: sha256::Digest) {
+        self.inner.remove(key);
+    }
+}
+
+fn local_chain_id_key() -> sha256::Digest {
+    Namespace::new(BRIDGE_NAMESPACE).key(3u8, b"local_chain_id")
+}
+
+fn foreign_chain_key() -> sha256::Digest {
+    Namespace::new(BRIDGE_NAMESPACE).key(3u8, b"foreign_chain_id")
+}
+
+fn latest_view_key(source: &ChainId) -> sha256::Digest {
+    Namespace::new(BRIDGE_NAMESPACE).key(5u8, source.encode().as_ref())
+}
+
 #[test]
 fn apply_surfaces_injected_storage_errors() {
     deterministic::Runner::default().start(|context| async move {
-        let attestor = signer(1);
-        let attestor_addr = addr(&attestor);
         let record = sample_record(addr(&signer(2)));
         let (root, proof) = source_root_and_proof(&context, &record).await;
         let record_id = record.record_id();
 
         let mut ledger = BridgeLedger::new(FailGet {
-            inner: configured_dest(&context, &attestor_addr, "fail-attestor").await,
-            fail: attestor_key(),
-        });
-        let err = ledger
-            .apply_transaction(
-                &anchor_tx(&attestor, 0, source_chain(), 1, Sha256::hash(&[b"root"])),
-                NoopEventSink,
-            )
-            .await
-            .expect_err("attestor get");
-        assert!(matches!(err, BridgeError::Storage(_)));
-
-        let mut ledger = BridgeLedger::new(FailGet {
-            inner: configured_dest(&context, &attestor_addr, "fail-latest").await,
-            fail: latest_view_key(&source_chain()),
-        });
-        let err = ledger
-            .apply_transaction(
-                &anchor_tx(&attestor, 0, source_chain(), 1, Sha256::hash(&[b"root"])),
-                NoopEventSink,
-            )
-            .await
-            .expect_err("latest view get");
-        assert!(matches!(err, BridgeError::Storage(_)));
-
-        let mut ledger = BridgeLedger::new(FailGet {
-            inner: configured_dest(&context, &attestor_addr, "fail-chain").await,
+            inner: dest_state(&context, "fail-chain").await,
             fail: local_chain_id_key(),
         });
         let err = ledger
@@ -817,14 +643,40 @@ fn apply_surfaces_injected_storage_errors() {
             .expect_err("local chain get");
         assert!(matches!(err, BridgeError::Storage(_)));
 
-        let mut inner = configured_dest(&context, &attestor_addr, "fail-root").await;
-        BridgeLedger::new(&mut inner)
+        let mut ledger = BridgeLedger::new(FailGet {
+            inner: dest_state(&context, "fail-foreign").await,
+            fail: foreign_chain_key(),
+        });
+        let err = ledger
             .apply_transaction(
-                &anchor_tx(&attestor, 0, source_chain(), 7, root),
+                &claim_tx(
+                    &signer(3),
+                    0,
+                    source_chain(),
+                    7,
+                    record.clone(),
+                    proof.clone(),
+                ),
                 NoopEventSink,
             )
             .await
-            .expect("anchor");
+            .expect_err("foreign chain get");
+        assert!(matches!(err, BridgeError::Storage(_)));
+
+        let err = store_certified_root(
+            &mut FailGet {
+                inner: dest_state(&context, "fail-latest").await,
+                fail: latest_view_key(&source_chain()),
+            },
+            7,
+            root,
+        )
+        .await
+        .expect_err("latest view get");
+        assert!(matches!(err, StateError::Backend(_)));
+
+        let mut inner = dest_state(&context, "fail-root").await;
+        certify(&mut inner, 7, root).await;
         let mut ledger = BridgeLedger::new(FailGet {
             inner,
             fail: foreign_root_key(&source_chain(), 7),
@@ -845,14 +697,8 @@ fn apply_surfaces_injected_storage_errors() {
             .expect_err("foreign root get");
         assert!(matches!(err, BridgeError::Storage(_)));
 
-        let mut inner = configured_dest(&context, &attestor_addr, "fail-consumed").await;
-        BridgeLedger::new(&mut inner)
-            .apply_transaction(
-                &anchor_tx(&attestor, 0, source_chain(), 7, root),
-                NoopEventSink,
-            )
-            .await
-            .expect("anchor");
+        let mut inner = dest_state(&context, "fail-consumed").await;
+        certify(&mut inner, 7, root).await;
         let mut ledger = BridgeLedger::new(FailGet {
             inner,
             fail: consumed_record_key(&source_chain(), &record_id),

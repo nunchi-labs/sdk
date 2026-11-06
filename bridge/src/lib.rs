@@ -1,8 +1,10 @@
 //! Bridge consensus extension for carrying foreign finalization certificates.
 //!
-//! A caller submits verified foreign finalizations through [`BridgeMailbox`],
-//! and [`BridgeExtension`] embeds the latest accepted certificate into proposed
-//! blocks.
+//! A caller submits a foreign finalization through [`BridgeMailbox`]. The actor verifies it
+//! against the configured foreign consensus scheme, keeps the newest verified certificate, and
+//! [`BridgeExtension`] embeds that certificate in the destination chain's consensus extension.
+//! Applying the payload stores the certificate's proposal payload as the certified state root
+//! for the one configured foreign chain. Claims prove transfer records against that root.
 
 commonware_macros::stability_scope!(ALPHA {
 #[cfg(feature = "rpc")]
@@ -10,9 +12,9 @@ pub mod rpc;
 
 pub mod record;
 pub use record::{
-    attestor, escrow_address, foreign_root, is_consumed, mark_consumed, put_foreign_root,
-    transfer_record, transfer_record_key, AssetId, BridgeTransferRecord, ChainId, ForeignRoot,
-    TransferRecordId, BRIDGE_NAMESPACE,
+    escrow_address, foreign_chain_id, foreign_root, is_consumed, mark_consumed, put_foreign_root,
+    store_certified_root, transfer_record, transfer_record_key, AssetId, BridgeTransferRecord,
+    CertifiedRootStatus, ChainId, ForeignRoot, TransferRecordId, BRIDGE_NAMESPACE,
 };
 
 pub mod events;
@@ -44,7 +46,7 @@ use futures::{
     SinkExt, StreamExt,
 };
 use nunchi_chain::{Block, BlockExtension, ConsensusExtension, Finalized, Notarized};
-use nunchi_common::RuntimeContext;
+use nunchi_common::{RuntimeContext, StateStore};
 use nunchi_dkg::{Finalization, Scheme};
 use rand::{CryptoRng, Rng};
 use tracing::warn;
@@ -271,6 +273,44 @@ impl ConsensusExtension for BridgeExtension {
 
     fn verify_payload(&mut self, payload: &Self::Payload) -> impl Future<Output = bool> + Send {
         self.mailbox.verify_payload(payload.clone())
+    }
+
+    /// Store the verified certificate's proposal payload as the foreign chain's claim root.
+    ///
+    /// `verify_payload` has already checked the certificate against the configured scheme when a
+    /// block is validated. This checks again so a payload is recorded only when that verification
+    /// still holds. An empty payload leaves the stored root unchanged. The same view and root may
+    /// be included again. An older view, or the same view with a different payload, is rejected.
+    async fn apply_payload<S>(
+        &mut self,
+        state: &mut S,
+        _context: RuntimeContext,
+        payload: &Self::Payload,
+    ) -> bool
+    where
+        S: StateStore + Send + Sync,
+    {
+        let Some(finalization) = payload else {
+            return true;
+        };
+        if !self
+            .mailbox
+            .verify_payload(Some(finalization.clone()))
+            .await
+        {
+            return false;
+        }
+        match store_certified_root(state, finalization.view().get(), finalization.proposal.payload)
+            .await
+        {
+            Ok(
+                CertifiedRootStatus::Stored
+                | CertifiedRootStatus::Unchanged
+                | CertifiedRootStatus::Unconfigured,
+            ) => true,
+            Ok(CertifiedRootStatus::Stale | CertifiedRootStatus::Conflict) => false,
+            Err(_) => false,
+        }
     }
 }
 
