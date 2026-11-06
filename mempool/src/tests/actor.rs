@@ -21,7 +21,7 @@ fn submit_pending_finalize_status_roundtrip() {
         let pending = handle.pending(10).await;
         assert_eq!(pending.len(), 1);
 
-        handle.finalized(vec![expected], vec![(1, 1)], 5);
+        handle.finalized(vec![expected], vec![(1, 1)], 5).await;
         assert_eq!(
             handle.status(expected).await,
             Some(TxStatus::Finalized { height: 5 })
@@ -54,7 +54,7 @@ fn metrics_are_exposed() {
         handle.submit(tx(1, 0, 10)).await.unwrap();
         let pending = handle.pending(10).await;
         assert_eq!(pending.len(), 1);
-        handle.finalized(vec![expected], vec![(1, 1)], 5);
+        handle.finalized(vec![expected], vec![(1, 1)], 5).await;
         context.sleep(Duration::from_millis(1)).await;
 
         let encoded = context.encode();

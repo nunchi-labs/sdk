@@ -17,7 +17,7 @@ To have every generated node upload consensus artifacts to an indexer, add `--in
 Secondary nodes can be included to provide non-voting uploader redundancy:
 
 ```sh
-cargo run -p narae -- generate coins-chain --validators 4 --secondaries 2 \\
+cargo run -p narae -- generate coins-chain --validators 4 --secondaries 2 \
   --indexer-url http://127.0.0.1:8080 --out testnet
 cargo run -p narae -- run testnet
 ```

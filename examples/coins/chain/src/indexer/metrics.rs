@@ -1234,6 +1234,10 @@ impl<C: Clock> LiveUploadGuard<C> {
         self.status = LiveUploadStatus::Success;
     }
 
+    pub(crate) async fn sleep(&self, duration: Duration) {
+        self.context.sleep(duration).await;
+    }
+
     pub(crate) const fn marshal_cancelled(&mut self) {
         self.status = LiveUploadStatus::MarshalCancelled;
     }
