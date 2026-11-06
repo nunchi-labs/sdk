@@ -5,9 +5,12 @@
 //! consumed exactly once. This module defines the record schema, its content-addressed id, the
 //! state keys, and minimal read/write accessors.
 //!
-//! Deliberately out of scope here: proof generation/verification, the source-side lock operation,
-//! the destination claim operation, the escrow balance table, and coins integration. Those build on
-//! this schema in later PRs.
+//! This module also holds the destination-side certified roots (one configured foreign chain, keyed
+//! by view) and the consumed-record replay guard the claim uses.
+//!
+//! Deliberately out of scope here: proof generation/verification (lives in `nunchi-common`), the
+//! signed operations themselves (see `transaction`/`ledger`), and the asset movement / settlement,
+//! which stays in the chain's coins integration layer so this crate remains decoupled from coins.
 
 use bytes::BufMut;
 use commonware_codec::Buf;
@@ -41,8 +44,12 @@ enum Table {
     ConsumedRecord = 1,
     /// Per-sender lock nonce, giving each of a sender's transfers a distinct record id.
     Nonce = 2,
-    /// Singleton module configuration (currently just this chain's [`ChainId`]).
+    /// Singleton module configuration (this chain's [`ChainId`] and the one foreign chain).
     Config = 3,
+    /// Attested foreign state roots, keyed by `(source_chain_id, view)`.
+    ForeignRoot = 4,
+    /// Latest anchored view per source chain, enforcing monotonic anchoring.
+    ForeignLatestView = 5,
 }
 
 impl From<Table> for u8 {
@@ -297,4 +304,174 @@ pub async fn local_chain_id<S: StateStore>(store: &S) -> Result<Option<ChainId>,
 /// `source_chain_id`.
 pub fn set_local_chain_id<S: StateStore>(store: &mut S, chain_id: &ChainId) {
     store.set(local_chain_id_key(), chain_id.encode().as_ref().to_vec());
+}
+
+/// Authenticated state root of the one configured foreign chain at a finalized view.
+///
+/// Written when a verified foreign finalization certificate is applied from the destination
+/// chain's consensus extension. The certificate's proposal payload is this root.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ForeignRoot {
+    /// The foreign chain's authenticated state root.
+    pub state_root: Digest,
+}
+
+impl Write for ForeignRoot {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.state_root.write(buf);
+    }
+}
+
+impl Read for ForeignRoot {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            state_root: Digest::read(buf)?,
+        })
+    }
+}
+
+impl FixedSize for ForeignRoot {
+    const SIZE: usize = Digest::SIZE;
+}
+
+/// Authenticated-state key for the attested root of `source_chain_id` at `view`.
+pub fn foreign_root_key(source_chain_id: &ChainId, view: u64) -> Digest {
+    let mut logical = source_chain_id.encode().as_ref().to_vec();
+    logical.extend_from_slice(view.encode().as_ref());
+    NS.key(Table::ForeignRoot, &logical)
+}
+
+/// Stage the attested foreign `root` for `source_chain_id` at `view`. Roots are kept per view (not
+/// latest-only) so an in-flight claim built against an earlier root still verifies.
+pub fn put_foreign_root<S: StateStore>(
+    store: &mut S,
+    source_chain_id: &ChainId,
+    view: u64,
+    root: &ForeignRoot,
+) {
+    store.set(
+        foreign_root_key(source_chain_id, view),
+        root.encode().as_ref().to_vec(),
+    );
+}
+
+/// Read the attested foreign root for `source_chain_id` at `view`, if anchored.
+pub async fn foreign_root<S: StateStore>(
+    store: &S,
+    source_chain_id: &ChainId,
+    view: u64,
+) -> Result<Option<ForeignRoot>, StateError> {
+    match store.get(&foreign_root_key(source_chain_id, view)).await? {
+        Some(bytes) => ForeignRoot::decode(bytes.as_ref())
+            .map(Some)
+            .map_err(|err| StateError::Backend(err.to_string())),
+        None => Ok(None),
+    }
+}
+
+/// Authenticated-state key for the latest anchored view of `source_chain_id`.
+fn latest_foreign_view_key(source_chain_id: &ChainId) -> Digest {
+    NS.key(Table::ForeignLatestView, source_chain_id.encode().as_ref())
+}
+
+/// The latest anchored view for `source_chain_id`, if any root has been anchored. Monotonicity is
+/// tracked per source chain so different source chains never block one another.
+pub async fn latest_foreign_view<S: StateStore>(
+    store: &S,
+    source_chain_id: &ChainId,
+) -> Result<Option<u64>, StateError> {
+    match store.get(&latest_foreign_view_key(source_chain_id)).await? {
+        Some(bytes) => {
+            u64::decode(bytes.as_ref()).map(Some).map_err(|err| StateError::Backend(err.to_string()))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Stage the latest certified view for `source_chain_id`.
+pub fn set_latest_foreign_view<S: StateStore>(
+    store: &mut S,
+    source_chain_id: &ChainId,
+    view: u64,
+) {
+    store.set(
+        latest_foreign_view_key(source_chain_id),
+        view.encode().as_ref().to_vec(),
+    );
+}
+
+/// Authenticated-state key for the one configured foreign chain.
+fn foreign_chain_id_key() -> Digest {
+    NS.key(Table::Config, b"foreign_chain_id")
+}
+
+/// The one foreign chain whose finalization certificates this chain accepts, if configured.
+pub async fn foreign_chain_id<S: StateStore>(store: &S) -> Result<Option<ChainId>, StateError> {
+    match store.get(&foreign_chain_id_key()).await? {
+        Some(bytes) => ChainId::decode(bytes.as_ref())
+            .map(Some)
+            .map_err(|err| StateError::Backend(err.to_string())),
+        None => Ok(None),
+    }
+}
+
+/// Pin the one foreign chain. Written once at genesis.
+pub fn set_foreign_chain_id<S: StateStore>(store: &mut S, chain_id: &ChainId) {
+    store.set(
+        foreign_chain_id_key(),
+        chain_id.encode().as_ref().to_vec(),
+    );
+}
+
+/// Result of recording a certified foreign state root.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CertifiedRootStatus {
+    /// No foreign chain is configured, so the certificate is not a claim root.
+    Unconfigured,
+    /// `view` is newer than the stored checkpoint and `state_root` was recorded.
+    Stored,
+    /// `view` already certifies this exact `state_root`.
+    Unchanged,
+    /// `view` is older than the stored checkpoint.
+    Stale,
+    /// `view` is already stored with a different root.
+    Conflict,
+}
+
+/// Record `state_root` as the certified root of the configured foreign chain at `view`.
+///
+/// Callers pass the proposal payload of a finalization certificate that has already verified
+/// against the configured foreign consensus scheme. The destination consensus extension does that
+/// check before calling this. Roots advance strictly by view. The same view and root may be
+/// applied again. A different root at that view, or an older view, is rejected.
+pub async fn store_certified_root<S: StateStore>(
+    store: &mut S,
+    view: u64,
+    state_root: Digest,
+) -> Result<CertifiedRootStatus, StateError> {
+    let Some(source_chain_id) = foreign_chain_id(store).await? else {
+        return Ok(CertifiedRootStatus::Unconfigured);
+    };
+    if let Some(latest) = latest_foreign_view(store, &source_chain_id).await? {
+        if view < latest {
+            return Ok(CertifiedRootStatus::Stale);
+        }
+        if view == latest {
+            let current = foreign_root(store, &source_chain_id, view).await?;
+            return Ok(match current {
+                Some(root) if root.state_root == state_root => CertifiedRootStatus::Unchanged,
+                _ => CertifiedRootStatus::Conflict,
+            });
+        }
+    }
+    put_foreign_root(
+        store,
+        &source_chain_id,
+        view,
+        &ForeignRoot { state_root },
+    );
+    set_latest_foreign_view(store, &source_chain_id, view);
+    Ok(CertifiedRootStatus::Stored)
 }

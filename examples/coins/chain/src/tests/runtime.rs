@@ -9,10 +9,13 @@ use nunchi_coins::{
     TokenCreated, TokenFactory, TokenGenesis, TokenName, TokenSymbol, FEE_CHARGED_EVENT,
     TOKEN_CREATED_EVENT, TRANSFERRED_EVENT,
 };
-use nunchi_common::{Address, MultisigPolicy, QmdbState, Runtime, RuntimeContext, VecEventSink};
-use nunchi_oracle::{IntervalKey, NamespaceId, OracleDB, OracleLedger, OracleOperation};
+use nunchi_common::{
+    state_db::StateError, Address, MultisigPolicy, QmdbState, Runtime, RuntimeContext, VecEventSink,
+};
 use nunchi_crypto::PrivateKey;
-use nunchi_oracle::OracleError;
+use nunchi_oracle::{
+    IntervalKey, NamespaceId, OracleDB, OracleError, OracleLedger, OracleOperation,
+};
 
 use crate::runtime::*;
 use crate::Transaction;
@@ -27,12 +30,15 @@ fn runtime_error_classifies_storage_errors() {
     assert!(RuntimeError::Clob(ClobError::Storage("disk".into())).is_storage());
     assert!(RuntimeError::Oracle(OracleError::Storage("disk".into())).is_storage());
     assert!(RuntimeError::Bridge(BridgeError::Storage("disk".into())).is_storage());
+    assert!(RuntimeError::Storage("disk".into()).is_storage());
+    assert!(RuntimeError::from(StateError::Backend("disk".into())).is_storage());
 
     assert!(!RuntimeError::Authority(AuthorityError::NotConfigured).is_storage());
     assert!(!RuntimeError::Coins(LedgerError::InvalidTokenSpec("bad")).is_storage());
     assert!(!RuntimeError::Clob(ClobError::OffchainOnly).is_storage());
     assert!(!RuntimeError::Oracle(OracleError::PayloadTooLarge).is_storage());
     assert!(!RuntimeError::Bridge(BridgeError::ChainNotConfigured).is_storage());
+    assert!(!RuntimeError::UnmappedAsset.is_storage());
 }
 
 #[test]
