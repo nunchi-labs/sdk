@@ -12,6 +12,7 @@
     "package:store": "python3 scripts/package-store.py",
     "build:store": "npm run icons && npm run build:wasm && npm run build && npm run package:store",
     "preview": "vite preview",
+    "postinstall": "node scripts/vite6-plugin-react-compat.mjs",
     "test": "vitest run --exclude src/**/*.live.test.ts",
     "test:live": "vitest run --config vitest.live.config.ts",
     "test:selenium": "python3 scripts/selenium-e2e.py --extension dist"
@@ -27,7 +28,7 @@
     "@types/chrome": "^0.3.7",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
-    "@vitejs/plugin-react": "^4.7.0",
+    "@vitejs/plugin-react": "^6.2.1",
     "typescript": "^7.0.2",
     "vite": "^6.4.5",
     "vitest": "^4.1.12"
