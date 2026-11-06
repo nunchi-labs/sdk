@@ -12,7 +12,6 @@ use nunchi_common::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BridgeOperationId {
     Lock = 0,
-    AnchorForeignRoot = 1,
     Claim = 2,
 }
 
@@ -26,7 +25,6 @@ impl TryFrom<u8> for BridgeOperationId {
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
             0 => Ok(Self::Lock),
-            1 => Ok(Self::AnchorForeignRoot),
             2 => Ok(Self::Claim),
             _ => Err(InvalidBridgeOperationId(value)),
         }
@@ -78,20 +76,7 @@ pub enum BridgeOperation {
         /// Destination-chain account to credit.
         recipient: Address,
     },
-    /// Anchor an attested foreign state root that destination claims verify against.
-    ///
-    /// Only the genesis-configured attestor may submit this, and the view must be strictly monotonic
-    /// per source chain. This is a trusted/authority-attested anchor for the MVP, not a cryptographic
-    /// finalization proof.
-    AnchorForeignRoot {
-        /// The foreign source chain this root belongs to.
-        source_chain_id: ChainId,
-        /// Monotonic view/height selecting this root among the source chain's history.
-        view: u64,
-        /// The foreign chain's authenticated state root at `view`.
-        state_root: Digest,
-    },
-    /// Claim a transfer on the destination chain by proving its record against an anchored foreign
+    /// Claim a transfer on the destination chain by proving its record against a certified foreign
     /// root; settlement to the recipient happens in the integration layer.
     Claim {
         /// The source chain the transfer originated on.
@@ -121,16 +106,6 @@ impl Write for BridgeOperation {
                 amount.write(buf);
                 recipient.write(buf);
             }
-            Self::AnchorForeignRoot {
-                source_chain_id,
-                view,
-                state_root,
-            } => {
-                BridgeOperationId::AnchorForeignRoot.write(buf);
-                source_chain_id.write(buf);
-                view.write(buf);
-                state_root.write(buf);
-            }
             Self::Claim {
                 source_chain_id,
                 source_view,
@@ -158,11 +133,6 @@ impl Read for BridgeOperation {
                 amount: u128::read(buf)?,
                 recipient: Address::read(buf)?,
             }),
-            BridgeOperationId::AnchorForeignRoot => Ok(Self::AnchorForeignRoot {
-                source_chain_id: ChainId::read(buf)?,
-                view: u64::read(buf)?,
-                state_root: Digest::read(buf)?,
-            }),
             BridgeOperationId::Claim => Ok(Self::Claim {
                 source_chain_id: ChainId::read(buf)?,
                 source_view: u64::read(buf)?,
@@ -189,11 +159,6 @@ impl EncodeSize for BridgeOperation {
                     + amount.encode_size()
                     + recipient.encode_size()
             }
-            Self::AnchorForeignRoot {
-                source_chain_id,
-                view,
-                state_root,
-            } => source_chain_id.encode_size() + view.encode_size() + state_root.encode_size(),
             Self::Claim {
                 source_chain_id,
                 source_view,

@@ -76,7 +76,7 @@ pub fn transfer_locked_event(value: TransferLocked) -> Event {
     )
 }
 
-/// Emitted when the attestor anchors a foreign state root.
+/// Certified foreign state root, keyed by the finalization view.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ForeignRootAnchored {
     pub source_chain_id: ChainId,

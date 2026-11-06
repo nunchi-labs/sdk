@@ -1,15 +1,78 @@
 use std::num::NonZeroU64;
 
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::{Hasher, Sha256};
-use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
-use nunchi_bridge::{
-    record::put_transfer_record, AssetId, BridgeGenesis, BridgeOperation, BridgeTransaction,
-    BridgeTransferRecord, ChainId,
+use commonware_consensus::{
+    simplex::{
+        scheme::bls12381_threshold::vrf,
+        types::{Finalization as CFinalization, Finalize, Proposal},
+    },
+    types::{Epoch, Round, View},
 };
-use nunchi_coins::{CoinOperation, CoinSpec, Ledger, TokenCreated, TokenName, TokenSymbol};
+use commonware_cryptography::{
+    bls12381::primitives::variant::MinSig, sha256, Hasher, Sha256,
+};
+use commonware_parallel::Sequential;
+use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
+use commonware_utils::{non_empty, TestRng};
+use nunchi_bridge::{
+    record::put_transfer_record, AssetId, BridgeActor, BridgeExtension, BridgeGenesis,
+    BridgeOperation, BridgeTransaction, BridgeTransferRecord, ChainId, SubmitResult,
+};
+use nunchi_chain::ConsensusExtension;
+use nunchi_coins::{
+    CoinOperation, CoinSpec, FeeConfig, Ledger, TokenCreated, TokenName, TokenSymbol,
+};
 use nunchi_common::{Address, CommitState, QmdbState, Runtime, RuntimeContext, VecEventSink};
 use nunchi_crypto::PrivateKey;
+use nunchi_dkg::Scheme;
+
+const FOREIGN_NAMESPACE: &[u8] = b"_NUNCHI_COINS_BRIDGE_FOREIGN";
+
+fn foreign_schemes(seed: u64) -> Vec<Scheme> {
+    let mut rng = TestRng::new(seed);
+    vrf::fixture::<MinSig, _>(&mut rng, FOREIGN_NAMESPACE, 4).schemes
+}
+
+fn certificate(schemes: &[Scheme], view: u64, payload: sha256::Digest) -> nunchi_dkg::Finalization {
+    let proposal = Proposal::new(
+        Round::new(Epoch::zero(), View::new(view)),
+        View::new(view.saturating_sub(1)),
+        payload,
+    );
+    let finalizes: Vec<_> = schemes
+        .iter()
+        .take(3)
+        .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("sign finalize"))
+        .collect();
+    CFinalization::from_finalizes(&schemes[0], non_empty![@finalizes.iter()], &Sequential)
+        .expect("assemble finalization")
+}
+
+/// Receive a foreign finalization whose payload is `root`, keep it as the newest verified
+/// certificate, and apply it through the destination consensus extension.
+async fn install_certified_root(
+    context: &deterministic::Context,
+    state: &mut QmdbState<deterministic::Context>,
+    root: sha256::Digest,
+) {
+    let schemes = foreign_schemes(1);
+    let (actor, mailbox) = BridgeActor::new(schemes[0].clone(), 8);
+    let _actor = actor.start(context.child("bridge_cert"));
+    let mut extension = BridgeExtension::new(mailbox.clone());
+    let certificate = certificate(&schemes, 7, root);
+    assert_eq!(
+        mailbox.submit(certificate.clone()).await,
+        SubmitResult::Updated
+    );
+    let runtime = RuntimeContext::default();
+    let payload = extension.propose(runtime).await;
+    assert_eq!(payload, Some(certificate));
+    assert!(
+        extension
+            .apply_payload(state, runtime, &payload)
+            .await
+    );
+}
 
 use crate::bridge_assets::set_asset_coin;
 use crate::runtime::{CoinsRuntime, RuntimeError};
@@ -79,7 +142,7 @@ fn bridge_claim_verifies_proof_and_mints_mapped_asset() {
             "proof should authenticate the record locally"
         );
 
-        // ----- Destination chain: wrapped token, mapping, attestor; anchor then claim. -----
+        // ----- Destination chain: wrapped token, mapping, certified root, then claim. -----
         let mut dest = QmdbState::init(context.child("dst"), "claim-dst")
             .await
             .unwrap();
@@ -101,29 +164,11 @@ fn bridge_claim_verifies_proof_and_mints_mapped_asset() {
             .token
             .id;
 
-        let attestor = key(3);
         BridgeGenesis::new(dest_chain())
-            .with_attestor(Address::external(&attestor.public_key()))
+            .with_foreign_chain(source_chain())
             .apply(&mut dest);
         set_asset_coin(&mut dest, &record.source_asset, &wrapped);
-
-        let anchor = Transaction::from(BridgeTransaction::sign(
-            &attestor,
-            0,
-            BridgeOperation::AnchorForeignRoot {
-                source_chain_id: source_chain(),
-                view: 7,
-                state_root: source_root,
-            },
-        ));
-        CoinsRuntime::apply(
-            &mut dest,
-            RuntimeContext::default(),
-            &anchor,
-            &mut VecEventSink::new(),
-        )
-        .await
-        .unwrap();
+        install_certified_root(&context, &mut dest, source_root).await;
 
         let claimer = key(4);
         let claim = Transaction::from(BridgeTransaction::sign(
@@ -182,31 +227,14 @@ fn bridge_claim_rejects_unmapped_asset_without_minting() {
             .await
             .unwrap();
 
-        // Destination has an attestor and an anchor, but no asset mapping.
+        // Destination has a certified root, but no asset mapping.
         let mut dest = QmdbState::init(context.child("dst"), "unmapped-dst")
             .await
             .unwrap();
-        let attestor = key(3);
         BridgeGenesis::new(dest_chain())
-            .with_attestor(Address::external(&attestor.public_key()))
+            .with_foreign_chain(source_chain())
             .apply(&mut dest);
-        let anchor = Transaction::from(BridgeTransaction::sign(
-            &attestor,
-            0,
-            BridgeOperation::AnchorForeignRoot {
-                source_chain_id: source_chain(),
-                view: 7,
-                state_root: source_root,
-            },
-        ));
-        CoinsRuntime::apply(
-            &mut dest,
-            RuntimeContext::default(),
-            &anchor,
-            &mut VecEventSink::new(),
-        )
-        .await
-        .unwrap();
+        install_certified_root(&context, &mut dest, source_root).await;
 
         // Claim fails because the asset is unmapped; nothing is consumed or minted.
         let claimer = key(4);
@@ -251,7 +279,7 @@ fn bridge_claim_settlement_failure_leaves_no_event_or_consumption() {
             source_asset: AssetId::derive(&source_chain(), &Sha256::hash(&[b"coin"])),
             amount: 400,
             sender: addr(9),
-            recipient,
+            recipient: recipient.clone(),
             nonce: 0,
         };
 
@@ -294,28 +322,38 @@ fn bridge_claim_settlement_failure_leaves_no_event_or_consumption() {
             .token
             .id;
 
-        let attestor = key(3);
         BridgeGenesis::new(dest_chain())
-            .with_attestor(Address::external(&attestor.public_key()))
+            .with_foreign_chain(source_chain())
             .apply(&mut dest);
         set_asset_coin(&mut dest, &record.source_asset, &capped);
-        let anchor = Transaction::from(BridgeTransaction::sign(
-            &attestor,
-            0,
-            BridgeOperation::AnchorForeignRoot {
-                source_chain_id: source_chain(),
-                view: 7,
-                state_root: source_root,
+        install_certified_root(&context, &mut dest, source_root).await;
+
+        // Fund the claimer in the fee coin and pin a fee, so a failed claim must drop the fee
+        // together with the mint.
+        let claimer_addr = addr(4);
+        let mint_fee_balance = Transaction::from(nunchi_coins::Transaction::sign(
+            &issuer,
+            1,
+            CoinOperation::Mint {
+                coin: capped,
+                to: claimer_addr.clone(),
+                amount: 40,
             },
         ));
         CoinsRuntime::apply(
             &mut dest,
             RuntimeContext::default(),
-            &anchor,
+            &mint_fee_balance,
             &mut VecEventSink::new(),
         )
         .await
         .unwrap();
+        Ledger::new(&mut dest).set_fee_config(&FeeConfig {
+            coin: capped,
+            collector: addr(9),
+            base: 1,
+            per_byte: 0,
+        });
 
         // The claim verifies, but minting 400 exceeds the cap of 100 -> the whole op reverts.
         let claimer = key(4);
@@ -343,12 +381,16 @@ fn bridge_claim_settlement_failure_leaves_no_event_or_consumption() {
             RuntimeError::Coins(nunchi_coins::LedgerError::MaxSupplyExceeded { .. })
         ));
 
-        // No event escaped, and the record was not consumed.
+        // No event escaped, the record was not consumed, and the fee was not collected.
         assert!(claim_events.is_empty(), "no event should escape a failed claim");
         assert!(
             !nunchi_bridge::is_consumed(&dest, &source_chain(), &record.record_id())
                 .await
                 .unwrap()
         );
+        let balances = Ledger::new(&mut dest);
+        assert_eq!(balances.balance(&claimer_addr, &capped).await.unwrap(), 40);
+        assert_eq!(balances.balance(&addr(9), &capped).await.unwrap(), 0);
+        assert_eq!(balances.balance(&recipient, &capped).await.unwrap(), 0);
     });
 }
