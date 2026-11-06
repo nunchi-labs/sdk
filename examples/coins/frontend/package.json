@@ -9,7 +9,7 @@
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "^5.0.0",
+    "@vitejs/plugin-react": "^6.2.1",
     "vite": "^7.3.7",
     "typescript": "^7.0.2",
     "react": "^19.3.1",
