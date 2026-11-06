@@ -1,6 +1,8 @@
 use std::{collections::BTreeMap, future::Future, time::Duration};
 
-use commonware_codec::{DecodeExt, Encode, EncodeSize, MaxEncodeSize};
+use commonware_codec::{
+    DecodeExt, Encode, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize,
+};
 use commonware_cryptography::{
     ed25519, sha256::Digest, Digest as DigestTrait, Hasher, Sha256, Signer as _,
 };
@@ -2860,6 +2862,7 @@ fn match_batch_bound_covers_full_multisig_orders() {
         fills: vec![fill],
     };
     assert!(batch.encode_size() <= MatchBatch::MAX_ENCODE_SIZE);
+    assert_eq!(MatchBatch::decode(batch.encode()).unwrap(), batch);
     const {
         assert!(MatchBatch::MAX_ENCODE_SIZE > 8 * 1024);
         assert!(MAX_MATCH_BATCH_ORDERS == 4_096);
@@ -2878,4 +2881,41 @@ fn match_batch_bound_covers_full_multisig_orders() {
         fills: Vec::new(),
     };
     assert!(MatchBatch::decode(nested_batch.encode()).is_err());
+}
+
+#[test]
+fn match_batch_rejects_nested_batch_before_reading_its_body() {
+    let nested = Transaction::sign(
+        &PrivateKey::from_seed(1),
+        0,
+        ClobOperation::ApplyMatchBatch {
+            batch: MatchBatch::default(),
+        },
+    );
+    let encoded = MatchBatch {
+        orders: vec![nested],
+        fills: Vec::new(),
+    }
+    .encode();
+    // One order uses a single-byte length prefix. The next bytes are the order header.
+    assert_eq!(encoded[0], 1);
+    let tag_index = 1 + Address::SIZE + u64::SIZE;
+    assert_eq!(encoded[tag_index], 3);
+
+    // The byte after the tag would be the inner batch length. A recursive read fails there
+    // with a length or buffer error. Rejecting the tag returns the encode-bound error instead.
+    let mut malformed = encoded[..=tag_index].to_vec();
+    malformed.push(0xff);
+
+    let error = MatchBatch::decode(malformed).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            CodecError::Invalid(
+                "nunchi_clob::MatchBatch",
+                "order exceeds the signed-order encode bound"
+            )
+        ),
+        "{error:?}"
+    );
 }
