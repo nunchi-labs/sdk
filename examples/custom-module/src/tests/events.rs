@@ -31,7 +31,7 @@ fn set_value_emits_event() {
         let event = &events.events()[0];
         assert_eq!(event.name.as_ref(), VALUE_SET_EVENT);
         assert_eq!(
-            ValueSet::decode(event.value.as_ref()).unwrap(),
+            ValueSet::decode(commonware_codec::Viewing::new(&event.value)).unwrap(),
             ValueSet {
                 account_id: account,
                 value: 42,
@@ -61,7 +61,7 @@ fn clear_value_emits_event() {
         let event = &events.events()[0];
         assert_eq!(event.name.as_ref(), VALUE_CLEARED_EVENT);
         assert_eq!(
-            ValueCleared::decode(event.value.as_ref()).unwrap(),
+            ValueCleared::decode(commonware_codec::Viewing::new(&event.value)).unwrap(),
             ValueCleared {
                 account_id: account,
             }

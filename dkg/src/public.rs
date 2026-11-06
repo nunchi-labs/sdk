@@ -19,7 +19,7 @@ use commonware_cryptography::{
     },
     ed25519,
     sha256::{Digest, Sha256},
-    BatchVerifier, Hasher, PublicKey, Signer,
+    BatchVerifier, Hasher, PublicKey,
 };
 use commonware_parallel::Strategy;
 use commonware_utils::{ordered::Set, N3f1, Participant, TryCollect};
@@ -193,7 +193,7 @@ impl<V: Variant, P: PublicKey> Read for DkgProtocolConfig<V, P> {
     type Cfg = ProtocolConfigReadCfg;
 
     fn read_cfg(
-        buf: &mut impl bytes::Buf,
+        buf: &mut impl commonware_codec::Buf,
         cfg: &Self::Cfg,
     ) -> Result<Self, CodecError> {
         let domain: [u8; CONFIG_DOMAIN.len()] = ReadExt::read(buf)?;
@@ -282,7 +282,7 @@ impl<V: Variant, P: PublicKey> Write for PublicCheckpoint<V, P> {
 impl<V: Variant, P: PublicKey> Read for PublicCheckpoint<V, P> {
     type Cfg = (NonZeroU32, ModeVersion);
 
-    fn read_cfg(buf: &mut impl bytes::Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let format_version = u16::read(buf)?;
         if format_version != STATE_FORMAT_VERSION {
             return Err(CodecError::Invalid(
@@ -308,19 +308,17 @@ pub struct PublicTransition<V: Variant = MinSig, P: PublicKey = ed25519::PublicK
 }
 
 /// Execute the public transition committed at an epoch boundary.
-pub fn transition<V, P, S, B>(
+pub fn transition<V, P>(
     config: &DkgProtocolConfig<V, P>,
     checkpoint: &PublicCheckpoint<V, P>,
-    signed_logs: impl IntoIterator<Item = SignedDealerLog<V, S>>,
+    signed_logs: impl IntoIterator<Item = SignedDealerLog<V, P>>,
     boundary_height: Height,
     rng: &mut impl CryptoRng,
     strategy: &impl Strategy,
 ) -> Result<PublicTransition<V, P>, Error>
 where
     V: Variant,
-    P: PublicKey,
-    S: Signer<PublicKey = P>,
-    B: BatchVerifier<PublicKey = P>,
+    P: BatchVerifier,
 {
     config.validate_checkpoint(checkpoint)?;
     let epocher = FixedEpocher::new(config.epoch_length);
@@ -329,7 +327,7 @@ where
     }
     let info = config.round_info(checkpoint)?;
     let eligible = config.participants_for_round(checkpoint.successful_round);
-    let mut unique = BTreeMap::<P, SignedDealerLog<V, S>>::new();
+    let mut unique = BTreeMap::<P, SignedDealerLog<V, P>>::new();
     for signed in signed_logs {
         let checked = signed.clone().check(&info).ok_or(Error::InvalidSignedLog)?;
         let dealer = checked.0;
@@ -351,7 +349,7 @@ where
             .ok_or(Error::InvalidSignedLog)?;
         checked.insert(dealer, log);
     }
-    transition_logs::<V, P, B>(
+    transition_logs::<V, P>(
         config,
         checkpoint,
         checked,
@@ -367,7 +365,7 @@ where
 /// This is the actor-facing half of [`transition`]. Applications should use
 /// [`transition`] so signatures and duplicate submissions are checked in the
 /// same call.
-pub fn transition_logs<V, P, B>(
+pub fn transition_logs<V, P>(
     config: &DkgProtocolConfig<V, P>,
     checkpoint: &PublicCheckpoint<V, P>,
     checked_logs: BTreeMap<P, DealerLog<V, P>>,
@@ -377,8 +375,7 @@ pub fn transition_logs<V, P, B>(
 ) -> Result<PublicTransition<V, P>, Error>
 where
     V: Variant,
-    P: PublicKey,
-    B: BatchVerifier<PublicKey = P>,
+    P: BatchVerifier,
 {
     config.validate_checkpoint(checkpoint)?;
     let epocher = FixedEpocher::new(config.epoch_length);
@@ -394,7 +391,7 @@ where
         }
         logs.record(dealer, log);
     }
-    let observed = observe::<V, P, N3f1, B>(rng, logs, strategy);
+    let observed = observe::<V, P, N3f1>(rng, logs, strategy);
     let (succeeded, successful_round, output) = match observed {
         Ok(output) => (true, checkpoint.successful_round + 1, output),
         Err(_) => (

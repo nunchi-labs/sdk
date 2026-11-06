@@ -84,7 +84,7 @@ fn coding_block_codec_preserves_no_reshare_log() {
     );
     
     let encoded = without_reshare.encode();
-    let decoded = CodingBlock::<u8>::decode_cfg(encoded.as_ref(), &(NZU32!(4), ()))
+    let decoded = CodingBlock::<u8>::decode_cfg(encoded, &(NZU32!(4), ()))
         .expect("decode should succeed");
     
     assert!(decoded.header.reshare_log.is_none());

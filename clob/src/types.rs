@@ -49,7 +49,7 @@ macro_rules! digest_id_codec {
         impl Read for $ty {
             type Cfg = ();
 
-            fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+            fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
                 Ok(Self(Digest::read(buf)?))
             }
         }
@@ -100,7 +100,7 @@ impl Write for Side {
 impl Read for Side {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         match u8::read(buf)? {
             0 => Ok(Self::Bid),
             1 => Ok(Self::Ask),
@@ -134,7 +134,7 @@ impl Write for TimeInForce {
 impl Read for TimeInForce {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         match u8::read(buf)? {
             0 => Ok(Self::GoodTilCancelled),
             1 => Ok(Self::ImmediateOrCancel),
@@ -180,7 +180,7 @@ impl Write for OrderStatus {
 impl Read for OrderStatus {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         match u8::read(buf)? {
             0 => Ok(Self::Open),
             1 => Ok(Self::PartiallyFilled),
@@ -227,7 +227,7 @@ impl Write for Market {
 impl Read for Market {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
             id: MarketId::read(buf)?,
             base_asset: AssetId::read(buf)?,
@@ -291,7 +291,7 @@ impl Write for Order {
 impl Read for Order {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
             id: OrderId::read(buf)?,
             owner: Address::read(buf)?,
@@ -365,7 +365,7 @@ impl Write for Fill {
 impl Read for Fill {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
             id: FillId::read(buf)?,
             market: MarketId::read(buf)?,

@@ -25,7 +25,7 @@ fn encoded<T: Encode>(value: &T) -> Vec<u8> {
 }
 
 fn decoded<T: Read<Cfg = ()>>(bytes: &[u8]) -> Result<T, AccessControlError> {
-    let mut buf = bytes;
+    let mut buf = commonware_codec::Copying(bytes);
     T::read(&mut buf).map_err(|err| AccessControlError::Storage(err.to_string()))
 }
 

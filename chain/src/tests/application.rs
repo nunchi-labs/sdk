@@ -7,7 +7,8 @@ use std::{
     time::Duration,
 };
 
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{BufMut, Bytes};
+use commonware_codec::Buf;
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::{
     marshal::ancestry,
@@ -15,8 +16,8 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{ed25519, sha256::Digest, Digestible as _, Hasher, Sha256, Signer};
 use commonware_glue::stateful::{
-    db::{DatabaseSet as _, Merkleized as _},
-    Application as StatefulApplication, Input,
+    db::{DatabaseSet, ManagedDb, Merkleized as _},
+    Application as StatefulApplication, Finality, Input,
 };
 use commonware_actor::mailbox;
 use commonware_runtime::{deterministic, Clock as _, Runner as _, Supervisor as _};
@@ -321,8 +322,8 @@ where
     Events: EventConsumer,
 {
     let (_mempool, submitter) = Mempool::new(PoolConfig::default());
-    let config = QmdbState::<deterministic::Context>::config(&context, "event-sink-test");
-    let db = QmdbBackend::init(context, config)
+    let config = QmdbState::<deterministic::Context>::config("event-sink-test");
+    let db = QmdbBackend::init(context, config, None)
         .await
         .expect("init state db");
     let databases: QmdbDatabaseSet<deterministic::Context> = shared_database(db);
@@ -344,6 +345,45 @@ where
     (app, databases, parent)
 }
 
+fn digested(block: CodingBlock<TestTx>) -> commonware_cryptography::Digested<CodingBlock<TestTx>> {
+    let digest = block.digest();
+    commonware_cryptography::Digested::precomputed(block, digest)
+}
+
+fn ancestry_of(
+    blocks: Vec<commonware_cryptography::Digested<CodingBlock<TestTx>>>,
+) -> ancestry::BoxedAncestry<CodingBlock<TestTx>> {
+    ancestry::BoxedAncestry::new(ancestry::from_iter::<CodingBlock<TestTx>>(blocks))
+}
+
+async fn apply_db(
+    databases: &QmdbDatabaseSet<deterministic::Context>,
+    merkleized: QmdbMerkleized<deterministic::Context>,
+) {
+    let (slot, database) = databases.write().await;
+    let database = <QmdbBackend<deterministic::Context> as ManagedDb<deterministic::Context>>::apply(
+        database,
+        merkleized,
+    )
+    .await
+    .expect("apply state");
+    slot.put(database);
+}
+
+async fn process_reporting(
+    app: &mut ReportingApplication,
+    context: (
+        deterministic::Context,
+        <ReportingApplication as StatefulApplication<deterministic::Context>>::Context,
+    ),
+    blocks: Vec<commonware_cryptography::Digested<CodingBlock<TestTx>>>,
+    batches: <QmdbDatabaseSet<deterministic::Context> as DatabaseSet<deterministic::Context>>::Unmerkleized,
+    finality: Finality,
+) -> Option<QmdbMerkleized<deterministic::Context>> {
+    app.process_inner(context, ancestry_of(blocks), batches, finality)
+        .await
+}
+
 async fn propose(
     app: &mut Application<TestRuntime>,
     databases: &QmdbDatabaseSet<deterministic::Context>,
@@ -355,7 +395,7 @@ async fn propose(
     <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::propose(
         app,
         (context, test_context(parent.header.height.get() + 1, &parent)),
-        ancestry::from_iter([Arc::new(parent)]),
+        ancestry_of(vec![digested(parent)]),
         databases.new_batches().await,
         Input {
             upstream: (),
@@ -372,11 +412,12 @@ async fn verify(
     block: CodingBlock<TestTx>,
     parent: CodingBlock<TestTx>,
 ) -> bool {
-    <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::verify(
+    <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::process(
         app,
         (context, block.header.context.clone()),
-        ancestry::from_iter([Arc::new(block), Arc::new(parent)]),
+        ancestry_of(vec![digested(block), digested(parent)]),
         databases.new_batches().await,
+        Finality::Candidate,
     )
     .await
     .is_some()
@@ -388,6 +429,8 @@ fn state_of(block: &CodingBlock<TestTx>) -> StateCommitment {
         range: block.header.state_range.clone(),
     }
 }
+
+type ReportingApplication = Application<TestRuntime, NoConsensusExtension, InMemoryEventConsumer>;
 
 fn with_timestamp(block: &CodingBlock<TestTx>, timestamp: u64) -> CodingBlock<TestTx> {
     CodingBlock::new(
@@ -590,11 +633,12 @@ fn timestamp_wait_is_cancellation_safe() {
         let batches = databases.new_batches().await;
         {
             let verify =
-                <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::verify(
+                <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::process(
                     &mut app,
                     (context.child("verify"), block.header.context.clone()),
-                    ancestry::from_iter([Arc::new(block), Arc::new(parent)]),
+                    ancestry_of(vec![digested(block), digested(parent)]),
                     batches,
+                    Finality::Candidate,
                 );
             futures::pin_mut!(verify);
             let waker = futures::task::noop_waker();
@@ -621,19 +665,18 @@ fn verification_uses_noop_event_sink() {
         let block = block(&parent, transactions, state);
 
         let verified =
-            <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::verify(
+            <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::process(
                 &mut app,
                 (context.child("verify"), block.header.context.clone()),
-                ancestry::from_iter([Arc::new(block), Arc::new(parent)]),
+                ancestry_of(vec![digested(block), digested(parent)]),
                 databases.new_batches().await,
+                Finality::Candidate,
             )
             .await;
 
         assert!(verified.is_some());
     });
 }
-
-type ReportingApplication = Application<TestRuntime, NoConsensusExtension, InMemoryEventConsumer>;
 
 #[test]
 fn certified_apply_uses_default_noop_consumer() {
@@ -649,11 +692,12 @@ fn certified_apply_uses_default_noop_consumer() {
         let block = block(&parent, transactions, state);
 
         let merkleized =
-            <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::apply(
+            <Application<TestRuntime> as StatefulApplication<deterministic::Context>>::process(
                 &mut app,
                 (context.child("apply"), block.header.context.clone()),
-                &block,
+                ancestry_of(vec![digested(block.clone())]),
                 databases.new_batches().await,
+                Finality::Finalized,
             )
             .await
             .expect("certified apply");
@@ -684,11 +728,12 @@ fn certified_apply_discards_events_from_failed_transaction() {
         let state = committed_state(&databases, std::slice::from_ref(&applied)).await;
         let block = block(&parent, vec![applied, failing], state);
 
-        let apply = <ReportingApplication as StatefulApplication<deterministic::Context>>::apply(
+        let apply = <ReportingApplication as StatefulApplication<deterministic::Context>>::process(
             &mut app,
             (context.child("apply"), block.header.context.clone()),
-            &block,
+            ancestry_of(vec![digested(block.clone())]),
             databases.new_batches().await,
+            Finality::Finalized,
         );
         assert!(AssertUnwindSafe(apply).catch_unwind().await.is_err());
         assert!(consumer.is_empty());
@@ -735,20 +780,19 @@ fn finalized_reports_collected_events_after_database_finalize() {
         let state = committed_state(&databases, &transactions).await;
         let block = block(&parent, transactions, state);
 
-        let merkleized =
-            <ReportingApplication as StatefulApplication<deterministic::Context>>::apply(
-                &mut app,
-                (context.child("apply"), block.header.context.clone()),
-                &block,
-                databases.new_batches().await,
-            )
-            .await
-            .expect("certified apply");
+        let merkleized = process_reporting(
+            &mut app,
+            (context.child("apply"), block.header.context.clone()),
+            vec![digested(block.clone())],
+            databases.new_batches().await,
+            Finality::Finalized,
+        )
+        .await
+        .expect("certified apply");
 
         assert!(consumer.is_empty());
-        databases.apply(merkleized).await;
+        apply_db(&databases, merkleized).await;
         let _ = databases.finalize().await;
-        assert!(consumer.is_empty());
 
         <ReportingApplication as StatefulApplication<deterministic::Context>>::finalized(
             &mut app,
@@ -810,7 +854,7 @@ fn finalized_reports_empty_events_when_handoff_is_missing() {
         let (state, merkleized) = merkleized_state(&databases, &transactions).await;
         let block = block(&parent, transactions, state);
 
-        databases.apply(merkleized).await;
+        apply_db(&databases, merkleized).await;
         let _ = databases.finalize().await;
         <ReportingApplication as StatefulApplication<deterministic::Context>>::finalized(
             &mut app,
@@ -835,8 +879,8 @@ fn finalized_reports_empty_events_when_handoff_is_missing() {
 fn with_dkg_and_events_uses_dummy_genesis_parent() {
     deterministic::Runner::default().start(|context| async move {
         let (_mempool, submitter) = Mempool::<TestTx>::new(PoolConfig::default());
-        let config = QmdbState::<deterministic::Context>::config(&context, "dkg-events-genesis");
-        let db = QmdbBackend::init(context.child("state"), config)
+        let config = QmdbState::<deterministic::Context>::config("dkg-events-genesis");
+        let db = QmdbBackend::init(context.child("state"), config, None)
             .await
             .expect("init state db");
         let databases: QmdbDatabaseSet<deterministic::Context> = shared_database(db);

@@ -6,7 +6,9 @@ use commonware_consensus::{
     marshal::coding::types::{coding_config_for_participants, CodedBlock},
     types::{Epoch, Height, Round, View},
 };
-use commonware_cryptography::{sha256, Committable, Digest as _, Digestible, Sha256, Signer};
+use commonware_cryptography::{
+    sha256, Committable, Digest as _, Digestible, Digested, Sha256, Signer,
+};
 use commonware_parallel::Sequential;
 use commonware_runtime::{deterministic, Runner as _};
 use commonware_storage::mmr::Location;
@@ -20,6 +22,17 @@ fn coding_context() -> CodingContext<u8> {
         leader: commonware_cryptography::ed25519::PrivateKey::from_seed(0).public_key(),
         parent: (View::zero(), dummy_genesis_parent()),
     }
+}
+
+fn encode_coded(
+    block: CodingBlock<u8>,
+    config: commonware_coding::Config,
+) -> CodedBlock<CodingBlock<u8>, ReedSolomon<Sha256>, Sha256> {
+    futures::executor::block_on(CodedBlock::encode(
+        Digested::precomputed(block.clone(), block.digest()),
+        config,
+        &Sequential,
+    ))
 }
 
 fn state() -> StateCommitment {
@@ -47,8 +60,8 @@ fn coded_block_commitment_is_deterministic() {
     let block = coding_block(vec![7, 8, 9]);
     let config = coding_config_for_participants(4);
     
-    let coded1 = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(block.clone(), config, &Sequential);
-    let coded2 = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(block, config, &Sequential);
+    let coded1 = encode_coded(block.clone(), config);
+    let coded2 = encode_coded(block, config);
     
     assert_eq!(coded1.commitment(), coded2.commitment());
 }
@@ -58,7 +71,7 @@ fn coded_block_empty_transactions_produces_valid_commitment() {
     let block = coding_block(vec![]);
     let config = coding_config_for_participants(4);
     
-    let coded = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(block.clone(), config, &Sequential);
+    let coded = encode_coded(block.clone(), config);
     
     assert!(coded.encode_size() > 0);
 }
@@ -68,7 +81,7 @@ fn coded_block_shards_count_matches_config() {
     let block = coding_block(vec![1, 2, 3]);
     let config = coding_config_for_participants(4);
     
-    let coded = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(block, config, &Sequential);
+    let coded = encode_coded(block, config);
     
     assert_eq!(coded.encode_size(), coded.encode().len());
 }
@@ -111,7 +124,7 @@ fn coding_block_codec_round_trip() {
     let encoded = block.encode();
     
     use commonware_utils::NZU32;
-    let decoded = CodingBlock::<u8>::decode_cfg(encoded.as_ref(), &(NZU32!(4), ()))
+    let decoded = CodingBlock::<u8>::decode_cfg(encoded, &(NZU32!(4), ()))
         .expect("decode should succeed");
     
     assert_eq!(decoded.digest(), block.digest());
@@ -134,8 +147,8 @@ fn coded_block_different_configs_produce_different_commitments() {
     let config_n4 = coding_config_for_participants(4);
     let config_n7 = coding_config_for_participants(7);
     
-    let coded_n4 = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(block.clone(), config_n4, &Sequential);
-    let coded_n7 = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(block, config_n7, &Sequential);
+    let coded_n4 = encode_coded(block.clone(), config_n4);
+    let coded_n7 = encode_coded(block, config_n7);
     
     assert_ne!(coded_n4.commitment(), coded_n7.commitment());
 }

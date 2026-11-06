@@ -30,11 +30,11 @@ use commonware_runtime::{
         histogram::Buckets, CounterFamily, EncodeLabelSet, Gauge, GaugeExt, Histogram,
         MetricsExt as _,
     },
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
+    Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
 use commonware_storage::metadata::{self, Metadata};
 use commonware_utils::sequence::U64;
-use commonware_utils::{vec::NonEmptyVec, NZUsize};
+use commonware_utils::{vec::NonEmptyVec, NonZeroDuration, NZUsize};
 use rand::CryptoRng;
 use std::{
     collections::BTreeMap,
@@ -45,6 +45,35 @@ use std::{
 use tracing::{debug, error, info, warn};
 
 const CLEANUP_WATERMARK_KEY: U64 = U64::new(0);
+
+/// Fetch and skip deadlines derived from the configured round timeouts.
+///
+/// Simplex requires the skip timeout to outlast both the certification timeout
+/// and `timeout_retry`. A fixed one-second fetch and twenty-second skip cannot
+/// elapse inside a shorter recovery window, so a restarted view can wait out
+/// the runtime deadline without certifying. The fetch timeout follows the
+/// leader timeout and is retried after one fifth of it. The skip timeout is
+/// one leader timeout after the later of the certification timeout and the
+/// nullify retry.
+struct SimplexLiveness {
+    fetch_timeout: NonZeroDuration,
+    fetch_retry_delay: Duration,
+    skip_timeout: Duration,
+}
+
+fn simplex_liveness(
+    leader_timeout: Duration,
+    certification_timeout: Duration,
+    timeout_retry: Duration,
+) -> SimplexLiveness {
+    SimplexLiveness {
+        fetch_timeout: NonZeroDuration::new_panic(leader_timeout),
+        fetch_retry_delay: leader_timeout / 5,
+        skip_timeout: certification_timeout
+            .max(timeout_retry)
+            .saturating_add(leader_timeout),
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, EncodeLabelSet)]
 struct CleanupStatusLabel {
@@ -107,8 +136,12 @@ where
     pub strategy: T,
     pub leader_timeout: Duration,
     pub certification_timeout: Duration,
+    /// Delay before rebroadcasting a nullify for a view restored from the journal.
+    ///
+    /// 2026.10 schedules this delay on the first poll after replay, so a node
+    /// that crashed mid-nullify does not broadcast again until it elapses.
+    pub timeout_retry: Duration,
 
-    pub muxer_size: usize,
     pub mailbox_size: NonZeroUsize,
 
     // Partition prefix used for orchestrator metadata persistence
@@ -150,7 +183,7 @@ impl<D: Digest> StartupFloor<D> {
 
 pub struct Actor<E, B, A, S, L, T, V, R>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Storage + Network,
+    E: Spawner + Metrics + CryptoRng + Clock + Storage + Network,
     B: Blocker<PublicKey = ed25519::PublicKey>,
     V: Variant,
     A: CertifiableAutomaton<
@@ -180,8 +213,8 @@ where
     strategy: T,
     leader_timeout: Duration,
     certification_timeout: Duration,
+    timeout_retry: Duration,
 
-    muxer_size: usize,
     partition_prefix: String,
     epoch_length: NonZeroU64,
     genesis_digest: V::Commitment,
@@ -199,7 +232,7 @@ where
 
 impl<E, B, A, S, L, T, V, R> Actor<E, B, A, S, L, T, V, R>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Storage + Network,
+    E: Spawner + Metrics + CryptoRng + Clock + Storage + Network,
     B: Blocker<PublicKey = ed25519::PublicKey>,
     V: Variant,
     A: CertifiableAutomaton<
@@ -222,7 +255,7 @@ where
         config: Config<B, A, S, L, T, V, R>,
     ) -> (Self, Mailbox<MinSig, ed25519::PublicKey>) {
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
-        let page_cache_ref = CacheRef::from_pooler(&context, page_size(16_384), NZUsize!(10_000));
+        let page_cache_ref = CacheRef::new(page_size(16_384), NZUsize!(10_000));
 
         // Register latest_epoch gauge for Grafana integration
         let latest_epoch = context.gauge("latest_epoch", "current epoch");
@@ -257,7 +290,7 @@ where
                 strategy: config.strategy,
                 leader_timeout: config.leader_timeout,
                 certification_timeout: config.certification_timeout,
-                muxer_size: config.muxer_size,
+                timeout_retry: config.timeout_retry,
                 partition_prefix: config.partition_prefix,
                 epoch_length: config.epoch_length,
                 genesis_digest: config.genesis_digest,
@@ -323,7 +356,6 @@ where
             self.context.child("vote_mux"),
             vote_sender,
             vote_receiver,
-            self.muxer_size,
         )
         .with_backup()
         .build();
@@ -332,7 +364,6 @@ where
             self.context.child("certificate_mux"),
             certificate_sender,
             certificate_receiver,
-            self.muxer_size,
         )
         .build();
         mux.start();
@@ -340,7 +371,6 @@ where
             self.context.child("resolver_mux"),
             resolver_sender,
             resolver_receiver,
-            self.muxer_size,
         );
         mux.start();
 
@@ -612,24 +642,20 @@ where
         epoch: Epoch,
         floor: Floor<S, V::Commitment>,
         scheme: S,
-        vote_mux: &mut MuxHandle<
-            impl Sender<PublicKey = ed25519::PublicKey>,
-            impl commonware_p2p::Receiver<PublicKey = ed25519::PublicKey>,
-        >,
-        certificate_mux: &mut MuxHandle<
-            impl Sender<PublicKey = ed25519::PublicKey>,
-            impl commonware_p2p::Receiver<PublicKey = ed25519::PublicKey>,
-        >,
-        resolver_mux: &mut MuxHandle<
-            impl Sender<PublicKey = ed25519::PublicKey>,
-            impl commonware_p2p::Receiver<PublicKey = ed25519::PublicKey>,
-        >,
+        vote_mux: &mut MuxHandle<impl Sender<PublicKey = ed25519::PublicKey>>,
+        certificate_mux: &mut MuxHandle<impl Sender<PublicKey = ed25519::PublicKey>>,
+        resolver_mux: &mut MuxHandle<impl Sender<PublicKey = ed25519::PublicKey>>,
     ) -> Handle<()> {
         // Start the new engine
         let context = self
             .context
             .child("consensus_engine")
             .with_attribute("epoch", epoch);
+        let liveness = simplex_liveness(
+            self.leader_timeout,
+            self.certification_timeout,
+            self.timeout_retry,
+        );
         let engine = simplex::Engine::new(
             context,
             simplex::Config {
@@ -648,11 +674,12 @@ where
                 track_historical_votes: false,
                 leader_timeout: self.leader_timeout,
                 certification_timeout: self.certification_timeout,
-                timeout_retry: Duration::from_secs(10),
-                fetch_timeout: Duration::from_secs(1),
+                timeout_retry: self.timeout_retry,
+                fetch_timeout: liveness.fetch_timeout,
+                fetch_retry_delay: liveness.fetch_retry_delay,
                 view_retention: ViewDelta::new(256),
                 skip: SkipPolicy::Enabled {
-                    timeout: Duration::from_secs(20),
+                    timeout: liveness.skip_timeout,
                     budget: Default::default(),
                 },
                 page_cache: self.page_cache_ref.clone(),
@@ -700,6 +727,37 @@ mod tests {
         };
 
         assert_eq!(floor.digest_for_epoch(&epocher, Epoch::new(2)), None);
+    }
+
+    #[test]
+    fn simplex_liveness_fits_the_unclean_recovery_window() {
+        // `recovers_unclean_shutdown` restarts every 250..1_000ms with these
+        // deadlines so a recovered view can certify or nullify first.
+        let leader = Duration::from_millis(250);
+        let certification = Duration::from_millis(500);
+        let timeout_retry = Duration::from_millis(50);
+        let window = Duration::from_secs(1);
+        let liveness = simplex_liveness(leader, certification, timeout_retry);
+
+        assert_eq!(liveness.fetch_timeout.get(), leader);
+        assert!(liveness.fetch_retry_delay < liveness.fetch_timeout.get());
+        assert!(liveness.fetch_timeout.get() < window);
+        assert!(liveness.skip_timeout > certification);
+        assert!(liveness.skip_timeout > timeout_retry);
+        assert!(liveness.skip_timeout < window);
+    }
+
+    #[test]
+    fn simplex_liveness_keeps_default_fetch_pacing() {
+        let liveness = simplex_liveness(
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+            Duration::from_secs(10),
+        );
+
+        assert_eq!(liveness.fetch_timeout.get(), Duration::from_secs(1));
+        assert_eq!(liveness.fetch_retry_delay, Duration::from_millis(200));
+        assert_eq!(liveness.skip_timeout, Duration::from_secs(11));
     }
 
 }

@@ -25,7 +25,7 @@ impl Write for AccountPolicyRegistered {
 impl Read for AccountPolicyRegistered {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
             account_id: Address::read(buf)?,
             policy: MultisigPolicy::read(buf)?,
@@ -53,7 +53,7 @@ impl Write for TokenCreated {
 impl Read for TokenCreated {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
             token: TokenDefinition::read(buf)?,
         })
@@ -86,7 +86,7 @@ impl Write for Minted {
 impl Read for Minted {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
             coin: CoinId::read(buf)?,
             to: Address::read(buf)?,
@@ -125,7 +125,7 @@ impl Write for Burned {
 impl Read for Burned {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
             coin: CoinId::read(buf)?,
             from: Address::read(buf)?,
@@ -164,7 +164,7 @@ impl Write for Transferred {
 impl Read for Transferred {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
             coin: CoinId::read(buf)?,
             from: Address::read(buf)?,
@@ -203,7 +203,7 @@ impl Write for FeeCharged {
 impl Read for FeeCharged {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
             coin: CoinId::read(buf)?,
             payer: Address::read(buf)?,

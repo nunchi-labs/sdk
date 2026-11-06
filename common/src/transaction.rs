@@ -36,7 +36,7 @@ impl<Operation: Write> Write for TransactionPayload<Operation> {
 impl<Operation: Read<Cfg = ()>> Read for TransactionPayload<Operation> {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
             nonce: u64::read(buf)?,
             operation: Operation::read(buf)?,
@@ -95,7 +95,7 @@ impl Write for AccountSignature {
 impl Read for AccountSignature {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         let signer = PublicKey::read(buf)?;
         let signature = Signature::read(buf)?;
 
@@ -203,7 +203,7 @@ impl Write for Authorization {
 impl Read for Authorization {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         match u8::read(buf)? {
             AUTH_SINGLE => {
                 let signer = PublicKey::read(buf)?;
@@ -313,7 +313,7 @@ impl<Operation: Write> Write for Transaction<Operation> {
 impl<Operation: Read<Cfg = ()>> Read for Transaction<Operation> {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         let account_id = Address::read(buf)?;
         let payload = TransactionPayload::read(buf)?;
         let authorization = Authorization::read(buf)?;

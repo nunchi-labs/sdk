@@ -34,7 +34,7 @@ impl Write for CoinId {
 impl Read for CoinId {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self(Digest::read(buf)?))
     }
 }
@@ -96,7 +96,7 @@ impl Write for TokenSymbol {
 impl Read for TokenSymbol {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         let bytes = Vec::<u8>::read_cfg(buf, &(RangeCfg::new(0..=MAX_SYMBOL_BYTES), ()))?;
         let value = String::from_utf8(bytes).map_err(|_| {
             CodecError::Wrapped(
@@ -186,7 +186,7 @@ impl Write for TokenName {
 impl Read for TokenName {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         let bytes = Vec::<u8>::read_cfg(buf, &(RangeCfg::new(0..=MAX_NAME_BYTES), ()))?;
         let value = String::from_utf8(bytes).map_err(|_| {
             CodecError::Wrapped(
@@ -270,7 +270,7 @@ impl Write for CoinSpec {
 impl Read for CoinSpec {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             symbol: TokenSymbol::read(buf)?,
             name: TokenName::read(buf)?,
@@ -332,7 +332,7 @@ impl Write for TokenDefinition {
 impl Read for TokenDefinition {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             id: CoinId::read(buf)?,
             issuer: Address::read(buf)?,

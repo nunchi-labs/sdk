@@ -14,7 +14,7 @@ use commonware_consensus::{
     Automaton, CertifiableAutomaton, Relay, Reporter,
     types::ViewDelta,
 };
-use commonware_cryptography::{ed25519, Sha256};
+use commonware_cryptography::{ed25519, Digested, Sha256};
 use commonware_glue::stateful::{db::SyncEngineConfig, PruneConfig};
 use commonware_runtime::{
     buffer::paged::page_size,
@@ -50,9 +50,7 @@ pub const MAX_REPAIR: NonZero<usize> = NZUsize!(50);
 pub const DEFAULT_MAX_PENDING_ACKS: NonZero<usize> = NZUsize!(16);
 pub const STATE_SYNC_FETCH_BATCH_SIZE: NonZero<u64> = NZU64!(1_024);
 pub const STATE_SYNC_APPLY_BATCH_SIZE: NonZero<u64> = NZU64!(4_096);
-pub const STATE_SYNC_MAX_OUTSTANDING_REQUESTS: usize = 8;
-pub const STATE_SYNC_UPDATE_CHANNEL_SIZE: NonZero<usize> = NZUsize!(256);
-pub const STATE_SYNC_MAX_RETAINED_ROOTS: usize = 32;
+pub const STATE_SYNC_MAX_OUTSTANDING_REQUESTS: NonZero<usize> = NZUsize!(8);
 pub const APPLICATION_VERIFY_CONCURRENCY: NonZeroUsize = NZUsize!(16);
 pub const STATE_SYNC_RESOLVER_TIMEOUT: Duration = Duration::from_secs(2);
 pub const STATE_SYNC_RESOLVER_RETRY: Duration = Duration::from_millis(100);
@@ -62,9 +60,8 @@ pub const DEFAULT_PRUNE_MAINTENANCE_INTERVAL: NonZero<usize> = NZUsize!(32);
 pub const DEFAULT_PRUNE_RETAINED_MARSHAL_BLOCKS: usize = 200;
 /// Extra QMDB history beyond the ack window for serving lagging state-sync peers.
 pub const DEFAULT_PRUNE_RETAINED_QMDB_BLOCKS: usize = 200;
-pub const SHARD_BACKGROUND_CHANNEL_CAPACITY: NonZeroUsize = NZUsize!(1024);
+pub const SHARD_RECORDS: NonZeroUsize = NZUsize!(64);
 pub const SHARD_PEER_BUFFER_SIZE: NonZeroUsize = NZUsize!(64);
-pub const MAX_SHARD_SIZE: usize = 1024 * 1024;
 
 /// Application block consumed by the coding marshal.
 pub type EngineBlock<Tx, Ext = NoConsensusExtension> = CodingBlock<Tx, Ext>;
@@ -308,7 +305,7 @@ where
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         input: Self::Input,
-    ) -> impl Future<Output = Option<Self::Block>> + Send {
+    ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send {
         self.application.propose(context, ancestry, input)
     }
 
@@ -332,8 +329,6 @@ pub fn state_sync_config() -> SyncEngineConfig {
         fetch_batch_size: STATE_SYNC_FETCH_BATCH_SIZE,
         apply_batch_size: STATE_SYNC_APPLY_BATCH_SIZE,
         max_outstanding_requests: STATE_SYNC_MAX_OUTSTANDING_REQUESTS,
-        update_channel_size: STATE_SYNC_UPDATE_CHANNEL_SIZE,
-        max_retained_roots: STATE_SYNC_MAX_RETAINED_ROOTS,
     }
 }
 
@@ -392,7 +387,7 @@ mod tests {
         marshal::ancestry::{self, Ancestry},
         types::{Epoch, Round, View},
     };
-    use commonware_cryptography::{ed25519, sha256, Digest as _, Signer as _};
+    use commonware_cryptography::{ed25519, sha256, Digest as _, Digested, Signer as _};
     use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
     use commonware_runtime::telemetry::metrics::{raw, Registered, Registration};
     use futures::{pin_mut, task::noop_waker};
@@ -436,7 +431,7 @@ mod tests {
             _context: (E, Self::Context),
             _ancestry: impl Ancestry<Self::Block>,
             _input: Self::Input,
-        ) -> Option<Self::Block> {
+        ) -> Option<Digested<Self::Block>> {
             None
         }
 
@@ -493,7 +488,7 @@ mod tests {
             assert!(commonware_consensus::Application::propose(
                 &mut application,
                 (context, consensus_context()),
-                ancestry::from_iter(Vec::<Arc<crate::Block<EmptyPayload>>>::new()),
+                ancestry::from_iter(Vec::<commonware_cryptography::Digested<crate::Block<EmptyPayload>>>::new()),
                 (),
             )
             .await
@@ -514,7 +509,7 @@ mod tests {
                 let verification = commonware_consensus::Application::verify(
                     &mut limiter,
                     (context.child("first"), consensus_context()),
-                    ancestry::from_iter(Vec::<Arc<crate::Block<EmptyPayload>>>::new()),
+                    ancestry::from_iter(Vec::<commonware_cryptography::Digested<crate::Block<EmptyPayload>>>::new()),
                 );
                 pin_mut!(verification);
                 let waker = noop_waker();
@@ -546,7 +541,7 @@ mod tests {
                 commonware_consensus::Application::verify(
                     &mut limiter,
                     (context.child("second"), consensus_context()),
-                    ancestry::from_iter(Vec::<Arc<crate::Block<EmptyPayload>>>::new()),
+                    ancestry::from_iter(Vec::<commonware_cryptography::Digested<crate::Block<EmptyPayload>>>::new()),
                 )
                 .await
             );

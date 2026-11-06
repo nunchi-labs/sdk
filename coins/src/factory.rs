@@ -69,7 +69,7 @@ impl Write for TokenFactory {
 impl Read for TokenFactory {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             next_nonce: u64::read(buf)?,
         })

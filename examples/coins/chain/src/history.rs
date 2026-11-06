@@ -4,7 +4,7 @@ use crate::{Block, Finalization};
 use commonware_codec::Read;
 use commonware_cryptography::sha256::Digest;
 use commonware_glue::stateful::PruneConfig;
-use commonware_runtime::{buffer::paged::CacheRef, BufferPooler, Clock, Metrics, Spawner, Storage};
+use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Spawner, Storage};
 use commonware_storage::{
     archive::{prunable, Archive as _},
     metadata::{self, Metadata},
@@ -147,7 +147,7 @@ impl Partitions {
 
 pub(crate) struct Opened<E>
 where
-    E: BufferPooler + Clock + Storage + Metrics,
+    E: Clock + Storage + Metrics,
 {
     pub(crate) finalizations: FinalizationsArchive<E>,
     pub(crate) blocks: BlocksArchive<E>,
@@ -167,7 +167,7 @@ pub(crate) async fn open<E>(
     _policy: RetentionPolicy,
 ) -> Result<Opened<E>, HistoryError>
 where
-    E: BufferPooler + Clock + Spawner + Storage + Metrics,
+    E: Clock + Spawner + Storage + Metrics,
 {
     reject_legacy(context, prefix).await?;
 
@@ -257,7 +257,7 @@ async fn init_finalizations<E>(
     page_cache: CacheRef,
 ) -> Result<FinalizationsArchive<E>, HistoryError>
 where
-    E: BufferPooler + Clock + Spawner + Storage + Metrics,
+    E: Clock + Spawner + Storage + Metrics,
 {
     prunable::Archive::init(
         context.child("finalizations_by_height"),
@@ -289,7 +289,7 @@ async fn init_blocks<E>(
     codec_config: <Block as Read>::Cfg,
 ) -> Result<BlocksArchive<E>, HistoryError>
 where
-    E: BufferPooler + Clock + Spawner + Storage + Metrics,
+    E: Clock + Spawner + Storage + Metrics,
 {
     prunable::Archive::init(
         context.child("finalized_blocks"),
@@ -327,7 +327,7 @@ async fn partition_exists<E: Storage>(context: &E, partition: &str) -> Result<bo
 
 async fn validate_marker<E>(context: &E, partition: &str) -> Result<(), HistoryError>
 where
-    E: BufferPooler + Clock + Storage + Metrics + Spawner,
+    E: Clock + Storage + Metrics + Spawner,
 {
     let marker = Metadata::<E, U64, u64>::init(
         context.child("history_marker"),
@@ -354,7 +354,7 @@ where
 
 async fn write_marker<E>(context: &E, partition: &str) -> Result<(), HistoryError>
 where
-    E: BufferPooler + Clock + Storage + Metrics + Spawner,
+    E: Clock + Storage + Metrics + Spawner,
 {
     let marker = Metadata::<E, U64, u64>::init(
         context.child("history_marker"),
@@ -434,7 +434,7 @@ mod tests {
     #[test]
     fn fresh_format_marker_is_durable_and_legacy_is_not_created() {
         deterministic::Runner::default().start(|context| async move {
-            let page_cache = CacheRef::from_pooler(&context, page_size(4_096), NZUsize!(32));
+            let page_cache = CacheRef::new(page_size(4_096), NZUsize!(32));
             let first = open(
                 &context,
                 "validator",
@@ -487,7 +487,7 @@ mod tests {
                 .open("validator-finalized_blocks-ordinal", b"legacy")
                 .await
                 .expect("create legacy partition");
-            let page_cache = CacheRef::from_pooler(&context, page_size(4_096), NZUsize!(32));
+            let page_cache = CacheRef::new(page_size(4_096), NZUsize!(32));
             let result = open(
                 &context,
                 "validator",

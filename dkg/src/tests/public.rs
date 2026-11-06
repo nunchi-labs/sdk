@@ -13,7 +13,7 @@ use commonware_cryptography::{
             variant::MinSig,
         },
     },
-    ed25519::{self, Batch},
+    ed25519,
     Signer,
 };
 use commonware_math::algebra::Ring;
@@ -70,10 +70,9 @@ fn protocol_digest_is_canonical_and_binds_configuration() {
 #[test]
 fn checkpoint_codec_is_bounded_and_rejects_wrong_format() {
     let (config, _, checkpoint, _) = setup();
-    let encoded = checkpoint.encode();
-    let mut input = encoded.as_ref();
+    let mut encoded = checkpoint.encode();
     let decoded = PublicCheckpoint::read_cfg(
-        &mut input,
+        &mut encoded,
         &(
             commonware_utils::NZU32!(config.max_participants_per_round()),
             crate::MAX_SUPPORTED_MODE,
@@ -81,12 +80,12 @@ fn checkpoint_codec_is_bounded_and_rejects_wrong_format() {
     )
     .unwrap();
     assert_eq!(decoded, checkpoint);
-    assert!(input.is_empty());
+    assert!(encoded.is_empty());
 
-    let mut malformed = encoded.to_vec();
+    let mut malformed = checkpoint.encode().to_vec();
     malformed[0] ^= 1;
     assert!(PublicCheckpoint::<MinSig, ed25519::PublicKey>::read_cfg(
-        &mut malformed.as_slice(),
+        &mut commonware_codec::Copying(malformed.as_slice()),
         &(
             commonware_utils::NZU32!(config.max_participants_per_round()),
             crate::MAX_SUPPORTED_MODE,
@@ -101,7 +100,7 @@ fn failed_public_transition_advances_epoch_only() {
     let boundary = FixedEpocher::new(config.epoch_length)
         .last(Epoch::zero())
         .unwrap();
-    let transition = transition_logs::<_, _, Batch>(
+    let transition = transition_logs(
         &config,
         &checkpoint,
         Default::default(),
@@ -154,7 +153,7 @@ fn successful_transition_and_identical_duplicate_are_deterministic() {
     let boundary = FixedEpocher::new(config.epoch_length)
         .last(Epoch::zero())
         .unwrap();
-    let transition = public_transition::<_, _, ed25519::PrivateKey, Batch>(
+    let transition = public_transition(
         &config,
         &checkpoint,
         logs,

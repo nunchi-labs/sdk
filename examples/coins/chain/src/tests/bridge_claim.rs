@@ -159,7 +159,7 @@ fn bridge_claim_verifies_proof_and_mints_mapped_asset() {
         CoinsRuntime::apply(&mut dest, RuntimeContext::default(), &create_wrapped, &mut ev)
             .await
             .unwrap();
-        let wrapped = TokenCreated::decode(ev.events()[0].value.as_ref())
+        let wrapped = TokenCreated::decode(commonware_codec::Viewing::new(&ev.events()[0].value))
             .unwrap()
             .token
             .id;
@@ -317,7 +317,7 @@ fn bridge_claim_settlement_failure_leaves_no_event_or_consumption() {
         CoinsRuntime::apply(&mut dest, RuntimeContext::default(), &create_capped, &mut ev)
             .await
             .unwrap();
-        let capped = TokenCreated::decode(ev.events()[0].value.as_ref())
+        let capped = TokenCreated::decode(commonware_codec::Viewing::new(&ev.events()[0].value))
             .unwrap()
             .token
             .id;

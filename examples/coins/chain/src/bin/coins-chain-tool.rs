@@ -1084,7 +1084,7 @@ fn token_spec(
 
 fn parse_coin(value: &str) -> Result<CoinId, Box<dyn Error>> {
     let bytes = from_hex(value).ok_or("coin id must be hex")?;
-    Ok(CoinId::decode(bytes.as_ref())?)
+    Ok(CoinId::decode(bytes)?)
 }
 
 fn decode_config_value<T>(value: &str) -> Result<T, Box<dyn Error>>
@@ -1092,7 +1092,7 @@ where
     T: DecodeExt<()>,
 {
     let bytes = from_hex(value).ok_or("config value must be hex")?;
-    Ok(T::decode(bytes.as_ref())?)
+    Ok(T::decode(bytes)?)
 }
 
 fn decode_storage_key(value: &str) -> Result<StorageKey, Box<dyn Error>> {

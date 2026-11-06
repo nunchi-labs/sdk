@@ -7,7 +7,8 @@
 //! local-finalization publication.
 
 commonware_macros::stability_scope!(ALPHA {
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
+use commonware_codec::Buf;
 use commonware_codec::{Encode, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};

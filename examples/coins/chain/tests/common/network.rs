@@ -44,7 +44,9 @@ use std::{
     time::Duration,
 };
 
-const TEST_QUOTA: Quota = Quota::per_second(NZU32!(u32::MAX));
+// The simulated receiver reports peers times this burst as its channel capacity, and the
+// marshal resolver mailbox allocates one slot per unit of that capacity.
+const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000)).allow_burst(NZU32!(1_024));
 const MAX_BLOCK_TRANSACTIONS: usize = 256;
 
 const PENDING_CHANNEL: u64 = nunchi_coins_chain::channels::PENDING;
@@ -118,6 +120,7 @@ pub(crate) struct ValidatorConfig {
     pub(crate) min_block_interval_ms: NonZeroU64,
     pub(crate) leader_timeout: Duration,
     pub(crate) certification_timeout: Duration,
+    pub(crate) timeout_retry: Duration,
     pub(crate) prune_config: PruneConfig,
 }
 
@@ -128,6 +131,7 @@ impl Default for ValidatorConfig {
             min_block_interval_ms: NZU64!(1),
             leader_timeout: Duration::from_secs(1),
             certification_timeout: Duration::from_secs(2),
+            timeout_retry: Duration::from_secs(10),
             prune_config: default_state_prune_config(),
         }
     }
@@ -567,7 +571,8 @@ impl TestNetwork<'_> {
                     .get_block(commonware_consensus::types::Height::new(height))
                     .await
                     .expect("finalized block missing")
-                    .into_inner(),
+                    .inner()
+                    .clone(),
             );
         }
         blocks
@@ -721,6 +726,7 @@ async fn start_validator(
         min_block_interval_ms: cfg.min_block_interval_ms,
         leader_timeout: cfg.leader_timeout,
         certification_timeout: cfg.certification_timeout,
+        timeout_retry: cfg.timeout_retry,
         strategy: Sequential,
         state_sync,
         max_pending_acks: NZUsize!(16),
@@ -738,8 +744,8 @@ async fn start_validator(
         peer_provider: oracle.manager(),
         blocker: oracle.control(public_key.clone()),
         mailbox_size: NZUsize!(1024),
-        timeout: Duration::from_secs(2),
-        fetch_retry_timeout: Duration::from_millis(100),
+        fetch_timeout: commonware_utils::NonZeroDuration::new_panic(Duration::from_secs(2)),
+        fetch_retry_delay: Duration::from_millis(100),
         priority_requests: false,
         priority_responses: false,
     };

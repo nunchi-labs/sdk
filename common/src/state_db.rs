@@ -13,7 +13,8 @@ use std::future::Future;
 use std::num::NonZeroU64;
 use std::collections::BTreeMap;
 
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
+use commonware_codec::Buf;
 use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, Write};
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_glue::stateful::db::{
@@ -23,7 +24,7 @@ use commonware_glue::stateful::db::{
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     buffer::paged::{page_size, CacheRef},
-    BufferPooler, Spawner,
+    Spawner,
 };
 use commonware_storage::{
     index::unordered::Index as UnorderedIndex,
@@ -33,9 +34,11 @@ use commonware_storage::{
     mmr::Family,
     qmdb::{
         any::{
+            batch::Slot,
             unordered::variable::{Db as AnyDb, Operation as AnyOperation, Update as AnyUpdate},
             VariableConfig,
         },
+        floor::Proportional,
         sync::Target,
         verify_proof, Error as QmdbError,
     },
@@ -210,10 +213,10 @@ pub struct QmdbState<E: Context> {
     root: Digest,
 }
 
-impl<E: Context + BufferPooler + Spawner> QmdbState<E> {
+impl<E: Context + Spawner> QmdbState<E> {
     /// Build the QMDB configuration used by direct and stateful state backends.
-    pub fn config(context: &E, partition: &str) -> QmdbConfig {
-        let page_cache = CacheRef::from_pooler(context, page_size(1024), NZUsize!(1024));
+    pub fn config(partition: &str) -> QmdbConfig {
+        let page_cache = CacheRef::new(page_size(1024), NZUsize!(1024));
         Self::config_with_page_cache(partition, page_cache)
     }
 
@@ -241,7 +244,7 @@ impl<E: Context + BufferPooler + Spawner> QmdbState<E> {
             translator: TwoCap,
             // Bounded location-to-key cache during snapshot rebuild on open/recovery.
             // Matches commonware's sync examples (`1 << 16`).
-            init_cache_size: Some(NZUsize!(1 << 16)),
+            init_cache: Some(NZUsize!(1 << 16)),
             init_buffer: NZUsize!(1 << 21),
             init_concurrency: (),
         }
@@ -250,13 +253,15 @@ impl<E: Context + BufferPooler + Spawner> QmdbState<E> {
     /// Open (or recover) the shared store. `partition` namespaces the on-disk storage partitions so
     /// multiple independent stores can coexist within one runtime (e.g. across tests).
     pub async fn init(context: E, partition: &str) -> Result<Self, StateError> {
-        let cfg = Self::config(&context, partition);
+        let cfg = Self::config(partition);
         Self::init_with_config(context, cfg).await
     }
 
     /// Open (or recover) the shared store with a caller-provided QMDB config.
     pub async fn init_with_config(context: E, cfg: QmdbConfig) -> Result<Self, StateError> {
-        let db = QmdbBackend::init(context, cfg).await.map_err(backend_err)?;
+        let db = QmdbBackend::init(context, cfg, None)
+            .await
+            .map_err(backend_err)?;
         let root = db.root();
         Ok(Self {
             db: Some(db),
@@ -315,12 +320,18 @@ impl<E: Context + Spawner> CommitState for QmdbState<E> {
                 }
             };
             let (_values, staged) = staged;
-            let updates: Vec<(usize, Option<Vec<u8>>)> = keys
+            let slots = keys
                 .iter()
-                .enumerate()
-                .map(|(i, key)| (i, overlay[key].clone()))
+                .map(|key| match overlay[key].clone() {
+                    Some(value) => Slot::Put(value),
+                    None => Slot::Delete,
+                })
                 .collect();
-            let merkleized = match staged.merkleize(updates, Vec::new(), None, &db).await {
+            let mut policy = Proportional;
+            let merkleized = match staged
+                .merkleize(slots, Vec::new(), None, &db, &mut policy)
+                .await
+            {
                 Ok(merkleized) => merkleized,
                 Err(err) => {
                     self.overlay = overlay;
@@ -328,7 +339,10 @@ impl<E: Context + Spawner> CommitState for QmdbState<E> {
                     return Err(backend_err(err));
                 }
             };
-            db = db.apply_batch(merkleized).await.map_err(backend_err)?.0;
+            db = db
+                .apply_batch(merkleized)
+                .await
+                .map_err(backend_err)?;
         }
         db = db.commit().await.map_err(backend_err)?;
         self.root = db.root();
@@ -533,13 +547,15 @@ impl<E: Context> QmdbBatch<E> {
         let keys: Vec<Digest> = pending.keys().copied().collect();
         let key_refs: Vec<&Digest> = keys.iter().collect();
         let (_values, staged) = batch.stage(&key_refs).await.map_err(backend_err)?;
-        let updates: Vec<(usize, Option<Vec<u8>>)> = keys
+        let slots = keys
             .iter()
-            .enumerate()
-            .map(|(i, key)| (i, pending[key].clone()))
+            .map(|key| match pending[key].clone() {
+                Some(value) => Slot::Put(value),
+                None => Slot::Delete,
+            })
             .collect();
         staged
-            .merkleize(updates, Vec::new())
+            .merkleize(slots, Vec::new())
             .await
             .map_err(backend_err)
     }

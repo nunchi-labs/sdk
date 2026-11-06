@@ -870,20 +870,42 @@ fn parse_dns_address_through_node_config(address: &str, seed: u64) -> Ingress {
     ingress
 }
 
+fn local_handshake(
+    signer: ed25519::PrivateKey,
+) -> commonware_stream::SakeCups<ed25519::PrivateKey, commonware_cryptography::ChaCha20Poly1305>
+{
+    use commonware_stream::{
+        cups::{self, Cups},
+        sake::{self, Sake},
+    };
+    Cups::<_, commonware_cryptography::ChaCha20Poly1305>::new(
+        Sake {
+            signer,
+            synchrony_bound: Duration::from_secs(5),
+            max_handshake_age: Duration::from_secs(10),
+            version: sake::Version::V1,
+        },
+        cups::Version::V1,
+    )
+}
+
 fn reconnect_config(
     key: ed25519::PrivateKey,
     listen: SocketAddr,
     dialable: Ingress,
     bootstrappers: Vec<(ed25519::PublicKey, Ingress)>,
-) -> discovery::Config<ed25519::PrivateKey> {
+) -> discovery::Config<
+    commonware_stream::SakeCups<ed25519::PrivateKey, commonware_cryptography::ChaCha20Poly1305>,
+> {
     let mut config = discovery::Config::local(
-        key,
+        local_handshake(key),
         NAMESPACE,
         listen,
         dialable,
         bootstrappers,
         NZUsize!(4),
         1024 * 1024,
+        NZUsize!(1_000),
     );
     config.peer_connection_cooldown = Duration::from_millis(100);
     config.dial_frequency = Duration::from_millis(50);

@@ -104,7 +104,7 @@ where
             return Feedback::Ok;
         };
         self.sender.enqueue(Message::Finalized {
-            block,
+            block: Arc::from(block),
             response: ack_tx,
         })
     }

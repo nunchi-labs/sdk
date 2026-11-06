@@ -330,6 +330,10 @@ fn recovers_unclean_shutdown() {
                 let cfg = ValidatorConfig {
                     leader_timeout: Duration::from_millis(250),
                     certification_timeout: Duration::from_millis(500),
+                    // 2026.10 restores a journaled nullify as a retry and waits
+                    // this long before broadcasting it again. The wait has to
+                    // finish inside the 250ms crash window or the view stalls.
+                    timeout_retry: Duration::from_millis(50),
                     ..ValidatorConfig::default()
                 };
 
@@ -351,9 +355,7 @@ fn recovers_unclean_shutdown() {
                     ) => {
                         true
                     },
-                    _ = network.context().sleep(wait) => {
-                        false
-                    }
+                    _ = network.context().sleep(wait) => false
                 }
             };
 

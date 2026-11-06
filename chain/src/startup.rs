@@ -145,15 +145,16 @@ where
     fn report(&mut self, update: Self::Activity) -> Feedback {
         if let Update::Block(block, acknowledgement) = update {
             let digest = block.digest();
+            let inner = block.inner();
             if self.certified_payloads.contains(&digest) {
                 let result = self
                     .coordinator
                     .lock()
                     .expect("startup coordinator lock poisoned")
                     .record(StartupCandidate {
-                        height: block.height(),
+                        height: inner.height(),
                         digest,
-                        state_target: (self.target)(&block),
+                        state_target: (self.target)(inner),
                         certificate_payload: Some(digest),
                         genesis: false,
                     });

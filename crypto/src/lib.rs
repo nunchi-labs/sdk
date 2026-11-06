@@ -27,7 +27,7 @@ impl Curve {
         self as u8
     }
 
-    fn read(buf: &mut impl bytes::Buf) -> Result<Self, Error> {
+    fn read(buf: &mut impl commonware_codec::Buf) -> Result<Self, Error> {
         match u8::read(buf)? {
             1 => Ok(Self::Ed25519),
             2 => Ok(Self::Secp256r1),
@@ -84,7 +84,7 @@ impl Write for PublicKey {
 impl Read for PublicKey {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         match Curve::read(buf)? {
             Curve::Ed25519 => Ok(Self::Ed25519(ed25519::PublicKey::read(buf)?)),
             Curve::Secp256r1 => Ok(Self::Secp256r1(secp256r1::standard::PublicKey::read(buf)?)),
@@ -169,7 +169,7 @@ impl Write for PrivateKey {
 impl Read for PrivateKey {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         match Curve::read(buf)? {
             Curve::Ed25519 => Ok(Self::Ed25519(ed25519::PrivateKey::read(buf)?)),
             Curve::Secp256r1 => Ok(Self::Secp256r1(secp256r1::standard::PrivateKey::read(buf)?)),
@@ -215,7 +215,7 @@ impl Write for Signature {
 impl Read for Signature {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         match Curve::read(buf)? {
             Curve::Ed25519 => Ok(Self::Ed25519(ed25519::Signature::read(buf)?)),
             Curve::Secp256r1 => Ok(Self::Secp256r1(secp256r1::standard::Signature::read(buf)?)),

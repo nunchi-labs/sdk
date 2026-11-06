@@ -17,7 +17,7 @@ impl Write for TestOp {
 impl Read for TestOp {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self(u8::read(buf)?))
     }
 }
@@ -106,7 +106,7 @@ fn pool_transaction_verify_rejects_tampered_payload() {
 fn transaction_round_trips_through_codec() {
     let tx = signed_tx(42, 3);
     assert_eq!(
-        Transaction::<TestOp>::decode(tx.encode().as_ref()).unwrap(),
+        Transaction::<TestOp>::decode(tx.encode()).unwrap(),
         tx
     );
 }

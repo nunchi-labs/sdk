@@ -10,5 +10,5 @@ fn operation_codec_uses_stable_tags() {
     assert_eq!(clear.encode()[0], 1);
     assert_eq!(CustomOperation::decode(set.encode()).unwrap(), set);
     assert_eq!(CustomOperation::decode(clear.encode()).unwrap(), clear);
-    assert!(CustomOperation::decode([99].as_slice()).is_err());
+    assert!(CustomOperation::decode(commonware_codec::Copying(&[99])).is_err());
 }

@@ -1,5 +1,5 @@
 use commonware_codec::{EncodeSize, Read, Write};
-use commonware_consensus::{marshal::Update, Reporters};
+use commonware_consensus::Reporters;
 use nunchi_dkg as dkg;
 
 use crate::{BlockExtension, CodingBlock, NoConsensusExtension};
@@ -12,7 +12,7 @@ pub type DkgMailbox<Tx, Ext = NoConsensusExtension> = dkg::Mailbox<CodingBlock<T
 
 /// Marshal reporters for a stateful application plus the DKG actor mailbox.
 pub type DkgReporters<Tx, R, Ext = NoConsensusExtension> =
-    Reporters<Update<CodingBlock<Tx, Ext>>, R, DkgMailbox<Tx, Ext>>;
+    Reporters<R, DkgMailbox<Tx, Ext>>;
 
 /// Build the marshal reporter fan-out required by DKG resharing chains.
 ///

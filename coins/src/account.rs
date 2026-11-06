@@ -30,7 +30,7 @@ impl Write for AccountType {
 impl Read for AccountType {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         match u8::read(buf)? {
             ACCOUNT_TYPE_EXTERNAL => Ok(Self::External),
             ACCOUNT_TYPE_MULTISIG => Ok(Self::Multisig),
@@ -87,7 +87,7 @@ impl Write for AccountPolicy {
 impl Read for AccountPolicy {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         match u8::read(buf)? {
             ACCOUNT_POLICY_MULTISIG => Ok(Self::Multisig(MultisigPolicy::read(buf)?)),
             tag => Err(Error::InvalidEnum(tag)),
@@ -128,7 +128,7 @@ impl Write for Account {
 impl Read for Account {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
             id: Address::read(buf)?,
             kind: AccountType::read(buf)?,

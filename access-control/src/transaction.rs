@@ -34,7 +34,7 @@ impl Write for OperationID {
 impl Read for OperationID {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         Self::try_from(u8::read(buf)?).map_err(|_| {
             Error::Invalid(
                 "AccessControlOperationId",
@@ -88,7 +88,7 @@ impl Write for AccessControlOperation {
 impl Read for AccessControlOperation {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
         match OperationID::read(buf)? {
             OperationID::GrantRole => Ok(Self::GrantRole {
                 scope: ScopeId::read(buf)?,

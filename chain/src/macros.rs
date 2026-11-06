@@ -131,7 +131,7 @@ macro_rules! transaction_wrapper {
             type Cfg = ();
 
             fn read_cfg(
-                buf: &mut impl ::bytes::Buf,
+                buf: &mut impl ::commonware_codec::Buf,
                 _: &Self::Cfg,
             ) -> ::std::result::Result<Self, ::commonware_codec::Error> {
                 match <u8 as ::commonware_codec::Read>::read_cfg(buf, &())? {

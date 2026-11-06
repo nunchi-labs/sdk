@@ -54,8 +54,8 @@ fn proposal_skips_unregistered_multisig() {
     let runner = deterministic::Runner::default();
     runner.start(|context| async move {
         let (_mempool, submitter) = Mempool::new(PoolConfig::default());
-        let config = QmdbState::<deterministic::Context>::config(&context, "application-test");
-        let db = QmdbBackend::init(context, config)
+        let config = QmdbState::<deterministic::Context>::config( "application-test");
+        let db = QmdbBackend::init(context, config, None)
             .await
             .expect("init state db");
         let databases: QmdbDatabaseSet<deterministic::Context> = shared_database(db);
@@ -127,8 +127,8 @@ fn profile_block_execution() {
     let runner = deterministic::Runner::default();
     runner.start(|context| async move {
         let (_mempool, submitter) = Mempool::new(PoolConfig::default());
-        let config = QmdbState::<deterministic::Context>::config(&context, "profile-test");
-        let db = QmdbBackend::init(context, config)
+        let config = QmdbState::<deterministic::Context>::config( "profile-test");
+        let db = QmdbBackend::init(context, config, None)
             .await
             .expect("init state db");
         let databases: QmdbDatabaseSet<deterministic::Context> = shared_database(db);

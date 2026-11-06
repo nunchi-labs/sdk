@@ -5,7 +5,10 @@
 //! In-memory BTreeMaps provide fast lookups while storage ensures durability.
 //!
 use crate::protector::{ProtectionError, SealedRecord, StorageProtector, NONCE_SIZE};
-use commonware_codec::{Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
+use bytes::Buf as _;
+use commonware_codec::{
+    Buf, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write,
+};
 use commonware_consensus::types::Epoch as EpochNum;
 use commonware_cryptography::{
     bls12381::{
@@ -21,7 +24,7 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    buffer::paged::{page_size, CacheRef}, Buf, BufMut, BufferPooler, Clock, Metrics, ReadOptions,
+    buffer::paged::{page_size, CacheRef}, BufMut, Clock, Metrics, ReadOptions,
     Storage as RuntimeStorage,
 };
 use commonware_storage::{
@@ -282,7 +285,7 @@ impl<V: Variant, P: PublicKey> Default for EpochCache<V, P> {
 /// the position/epoch confusion that can occur with position-based journals.
 pub struct Storage<E, V, P>
 where
-    E: BufferPooler + Clock + RuntimeStorage + Metrics + CryptoRng,
+    E: Clock + RuntimeStorage + Metrics + CryptoRng,
     V: Variant,
     P: PublicKey,
 {
@@ -303,7 +306,7 @@ where
 
 impl<E, V, P> Storage<E, V, P>
 where
-    E: BufferPooler + Clock + RuntimeStorage + Metrics + CryptoRng,
+    E: Clock + RuntimeStorage + Metrics + CryptoRng,
     V: Variant,
     P: PublicKey,
 {
@@ -318,7 +321,7 @@ where
         max_read_size: NonZeroU32,
         max_supported_mode: ModeVersion,
     ) -> Result<Self, Error> {
-        let page_cache = CacheRef::from_pooler(&context, page_size(1 << 12), PAGE_CACHE_CAPACITY);
+        let page_cache = CacheRef::new(page_size(1 << 12), PAGE_CACHE_CAPACITY);
 
         let states: Metadata<E, u64, SealedRecord> = Metadata::init(
             context.child("states"),
@@ -457,7 +460,7 @@ where
             epoch,
         );
         let plaintext = protector.open(record, &ad)?;
-        let mut buf = plaintext.as_ref();
+        let mut buf = commonware_codec::Copying(plaintext.as_ref());
         let state = Epoch::read_cfg(&mut buf, &cfg)?;
         if buf.has_remaining() {
             return Err(Error::TrailingBytes);
@@ -482,7 +485,7 @@ where
             epoch,
         );
         let plaintext = protector.open(record, &ad)?;
-        let mut buf = plaintext.as_ref();
+        let mut buf = commonware_codec::Copying(plaintext.as_ref());
         let event = Event::read_cfg(&mut buf, &max_read_size)?;
         if buf.has_remaining() {
             return Err(Error::TrailingBytes);
@@ -791,7 +794,7 @@ pub struct Dealer<V: Variant, C: Signer> {
     dealer: Option<CryptoDealer<V, C>>,
     pub_msg: DealerPubMsg<V>,
     unsent: BTreeMap<C::PublicKey, DealerPrivMsg>,
-    finalized: Option<SignedDealerLog<V, C>>,
+    finalized: Option<SignedDealerLog<V, C::PublicKey>>,
 }
 
 impl<V: Variant, C: Signer> Dealer<V, C> {
@@ -820,7 +823,7 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
         ack: PlayerAck<C::PublicKey>,
     ) -> bool
     where
-        E: BufferPooler + Clock + RuntimeStorage + Metrics + CryptoRng,
+        E: Clock + RuntimeStorage + Metrics + CryptoRng,
     {
         if !self.unsent.contains_key(&player) {
             return false;
@@ -870,12 +873,12 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
     }
 
     /// Returns a clone of the finalized log if it exists.
-    pub fn finalized(&self) -> Option<SignedDealerLog<V, C>> {
+    pub fn finalized(&self) -> Option<SignedDealerLog<V, C::PublicKey>> {
         self.finalized.clone()
     }
 
     /// Takes and returns the finalized log, leaving None in its place.
-    pub const fn take_finalized(&mut self) -> Option<SignedDealerLog<V, C>> {
+    pub const fn take_finalized(&mut self) -> Option<SignedDealerLog<V, C::PublicKey>> {
         self.finalized.take()
     }
 
@@ -916,7 +919,7 @@ impl<V: Variant, C: Signer> Player<V, C> {
         priv_msg: DealerPrivMsg,
     ) -> Option<PlayerAck<C::PublicKey>>
     where
-        E: BufferPooler + Clock + RuntimeStorage + Metrics + CryptoRng,
+        E: Clock + RuntimeStorage + Metrics + CryptoRng,
         M: Faults,
     {
         // If we've already generated an ack, return the cached version
@@ -949,12 +952,15 @@ impl<V: Variant, C: Signer> Player<V, C> {
     }
 
     /// Finalize the player's participation in the DKG round.
-    pub fn finalize<M: Faults, B: BatchVerifier<PublicKey = C::PublicKey>>(
+    pub fn finalize<M: Faults>(
         self,
         rng: &mut impl CryptoRng,
         logs: Logs<V, C::PublicKey, M>,
         strategy: &impl Strategy,
-    ) -> Result<PlayerOutput<V, C::PublicKey>, FinalizeError<C::PublicKey>> {
-        self.player.finalize::<M, B>(rng, logs, strategy)
+    ) -> Result<PlayerOutput<V, C::PublicKey>, FinalizeError<C::PublicKey>>
+    where
+        C::PublicKey: BatchVerifier,
+    {
+        self.player.finalize::<M>(rng, logs, strategy)
     }
 }

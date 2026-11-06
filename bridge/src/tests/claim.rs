@@ -212,7 +212,8 @@ fn claim_succeeds_and_marks_consumed() {
         assert_eq!(claim_sink.len(), 1);
         let event = &claim_sink.events()[0];
         assert_eq!(event.name.as_ref(), TRANSFER_CLAIMED_EVENT);
-        let decoded = TransferClaimed::decode(event.value.as_ref()).expect("decode event");
+        let decoded = TransferClaimed::decode(commonware_codec::Viewing::new(&event.value))
+            .expect("decode event");
         assert_eq!(decoded.record_id, record_id);
         assert_eq!(decoded.amount, record.amount);
 
@@ -445,12 +446,12 @@ fn claim_codec_round_trip() {
         let (_root, proof) = source_root_and_proof(&context, &record).await;
         let tx = claim_tx(&signer(3), 0, source_chain(), 7, record, proof);
         assert_eq!(
-            Transaction::decode(tx.encode().as_ref()).expect("decode claim tx"),
+            Transaction::decode(tx.encode()).expect("decode claim tx"),
             tx
         );
         let encoded = tx.encode();
         assert_eq!(encoded.len(), tx.encode_size());
-        assert!(Transaction::decode(&encoded[..encoded.len() - 1]).is_err());
+        assert!(Transaction::decode(commonware_codec::Copying(&encoded[..encoded.len() - 1])).is_err());
     });
 }
 
@@ -466,10 +467,10 @@ fn operation_ids_round_trip_and_reject_unknown() {
     );
     // Operation id 1 is unused. It must not decode as a claim.
     assert!(BridgeOperationId::try_from(1).is_err());
-    assert!(BridgeOperation::decode(&[1u8][..]).is_err());
+    assert!(BridgeOperation::decode(commonware_codec::Copying(&[1u8][..])).is_err());
     assert!(BridgeOperationId::try_from(3).is_err());
-    assert!(BridgeOperation::decode(&[3u8][..]).is_err());
-    assert!(BridgeOperation::decode(&[][..]).is_err());
+    assert!(BridgeOperation::decode(commonware_codec::Copying(&[3u8][..])).is_err());
+    assert!(BridgeOperation::decode(commonware_codec::Copying(&[][..])).is_err());
 }
 
 #[test]
@@ -542,12 +543,12 @@ fn claim_operation_rejects_every_truncated_prefix() {
         assert_eq!(encoded.len(), op.encode_size());
         for i in 0..encoded.len() {
             assert!(
-                BridgeOperation::decode(&encoded[..i]).is_err(),
+                BridgeOperation::decode(commonware_codec::Copying(&encoded[..i])).is_err(),
                 "claim prefix {i} must fail"
             );
         }
         assert_eq!(
-            BridgeOperation::decode(encoded.as_ref()).expect("full claim"),
+            BridgeOperation::decode(encoded).expect("full claim"),
             op
         );
     });

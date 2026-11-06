@@ -35,7 +35,7 @@ pub use state::{
     Epoch as StoredEpoch, Reconciliation, ReconciliationPhase, Storage,
 };
 
-pub type DealerLog = SignedDealerLog<MinSig, ed25519::PrivateKey>;
+pub type DealerLog = SignedDealerLog<MinSig, ed25519::PublicKey>;
 
 pub const MAX_SUPPORTED_MODE: commonware_cryptography::bls12381::primitives::sharing::ModeVersion =
     commonware_cryptography::bls12381::primitives::sharing::ModeVersion::v0();

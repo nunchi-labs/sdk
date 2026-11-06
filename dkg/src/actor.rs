@@ -13,7 +13,7 @@ use crate::{
     validate_share, ReshareBlock, STATE_FORMAT_VERSION,
 };
 use commonware_actor::mailbox::{self, Receiver as ActorReceiver};
-use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::types::{Epoch, EpochPhase, Epocher, FixedEpocher, Height};
 use commonware_cryptography::{
     bls12381::{
@@ -27,7 +27,7 @@ use commonware_cryptography::{
             variant::{MinSig, Variant},
         },
     },
-    ed25519::{self, Batch},
+    ed25519,
     sha256::Sha256,
     transcript::Summary,
     BatchVerifier, Hasher, PublicKey, Signer,
@@ -39,7 +39,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{Counter, EncodeStruct, GaugeExt, GaugeFamily, MetricsExt as _},
-    Buf, BufMut, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
+    BufMut, Clock, ContextCell, Handle, Metrics, Spawner,
     Storage as RuntimeStorage,
 };
 use commonware_utils::{ordered::Set, Acknowledgement as _, N3f1, NZU32};
@@ -169,7 +169,7 @@ pub(crate) fn tracked_peers(
 
 pub struct Actor<E, P, B>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + RuntimeStorage,
+    E: Spawner + Metrics + CryptoRng + Clock + RuntimeStorage,
     P: Manager<PublicKey = ed25519::PublicKey>,
     B: ReshareBlock,
 {
@@ -196,10 +196,10 @@ where
 
 impl<E, P, B> Actor<E, P, B>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + RuntimeStorage,
+    E: Spawner + Metrics + CryptoRng + Clock + RuntimeStorage,
     P: Manager<PublicKey = ed25519::PublicKey>,
     B: ReshareBlock,
-    Batch: BatchVerifier<PublicKey = ed25519::PublicKey>,
+    ed25519::PublicKey: BatchVerifier,
 {
     /// Create a new DKG [Actor] and its associated [Mailbox].
     pub fn new(context: E, config: Config<P>) -> (Self, Mailbox<B>) {
@@ -371,7 +371,7 @@ where
         }
 
         // Start a muxer for the physical channel used by DKG/reshare
-        let (mux, mut dkg_mux) = Muxer::new(self.context.child("dkg_mux"), sender, receiver, 100);
+        let (mux, mut dkg_mux) = Muxer::new(self.context.child("dkg_mux"), sender, receiver);
         mux.start();
 
         'actor: loop {
@@ -700,7 +700,7 @@ where
                                         .unwrap_or(Height::zero()),
                                     output: previous_output.clone(),
                                 };
-                                let public = match transition_logs::<_, _, Batch>(
+                                let public = match transition_logs(
                                     &protocol_config,
                                     &checkpoint,
                                     checked_logs.clone(),
@@ -726,7 +726,7 @@ where
                                     for (dealer, log) in checked_logs {
                                         player_logs.record(dealer, log);
                                     }
-                                    match ps.finalize::<N3f1, Batch>(
+                                    match ps.finalize::<N3f1>(
                                         self.context.as_present_mut(),
                                         player_logs,
                                         &Sequential,
@@ -774,7 +774,7 @@ where
                                     logs.record(dealer, log);
                                 }
                                 if let Some(ps) = player_state.take() {
-                                    match ps.finalize::<N3f1, Batch>(
+                                    match ps.finalize::<N3f1>(
                                         self.context.as_present_mut(),
                                         logs,
                                         &Sequential,
@@ -793,7 +793,7 @@ where
                                         ),
                                     }
                                 } else {
-                                    match observe::<_, _, N3f1, Batch>(
+                                    match observe::<_, _, N3f1>(
                                         self.context.as_present_mut(),
                                         logs,
                                         &Sequential,

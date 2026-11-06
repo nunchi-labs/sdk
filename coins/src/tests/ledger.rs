@@ -1056,7 +1056,7 @@ fn charge_fee_moves_fee_to_collector_and_emits_event() {
         assert_eq!(events.len(), 1);
         let event = &events.events()[0];
         assert_eq!(event.name.as_ref(), crate::FEE_CHARGED_EVENT);
-        let payload = FeeCharged::decode(event.value.as_ref()).expect("decode event");
+        let payload = FeeCharged::decode(commonware_codec::Viewing::new(&event.value)).expect("decode event");
         assert_eq!(
             payload,
             FeeCharged {

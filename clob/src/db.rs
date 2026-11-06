@@ -42,7 +42,7 @@ fn encoded<T: Encode>(value: &T) -> Vec<u8> {
 }
 
 fn decoded<T: Read<Cfg = ()>>(bytes: &[u8]) -> Result<T, ClobError> {
-    let mut buf = bytes;
+    let mut buf = commonware_codec::Copying(bytes);
     T::read(&mut buf).map_err(|err| ClobError::Storage(err.to_string()))
 }
 
@@ -172,7 +172,7 @@ impl<S: StateStore + Send + Sync> ClobDB for S {
             .map_err(|err| ClobError::Storage(err.to_string()))?
         {
             Some(bytes) => {
-                let mut buf = bytes.as_ref();
+                let mut buf = commonware_codec::Copying(bytes.as_ref());
                 Vec::read_cfg(&mut buf, &(RangeCfg::new(0..=MAX_MARKETS), ()))
                     .map_err(|err| ClobError::Storage(err.to_string()))
             }
@@ -208,7 +208,7 @@ impl<S: StateStore + Send + Sync> ClobDB for S {
             .map_err(|err| ClobError::Storage(err.to_string()))?
         {
             Some(bytes) => {
-                let mut buf = bytes.as_ref();
+                let mut buf = commonware_codec::Copying(bytes.as_ref());
                 Vec::read_cfg(&mut buf, &(RangeCfg::new(0..=MAX_BOOK_ORDERS), ()))
                     .map_err(|err| ClobError::Storage(err.to_string()))
             }
@@ -226,7 +226,7 @@ impl<S: StateStore + Send + Sync> ClobDB for S {
             .map_err(|err| ClobError::Storage(err.to_string()))?
         {
             Some(bytes) => {
-                let mut buf = bytes.as_ref();
+                let mut buf = commonware_codec::Copying(bytes.as_ref());
                 Vec::read_cfg(&mut buf, &(RangeCfg::new(0..=MAX_ACCOUNT_ORDERS), ()))
                     .map_err(|err| ClobError::Storage(err.to_string()))
             }
@@ -266,7 +266,7 @@ impl<S: StateStore + Send + Sync> ClobDB for S {
             .map_err(|err| ClobError::Storage(err.to_string()))?
         {
             Some(bytes) => {
-                let mut buf = bytes.as_ref();
+                let mut buf = commonware_codec::Copying(bytes.as_ref());
                 Vec::read_cfg(&mut buf, &(RangeCfg::new(0..=MAX_FILLS_PER_MARKET), ()))
                     .map_err(|err| ClobError::Storage(err.to_string()))
             }
@@ -298,7 +298,7 @@ impl<S: StateStore + Send + Sync> ClobDB for S {
             .map_err(|err| ClobError::Storage(err.to_string()))?
         {
             Some(bytes) => {
-                let mut buf = bytes.as_ref();
+                let mut buf = commonware_codec::Copying(bytes.as_ref());
                 // One address is 32 bytes. Stay inside the shared state value cap.
                 Vec::read_cfg(&mut buf, &(RangeCfg::new(0..=MAX_NONCE_ACCOUNTS), ()))
                     .map_err(|err| ClobError::Storage(err.to_string()))

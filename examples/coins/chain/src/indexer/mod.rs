@@ -6,7 +6,7 @@ use commonware_consensus::types::Epoch;
 use commonware_cryptography::bls12381::{
     dkg::feldman_desmedt::Output as DkgOutput, primitives::variant::MinSig,
 };
-use commonware_runtime::{BufferPooler, Clock, Handle, Metrics, Spawner, Storage};
+use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::queue;
 use commonware_utils::{sync::Mutex, NZU64};
 use std::{future::Future, num::NonZeroUsize, sync::Arc, time::Duration};
@@ -314,19 +314,19 @@ pub(crate) struct Config {
     pub(crate) metrics: IndexerMetrics,
 }
 
-pub(crate) struct Indexer<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> {
+pub(crate) struct Indexer<E: Spawner + Clock + Storage + Metrics, C: Client> {
     producer: Producer,
     producer_handle: Handle<()>,
     pusher: Pusher<E, C>,
     consumer: Consumer<E, C>,
 }
 
-impl<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> Indexer<E, C> {
+impl<E: Spawner + Clock + Storage + Metrics, C: Client> Indexer<E, C> {
     pub(crate) async fn new(
         context: E,
         client: C,
         marshal: MarshalMailbox<crate::Scheme, crate::EngineVariant>,
-        backfiller: (queue::Writer<E, Entry>, queue::Reader<E, Entry>),
+        backfiller: (queue::Queue<E, Entry>, queue::Reader<E, Entry>),
         config: Config,
     ) -> Self {
         let Config {
@@ -356,10 +356,7 @@ impl<E: BufferPooler + Spawner + Clock + Storage + Metrics, C: Client> Indexer<E
             };
             uploads.lock().recover_queued(position, &entry);
         }
-        reader
-            .reset()
-            .await
-            .expect("failed to reset indexer spool reader");
+        reader.reset();
         let (admission_sender, admission_receiver) = commonware_actor::mailbox::new(
             context.child("admission_mailbox"),
             mailbox_size,

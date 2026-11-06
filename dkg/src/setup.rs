@@ -103,7 +103,7 @@ mod serde_hex_ordered {
                     let bytes = from_hex(&hex_str).ok_or_else(|| {
                         serde::de::Error::custom("failed to deserialize: invalid hex string")
                     })?;
-                    let item = T::decode(&mut bytes.as_slice())
+                    let item = T::decode(bytes)
                         .map_err(|_| serde::de::Error::custom("failed to decode bytes"))?;
                     items.push(item);
                 }

@@ -74,7 +74,7 @@ fn main() {
     println!("  Digest:      {}", hex::encode(digest.as_ref()));
     println!();
 
-    let reimported = PrivateKey::decode(priv_key.encode().as_ref()).expect("reimport");
+    let reimported = PrivateKey::decode(priv_key.encode()).expect("reimport");
     let reimported_pub = reimported.public_key();
     let reimported_addr = Address::external(&reimported_pub);
     println!("Re-import Check:");

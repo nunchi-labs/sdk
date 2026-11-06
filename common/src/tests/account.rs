@@ -21,7 +21,7 @@ fn addresses_share_a_fixed_width_space_and_roundtrip() {
     );
     assert_ne!(ed_address, secp_address);
     assert_eq!(
-        Address::decode(ed_address.encode().as_ref()).unwrap(),
+        Address::decode(ed_address.encode()).unwrap(),
         ed_address
     );
 }

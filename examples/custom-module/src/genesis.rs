@@ -35,5 +35,5 @@ where
     T: DecodeExt<()>,
 {
     let bytes = from_hex(value).ok_or_else(|| CustomError::Storage(format!("invalid {what}")))?;
-    T::decode(bytes.as_ref()).map_err(|err| CustomError::Storage(format!("invalid {what}: {err}")))
+    T::decode(bytes).map_err(|err| CustomError::Storage(format!("invalid {what}: {err}")))
 }

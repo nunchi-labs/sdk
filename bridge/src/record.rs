@@ -12,7 +12,8 @@
 //! signed operations themselves (see `transaction`/`ledger`), and the asset movement / settlement,
 //! which stays in the chain's coins integration layer so this crate remains decoupled from coins.
 
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
+use commonware_codec::Buf;
 use commonware_codec::{
     DecodeExt, Encode, Error as CodecError, FixedSize, Read, ReadExt, Write,
 };
@@ -235,7 +236,7 @@ pub async fn transfer_record<S: StateStore>(
     id: &TransferRecordId,
 ) -> Result<Option<BridgeTransferRecord>, StateError> {
     match store.get(&transfer_record_key(id)).await? {
-        Some(bytes) => BridgeTransferRecord::decode(bytes.as_ref())
+        Some(bytes) => BridgeTransferRecord::decode(bytes)
             .map(Some)
             .map_err(|err| StateError::Backend(err.to_string())),
         None => Ok(None),
@@ -273,7 +274,7 @@ pub fn nonce_key(account: &Address) -> Digest {
 pub async fn bridge_nonce<S: StateStore>(store: &S, account: &Address) -> Result<u64, StateError> {
     match store.get(&nonce_key(account)).await? {
         Some(bytes) => {
-            u64::decode(bytes.as_ref()).map_err(|err| StateError::Backend(err.to_string()))
+            u64::decode(bytes).map_err(|err| StateError::Backend(err.to_string()))
         }
         None => Ok(0),
     }
@@ -292,7 +293,7 @@ fn local_chain_id_key() -> Digest {
 /// This chain's configured [`ChainId`], if it has been pinned (see the bridge genesis).
 pub async fn local_chain_id<S: StateStore>(store: &S) -> Result<Option<ChainId>, StateError> {
     match store.get(&local_chain_id_key()).await? {
-        Some(bytes) => ChainId::decode(bytes.as_ref())
+        Some(bytes) => ChainId::decode(bytes)
             .map(Some)
             .map_err(|err| StateError::Backend(err.to_string())),
         None => Ok(None),
@@ -363,7 +364,7 @@ pub async fn foreign_root<S: StateStore>(
     view: u64,
 ) -> Result<Option<ForeignRoot>, StateError> {
     match store.get(&foreign_root_key(source_chain_id, view)).await? {
-        Some(bytes) => ForeignRoot::decode(bytes.as_ref())
+        Some(bytes) => ForeignRoot::decode(bytes)
             .map(Some)
             .map_err(|err| StateError::Backend(err.to_string())),
         None => Ok(None),
@@ -383,7 +384,7 @@ pub async fn latest_foreign_view<S: StateStore>(
 ) -> Result<Option<u64>, StateError> {
     match store.get(&latest_foreign_view_key(source_chain_id)).await? {
         Some(bytes) => {
-            u64::decode(bytes.as_ref()).map(Some).map_err(|err| StateError::Backend(err.to_string()))
+            u64::decode(bytes).map(Some).map_err(|err| StateError::Backend(err.to_string()))
         }
         None => Ok(None),
     }
@@ -409,7 +410,7 @@ fn foreign_chain_id_key() -> Digest {
 /// The one foreign chain whose finalization certificates this chain accepts, if configured.
 pub async fn foreign_chain_id<S: StateStore>(store: &S) -> Result<Option<ChainId>, StateError> {
     match store.get(&foreign_chain_id_key()).await? {
-        Some(bytes) => ChainId::decode(bytes.as_ref())
+        Some(bytes) => ChainId::decode(bytes)
             .map(Some)
             .map_err(|err| StateError::Backend(err.to_string())),
         None => Ok(None),

@@ -151,11 +151,8 @@ fn authenticated_checkpoint_is_seeded_with_and_without_application_genesis() {
                 &format!("{partition}-empty"),
             )
             .await;
-            let config_context = context.child(config_label);
-            let config = QmdbState::<deterministic::Context>::config(
-                &config_context,
-                &partition,
-            );
+            let _ = context.child(config_label);
+            let config = QmdbState::<deterministic::Context>::config(&partition);
             let commitment = authenticated_genesis_target(
                 context.child(state_label),
                 config.clone(),

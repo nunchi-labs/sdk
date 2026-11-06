@@ -64,7 +64,7 @@ fn register_account_policy_emits_event() {
         let event = &events.events()[0];
         assert_eq!(event.name.as_ref(), ACCOUNT_POLICY_REGISTERED_EVENT);
         assert_eq!(
-            AccountPolicyRegistered::decode(event.value.as_ref()).unwrap(),
+            AccountPolicyRegistered::decode(commonware_codec::Viewing::new(&event.value)).unwrap(),
             AccountPolicyRegistered {
                 account_id: alice,
                 policy
@@ -96,7 +96,7 @@ fn create_token_emits_event() {
         assert_eq!(events.len(), 1);
         let event = &events.events()[0];
         assert_eq!(event.name.as_ref(), TOKEN_CREATED_EVENT);
-        let emitted = TokenCreated::decode(event.value.as_ref()).unwrap();
+        let emitted = TokenCreated::decode(commonware_codec::Viewing::new(&event.value)).unwrap();
         assert_eq!(emitted.token.issuer, alice);
         assert_eq!(emitted.token.total_supply, 1_000);
         assert_eq!(emitted.token.max_supply, Some(2_000));
@@ -135,7 +135,7 @@ fn mint_emits_event() {
         let event = &events.events()[0];
         assert_eq!(event.name.as_ref(), MINTED_EVENT);
         assert_eq!(
-            Minted::decode(event.value.as_ref()).unwrap(),
+            Minted::decode(commonware_codec::Viewing::new(&event.value)).unwrap(),
             Minted {
                 coin,
                 to: bob,
@@ -173,7 +173,7 @@ fn burn_emits_event() {
         let event = &events.events()[0];
         assert_eq!(event.name.as_ref(), BURNED_EVENT);
         assert_eq!(
-            Burned::decode(event.value.as_ref()).unwrap(),
+            Burned::decode(commonware_codec::Viewing::new(&event.value)).unwrap(),
             Burned {
                 coin,
                 from: alice,
@@ -213,7 +213,7 @@ fn transfer_emits_event() {
         let event = &events.events()[0];
         assert_eq!(event.name.as_ref(), TRANSFERRED_EVENT);
         assert_eq!(
-            Transferred::decode(event.value.as_ref()).unwrap(),
+            Transferred::decode(commonware_codec::Viewing::new(&event.value)).unwrap(),
             Transferred {
                 coin,
                 from: alice,

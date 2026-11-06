@@ -31,7 +31,7 @@ fn encoded<T: Encode>(value: &T) -> Vec<u8> {
 }
 
 fn decoded<T: Read<Cfg = ()>>(bytes: &[u8]) -> Result<T, OracleError> {
-    let mut buf = bytes;
+    let mut buf = commonware_codec::Copying(bytes);
     T::read(&mut buf).map_err(|err| OracleError::Storage(err.to_string()))
 }
 
@@ -123,7 +123,7 @@ impl<S: StateStore + Send + Sync> OracleDB for S {
             .map_err(|err| OracleError::Storage(err.to_string()))?
         {
             Some(bytes) => {
-                let mut buf = bytes.as_ref();
+                let mut buf = commonware_codec::Copying(bytes.as_ref());
                 Vec::read_cfg(&mut buf, &(RangeCfg::new(0..=MAX_RECORDS_PER_BUCKET), ()))
                     .map_err(|err| OracleError::Storage(err.to_string()))
             }
@@ -154,7 +154,7 @@ impl<S: StateStore + Send + Sync> OracleDB for S {
             .map_err(|err| OracleError::Storage(err.to_string()))?
         {
             Some(bytes) => {
-                let mut buf = bytes.as_ref();
+                let mut buf = commonware_codec::Copying(bytes.as_ref());
                 Vec::read_cfg(&mut buf, &(RangeCfg::new(0..=MAX_RECORDS_PER_BUCKET), ()))
                     .map_err(|err| OracleError::Storage(err.to_string()))
             }

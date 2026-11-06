@@ -7,7 +7,6 @@ use crate::{
     Block, BlockCommitment, EngineVariant, EpochProvider, Provider, PublicKey, Scheme, Transaction,
     NAMESPACE,
 };
-use commonware_coding::CodecConfig;
 use commonware_consensus::{
     marshal::{
         self,
@@ -30,9 +29,9 @@ use commonware_cryptography::{
         dkg::feldman_desmedt::Output,
         primitives::{group, sharing::Mode, variant::MinSig},
     },
-    ed25519::{self, Batch},
+    ed25519,
     sha256::Digest,
-    BatchVerifier, Committable, Digestible, Signer,
+    Committable, Digestible, Digested, Signer,
 };
 use commonware_glue::stateful::{
     Application as StatefulApplication,
@@ -43,7 +42,7 @@ use commonware_glue::stateful::{
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    buffer::paged::CacheRef, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics,
+    buffer::paged::CacheRef, spawn_cell, Clock, ContextCell, Handle, Metrics,
     Network, Spawner, Storage, Strategizer,
 };
 use commonware_storage::{archive::{Archive as ArchiveStore, Identifier as ArchiveIdentifier}, metadata::{self, Metadata}, queue};
@@ -104,6 +103,8 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
     pub min_block_interval_ms: NonZeroU64,
     pub leader_timeout: Duration,
     pub certification_timeout: Duration,
+    /// See [`nunchi_dkg::orchestrator::Config::timeout_retry`].
+    pub timeout_retry: Duration,
     pub strategy: S,
     /// Discover a finalized floor and perform peer QMDB state sync on a fresh database.
     pub state_sync: bool,
@@ -119,8 +120,8 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, P: Manager<PublicKey = Publ
 
 type DkgActor<E, P> = nunchi_chain::DkgActor<E, P, Transaction, ClobExtension>;
 type DkgMailbox = nunchi_chain::DkgMailbox<Transaction, ClobExtension>;
-type StatefulApp<E> =
-    StatefulActor<E, Application, Scheme, EngineVariant, StateSyncMailbox<E>>;
+type StatefulApp<E, S> =
+    StatefulActor<E, Application, EngineVariant, StateSyncMailbox<E>, S>;
 type StatefulAppMailbox<E> = StatefulMailbox<E, Application>;
 type LimitedStatefulAppMailbox<E> = VerifyLimiter<StatefulAppMailbox<E>>;
 type MarshaledApp<E, S> = BoxedAutomaton<
@@ -179,8 +180,7 @@ type ShardMailbox = shards::Mailbox<
 #[allow(clippy::type_complexity)]
 pub struct Engine<E, B, P, S>
 where
-    E: BufferPooler
-        + Spawner
+    E: Spawner
         + Metrics
         + CryptoRng
         + Rng
@@ -212,7 +212,7 @@ where
     orchestrator_mailbox: orchestrator::Mailbox<MinSig, PublicKey>,
     mempool: Mempool<Transaction>,
     clob: ClobActor,
-    stateful: StatefulApp<E>,
+    stateful: StatefulApp<E, S>,
     stateful_mailbox: StatefulAppMailbox<E>,
     indexer_producer: Option<indexer::Producer>,
     indexer_producer_handle: Option<Handle<()>>,
@@ -221,8 +221,7 @@ where
 
 impl<E, B, P, S> Engine<E, B, P, S>
 where
-    E: BufferPooler
-        + Spawner
+    E: Spawner
         + Metrics
         + CryptoRng
         + Rng
@@ -236,7 +235,6 @@ where
     B: Blocker<PublicKey = PublicKey>,
     P: Manager<PublicKey = PublicKey>,
     S: Strategy,
-    Batch: BatchVerifier<PublicKey = PublicKey>,
 {
     /// Create a new [Engine].
     pub async fn new(
@@ -267,7 +265,7 @@ where
             }
         }
 
-        let page_cache = CacheRef::from_pooler(&context, PAGE_CACHE_PAGE_SIZE, PAGE_CACHE_CAPACITY);
+        let page_cache = CacheRef::new(PAGE_CACHE_PAGE_SIZE, PAGE_CACHE_CAPACITY);
         let consensus_namespace = union(NAMESPACE, b"_CONSENSUS");
         let num_participants =
             commonware_utils::NZU32!(config.peer_config.max_participants_per_round());
@@ -374,14 +372,11 @@ where
             shards::Config {
                 scheme_provider: provider.clone(),
                 blocker: config.blocker.clone(),
-                shard_codec_cfg: CodecConfig {
-                    maximum_shard_size: MAX_SHARD_SIZE,
-                },
-                block_codec_cfg: block_codec_config,
+                block_codec_config,
                 strategy: config.strategy.clone(),
                 mailbox_size: MAILBOX_SIZE,
                 peer_buffer_size: SHARD_PEER_BUFFER_SIZE,
-                background_channel_capacity: SHARD_BACKGROUND_CHANNEL_CAPACITY,
+                records: SHARD_RECORDS,
                 peer_provider: config.manager.clone(),
             },
         );
@@ -406,6 +401,7 @@ where
                     &format!("{}-empty-genesis-coins", config.partition_prefix),
                     page_cache.clone(),
                 ),
+                None,
             )
             .await
             .expect("failed to initialize empty state database for genesis commitment");
@@ -537,13 +533,21 @@ where
         .with_genesis_parent(genesis_parent);
         let genesis = app.genesis_block();
         let genesis_digest = genesis.digest();
-        let coded_genesis = CodedBlock::new(genesis.clone(), coding_config, &config.strategy);
+        let coded_genesis = CodedBlock::encode(
+            Digested::precomputed(genesis.clone(), genesis_digest),
+            coding_config,
+            &config.strategy,
+        )
+        .await;
         let genesis_commitment = coded_genesis.commitment();
         // The sync plan drives both marshal and stateful startup. Fresh joining nodes can discover
         // a floor and sync QMDB directly; bootstrap nodes leave `state_sync` disabled and start
         // from genesis. Interrupted state sync resumes from its persisted floor.
         let mut plan =
-            SyncPlan::<_, Scheme, EngineVariant>::init(&context, config.partition_prefix.clone())
+            SyncPlan::<_, Scheme, EngineVariant>::init(
+                context.child("sync_plan"),
+                config.partition_prefix.clone(),
+            )
                 .await;
         let (state_sync, state_sync_mailbox) = StateSyncActor::new(
             context.child("state_sync_resolver"),
@@ -554,8 +558,10 @@ where
                 operation_codec_config: nunchi_common::qmdb_operation_codec_config(),
                 mailbox_size: MAILBOX_SIZE,
                 me: Some(config.signer.public_key()),
-                timeout: STATE_SYNC_RESOLVER_TIMEOUT,
-                fetch_retry_timeout: STATE_SYNC_RESOLVER_RETRY,
+                fetch_timeout: commonware_utils::NonZeroDuration::new_panic(
+                    STATE_SYNC_RESOLVER_TIMEOUT,
+                ),
+                fetch_retry_delay: STATE_SYNC_RESOLVER_RETRY,
                 max_serve_ops: STATE_SYNC_FETCH_BATCH_SIZE,
                 priority_requests: false,
                 priority_responses: false,
@@ -566,18 +572,18 @@ where
             context: context.child("probe"),
             provider: floor_provider,
             strategy: config.strategy.clone(),
-            capacity: MAILBOX_SIZE,
+            mailbox_size: MAILBOX_SIZE,
             blocker: config.blocker.clone(),
             minimum_epoch: Epoch::zero(),
             retry_timeout: NZDuration!(Duration::from_secs(1)),
         });
         let probe_handle = probe.start(probe_network);
-        if plan.should_state_sync(config.state_sync) && plan.floor().is_none() {
+        if plan.should_sync(config.state_sync) && plan.floor().is_none() {
             let floor = probe_mailbox
                 .subscribe()
                 .await
                 .expect("state-sync floor probe stopped");
-            plan = plan.with_floor(floor);
+            plan = plan.set_floor(floor).await;
         }
         // Preserve the certificate-verified anchor while the plan is consumed
         // by the stateful actor. It is needed to resume Simplex from a QMDB
@@ -624,7 +630,10 @@ where
         );
         let marshal_start = recovered_floor
             .clone()
-            .map_or_else(|| plan.marshal_start(coded_genesis), marshal::Start::Floor);
+            .map_or_else(
+                || plan.marshal_start(Arc::new(coded_genesis)),
+                marshal::Start::Floor,
+            );
         let (marshal, marshal_mailbox, marshal_floor) = MarshalActor::init(
             context.child("marshal"),
             finalizations_by_height,
@@ -655,7 +664,7 @@ where
         // Once startup floor selection is complete, serve our latest finalization to peers.
         probe_mailbox.attach(marshal_mailbox.clone());
 
-        let (stateful, stateful_mailbox) = StatefulActor::init(
+        let (stateful, stateful_mailbox) = StatefulActor::new(
             context.child("stateful"),
             StatefulConfig {
                 application: app,
@@ -667,6 +676,7 @@ where
                 resolvers: state_sync_mailbox,
                 sync_config: state_sync_config(),
                 prune_config: Some(prune_config),
+                strategy: config.strategy.clone(),
             },
         );
         let node_handle = NodeHandle::new(
@@ -699,7 +709,7 @@ where
                 let indexer_context = context.child("indexer");
                 let indexer_metrics = indexer::IndexerMetrics::register(&indexer_context);
                 let client = client.with_metrics(indexer_metrics.clone());
-                let queue = queue::shared::init(
+                let queue = queue::Queue::init(
                     context.child("indexer_queue"),
                     queue::Config {
                         partition: format!(
@@ -753,7 +763,7 @@ where
                 strategy: config.strategy.clone(),
                 leader_timeout: config.leader_timeout,
                 certification_timeout: config.certification_timeout,
-                muxer_size: MAILBOX_SIZE.get(),
+                timeout_retry: config.timeout_retry,
                 mailbox_size: MAILBOX_SIZE,
                 partition_prefix: format!("{}_consensus", config.partition_prefix),
                 epoch_length: config.epoch_length,
@@ -884,7 +894,7 @@ where
         callback: Box<dyn UpdateCallBack<MinSig, PublicKey>>,
     ) -> Result<(), EngineError> {
         let shards_handle = self.shards.start(marshal_shards);
-        let reporters: Reporters<_, _, indexer::Producer> = Reporters::from((
+        let reporters: Reporters<_, indexer::Producer> = Reporters::from((
             Reporters::from((
                 nunchi_chain::dkg_reporters(
                     self.stateful_mailbox.clone(),
@@ -1077,8 +1087,7 @@ async fn validate_marshal_progress_against_state<E>(
     max_pending_acks: NonZeroUsize,
 ) -> Option<(Height, nunchi_chain::startup::StartupCandidate)>
 where
-    E: BufferPooler
-        + Clock
+    E: Clock
         + Metrics
         + Network
         + Rng
@@ -1100,15 +1109,33 @@ where
     )
     .await
     .expect("failed to initialize marshal progress metadata probe");
-    let processed_height = metadata.get(&MARSHAL_PROCESSED_KEY).copied()?;
+    let processed_height = metadata.get(&MARSHAL_PROCESSED_KEY).copied();
     drop(metadata);
 
     let Some(tip) = ArchiveStore::last_index(finalized_blocks) else {
-        panic!("marshal progress references height {processed_height}, but finalized block history is empty; rebuild or perform verified peer state sync");
+        if let Some(processed_height) = processed_height {
+            panic!(
+                "marshal progress references height {processed_height}, but finalized block history is empty; rebuild or perform verified peer state sync"
+            );
+        }
+        return None;
     };
-    let search_end =
-        reconciliation_search_end(processed_height.get(), tip, max_pending_acks);
-    for height in processed_height.get()..=search_end {
+    let search_start = finalized_blocks
+        .first_index()
+        .expect("finalized block history has a tip");
+    // An unclean shutdown can sync QMDB behind marshal's processed height.
+    // Search the retained history, not only the forward acknowledgement window.
+    let search_end = match processed_height {
+        Some(processed) => reconciliation_search_end(processed.get(), tip, max_pending_acks),
+        None => tip,
+    };
+    if search_start > search_end {
+        panic!(
+            "finalized history floor {search_start} is above the startup search end {search_end}"
+        );
+    }
+    let reported_processed = processed_height.unwrap_or_else(|| Height::new(search_end));
+    for height in search_start..=search_end {
         let Some(block) = ArchiveStore::get(
             finalized_blocks,
             ArchiveIdentifier::Index(height),
@@ -1134,7 +1161,7 @@ where
                 "startup candidate certificate payload must equal block commitment"
             );
             return Some((
-                processed_height,
+                reported_processed,
                 nunchi_chain::startup::StartupCandidate {
                     height: inner.header.height,
                     digest: inner.digest(),
@@ -1147,9 +1174,7 @@ where
     }
 
     panic!(
-        "QMDB committed target does not exactly match canonical finalized history from processed height {} through {}; rebuild or perform verified peer state sync",
-        processed_height,
-        search_end,
+        "QMDB committed target does not exactly match canonical finalized history from {search_start} through {search_end}; rebuild or perform verified peer state sync"
     );
 }
 
@@ -1159,7 +1184,7 @@ async fn validate_history_through_processed<E>(
     processed_height: Height,
 )
 where
-    E: BufferPooler + Clock + Metrics + Storage,
+    E: Clock + Metrics + Storage,
 {
     let processed = processed_height.get();
     let first = match (finalizations.first_index(), blocks.first_index()) {
