@@ -41,7 +41,7 @@ export function ValueChart({
   onRange: (range: RangeId) => void;
   hover: number | null;
   setHover: (index: number | null) => void;
-  svgRef: React.RefObject<SVGSVGElement>;
+  svgRef: React.RefObject<SVGSVGElement | null>;
   scrub: (clientX: number) => void;
   onRetry?: () => void;
   ranges?: RangeId[];
