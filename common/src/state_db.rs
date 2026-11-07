@@ -303,7 +303,20 @@ impl<E: Context + Spawner> QmdbState<E> {
 
     /// Open (or recover) the shared store with a caller-provided QMDB config.
     pub async fn init_with_config(context: E, cfg: QmdbConfig) -> Result<Self, StateError> {
-        let db = QmdbBackend::init(context, cfg, None)
+        Self::init_at_most(context, cfg, None).await
+    }
+
+    /// Open the latest retained commit with at most `max_size` operations.
+    ///
+    /// `None` keeps the latest commit. A cap below that commit discards the
+    /// suffix, which is how `syncer::open` rewinds a database that leads the
+    /// block it attaches.
+    pub async fn init_at_most(
+        context: E,
+        cfg: QmdbConfig,
+        max_size: Option<Location<Family>>,
+    ) -> Result<Self, StateError> {
+        let db = QmdbBackend::init(context, cfg, max_size)
             .await
             .map_err(backend_err)?;
         let root = db.root();

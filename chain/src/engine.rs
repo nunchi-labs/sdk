@@ -63,6 +63,34 @@ pub const DEFAULT_PRUNE_RETAINED_QMDB_BLOCKS: usize = 200;
 pub const SHARD_RECORDS: NonZeroUsize = NZUsize!(64);
 pub const SHARD_PEER_BUFFER_SIZE: NonZeroUsize = NZUsize!(64);
 
+/// Marshal backfill request pacing for one consensus round.
+pub struct BackfillPacing {
+    /// Maximum wait for one backfill response.
+    pub fetch_timeout: commonware_utils::NonZeroDuration,
+    /// Delay before retrying an unresolved backfill.
+    pub fetch_retry_delay: Duration,
+}
+
+/// Derives marshal backfill pacing from the round leader timeout.
+///
+/// The fetch deadline is the leader timeout, and never longer than two seconds.
+/// A fixed two second fetch cannot expire inside a shorter crash window, so a
+/// restarted node keeps one attempt until the runtime stops. The retry stays at
+/// 100ms unless that would outlast the shorter fetch deadline, in which case it
+/// is one fifth of the deadline.
+pub fn marshal_backfill_pacing(leader_timeout: Duration) -> BackfillPacing {
+    let capped = leader_timeout.min(Duration::from_secs(2));
+    let fetch = if capped.is_zero() {
+        Duration::from_millis(1)
+    } else {
+        capped
+    };
+    BackfillPacing {
+        fetch_timeout: commonware_utils::NonZeroDuration::new_panic(fetch),
+        fetch_retry_delay: Duration::from_millis(100).min(fetch / 5),
+    }
+}
+
 /// Application block consumed by the coding marshal.
 pub type EngineBlock<Tx, Ext = NoConsensusExtension> = CodingBlock<Tx, Ext>;
 /// Coding marshal variant used by DKG-backed engines.
@@ -546,6 +574,32 @@ mod tests {
                 .await
             );
         });
+    }
+
+    #[test]
+    fn marshal_backfill_fits_the_short_recovery_window() {
+        // `recovers_unclean_shutdown` restarts every 250..1_000ms and certifies
+        // with a 250ms leader timeout. The fetch has to be able to expire
+        // inside that window.
+        let pacing = marshal_backfill_pacing(Duration::from_millis(250));
+        assert_eq!(pacing.fetch_timeout.get(), Duration::from_millis(250));
+        assert_eq!(pacing.fetch_retry_delay, Duration::from_millis(50));
+        assert!(pacing.fetch_timeout.get() < Duration::from_secs(1));
+        assert!(pacing.fetch_retry_delay < pacing.fetch_timeout.get());
+    }
+
+    #[test]
+    fn marshal_backfill_keeps_the_two_second_cap_for_slow_rounds() {
+        let pacing = marshal_backfill_pacing(Duration::from_secs(5));
+        assert_eq!(pacing.fetch_timeout.get(), Duration::from_secs(2));
+        assert_eq!(pacing.fetch_retry_delay, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn marshal_backfill_tracks_one_second_rounds() {
+        let pacing = marshal_backfill_pacing(Duration::from_secs(1));
+        assert_eq!(pacing.fetch_timeout.get(), Duration::from_secs(1));
+        assert_eq!(pacing.fetch_retry_delay, Duration::from_millis(100));
     }
 
     #[test]

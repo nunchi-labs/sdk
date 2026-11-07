@@ -1135,13 +1135,16 @@ async fn start_node(
     };
     let dkg_callback: Box<dyn UpdateCallBack<MinSig, PublicKey>> = ContinueOnUpdate::boxed();
 
+    let backfill_pacing = nunchi_chain::marshal_backfill_pacing(Duration::from_millis(
+        config.consensus.leader_timeout_ms,
+    ));
     let resolver_config = marshal::resolver::p2p::Config {
         public_key,
         peer_provider: oracle.clone(),
         blocker: oracle,
         mailbox_size: NZUsize!(1024),
-        fetch_timeout: commonware_utils::NonZeroDuration::new_panic(Duration::from_secs(2)),
-        fetch_retry_delay: Duration::from_millis(100),
+        fetch_timeout: backfill_pacing.fetch_timeout,
+        fetch_retry_delay: backfill_pacing.fetch_retry_delay,
         priority_requests: false,
         priority_responses: false,
     };

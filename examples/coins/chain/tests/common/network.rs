@@ -748,13 +748,14 @@ async fn start_validator(
     };
 
     let validator_context = context.child("validator").with_attribute("id", &uid);
+    let backfill = nunchi_chain::marshal_backfill_pacing(cfg.leader_timeout);
     let marshal_resolver_cfg = marshal::resolver::p2p::Config {
         public_key: public_key.clone(),
         peer_provider: oracle.manager(),
         blocker: oracle.control(public_key.clone()),
         mailbox_size: NZUsize!(1024),
-        fetch_timeout: commonware_utils::NonZeroDuration::new_panic(Duration::from_secs(2)),
-        fetch_retry_delay: Duration::from_millis(100),
+        fetch_timeout: backfill.fetch_timeout,
+        fetch_retry_delay: backfill.fetch_retry_delay,
         priority_requests: false,
         priority_responses: false,
     };

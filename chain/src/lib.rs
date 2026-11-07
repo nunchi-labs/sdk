@@ -32,7 +32,8 @@ pub use events::{
     TransactionEventContext, TransactionEvents,
 };
 pub use engine::{
-    EngineBlock, EngineCodedBlock, EngineCommitment, EngineStoredBlock, EngineVariant,
+    marshal_backfill_pacing, BackfillPacing, EngineBlock, EngineCodedBlock, EngineCommitment,
+    EngineStoredBlock, EngineVariant,
 };
 pub use limits::discovery_max_message_size;
 pub use execution::{NodeHandle, StatefulQuery};

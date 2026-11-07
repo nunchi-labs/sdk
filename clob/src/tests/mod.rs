@@ -8,9 +8,14 @@ use commonware_cryptography::{
 };
 use commonware_formatting::hex;
 use commonware_p2p::simulated::{self, Link, Network};
+use commonware_p2p::Receiver as _;
 use commonware_runtime::{deterministic, Clock, Runner as _, Supervisor};
 use commonware_utils::{probability, NZUsize, NZU32};
 use governor::Quota;
+
+/// Gossip rate for the actor test. The burst is the per-peer mailbox reservation
+/// an authenticated channel derives from the quota, so it stays finite.
+const GOSSIP_QUOTA: Quota = Quota::per_second(NZU32!(32));
 use nunchi_chain::ConsensusExtension;
 use nunchi_common::{
     Address, CommitState, MultisigPolicy, RuntimeContext, StateError, StateStore,
@@ -1057,17 +1062,22 @@ fn actor_p2p_gossips_submitted_orders_to_peer_books() {
         )
         .await;
         network.start();
-        let quota = Quota::per_second(NZU32!(u32::MAX));
         let p2p_a = oracle
             .control(peer_a.clone())
-            .register(17, quota)
+            .register(17, GOSSIP_QUOTA)
             .await
             .unwrap();
         let p2p_b = oracle
             .control(peer_b.clone())
-            .register(17, quota)
+            .register(17, GOSSIP_QUOTA)
             .await
             .unwrap();
+        let retained_peers = 2usize;
+        let mailbox_capacity =
+            retained_peers * usize::try_from(GOSSIP_QUOTA.burst_size().get()).unwrap();
+        assert_eq!(p2p_a.1.capacity().get(), mailbox_capacity);
+        assert_eq!(p2p_b.1.capacity().get(), mailbox_capacity);
+        assert!(mailbox_capacity < 1_024);
         let link = Link {
             latency: Duration::from_millis(10),
             jitter: Duration::ZERO,
