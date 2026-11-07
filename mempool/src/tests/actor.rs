@@ -2,10 +2,15 @@ use crate::testing::{digest, tx, TestTx};
 use crate::{AdmissionError, Mempool, PoolConfig, TxStatus};
 use commonware_cryptography::{ed25519, Signer};
 use commonware_p2p::simulated::{self, Link, Network};
+use commonware_p2p::Receiver as _;
 use commonware_runtime::{deterministic, Clock, Metrics, Runner as _, Supervisor};
 use commonware_utils::{probability, NZUsize, NZU32};
 use governor::Quota;
 use std::time::Duration;
+
+/// Gossip rate for these tests. The burst is the per-peer mailbox reservation an
+/// authenticated channel derives from the quota, so it stays finite.
+const GOSSIP_QUOTA: Quota = Quota::per_second(NZU32!(32));
 
 #[test]
 fn submit_pending_finalize_status_roundtrip() {
@@ -95,17 +100,24 @@ fn p2p_gossips_submitted_transactions() {
         .await;
         network.start();
         let channel = 7;
-        let quota = Quota::per_second(NZU32!(u32::MAX));
         let p2p_a = oracle
             .control(peer_a.clone())
-            .register(channel, quota)
+            .register(channel, GOSSIP_QUOTA)
             .await
             .unwrap();
         let p2p_b = oracle
             .control(peer_b.clone())
-            .register(channel, quota)
+            .register(channel, GOSSIP_QUOTA)
             .await
             .unwrap();
+        // max_peers_per_set * tracked_peer_sets. The simulated receiver reports the
+        // mailbox an authenticated channel would reserve for that many peers.
+        let retained_peers = 2usize;
+        let burst = usize::try_from(GOSSIP_QUOTA.burst_size().get()).unwrap();
+        let mailbox_capacity = retained_peers * burst;
+        assert_eq!(p2p_a.1.capacity().get(), mailbox_capacity);
+        assert_eq!(p2p_b.1.capacity().get(), mailbox_capacity);
+        assert!(mailbox_capacity < 1_024);
         let link = Link {
             latency: Duration::from_millis(10),
             jitter: Duration::ZERO,

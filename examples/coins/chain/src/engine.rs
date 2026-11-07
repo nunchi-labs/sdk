@@ -466,20 +466,21 @@ where
             );
         }
         let genesis_state = expected;
-        let current_state_target = {
-            let mut state = QmdbState::init_with_config(
-                context.child("startup_state_probe"),
-                db_config.clone(),
-            )
-            .await
-            .expect("failed to initialize state database for startup probe");
-            let snapshot = ClobLedger::new(&mut state)
-                .actor_snapshot()
-                .await
-                .expect("failed to read committed clob book for proposer recovery");
-            clob.restore_snapshot(snapshot);
-            state.sync_target()
-        };
+        // The sync plan is loaded before the startup probe so recovery can use the
+        // recorded completion height. `syncer::open` attaches the later of that
+        // height and marshal's last synced acknowledgement.
+        let mut plan = SyncPlan::<_, Scheme, EngineVariant>::init(
+            context.child("sync_plan"),
+            config.partition_prefix.clone(),
+        )
+        .await;
+        let mut state = QmdbState::init_with_config(
+            context.child("startup_state_probe"),
+            db_config.clone(),
+        )
+        .await
+        .expect("failed to initialize state database for startup probe");
+        let current_state_target = state.sync_target();
         let local_startup_candidate = if let Some((processed_height, candidate)) =
             validate_marshal_progress_against_state(
             &context,
@@ -488,6 +489,7 @@ where
             &finalized_blocks,
             &current_state_target,
             config.max_pending_acks,
+            plan.completed(),
         )
         .await
         {
@@ -518,6 +520,42 @@ where
         } else {
             None
         };
+        // Local recovery rewinds a QMDB tip that leads the anchor. The proposer
+        // book has to be read from that anchor, not from the discarded suffix.
+        // A node that still has to state-sync keeps the latest local book; peer
+        // sync replaces the database after this snapshot.
+        let recover_locally = plan.floor().is_none() && !plan.should_sync(config.state_sync);
+        let snapshot_target = if recover_locally {
+            local_startup_candidate
+                .as_ref()
+                .map(|candidate| candidate.state_target.clone())
+                .unwrap_or_else(|| current_state_target.clone())
+        } else {
+            current_state_target.clone()
+        };
+        if snapshot_target != current_state_target {
+            drop(state);
+            state = QmdbState::init_at_most(
+                context.child("startup_state_snapshot"),
+                db_config.clone(),
+                Some(commonware_storage::merkle::Location::new(
+                    *snapshot_target.range.end(),
+                )),
+            )
+            .await
+            .expect("failed to open state database at the marshal recovery anchor");
+            assert_eq!(
+                state.sync_target(),
+                snapshot_target,
+                "startup state snapshot must match the selected startup target"
+            );
+        }
+        let snapshot = ClobLedger::new(&mut state)
+            .actor_snapshot()
+            .await
+            .expect("failed to read committed clob book for proposer recovery");
+        clob.restore_snapshot(snapshot);
+        drop(state);
         let applied_height = Arc::new(AsyncMutex::new(Height::zero()));
         let app = Application::with_authenticated_dkg(
             submitter.clone(),
@@ -543,12 +581,6 @@ where
         // The sync plan drives both marshal and stateful startup. Fresh joining nodes can discover
         // a floor and sync QMDB directly; bootstrap nodes leave `state_sync` disabled and start
         // from genesis. Interrupted state sync resumes from its persisted floor.
-        let mut plan =
-            SyncPlan::<_, Scheme, EngineVariant>::init(
-                context.child("sync_plan"),
-                config.partition_prefix.clone(),
-            )
-                .await;
         let (state_sync, state_sync_mailbox) = StateSyncActor::new(
             context.child("state_sync_resolver"),
             StateSyncConfig {
@@ -1078,6 +1110,18 @@ fn reconciliation_search_end(
     tip.min(processed_height.saturating_add(ack_window))
 }
 
+/// Height `syncer::open` attaches: the later of marshal's last synced
+/// acknowledgement and the recorded state-sync completion, or genesis when
+/// neither exists.
+fn recovery_anchor(processed: Option<Height>, completed: Option<Height>) -> Height {
+    match (processed, completed) {
+        (Some(processed), Some(completed)) => processed.max(completed),
+        (Some(processed), None) => processed,
+        (None, Some(completed)) => completed,
+        (None, None) => Height::zero(),
+    }
+}
+
 async fn validate_marshal_progress_against_state<E>(
     context: &E,
     partition_prefix: &str,
@@ -1085,6 +1129,7 @@ async fn validate_marshal_progress_against_state<E>(
     finalized_blocks: &BlocksArchive<E>,
     current_target: &commonware_storage::qmdb::sync::Target<commonware_storage::mmr::Family, Digest>,
     max_pending_acks: NonZeroUsize,
+    completed: Option<Height>,
 ) -> Option<(Height, nunchi_chain::startup::StartupCandidate)>
 where
     E: Clock
@@ -1113,69 +1158,136 @@ where
     drop(metadata);
 
     let Some(tip) = ArchiveStore::last_index(finalized_blocks) else {
-        if let Some(processed_height) = processed_height {
+        if processed_height.is_some() || completed.is_some() {
             panic!(
-                "marshal progress references height {processed_height}, but finalized block history is empty; rebuild or perform verified peer state sync"
+                "marshal progress references height {}, but finalized block history is empty; rebuild or perform verified peer state sync",
+                processed_height
+                    .or(completed)
+                    .expect("progress height")
             );
         }
         return None;
     };
+    let anchor = recovery_anchor(processed_height, completed);
+    if anchor.get() > tip {
+        panic!(
+            "recovery anchor {anchor} is above finalized tip {tip}; rebuild or perform verified peer state sync"
+        );
+    }
     let search_start = finalized_blocks
         .first_index()
         .expect("finalized block history has a tip");
-    // An unclean shutdown can sync QMDB behind marshal's processed height.
-    // Search the retained history, not only the forward acknowledgement window.
+    if search_start > anchor.get() {
+        panic!(
+            "recovery anchor {anchor} is below retained finalized history floor {search_start}; rebuild or perform verified peer state sync"
+        );
+    }
+    // The current commit may lead the anchor by at most the acknowledgement
+    // window. `syncer::open` discards that suffix and attaches the anchor.
     let search_end = match processed_height {
         Some(processed) => reconciliation_search_end(processed.get(), tip, max_pending_acks),
         None => tip,
-    };
+    }
+    .max(anchor.get())
+    .min(tip);
     if search_start > search_end {
         panic!(
             "finalized history floor {search_start} is above the startup search end {search_end}"
         );
     }
-    let reported_processed = processed_height.unwrap_or_else(|| Height::new(search_end));
+    let mut matched = None;
+    let mut earlier_match = None;
     for height in search_start..=search_end {
-        let Some(block) = ArchiveStore::get(
-            finalized_blocks,
-            ArchiveIdentifier::Index(height),
-        )
+        let Some(block) = ArchiveStore::get(finalized_blocks, ArchiveIdentifier::Index(height))
             .await
             .expect("failed to read finalized block while validating QMDB startup target")
         else {
             continue;
         };
-        let inner = block.inner();
-        let target = <Application as StatefulApplication<E>>::sync_targets(inner);
-        if &target == current_target {
-            let certificate = Certificates::get(
-                finalizations,
-                ArchiveIdentifier::Index(height),
-            )
-            .await
-            .expect("failed to read startup candidate finalization")
-            .expect("startup candidate block has no finalization");
-            assert_eq!(
-                certificate.proposal.payload,
-                block.commitment(),
-                "startup candidate certificate payload must equal block commitment"
-            );
-            return Some((
-                reported_processed,
-                nunchi_chain::startup::StartupCandidate {
-                    height: inner.header.height,
-                    digest: inner.digest(),
-                    state_target: target,
-                    certificate_payload: Some(certificate.proposal.payload.block()),
-                    genesis: false,
-                },
-            ));
+        let target = <Application as StatefulApplication<E>>::sync_targets(block.inner());
+        if &target != current_target {
+            continue;
         }
+        // An unchanged state root can appear at more than one height. The anchor
+        // wins when it carries that same target; an earlier height is only a lag.
+        if height < anchor.get() {
+            earlier_match = Some(height);
+            continue;
+        }
+        matched = Some(height);
+        break;
     }
+    let matched = matched.or(earlier_match);
+    let Some(matched) = matched else {
+        panic!(
+            "QMDB committed target does not exactly match canonical finalized history from {search_start} through {search_end}; rebuild or perform verified peer state sync"
+        );
+    };
+    if matched < anchor.get() {
+        panic!(
+            "QMDB committed target matches height {matched}, below recovery anchor {anchor}; syncer::open attaches the later block and cannot fast-forward, rebuild or perform verified peer state sync"
+        );
+    }
+    // A leading commit is canonical only inside the acknowledgement window.
+    // The candidate is still the anchor, because that is the database syncer
+    // attaches after discarding the suffix.
+    let candidate_height = if matched == anchor.get() {
+        matched
+    } else if matched <= anchor.get().saturating_add(
+        u64::try_from(max_pending_acks.get()).expect("acknowledgement window does not fit in u64"),
+    ) {
+        anchor.get()
+    } else {
+        panic!(
+            "QMDB committed target matches height {matched}, more than the acknowledgement window above recovery anchor {anchor}; rebuild or perform verified peer state sync"
+        );
+    };
+    let reported_processed = processed_height.unwrap_or_else(|| Height::new(candidate_height));
+    Some((
+        reported_processed,
+        startup_candidate_at(finalizations, finalized_blocks, candidate_height).await,
+    ))
+}
 
-    panic!(
-        "QMDB committed target does not exactly match canonical finalized history from {search_start} through {search_end}; rebuild or perform verified peer state sync"
+async fn startup_candidate_at<E>(
+    finalizations: &FinalizationsArchive<E>,
+    finalized_blocks: &BlocksArchive<E>,
+    height: u64,
+) -> nunchi_chain::startup::StartupCandidate
+where
+    E: Clock
+        + Metrics
+        + Network
+        + Rng
+        + CryptoRng
+        + Spawner
+        + Storage
+        + Strategizer
+        + Send
+        + Sync
+        + 'static,
+{
+    let block = ArchiveStore::get(finalized_blocks, ArchiveIdentifier::Index(height))
+        .await
+        .expect("failed to read startup candidate block")
+        .expect("startup candidate block is missing");
+    let certificate = Certificates::get(finalizations, ArchiveIdentifier::Index(height))
+        .await
+        .expect("failed to read startup candidate finalization")
+        .expect("startup candidate block has no finalization");
+    assert_eq!(
+        certificate.proposal.payload,
+        block.commitment(),
+        "startup candidate certificate payload must equal block commitment"
     );
+    let inner = block.inner();
+    nunchi_chain::startup::StartupCandidate {
+        height: inner.header.height,
+        digest: inner.digest(),
+        state_target: <Application as StatefulApplication<E>>::sync_targets(inner),
+        certificate_payload: Some(certificate.proposal.payload.block()),
+        genesis: false,
+    }
 }
 
 async fn validate_history_through_processed<E>(
@@ -1230,6 +1342,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_cryptography::Digest as _;
+    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
     use commonware_utils::NZUsize;
 
     #[test]
@@ -1246,5 +1360,253 @@ mod tests {
     fn startup_capacity_covers_every_candidate_source() {
         assert_eq!(startup_coordinator_capacity(true, 2).get(), 4);
         assert_eq!(startup_coordinator_capacity(false, 0).get(), 1);
+    }
+
+    #[test]
+    fn recovery_anchor_follows_syncer_open() {
+        assert_eq!(recovery_anchor(None, None), Height::zero());
+        assert_eq!(
+            recovery_anchor(Some(Height::new(4)), None),
+            Height::new(4)
+        );
+        assert_eq!(
+            recovery_anchor(None, Some(Height::new(9))),
+            Height::new(9)
+        );
+        assert_eq!(
+            recovery_anchor(Some(Height::new(4)), Some(Height::new(9))),
+            Height::new(9)
+        );
+        assert_eq!(
+            recovery_anchor(Some(Height::new(12)), Some(Height::new(9))),
+            Height::new(12)
+        );
+    }
+
+    #[test]
+    fn leading_qmdb_binds_the_rewind_anchor() {
+        deterministic::Runner::default().start(|context| async move {
+            leading_qmdb_binds_the_rewind_anchor_inner(context).await;
+        });
+    }
+
+    /// QMDB commit at height 1 with marshal's last synced ack at height 0.
+    ///
+    /// `syncer::open` rewinds to the ack. The startup candidate has to be that
+    /// block, or resolve rejects the database after the rewind.
+    async fn leading_qmdb_binds_the_rewind_anchor_inner(context: deterministic::Context) {
+        use commonware_consensus::{
+            marshal::coding::types::{coding_config_for_participants, CodedBlock, StoredCodedBlock},
+            simplex::{
+                scheme::bls12381_threshold::vrf,
+                types::{Finalization as CFinalization, Finalize, Proposal},
+            },
+            types::{Epoch, Round, View},
+        };
+        use commonware_cryptography::{
+            bls12381::primitives::variant::MinSig,
+            ed25519,
+            sha256::Digest as ShaDigest,
+            Digestible as _,
+            Digested,
+            Hasher,
+            Sha256,
+            Signer as _,
+        };
+        use commonware_parallel::Sequential;
+        use commonware_runtime::buffer::paged::CacheRef;
+        use commonware_storage::{
+            archive::{prunable, Archive as _},
+            metadata::{self, Metadata},
+            translator::EightCap,
+        };
+        use nunchi_chain::BlockExtension as _;
+        use commonware_utils::{non_empty, NZU32, NZU64, TestRng};
+        use nunchi_chain::engine::{REPLAY_BUFFER, WRITE_BUFFER};
+        use nunchi_clob::ClobExtension;
+        use nunchi_common::{CommitState as _, QmdbState, StateStore as _};
+
+        let prefix = "lead-anchor";
+        let mut state = QmdbState::init(context.child("state"), prefix)
+            .await
+            .expect("open state");
+        let anchor_target = state.sync_target();
+        state.set(Sha256::hash(&[b"lead"]), b"value".to_vec());
+        state.commit().await.expect("commit leading state");
+        let leading_target = state.sync_target();
+        assert_ne!(anchor_target, leading_target);
+        drop(state);
+
+        let rewound = QmdbState::init_at_most(
+            context.child("rewound"),
+            QmdbState::<deterministic::Context>::config(prefix),
+            Some(commonware_storage::merkle::Location::new(
+                *anchor_target.range.end(),
+            )),
+        )
+        .await
+        .expect("rewind to the synced ack");
+        assert_eq!(
+            rewound.sync_target(),
+            anchor_target,
+            "opening at the anchor operation count must discard the leading commit"
+        );
+        drop(rewound);
+
+        let mut rng = TestRng::new(7);
+        let schemes = vrf::fixture::<MinSig, _>(&mut rng, NAMESPACE, 4).schemes;
+        let participants = NZU32!(4);
+        let page_cache = CacheRef::new(
+            commonware_runtime::buffer::paged::page_size(1024),
+            NZUsize!(8),
+        );
+        let leader = ed25519::PrivateKey::from_seed(1).public_key();
+        let parent = nunchi_chain::genesis_parent::<crate::Transaction, ClobExtension>(4);
+
+        let anchor_block = crate::Block::new(
+            crate::Context {
+                round: Round::new(Epoch::zero(), View::zero()),
+                leader: leader.clone(),
+                parent: (View::zero(), parent),
+            },
+            ShaDigest::EMPTY,
+            Height::zero(),
+            0,
+            Vec::new(),
+            None,
+            ClobExtension::genesis_payload(),
+            crate::genesis::state_commitment(anchor_target.clone()),
+        );
+        let leading_block = crate::Block::new(
+            crate::Context {
+                round: Round::new(Epoch::zero(), View::new(1)),
+                leader,
+                parent: (View::zero(), parent),
+            },
+            anchor_block.digest(),
+            Height::new(1),
+            1,
+            Vec::new(),
+            None,
+            ClobExtension::genesis_payload(),
+            crate::genesis::state_commitment(leading_target.clone()),
+        );
+
+        let mut blocks = prunable::Archive::<
+            EightCap,
+            _,
+            ShaDigest,
+            nunchi_chain::EngineStoredBlock<crate::Transaction, ClobExtension>,
+        >::init(
+            context.child("blocks"),
+            prunable::Config {
+                translator: EightCap,
+                metadata_partition: format!("{prefix}-blocks-meta"),
+                key_partition: format!("{prefix}-blocks-key"),
+                key_page_cache: page_cache.clone(),
+                value_partition: format!("{prefix}-blocks-value"),
+                compression: None,
+                codec_config: (participants, ()),
+                items_per_section: NZU64!(64),
+                key_write_buffer: WRITE_BUFFER,
+                value_write_buffer: WRITE_BUFFER,
+                replay_buffer: REPLAY_BUFFER,
+            },
+        )
+        .await
+        .expect("open block archive");
+        let mut finalizations = prunable::Archive::<EightCap, _, ShaDigest, crate::Finalization>::init(
+            context.child("finalizations"),
+            prunable::Config {
+                translator: EightCap,
+                metadata_partition: format!("{prefix}-finalizations-meta"),
+                key_partition: format!("{prefix}-finalizations-key"),
+                key_page_cache: page_cache,
+                value_partition: format!("{prefix}-finalizations-value"),
+                compression: None,
+                codec_config: (),
+                items_per_section: NZU64!(64),
+                key_write_buffer: WRITE_BUFFER,
+                value_write_buffer: WRITE_BUFFER,
+                replay_buffer: REPLAY_BUFFER,
+            },
+        )
+        .await
+        .expect("open finalization archive");
+
+        let coding = coding_config_for_participants(4);
+        for (height, block) in [(0u64, anchor_block), (1, leading_block)] {
+            let digested = Digested::precomputed(block.clone(), block.digest());
+            let coded = CodedBlock::encode(digested, coding, &Sequential).await;
+            let stored = StoredCodedBlock::new(coded);
+            let payload = stored.commitment();
+            let proposal = Proposal::new(
+                Round::new(Epoch::zero(), View::new(height)),
+                View::new(height.saturating_sub(1)),
+                payload,
+            );
+            let votes: Vec<_> = schemes
+                .iter()
+                .take(3)
+                .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("sign finalize"))
+                .collect();
+            let certificate = CFinalization::from_finalizes(
+                &schemes[0],
+                non_empty![@votes.iter()],
+                &Sequential,
+            )
+            .expect("assemble finalization");
+            let digest = stored.digest();
+            blocks = blocks
+                .put_sync(height, digest, &stored)
+                .await
+                .expect("store block");
+            finalizations = finalizations
+                .put_sync(height, digest, &certificate)
+                .await
+                .expect("store finalization");
+        }
+
+        let mut metadata: Metadata<_, U64, Height> = Metadata::init(
+            context.child("ack"),
+            metadata::Config {
+                partition: format!("{prefix}_marshal-application-metadata"),
+                codec_config: (),
+            },
+        )
+        .await
+        .expect("open marshal metadata");
+        metadata.put(MARSHAL_PROCESSED_KEY, Height::zero());
+        let metadata = metadata.sync().await.expect("sync marshal ack");
+        drop(metadata);
+
+        let (processed, candidate) = validate_marshal_progress_against_state(
+            &context,
+            prefix,
+            &finalizations,
+            &blocks,
+            &leading_target,
+            NZUsize!(1),
+            None,
+        )
+        .await
+        .expect("leading state is inside the acknowledgement window");
+        assert_eq!(processed, Height::zero());
+        assert_eq!(candidate.height, Height::zero());
+        assert_eq!(candidate.state_target, anchor_target);
+
+        let mut coordinator =
+            nunchi_chain::startup::StartupCoordinator::new(NZUsize!(1));
+        coordinator
+            .record(candidate)
+            .expect("record anchor candidate");
+        assert_eq!(
+            coordinator.resolve(&leading_target),
+            Err(nunchi_chain::startup::Error::NoExactMatch)
+        );
+        let artifact = coordinator
+            .resolve(&anchor_target)
+            .expect("rewound database matches the anchor");
+        assert_eq!(artifact.anchor_height, Height::zero());
     }
 }
