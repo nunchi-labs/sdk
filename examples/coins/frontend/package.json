@@ -14,7 +14,7 @@
     "typescript": "^7.0.2",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
-    "lucide-react": "^1.66.0"
+    "lucide-react": "^1.70.0"
   },
   "devDependencies": {
     "@types/react": "^19.3.0",
