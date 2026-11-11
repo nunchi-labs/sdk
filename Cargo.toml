@@ -92,7 +92,7 @@ serde_with = "3"
 bech32 = "0.12"
 axum = "0.8.8"
 tokio = "1.41.0"
-tower-http = "0.6.2"
+tower-http = "0.7.1"
 
 [profile.bench]
 overflow-checks = true
