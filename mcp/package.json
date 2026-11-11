@@ -18,7 +18,7 @@
     "ci": "npm run format:check && npm run lint && npm run build && npm run test"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "agents": "^0.28.1",
     "zod": "^4.6.7"
   },
