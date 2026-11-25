@@ -571,9 +571,9 @@ dependencies = [
 
 [[package]]
 name = "commonware-macros"
-version = "2026.10.0"
+version = "2026.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7ee2a1a0f65788f7e00d025933e833959e2a6a7808f74d26029bb6715d51be9"
+checksum = "077750065c4f78c23f9a5648a6be6ec8611a48e055d7bf03c3e2108c3133617e"
 dependencies = [
  "commonware-macros-impl",
  "tokio",
@@ -581,9 +581,9 @@ dependencies = [
 
 [[package]]
 name = "commonware-macros-impl"
-version = "2026.10.0"
+version = "2026.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a67b8171d05c6c8dfd691b8ecb263550e820d904dd100369efeb59a3d78be138"
+checksum = "bb18c86bb95c0b698b37f2db39b2507b1b4d93508d2b5e498ae204e51fc2c602"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
